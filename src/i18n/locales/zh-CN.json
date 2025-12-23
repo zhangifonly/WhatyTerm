@@ -1,0 +1,23 @@
+{
+  "settings": {
+    "ai": "AI监控设置",
+    "api": "API 配置",
+    "auth": "访问控制",
+    "interface": "界面"
+  },
+  "interface": {
+    "language": "界面语言",
+    "languageHint": "切换后立即生效，设置将自动保存。",
+    "chinese": "中文",
+    "english": "English",
+    "japanese": "日本語"
+  },
+  "common": {
+    "close": "关闭",
+    "save": "保存",
+    "cancel": "取消"
+  },
+  "toast": {
+    "languageSwitched": "语言已切换"
+  }
+}
