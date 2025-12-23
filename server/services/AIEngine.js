@@ -837,11 +837,12 @@ ${historyText || '(空)'}
     }
 
     // 2.5 检测程序运行中（必须在 accept edits 之前检测）
-    // 当显示运行时间（如 1h 8m 37s）或 "esc to interrupt" 时，说明程序正在运行
+    // 当显示 "esc to interrupt" 或运行时间（如 1h 8m 37s）时，说明程序正在运行
     // 此时底部的 "accept edits on" 只是状态栏，不需要操作
     // 注意：使用清理后的内容进行检测
-    const isRunning = /\d+[msh]\s+\d+[msh]/.test(cleanContent) ||
-                      (/esc to interrupt/i.test(cleanContent) && /\d+[ms]\s/.test(cleanContent));
+    const isRunning = /esc to interrupt/i.test(cleanContent) ||
+                      /\d+[msh]\s+\d+[msh]/.test(cleanContent) ||
+                      /ctrl\+t to show todos/i.test(cleanContent);
     if (isRunning) {
       return {
         currentState: '程序运行中',
