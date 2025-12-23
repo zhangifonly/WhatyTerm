@@ -2241,8 +2241,7 @@ io.on('connection', (socket) => {
 
       // 如果 AI 启用且后台自动操作未开启，触发基于目标的分析
       // 注：如果后台自动操作已开启，则由后台循环处理，无需重复分析
-      const sessionData = sessionManager.getSessionData(sessionId);
-      if (session.aiEnabled && !sessionData?.autoActionEnabled) {
+      if (session.aiEnabled && !session.autoActionEnabled) {
         handleAIAnalysis(sessionId, session, socket);
       }
     };
@@ -2759,6 +2758,16 @@ io.on('connection', (socket) => {
 
     // 启动切换状态机
     await switchProviderStateMachine(session, appType, providerId, socket);
+  });
+
+  // 获取系统信息
+  socket.on('system:info', () => {
+    socket.emit('system:info', {
+      nodeVersion: process.version,
+      platform: process.platform,
+      configPath: path.join(os.homedir(), '.webtmux'),
+      databasePath: path.join(os.homedir(), '.webtmux/db/webtmux.db')
+    });
   });
 
   // 断开连接

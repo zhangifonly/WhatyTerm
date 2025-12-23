@@ -1769,11 +1769,23 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
   };
 
   const handleAuthSetup = async () => {
+    // 如果密码已启用，且用户留空密码字段，直接返回（留空表示不修改）
+    if (auth.enabled && !authPassword && !authConfirm) {
+      setAuthMessage(t('auth.passwordUnchanged'));
+      return;
+    }
+
+    // 首次启用密码或更新密码时，必须填写密码
+    if (!authPassword) {
+      setAuthMessage(t('auth.passwordRequired'));
+      return;
+    }
+
     if (authPassword !== authConfirm) {
       setAuthMessage(t('auth.passwordMismatch'));
       return;
     }
-    if (authPassword && authPassword.length < 4) {
+    if (authPassword.length < 4) {
       setAuthMessage(t('auth.passwordTooShort'));
       return;
     }
@@ -1827,6 +1839,12 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
           >
             {t('settings.interface')}
           </button>
+          <button
+            className={`tab-btn ${activeTab === 'about' ? 'active' : ''}`}
+            onClick={() => setActiveTab('about')}
+          >
+            {t('settings.about')}
+          </button>
         </div>
 
         {activeTab === 'ai' && (
@@ -1840,6 +1858,26 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
             {/* 供应商选择 */}
             <div className="form-group" style={{ marginBottom: '20px' }}>
               <label>AI 供应商</label>
+
+              {/* Cli Only 警告提示 */}
+              <div style={{
+                background: 'rgba(127, 29, 29, 0.2)',
+                border: '1px solid rgba(239, 68, 68, 0.5)',
+                borderRadius: '6px',
+                padding: '12px',
+                marginBottom: '12px',
+                marginTop: '8px'
+              }}>
+                <p style={{
+                  color: '#f87171',
+                  fontSize: '13px',
+                  lineHeight: '1.6',
+                  margin: 0
+                }}>
+                  {t('provider.cliOnlyWarning')}
+                </p>
+              </div>
+
               <select
                 value={selectedProviderId}
                 onChange={(e) => handleProviderSelect(e.target.value)}
@@ -2258,18 +2296,10 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
 
             <div className="modal-actions">
               {auth.enabled && (
-                <>
-                  <button type="button" className="btn btn-danger" onClick={handleDisableAuth}>
-                    {t('common.delete')}
-                  </button>
-                  <button type="button" className="btn btn-secondary" onClick={handleLogout}>
-                    {t('auth.login')}
-                  </button>
-                </>
+                <button type="button" className="btn btn-danger" onClick={handleDisableAuth}>
+                  {t('auth.disablePassword')}
+                </button>
               )}
-              <button type="button" className="btn btn-secondary" onClick={onClose}>
-                {t('common.cancel')}
-              </button>
               <button type="button" className="btn btn-primary" onClick={handleAuthSetup}>
                 {auth.enabled ? t('auth.updatePassword') : t('auth.enablePassword')}
               </button>
@@ -2363,6 +2393,180 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
             </div>
           </div>
         )}
+
+        {activeTab === 'about' && (
+          <AboutPage socket={socket} onClose={onClose} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// 关于页面组件
+function AboutPage({ socket, onClose }) {
+  const { t } = useTranslation();
+  const [updateStatus, setUpdateStatus] = useState('');
+  const [checking, setChecking] = useState(false);
+  const [latestVersion, setLatestVersion] = useState(null);
+  const [systemInfo, setSystemInfo] = useState(null);
+
+  useEffect(() => {
+    // 获取系统信息
+    if (socket) {
+      socket.emit('system:info');
+      socket.on('system:info', (info) => {
+        setSystemInfo(info);
+      });
+
+      return () => {
+        socket.off('system:info');
+      };
+    }
+  }, [socket]);
+
+  const checkUpdate = async () => {
+    setChecking(true);
+    setUpdateStatus(t('about.checking'));
+
+    try {
+      const response = await fetch('https://api.github.com/repos/zhangifonly/WhatyTerm/releases/latest');
+      const data = await response.json();
+
+      if (data.tag_name) {
+        setLatestVersion(data);
+        const currentVersion = '1.0.0';
+        const latestVer = data.tag_name.replace(/^v/, '');
+
+        if (latestVer === currentVersion) {
+          setUpdateStatus(t('about.upToDate'));
+        } else {
+          setUpdateStatus(t('about.newVersionAvailable') + ': ' + data.tag_name);
+        }
+      }
+    } catch (error) {
+      setUpdateStatus('检查更新失败');
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  return (
+    <div className="about-page" style={{ padding: '20px' }}>
+      {/* 应用信息 */}
+      <div style={{ textAlign: 'center', marginBottom: '30px' }}>
+        <h2 style={{ fontSize: '24px', color: '#4a9eff', marginBottom: '8px' }}>
+          {t('about.appName')}
+        </h2>
+        <p style={{ color: '#888', marginBottom: '8px' }}>
+          {t('about.description')}
+        </p>
+        <p style={{ color: '#666', fontSize: '14px' }}>
+          {t('about.version')}: v1.0.0
+        </p>
+      </div>
+
+      {/* 检查更新 */}
+      <div style={{ marginBottom: '30px', textAlign: 'center' }}>
+        <button
+          onClick={checkUpdate}
+          disabled={checking}
+          style={{
+            padding: '10px 24px',
+            background: '#4a9eff',
+            border: 'none',
+            borderRadius: '6px',
+            color: '#fff',
+            fontSize: '14px',
+            cursor: checking ? 'not-allowed' : 'pointer',
+            opacity: checking ? 0.6 : 1
+          }}
+        >
+          {checking ? t('about.checking') : t('about.checkUpdate')}
+        </button>
+        {updateStatus && (
+          <p style={{ marginTop: '12px', color: '#4a9eff', fontSize: '14px' }}>
+            {updateStatus}
+          </p>
+        )}
+        {latestVersion && latestVersion.html_url && (
+          <a
+            href={latestVersion.html_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: '#4a9eff', fontSize: '14px', marginTop: '8px', display: 'inline-block' }}
+          >
+            {t('about.download')} →
+          </a>
+        )}
+      </div>
+
+      {/* 项目链接 */}
+      <div style={{ marginBottom: '30px' }}>
+        <h3 style={{ fontSize: '16px', color: '#fff', marginBottom: '12px' }}>
+          {t('about.projectLinks')}
+        </h3>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+          <a href="https://zhangifonly.github.io/whatyterm-pages/" target="_blank" rel="noopener noreferrer"
+            style={{ padding: '12px', background: '#2a2a2a', borderRadius: '6px', color: '#4a9eff', textDecoration: 'none', display: 'block', textAlign: 'center' }}>
+            🏠 {t('about.homepage')}
+          </a>
+          <a href="https://github.com/zhangifonly/WhatyTerm" target="_blank" rel="noopener noreferrer"
+            style={{ padding: '12px', background: '#2a2a2a', borderRadius: '6px', color: '#4a9eff', textDecoration: 'none', display: 'block', textAlign: 'center' }}>
+            🔗 {t('about.github')}
+          </a>
+          <a href="https://github.com/zhangifonly/WhatyTerm/issues" target="_blank" rel="noopener noreferrer"
+            style={{ padding: '12px', background: '#2a2a2a', borderRadius: '6px', color: '#4a9eff', textDecoration: 'none', display: 'block', textAlign: 'center' }}>
+            🐛 {t('about.issues')}
+          </a>
+          <a href="https://github.com/zhangifonly/WhatyTerm/releases" target="_blank" rel="noopener noreferrer"
+            style={{ padding: '12px', background: '#2a2a2a', borderRadius: '6px', color: '#4a9eff', textDecoration: 'none', display: 'block', textAlign: 'center' }}>
+            📦 {t('about.releases')}
+          </a>
+        </div>
+      </div>
+
+      {/* 系统信息 */}
+      {systemInfo && (
+        <div style={{ marginBottom: '30px' }}>
+          <h3 style={{ fontSize: '16px', color: '#fff', marginBottom: '12px' }}>
+            {t('about.systemInfo')}
+          </h3>
+          <div style={{ background: '#2a2a2a', borderRadius: '6px', padding: '16px', fontSize: '13px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: '8px', color: '#ccc' }}>
+              <span>{t('about.nodeVersion')}:</span><span>{systemInfo.nodeVersion}</span>
+              <span>{t('about.platform')}:</span><span>{systemInfo.platform}</span>
+              <span>{t('about.configPath')}:</span><span>{systemInfo.configPath}</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 技术栈 */}
+      <div style={{ marginBottom: '30px' }}>
+        <h3 style={{ fontSize: '16px', color: '#fff', marginBottom: '12px' }}>
+          {t('about.techStack')}
+        </h3>
+        <div style={{ background: '#2a2a2a', borderRadius: '6px', padding: '16px', fontSize: '13px' }}>
+          <div style={{ color: '#ccc', lineHeight: '1.8' }}>
+            <div><strong>{t('about.frontend')}:</strong> React + Vite + Tailwind CSS</div>
+            <div><strong>{t('about.backend')}:</strong> Node.js + Express + Socket.IO</div>
+            <div><strong>{t('about.terminal')}:</strong> node-pty + tmux</div>
+            <div><strong>AI:</strong> Claude / OpenAI / Gemini</div>
+          </div>
+        </div>
+      </div>
+
+      {/* 版权信息 */}
+      <div style={{ textAlign: 'center', color: '#666', fontSize: '12px', paddingTop: '20px', borderTop: '1px solid #333' }}>
+        <p>© 2025 WhatyTerm Team</p>
+        <p style={{ marginTop: '4px' }}>{t('about.license')}: MIT</p>
+      </div>
+
+      {/* 关闭按钮 */}
+      <div className="modal-actions" style={{ marginTop: '30px' }}>
+        <button type="button" className="btn btn-secondary" onClick={onClose}>
+          {t('common.close')}
+        </button>
       </div>
     </div>
   );

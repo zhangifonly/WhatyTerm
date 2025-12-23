@@ -1,10 +1,12 @@
 import React from 'react';
+import { useTranslation } from 'react-i18next';
 import ProviderCard from './ProviderCard';
 
 /**
  * 供应商列表组件 - 简化版
  */
 export default function ProviderList({ providers, appType = 'claude', onSwitch, onDelete, onHealthCheck, socket }) {
+  const { t } = useTranslation();
   let providerList = Object.values(providers.providers);
 
   // 按 sortIndex 排序
@@ -27,19 +29,29 @@ export default function ProviderList({ providers, appType = 'claude', onSwitch, 
   }
 
   return (
-    <div className="space-y-3">
-      {providerList.map(provider => (
-        <ProviderCard
-          key={provider.id}
-          provider={provider}
-          appType={appType}
-          isCurrent={providers.current === provider.id}
-          onSwitch={onSwitch}
-          onDelete={onDelete}
-          onHealthCheck={onHealthCheck}
-          socket={socket}
-        />
-      ))}
+    <div className="space-y-4">
+      {/* Cli Only 警告提示 */}
+      <div className="bg-red-900/20 border border-red-500/50 rounded-lg p-3">
+        <p className="text-red-400 text-sm leading-relaxed">
+          {t('provider.cliOnlyWarning')}
+        </p>
+      </div>
+
+      {/* 供应商列表 */}
+      <div className="space-y-3">
+        {providerList.map(provider => (
+          <ProviderCard
+            key={provider.id}
+            provider={provider}
+            appType={appType}
+            isCurrent={providers.current === provider.id}
+            onSwitch={onSwitch}
+            onDelete={onDelete}
+            onHealthCheck={onHealthCheck}
+            socket={socket}
+          />
+        ))}
+      </div>
     </div>
   );
 }
