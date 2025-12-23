@@ -2,7 +2,38 @@
   "app": {
     "title": "WebTerm",
     "subtitle": "WhatyTerm",
-    "welcome": "Welcome to WebTerm"
+    "welcome": "Welcome to WebTerm",
+    "description": "AI-Powered Intelligent Terminal Management Tool"
+  },
+  "welcome": {
+    "coreFeatures": "Core Features",
+    "aiMonitoring": "AI Smart Monitoring",
+    "aiMonitoringDesc": "Automatically analyzes terminal status, identifies input prompts and error messages",
+    "automation": "Automated Operations",
+    "automationDesc": "Automatically executes confirmations and continuations based on AI analysis",
+    "multiSession": "Multi-Session Management",
+    "multiSessionDesc": "Manage multiple terminal sessions simultaneously, supports Claude/Codex/Gemini",
+    "remoteAccess": "Remote Access",
+    "remoteAccessDesc": "Secure access via FRP tunnel, supports mobile QR code connection",
+    "usageTips": "Usage Tips",
+    "createSession": "Create Session",
+    "createSessionDesc": "Click the '+' button on the left, select AI type and set project goals",
+    "aiSwitch": "AI Toggle",
+    "aiSwitchDesc": "Each session can independently enable/disable AI monitoring",
+    "autoMode": "Auto Mode",
+    "autoModeDesc": "AI will automatically execute suggested operations when enabled",
+    "manualConfirm": "Manual Confirmation",
+    "manualConfirmDesc": "Operations require manual confirmation when auto mode is disabled",
+    "shortcuts": "Quick Operations",
+    "settings": "Settings",
+    "settingsDesc": "Click the gear icon in the top right to configure AI and API",
+    "terminalInput": "Terminal Input",
+    "terminalInputDesc": "Enter commands directly in the terminal area",
+    "sessionSwitch": "Session Switch",
+    "sessionSwitchDesc": "Click session list on the left to quickly switch",
+    "statusPanel": "Status Panel",
+    "statusPanelDesc": "Right panel displays AI analysis results and operation history",
+    "startHint": "Select a session or click '+' to create a new session to start"
   },
   "settings": {
     "ai": "AI Monitoring",
@@ -39,6 +70,18 @@
     "title": "Goal",
     "placeholder": "Enter goals, for example:\n1. List files in current directory\n2. Find files with specific content\n3. Execute deployment script",
     "notSet": "Click to set goal"
+  },
+  "stats": {
+    "title": "AI Operation Statistics (Current Session)",
+    "totalOps": "Total Operations",
+    "success": "Success",
+    "failed": "Failed",
+    "aiDecision": "AI Decisions",
+    "programDecision": "Program Decisions",
+    "sessionDuration": "Session Duration",
+    "minutes": "minutes",
+    "hours": "hours",
+    "days": "days"
   },
   "aiPanel": {
     "title": "AI Status Monitor",
