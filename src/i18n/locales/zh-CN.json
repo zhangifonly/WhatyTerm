@@ -15,9 +15,72 @@
   "common": {
     "close": "关闭",
     "save": "保存",
-    "cancel": "取消"
+    "cancel": "取消",
+    "delete": "删除",
+    "test": "测试连接",
+    "testing": "测试中...",
+    "unknown": "未知",
+    "none": "无",
+    "notConfigured": "未配置",
+    "copied": "已复制!"
+  },
+  "sidebar": {
+    "expand": "展开侧边栏",
+    "collapse": "收起侧边栏",
+    "deleteSession": "删除会话"
+  },
+  "goal": {
+    "title": "目标",
+    "placeholder": "输入目标，例如：\n1. 列出当前目录文件\n2. 查找包含特定内容的文件\n3. 执行部署脚本",
+    "notSet": "点击设置目标"
+  },
+  "aiPanel": {
+    "expand": "展开 AI 面板",
+    "collapse": "收起 AI 面板",
+    "serviceNormal": "服务正常",
+    "disabled": "已关闭",
+    "analyzing": "分析中...",
+    "waitingAnalysis": "等待分析...",
+    "switchProvider": "切换 API 供应商",
+    "local": "本地",
+    "global": "全局",
+    "deleteLocalConfig": "删除本地配置，恢复使用全局配置",
+    "restoreGlobalConfig": "删除本地 .claude/settings.local.json，恢复使用全局配置",
+    "syncToLocal": "将全局 ~/.claude/settings.json 同步到项目 .claude/settings.local.json",
+    "currentState": "当前状态",
+    "workingDir": "工作目录",
+    "recentAction": "最近操作",
+    "waitingAiAnalysis": "等待 AI 分析..."
+  },
+  "controls": {
+    "autoOn": "自动:开",
+    "autoOff": "自动:关",
+    "hideDebug": "隐藏",
+    "showLog": "日志",
+    "continue": "继续"
+  },
+  "auth": {
+    "enabled": "已启用",
+    "disabled": "未启用",
+    "newPassword": "新密码",
+    "setPassword": "设置密码",
+    "confirmPassword": "再次输入密码",
+    "placeholder": "设置访问密码",
+    "placeholderOptional": "留空则不修改",
+    "updatePassword": "更新密码",
+    "enablePassword": "启用密码",
+    "enterPassword": "请输入密码",
+    "login": "登录",
+    "loggingIn": "登录中...",
+    "passwordMismatch": "两次密码不一致",
+    "passwordTooShort": "密码至少 4 位",
+    "setupSuccess": "设置成功",
+    "setupFailed": "设置失败",
+    "disableSuccess": "已禁用密码保护",
+    "loginFailed": "登录失败"
   },
   "toast": {
-    "languageSwitched": "语言已切换"
+    "languageSwitched": "语言已切换",
+    "tunnelUrlSaved": "外部访问 URL 已保存"
   }
 }

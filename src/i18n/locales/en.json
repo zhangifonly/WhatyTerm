@@ -15,9 +15,72 @@
   "common": {
     "close": "Close",
     "save": "Save",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "test": "Test Connection",
+    "testing": "Testing...",
+    "unknown": "Unknown",
+    "none": "None",
+    "notConfigured": "Not Configured",
+    "copied": "Copied!"
+  },
+  "sidebar": {
+    "expand": "Expand Sidebar",
+    "collapse": "Collapse Sidebar",
+    "deleteSession": "Delete Session"
+  },
+  "goal": {
+    "title": "Goal",
+    "placeholder": "Enter goals, for example:\n1. List files in current directory\n2. Find files with specific content\n3. Execute deployment script",
+    "notSet": "Click to set goal"
+  },
+  "aiPanel": {
+    "expand": "Expand AI Panel",
+    "collapse": "Collapse AI Panel",
+    "serviceNormal": "Service Normal",
+    "disabled": "Disabled",
+    "analyzing": "Analyzing...",
+    "waitingAnalysis": "Waiting for analysis...",
+    "switchProvider": "Switch API Provider",
+    "local": "Local",
+    "global": "Global",
+    "deleteLocalConfig": "Delete local config, restore to global config",
+    "restoreGlobalConfig": "Delete local .claude/settings.local.json, restore to global config",
+    "syncToLocal": "Sync global ~/.claude/settings.json to local .claude/settings.local.json",
+    "currentState": "Current State",
+    "workingDir": "Working Directory",
+    "recentAction": "Recent Action",
+    "waitingAiAnalysis": "Waiting for AI analysis..."
+  },
+  "controls": {
+    "autoOn": "Auto: ON",
+    "autoOff": "Auto: OFF",
+    "hideDebug": "Hide",
+    "showLog": "Log",
+    "continue": "Continue"
+  },
+  "auth": {
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "newPassword": "New Password",
+    "setPassword": "Set Password",
+    "confirmPassword": "Confirm Password",
+    "placeholder": "Set access password",
+    "placeholderOptional": "Leave empty to keep unchanged",
+    "updatePassword": "Update Password",
+    "enablePassword": "Enable Password",
+    "enterPassword": "Enter password",
+    "login": "Login",
+    "loggingIn": "Logging in...",
+    "passwordMismatch": "Passwords do not match",
+    "passwordTooShort": "Password must be at least 4 characters",
+    "setupSuccess": "Setup successful",
+    "setupFailed": "Setup failed",
+    "disableSuccess": "Password protection disabled",
+    "loginFailed": "Login failed"
   },
   "toast": {
-    "languageSwitched": "Language switched"
+    "languageSwitched": "Language switched",
+    "tunnelUrlSaved": "External access URL saved"
   }
 }

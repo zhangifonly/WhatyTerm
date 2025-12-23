@@ -96,6 +96,7 @@ const convertAnsiToHtml = (text) => {
 };
 
 export default function App() {
+  const { t } = useTranslation();
   const auth = useAuth();
   const [sessions, setSessions] = useState([]);
   const [currentSession, setCurrentSession] = useState(null);
@@ -714,7 +715,7 @@ export default function App() {
         <button
           className="panel-toggle sidebar-toggle"
           onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-          title={sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
+          title={sidebarCollapsed ? t('sidebar.expand') : t('sidebar.collapse')}
         >
           {sidebarCollapsed ? '›' : '‹'}
         </button>
@@ -748,7 +749,7 @@ export default function App() {
                       }
                     }
                   }}
-                  title="删除会话"
+                  title={t('sidebar.deleteSession')}
                 >
                   ×
                 </button>
@@ -888,7 +889,7 @@ export default function App() {
                     <textarea
                       value={goalInput}
                       onChange={(e) => setGoalInput(e.target.value)}
-                      placeholder="输入目标，例如：&#10;1. 列出当前目录文件&#10;2. 查找包含特定内容的文件&#10;3. 执行部署脚本"
+                      placeholder={t('goal.placeholder')}
                       autoFocus
                       onKeyDown={(e) => {
                         if (e.key === 'Escape') setEditingGoal(false);
@@ -896,19 +897,19 @@ export default function App() {
                       }}
                     />
                     <div className="goal-edit-actions">
-                      <span className="goal-edit-hint">Ctrl/Cmd+Enter 保存</span>
+                      <span className="goal-edit-hint">Ctrl/Cmd+Enter {t('common.save')}</span>
                       <button className="btn btn-primary btn-small" onClick={saveGoal}>
-                        保存
+                        {t('common.save')}
                       </button>
                       <button className="btn btn-secondary btn-small" onClick={() => setEditingGoal(false)}>
-                        取消
+                        {t('common.cancel')}
                       </button>
                     </div>
                   </div>
                 ) : (
                   <>
                     <span className="settings-label goal-display" onClick={startEditGoal}>
-                      目标: {currentSession.goal || '点击设置目标'}
+                      {t('goal.title')}: {currentSession.goal || t('goal.notSet')}
                     </span>
                     <div className="settings-actions">
                       <button className="btn btn-secondary btn-small" onClick={startEditGoal}>
@@ -971,7 +972,7 @@ export default function App() {
           <button
             className="panel-toggle ai-panel-toggle"
             onClick={() => setAiPanelCollapsed(!aiPanelCollapsed)}
-            title={aiPanelCollapsed ? '展开 AI 面板' : '收起 AI 面板'}
+            title={aiPanelCollapsed ? t('aiPanel.expand') : t('aiPanel.collapse')}
           >
             {aiPanelCollapsed ? '‹' : '›'}
           </button>
@@ -988,11 +989,11 @@ export default function App() {
                     ? `服务故障: ${aiHealthStatus.lastError}\n下次重试: ${new Date(aiHealthStatus.nextRecoveryCheck).toLocaleTimeString()}`
                     : aiHealthStatus.status === 'degraded'
                     ? `服务降级: 连续错误 ${aiHealthStatus.consecutiveErrors} 次`
-                    : '服务正常'
+                    : t('aiPanel.serviceNormal')
                 }
               />
               <span className={`ai-status-indicator ${aiStatusLoading[currentSession.id] ? 'loading' : ''}`}>
-                {!currentSession.aiEnabled ? '已关闭' : (aiStatusLoading[currentSession.id] ? '分析中...' : `${aiStatusCountdown}s`)}
+                {!currentSession.aiEnabled ? t('aiPanel.disabled') : (aiStatusLoading[currentSession.id] ? t('aiPanel.analyzing') : `${aiStatusCountdown}s`)}
               </span>
               {/* 操作统计 */}
               <span className="ai-stats-wrapper">
@@ -1072,7 +1073,7 @@ export default function App() {
                     padding: '2px 6px',
                     fontSize: '10px'
                   }}
-                  title="切换 API 供应商"
+                  title={t('aiPanel.switchProvider')}
                 >
                   ▼
                 </button>
@@ -1094,7 +1095,7 @@ export default function App() {
                   <>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <p style={{ fontWeight: 500, color: provider?.exists ? color : 'hsl(var(--muted-foreground))', margin: 0 }}>
-                        {provider?.name || '未配置'}
+                        {provider?.name || t('common.notConfigured')}
                       </p>
                       {provider?.configSource && (
                         <span style={{
@@ -1104,7 +1105,7 @@ export default function App() {
                           background: isLocalConfig ? 'hsl(142 70% 45% / 0.2)' : 'hsl(220 14% 40% / 0.3)',
                           color: isLocalConfig ? 'hsl(142 70% 55%)' : 'hsl(220 14% 70%)'
                         }}>
-                          {isLocalConfig ? '本地' : '全局'}
+                          {isLocalConfig ? t('aiPanel.local') : t('aiPanel.global')}
                         </span>
                       )}
                       {/* 本地配置时显示红色删除按钮 */}
@@ -1140,7 +1141,7 @@ export default function App() {
                             alignItems: 'center',
                             justifyContent: 'center'
                           }}
-                          title="删除本地配置，恢复使用全局配置"
+                          title={t('aiPanel.deleteLocalConfig')}
                         >
                           ×
                         </button>
@@ -1190,9 +1191,9 @@ export default function App() {
                               color: 'hsl(220 14% 70%)',
                               cursor: 'pointer'
                             }}
-                            title="删除本地 .claude/settings.local.json，恢复使用全局配置"
+                            title={t('aiPanel.restoreGlobalConfig')}
                           >
-                            恢复全局
+                            {t('aiPanel.global')}
                           </button>
                         </div>
                         <p style={{ fontSize: '11px', color: 'hsl(220 14% 70%)', margin: 0 }}>
@@ -1235,9 +1236,9 @@ export default function App() {
                           cursor: 'pointer',
                           width: '100%'
                         }}
-                        title="将全局 ~/.claude/settings.json 同步到项目 .claude/settings.local.json"
+                        title={t('aiPanel.syncToLocal')}
                       >
-                        同步到项目本地配置
+                        {t('aiPanel.local')}
                       </button>
                     )}
                   </>
@@ -1334,16 +1335,16 @@ export default function App() {
             {aiStatusMap[currentSession.id] ? (
               <>
                 <div className="ai-status-section">
-                  <h4>当前状态</h4>
-                  <p>{aiStatusMap[currentSession.id].currentState || '等待分析...'}</p>
+                  <h4>{t('aiPanel.currentState')}</h4>
+                  <p>{aiStatusMap[currentSession.id].currentState || t('aiPanel.waitingAnalysis')}</p>
                 </div>
                 <div className="ai-status-section">
-                  <h4>工作目录</h4>
-                  <p className="mono">{currentSession.workingDir || aiStatusMap[currentSession.id].workingDir || '未知'}</p>
+                  <h4>{t('aiPanel.workingDir')}</h4>
+                  <p className="mono">{currentSession.workingDir || aiStatusMap[currentSession.id].workingDir || t('common.unknown')}</p>
                 </div>
                 <div className="ai-status-section">
-                  <h4>最近操作</h4>
-                  <p>{aiStatusMap[currentSession.id].recentAction || '无'}</p>
+                  <h4>{t('aiPanel.recentAction')}</h4>
+                  <p>{aiStatusMap[currentSession.id].recentAction || t('common.none')}</p>
                 </div>
                 {/* 需要操作提示 */}
                 {aiStatusMap[currentSession.id].needsAction && (
@@ -1378,7 +1379,7 @@ export default function App() {
               </>
             ) : (
               <div className="ai-status-empty">
-                {aiStatusLoading[currentSession.id] ? '正在分析终端状态...' : '等待 AI 分析...'}
+                {aiStatusLoading[currentSession.id] ? t('aiPanel.analyzing') : t('aiPanel.waitingAiAnalysis')}
               </div>
             )}
             {/* 智能监控 API 供应商信息 - 始终在底部 */}
@@ -1416,7 +1417,7 @@ export default function App() {
               className={`btn btn-small ${currentSession.autoActionEnabled ? 'btn-primary' : 'btn-secondary'}`}
               onClick={() => toggleAutoAction(currentSession.id, !currentSession.autoActionEnabled)}
             >
-              {currentSession.autoActionEnabled ? '自动:开' : '自动:关'}
+              {currentSession.autoActionEnabled ? t('controls.autoOn') : t('controls.autoOff')}
             </button>
             <button
               className="btn btn-secondary btn-small"
@@ -1429,20 +1430,20 @@ export default function App() {
               className="btn btn-secondary btn-small"
               onClick={() => setShowDebugPanel(!showDebugPanel)}
             >
-              {showDebugPanel ? '隐藏' : '日志'}
+              {showDebugPanel ? t('controls.hideDebug') : t('controls.showLog')}
             </button>
             <button
               className="btn btn-primary btn-small"
               onClick={() => {
                 // 关键：分两次发送，模拟人工输入
-                socket.emit('terminal:input', { sessionId: currentSession.id, input: '继续' });
+                socket.emit('terminal:input', { sessionId: currentSession.id, input: t('controls.continue') });
                 setTimeout(() => {
                   socket.emit('terminal:input', { sessionId: currentSession.id, input: '\r' });
                 }, 50);
-                addDebugLog('test', { message: '测试: 分开发送 继续 + CR' });
+                addDebugLog('test', { message: `测试: 分开发送 ${t('controls.continue')} + CR` });
               }}
             >
-              继续
+              {t('controls.continue')}
             </button>
           </div>
 
@@ -1530,6 +1531,7 @@ export default function App() {
 
 // QR Code Display 组件（嵌入式）
 function QRCodeDisplay({ url }) {
+  const { t } = useTranslation();
   const canvasRef = useRef(null);
   const [copied, setCopied] = useState(false);
 
@@ -1572,7 +1574,7 @@ function QRCodeDisplay({ url }) {
           padding: '4px 0'
         }}
       >
-        {copied ? '已复制!' : new URL(url).hostname}
+        {copied ? t('common.copied') : new URL(url).hostname}
       </div>
     </div>
   );
@@ -1668,7 +1670,7 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
     if (!selectedProviderId) return;
     const [appType, providerId] = selectedProviderId.split(':');
     setProviderTestStatus('testing');
-    setProviderTestMessage('正在测试连接...');
+    setProviderTestMessage(t('common.testing'));
     socket.emit('settings:testProvider', { providerId, appType });
   };
 
@@ -1727,7 +1729,7 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
   // 测试 API 连接
   const testApi = async (type) => {
     setTestStatus(prev => ({ ...prev, [type]: 'testing' }));
-    setTestMessage(prev => ({ ...prev, [type]: '测试中...' }));
+    setTestMessage(prev => ({ ...prev, [type]: t('common.testing') }));
 
     try {
       const config = type === 'openai' ? settings.openai : settings.claude;
@@ -1762,28 +1764,28 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
 
   const handleAuthSetup = async () => {
     if (authPassword !== authConfirm) {
-      setAuthMessage('两次密码不一致');
+      setAuthMessage(t('auth.passwordMismatch'));
       return;
     }
     if (authPassword && authPassword.length < 4) {
-      setAuthMessage('密码至少 4 位');
+      setAuthMessage(t('auth.passwordTooShort'));
       return;
     }
 
     const result = await auth.setupAuth(authUsername, authPassword);
     if (result.success) {
-      setAuthMessage(result.message || '设置成功');
+      setAuthMessage(result.message || t('auth.setupSuccess'));
       setAuthPassword('');
       setAuthConfirm('');
     } else {
-      setAuthMessage(result.error || '设置失败');
+      setAuthMessage(result.error || t('auth.setupFailed'));
     }
   };
 
   const handleDisableAuth = async () => {
     const result = await auth.setupAuth(null, null, true);
     if (result.success) {
-      setAuthMessage('已禁用密码保护');
+      setAuthMessage(t('auth.disableSuccess'));
     }
   };
 
@@ -1950,7 +1952,7 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
                         fontSize: '12px'
                       }}
                     >
-                      {providerTestStatus === 'testing' ? '测试中...' : '测试连接'}
+                      {providerTestStatus === 'testing' ? t('common.testing') : t('common.test')}
                     </button>
                     {providerTestStatus && providerTestStatus !== 'testing' && (
                       <span style={{
@@ -2031,7 +2033,7 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
                           fontSize: '12px'
                         }}
                       >
-                        {testStatus.openai === 'testing' ? '测试中...' : '测试连接'}
+                        {testStatus.openai === 'testing' ? t('common.testing') : t('common.test')}
                       </button>
                       {testMessage.openai && (
                         <span style={{
@@ -2097,7 +2099,7 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
                           fontSize: '12px'
                         }}
                       >
-                        {testStatus.claude === 'testing' ? '测试中...' : '测试连接'}
+                        {testStatus.claude === 'testing' ? t('common.testing') : t('common.test')}
                       </button>
                       {testMessage.claude && (
                         <span style={{
@@ -2192,7 +2194,7 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
               <div>
                 <span>密码保护: </span>
                 <span className={auth.enabled ? 'status-enabled' : 'status-disabled'}>
-                  {auth.enabled ? '已启用' : '未启用'}
+                  {auth.enabled ? t('auth.enabled') : t('auth.disabled')}
                 </span>
               </div>
               {auth.isLocal && (
@@ -2212,21 +2214,21 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
               />
             </div>
             <div className="form-group">
-              <label>{auth.enabled ? '新密码' : '设置密码'}</label>
+              <label>{auth.enabled ? t('auth.newPassword') : t('auth.setPassword')}</label>
               <input
                 type="password"
                 value={authPassword}
                 onChange={(e) => setAuthPassword(e.target.value)}
-                placeholder={auth.enabled ? '留空则不修改' : '设置访问密码'}
+                placeholder={auth.enabled ? t('auth.placeholderOptional') : t('auth.placeholder')}
               />
             </div>
             <div className="form-group">
-              <label>确认密码</label>
+              <label>{t('auth.confirmPassword')}</label>
               <input
                 type="password"
                 value={authConfirm}
                 onChange={(e) => setAuthConfirm(e.target.value)}
-                placeholder="再次输入密码"
+                placeholder={t('auth.confirmPassword')}
               />
             </div>
 
@@ -2234,16 +2236,15 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
 
             <div className="modal-actions" style={{ marginBottom: '16px' }}>
               <button type="button" className="btn btn-secondary" onClick={onClose}>
-                取消
+                {t('common.cancel')}
               </button>
               <button type="button" className="btn btn-primary" onClick={() => {
                 if (onTunnelUrlChange) {
                   onTunnelUrlChange(localTunnelUrl);
                 }
-                setAuthMessage('外部访问 URL 已保存');
-                setTimeout(() => setAuthMessage(''), 2000);
+                toast.success(t('toast.tunnelUrlSaved'));
               }}>
-                保存 URL
+                {t('common.save')} URL
               </button>
             </div>
 
@@ -2253,18 +2254,18 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
               {auth.enabled && (
                 <>
                   <button type="button" className="btn btn-danger" onClick={handleDisableAuth}>
-                    禁用密码
+                    {t('common.delete')}
                   </button>
                   <button type="button" className="btn btn-secondary" onClick={handleLogout}>
-                    退出登录
+                    {t('auth.login')}
                   </button>
                 </>
               )}
               <button type="button" className="btn btn-secondary" onClick={onClose}>
-                取消
+                {t('common.cancel')}
               </button>
               <button type="button" className="btn btn-primary" onClick={handleAuthSetup}>
-                {auth.enabled ? '更新密码' : '启用密码'}
+                {auth.enabled ? t('auth.updatePassword') : t('auth.enablePassword')}
               </button>
             </div>
           </div>
@@ -2632,6 +2633,7 @@ function QRCodeWidget({ url, onClose }) {
 
 // 登录页面组件
 function LoginPage({ auth }) {
+  const { t } = useTranslation();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -2644,7 +2646,7 @@ function LoginPage({ auth }) {
 
     const result = await auth.login(username, password);
     if (!result.success) {
-      setError(result.error || '登录失败');
+      setError(result.error || t('auth.loginFailed'));
     }
     setLoading(false);
   };
@@ -2671,12 +2673,12 @@ function LoginPage({ auth }) {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="请输入密码"
+              placeholder={t('auth.enterPassword')}
             />
           </div>
           {error && <div className="login-error">{error}</div>}
           <button type="submit" className="btn btn-primary btn-block" disabled={loading}>
-            {loading ? '登录中...' : '登录'}
+            {loading ? t('auth.loggingIn') : t('auth.login')}
           </button>
         </form>
       </div>
