@@ -42,12 +42,9 @@ extraResources:
     to: node_modules/node-pty/lib
 
 asar: true
-# 启用原生模块重新编译
-npmRebuild: true
+# 原生模块配置
+npmRebuild: false
 nodeGypRebuild: false
-
-# 需要为目标平台编译的原生模块
-nativeRebuilder: sequential
 
 mac:
   category: public.app-category.developer-tools
