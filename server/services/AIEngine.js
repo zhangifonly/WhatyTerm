@@ -836,9 +836,27 @@ ${historyText || '(空)'}
       };
     }
 
-    // 2.5 检测程序运行中（必须在 accept edits 之前检测）
+    // 2.5 检测 Claude Code 编辑确认状态
+    // 当显示 "accept edits on" 时，说明 Claude Code 正在等待用户确认编辑
+    // 此时不应该给出任何 shell 命令建议
+    if (/accept edits on/i.test(cleanContent)) {
+      return {
+        currentState: 'Claude Code等待确认编辑',
+        workingDir: '未显示',
+        recentAction: '等待编辑确认',
+        needsAction: false,
+        actionType: 'none',
+        suggestedAction: null,
+        actionReason: 'Claude Code正在等待用户确认或拒绝编辑建议',
+        suggestion: null,
+        updatedAt: new Date().toISOString(),
+        preAnalyzed: true,
+        detectedCLI
+      };
+    }
+
+    // 2.6 检测程序运行中
     // 当显示 "esc to interrupt" 或运行时间（如 1h 8m 37s）时，说明程序正在运行
-    // 此时底部的 "accept edits on" 只是状态栏，不需要操作
     // 注意：使用清理后的内容进行检测
     const isRunning = /esc to interrupt/i.test(cleanContent) ||
                       /\d+[msh]\s+\d+[msh]/.test(cleanContent) ||
@@ -859,7 +877,7 @@ ${historyText || '(空)'}
       };
     }
 
-    // 2.6 检测 Claude Code 空闲状态下的中文问句
+    // 2.7 检测 Claude Code 空闲状态下的中文问句
     // 检查最后 800 字符中是否有问句（增加范围以确保捕获问句）
     const last800Chars = terminalContent.slice(-800);
     // 去除 ANSI 转义序列后再匹配（终端内容可能包含颜色代码）

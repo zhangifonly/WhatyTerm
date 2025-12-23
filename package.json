@@ -6,6 +6,11 @@
     "name": "WhatyTerm",
     "email": "support@whatyterm.com"
   },
+  "homepage": "https://zhangifonly.github.io/whatyterm-pages/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhangifonly/WhatyTerm.git"
+  },
   "main": "electron/main.js",
   "type": "module",
   "scripts": {
