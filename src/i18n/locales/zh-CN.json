@@ -2,7 +2,38 @@
   "app": {
     "title": "网梯终端",
     "subtitle": "WhatyTerm",
-    "welcome": "欢迎使用网梯终端"
+    "welcome": "欢迎使用网梯终端",
+    "description": "AI 驱动的智能终端管理工具"
+  },
+  "welcome": {
+    "coreFeatures": "核心功能",
+    "aiMonitoring": "AI 智能监控",
+    "aiMonitoringDesc": "自动分析终端状态，识别等待输入、错误提示等场景",
+    "automation": "自动化操作",
+    "automationDesc": "根据 AI 分析结果自动执行确认、继续等操作",
+    "multiSession": "多会话管理",
+    "multiSessionDesc": "同时管理多个终端会话，支持 Claude/Codex/Gemini",
+    "remoteAccess": "远程访问",
+    "remoteAccessDesc": "通过 FRP 隧道安全访问，支持手机扫码连接",
+    "usageTips": "使用技巧",
+    "createSession": "创建会话",
+    "createSessionDesc": "点击左侧「+」按钮，选择 AI 类型并设置项目目标",
+    "aiSwitch": "AI 开关",
+    "aiSwitchDesc": "每个会话可独立开启/关闭 AI 监控",
+    "autoMode": "自动模式",
+    "autoModeDesc": "开启后 AI 会自动执行建议的操作",
+    "manualConfirm": "手动确认",
+    "manualConfirmDesc": "关闭自动模式时，操作需要手动确认",
+    "shortcuts": "快捷操作",
+    "settings": "设置",
+    "settingsDesc": "点击右上角齿轮图标配置 AI 和 API",
+    "terminalInput": "终端输入",
+    "terminalInputDesc": "直接在终端区域输入命令",
+    "sessionSwitch": "会话切换",
+    "sessionSwitchDesc": "点击左侧会话列表快速切换",
+    "statusPanel": "状态面板",
+    "statusPanelDesc": "右侧面板显示 AI 分析结果和操作历史",
+    "startHint": "选择一个会话或点击「+」创建新会话开始"
   },
   "settings": {
     "ai": "AI监控设置",
@@ -39,6 +70,18 @@
     "title": "目标",
     "placeholder": "输入目标，例如：\n1. 列出当前目录文件\n2. 查找包含特定内容的文件\n3. 执行部署脚本",
     "notSet": "点击设置目标"
+  },
+  "stats": {
+    "title": "AI 操作统计（本会话）",
+    "totalOps": "总操作次数",
+    "success": "成功",
+    "failed": "失败",
+    "aiDecision": "AI 判断",
+    "programDecision": "程序判断",
+    "sessionDuration": "会话时长",
+    "minutes": "分钟",
+    "hours": "小时",
+    "days": "天"
   },
   "aiPanel": {
     "title": "AI 状态监控",

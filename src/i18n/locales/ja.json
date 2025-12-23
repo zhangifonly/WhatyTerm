@@ -2,7 +2,38 @@
   "app": {
     "title": "ウェブターミナル",
     "subtitle": "WhatyTerm",
-    "welcome": "ウェブターミナルへようこそ"
+    "welcome": "ウェブターミナルへようこそ",
+    "description": "AI駆動のインテリジェントターミナル管理ツール"
+  },
+  "welcome": {
+    "coreFeatures": "主な機能",
+    "aiMonitoring": "AIスマート監視",
+    "aiMonitoringDesc": "ターミナルの状態を自動的に分析し、入力待ちやエラーメッセージを識別します",
+    "automation": "自動化操作",
+    "automationDesc": "AI分析結果に基づいて確認や継続を自動実行します",
+    "multiSession": "マルチセッション管理",
+    "multiSessionDesc": "複数のターミナルセッションを同時に管理、Claude/Codex/Geminiをサポート",
+    "remoteAccess": "リモートアクセス",
+    "remoteAccessDesc": "FRPトンネル経由で安全にアクセス、モバイルQRコード接続をサポート",
+    "usageTips": "使用のヒント",
+    "createSession": "セッション作成",
+    "createSessionDesc": "左側の「+」ボタンをクリックし、AIタイプを選択してプロジェクト目標を設定",
+    "aiSwitch": "AIスイッチ",
+    "aiSwitchDesc": "各セッションは独立してAI監視を有効/無効にできます",
+    "autoMode": "自動モード",
+    "autoModeDesc": "有効にすると、AIが推奨操作を自動実行します",
+    "manualConfirm": "手動確認",
+    "manualConfirmDesc": "自動モードを無効にすると、操作は手動確認が必要です",
+    "shortcuts": "クイック操作",
+    "settings": "設定",
+    "settingsDesc": "右上の歯車アイコンをクリックしてAIとAPIを設定",
+    "terminalInput": "ターミナル入力",
+    "terminalInputDesc": "ターミナル領域で直接コマンドを入力",
+    "sessionSwitch": "セッション切り替え",
+    "sessionSwitchDesc": "左側のセッションリストをクリックして素早く切り替え",
+    "statusPanel": "ステータスパネル",
+    "statusPanelDesc": "右パネルにAI分析結果と操作履歴を表示",
+    "startHint": "セッションを選択するか、「+」をクリックして新しいセッションを作成して開始"
   },
   "settings": {
     "ai": "AI監視設定",
@@ -39,6 +70,18 @@
     "title": "目標",
     "placeholder": "目標を入力してください。例：\n1. 現在のディレクトリのファイルを一覧表示\n2. 特定の内容を含むファイルを検索\n3. デプロイスクリプトを実行",
     "notSet": "クリックして目標を設定"
+  },
+  "stats": {
+    "title": "AI操作統計（現在のセッション）",
+    "totalOps": "総操作回数",
+    "success": "成功",
+    "failed": "失敗",
+    "aiDecision": "AI判断",
+    "programDecision": "プログラム判断",
+    "sessionDuration": "セッション時間",
+    "minutes": "分",
+    "hours": "時間",
+    "days": "日"
   },
   "aiPanel": {
     "title": "AIステータス監視",

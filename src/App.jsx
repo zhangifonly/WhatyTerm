@@ -927,41 +927,41 @@ export default function App() {
         ) : (
           <div className="empty-state welcome-page">
             <h2>{t('app.welcome')}</h2>
-            <p className="welcome-subtitle">AI 驱动的智能终端管理工具</p>
+            <p className="welcome-subtitle">{t('app.description')}</p>
 
             <div className="welcome-features">
               <div className="feature-section">
-                <h3>核心功能</h3>
+                <h3>{t('welcome.coreFeatures')}</h3>
                 <ul>
-                  <li><strong>AI 智能监控</strong> - 自动分析终端状态，识别等待输入、错误提示等场景</li>
-                  <li><strong>自动化操作</strong> - 根据 AI 分析结果自动执行确认、继续等操作</li>
-                  <li><strong>多会话管理</strong> - 同时管理多个终端会话，支持 Claude/Codex/Gemini</li>
-                  <li><strong>远程访问</strong> - 通过 FRP 隧道安全访问，支持手机扫码连接</li>
+                  <li><strong>{t('welcome.aiMonitoring')}</strong> - {t('welcome.aiMonitoringDesc')}</li>
+                  <li><strong>{t('welcome.automation')}</strong> - {t('welcome.automationDesc')}</li>
+                  <li><strong>{t('welcome.multiSession')}</strong> - {t('welcome.multiSessionDesc')}</li>
+                  <li><strong>{t('welcome.remoteAccess')}</strong> - {t('welcome.remoteAccessDesc')}</li>
                 </ul>
               </div>
 
               <div className="feature-section">
-                <h3>使用技巧</h3>
+                <h3>{t('welcome.usageTips')}</h3>
                 <ul>
-                  <li><strong>创建会话</strong> - 点击左侧「+」按钮，选择 AI 类型并设置项目目标</li>
-                  <li><strong>AI 开关</strong> - 每个会话可独立开启/关闭 AI 监控</li>
-                  <li><strong>自动模式</strong> - 开启后 AI 会自动执行建议的操作</li>
-                  <li><strong>手动确认</strong> - 关闭自动模式时，操作需要手动确认</li>
+                  <li><strong>{t('welcome.createSession')}</strong> - {t('welcome.createSessionDesc')}</li>
+                  <li><strong>{t('welcome.aiSwitch')}</strong> - {t('welcome.aiSwitchDesc')}</li>
+                  <li><strong>{t('welcome.autoMode')}</strong> - {t('welcome.autoModeDesc')}</li>
+                  <li><strong>{t('welcome.manualConfirm')}</strong> - {t('welcome.manualConfirmDesc')}</li>
                 </ul>
               </div>
 
               <div className="feature-section">
-                <h3>快捷操作</h3>
+                <h3>{t('welcome.shortcuts')}</h3>
                 <ul>
-                  <li><strong>设置</strong> - 点击右上角齿轮图标配置 AI 和 API</li>
-                  <li><strong>终端输入</strong> - 直接在终端区域输入命令</li>
-                  <li><strong>会话切换</strong> - 点击左侧会话列表快速切换</li>
-                  <li><strong>状态面板</strong> - 右侧面板显示 AI 分析结果和操作历史</li>
+                  <li><strong>{t('welcome.settings')}</strong> - {t('welcome.settingsDesc')}</li>
+                  <li><strong>{t('welcome.terminalInput')}</strong> - {t('welcome.terminalInputDesc')}</li>
+                  <li><strong>{t('welcome.sessionSwitch')}</strong> - {t('welcome.sessionSwitchDesc')}</li>
+                  <li><strong>{t('welcome.statusPanel')}</strong> - {t('welcome.statusPanelDesc')}</li>
                 </ul>
               </div>
             </div>
 
-            <p className="welcome-hint">选择一个会话或点击「+」创建新会话开始</p>
+            <p className="welcome-hint">{t('welcome.startHint')}</p>
           </div>
         )}
       </main>
@@ -1001,50 +1001,50 @@ export default function App() {
                   {(currentSession?.stats?.total || 0)}次 ✓{(currentSession?.stats?.success || 0)} ✗{(currentSession?.stats?.failed || 0)}
                 </span>
                 <div className="ai-stats-tooltip">
-                  <div className="tooltip-title">AI 操作统计（本会话）</div>
+                  <div className="tooltip-title">{t('stats.title')}</div>
                   <div className="tooltip-item">
-                    <span className="tooltip-label">总操作次数:</span>
+                    <span className="tooltip-label">{t('stats.totalOps')}:</span>
                     <span className="tooltip-value">{currentSession?.stats?.total || 0}</span>
                   </div>
                   <div className="tooltip-item">
-                    <span className="tooltip-label">成功:</span>
+                    <span className="tooltip-label">{t('stats.success')}:</span>
                     <span className="tooltip-value success">
                       {currentSession?.stats?.success || 0} ({(currentSession?.stats?.total || 0) > 0 ? Math.round((currentSession?.stats?.success || 0) / currentSession.stats.total * 100) : 0}%)
                     </span>
                   </div>
                   <div className="tooltip-item">
-                    <span className="tooltip-label">失败:</span>
+                    <span className="tooltip-label">{t('stats.failed')}:</span>
                     <span className="tooltip-value failed">
                       {currentSession?.stats?.failed || 0} ({(currentSession?.stats?.total || 0) > 0 ? Math.round((currentSession?.stats?.failed || 0) / currentSession.stats.total * 100) : 0}%)
                     </span>
                   </div>
                   <div className="tooltip-divider"></div>
                   <div className="tooltip-item">
-                    <span className="tooltip-label">AI 判断:</span>
+                    <span className="tooltip-label">{t('stats.aiDecision')}:</span>
                     <span className="tooltip-value">
                       {currentSession?.stats?.aiAnalyzed || 0} ({(currentSession?.stats?.total || 0) > 0 ? Math.round((currentSession?.stats?.aiAnalyzed || 0) / currentSession.stats.total * 100) : 0}%)
                     </span>
                   </div>
                   <div className="tooltip-item">
-                    <span className="tooltip-label">程序判断:</span>
+                    <span className="tooltip-label">{t('stats.programDecision')}:</span>
                     <span className="tooltip-value">
                       {currentSession?.stats?.preAnalyzed || 0} ({(currentSession?.stats?.total || 0) > 0 ? Math.round((currentSession?.stats?.preAnalyzed || 0) / currentSession.stats.total * 100) : 0}%)
                     </span>
                   </div>
                   <div className="tooltip-divider"></div>
                   <div className="tooltip-item">
-                    <span className="tooltip-label">会话时长:</span>
+                    <span className="tooltip-label">{t('stats.sessionDuration')}:</span>
                     <span className="tooltip-value">
                       {currentSession?.createdAt ? (() => {
                         const minutes = Math.floor((Date.now() - new Date(currentSession.createdAt).getTime()) / 60000);
-                        if (minutes < 60) return `${minutes}分钟`;
+                        if (minutes < 60) return `${minutes}${t('stats.minutes')}`;
                         const hours = Math.floor(minutes / 60);
                         const remainMinutes = minutes % 60;
-                        if (hours < 24) return `${hours}小时${remainMinutes}分钟`;
+                        if (hours < 24) return `${hours}${t('stats.hours')}${remainMinutes}${t('stats.minutes')}`;
                         const days = Math.floor(hours / 24);
                         const remainHours = hours % 24;
-                        return `${days}天${remainHours}小时`;
-                      })() : '未知'}
+                        return `${days}${t('stats.days')}${remainHours}${t('stats.hours')}`;
+                      })() : t('common.unknown')}
                     </span>
                   </div>
                 </div>
