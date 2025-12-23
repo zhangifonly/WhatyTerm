@@ -1,0 +1,690 @@
+import pty from 'node-pty';
+import { v4 as uuidv4 } from 'uuid';
+import Database from 'better-sqlite3';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+import { execSync } from 'child_process';
+import sqlite3 from 'sqlite3';
+import path from 'path';
+import os from 'os';
+import fs from 'fs';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// 获取当前激活的 API 供应商信息
+function getCurrentApiProvider() {
+  return new Promise((resolve) => {
+    try {
+      const ccSwitchDbPath = path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
+
+      if (!fs.existsSync(ccSwitchDbPath)) {
+        return resolve({ name: '未配置', url: '' });
+      }
+
+      const db = new sqlite3.Database(ccSwitchDbPath, sqlite3.OPEN_READONLY);
+
+      db.get('SELECT * FROM providers WHERE app_type = ? AND is_current = 1',
+        ['claude'],
+        (err, row) => {
+          db.close();
+
+          if (err || !row) {
+            return resolve({ name: '未配置', url: '' });
+          }
+
+          let settingsConfig = {};
+          try {
+            if (row.settings_config) {
+              settingsConfig = JSON.parse(row.settings_config);
+            }
+          } catch (parseError) {
+            console.error('[Session] 解析 settings_config 失败:', parseError);
+          }
+
+          // 从 env.ANTHROPIC_BASE_URL 获取 API 地址
+          const url = settingsConfig.env?.ANTHROPIC_BASE_URL || settingsConfig.baseURL || '';
+
+          resolve({
+            name: row.name || '未命名',
+            url: url
+          });
+        });
+    } catch (error) {
+      console.error('[Session] 获取 API 供应商失败:', error);
+      resolve({ name: '未配置', url: '' });
+    }
+  });
+}
+
+// 验证并清理 tmux 会话名称，防止命令注入
+function sanitizeTmuxSessionName(name) {
+  if (!name) return null;
+  // 只允许字母、数字、连字符和下划线
+  return name.replace(/[^a-zA-Z0-9_-]/g, '');
+}
+
+export class Session {
+  constructor(options) {
+    this.id = options.id || uuidv4();
+    this.name = options.name || `session-${Date.now()}`;
+    // 验证 tmuxSessionName，防止命令注入
+    const rawTmuxName = options.tmuxSessionName || `webtmux-${this.id.slice(0, 8)}`;
+    this.tmuxSessionName = sanitizeTmuxSessionName(rawTmuxName);
+    this.goal = options.goal || '';
+    this.systemPrompt = options.systemPrompt || '';
+    this.aiEnabled = options.aiEnabled ?? true;
+    this.autoMode = options.autoMode ?? false;
+    this.autoActionEnabled = options.autoActionEnabled ?? false;  // 后台自动操作开关
+    this.status = 'running';
+    this.createdAt = options.createdAt || new Date();
+    this.updatedAt = new Date();
+    this.apiProvider = options.apiProvider || { name: '加载中...', url: '' }; // API 供应商信息
+
+    this.outputBuffer = '';
+    this.outputCallbacks = [];
+    this.bellCallbacks = [];  // bell 事件回调（Claude Code 需要输入时触发）
+    this.isAnalyzing = false;
+    this.analysisTimer = null;
+    this.autoActionTimer = null;  // 后台自动操作定时器
+    this.autoCommandCount = 0;
+    this.pty = null;
+    this.attachCount = 0;
+
+    if (!options.skipPty) {
+      this._ensureTmuxSession(options.isNew);
+    }
+
+    // 如果是新会话且没有提供 apiProvider，则获取当前 API 信息
+    if (options.isNew && !options.apiProvider) {
+      this._loadApiProvider();
+    }
+  }
+
+  async _loadApiProvider() {
+    try {
+      this.apiProvider = await getCurrentApiProvider();
+      console.log(`[Session] ${this.id} API 供应商: ${this.apiProvider.name}`);
+    } catch (error) {
+      console.error('[Session] 加载 API 供应商失败:', error);
+      this.apiProvider = { name: '未配置', url: '' };
+    }
+  }
+
+  _ensureTmuxSession(isNew = true) {
+    try {
+      if (isNew) {
+        // 创建新的 tmux 会话
+        execSync(`tmux new-session -d -s "${this.tmuxSessionName}" -x 80 -y 24`, {
+          stdio: 'ignore'
+        });
+        console.log(`创建 tmux 会话: ${this.tmuxSessionName}`);
+        this._attachToTmux();
+      } else {
+        try {
+          execSync(`tmux has-session -t "${this.tmuxSessionName}" 2>/dev/null`);
+          console.log(`tmux 会话已存在: ${this.tmuxSessionName}`);
+        } catch {
+          execSync(`tmux new-session -d -s "${this.tmuxSessionName}" -x 80 -y 24`, {
+            stdio: 'ignore'
+          });
+          console.log(`重新创建 tmux 会话: ${this.tmuxSessionName}`);
+        }
+      }
+      // 统一设置 tmux 选项（无论新建还是已存在）
+      this._configureTmuxSession();
+    } catch (err) {
+      console.error(`初始化 tmux 会话失败: ${err.message}`);
+    }
+  }
+
+  // 配置 tmux 会话选项
+  _configureTmuxSession() {
+    try {
+      // 设置 history-limit 为 10000 行
+      execSync(`tmux set-option -t "${this.tmuxSessionName}" history-limit 10000`, {
+        stdio: 'ignore'
+      });
+      // 启用鼠标模式，支持鼠标滚轮滚动
+      execSync(`tmux set-option -t "${this.tmuxSessionName}" mouse on`, {
+        stdio: 'ignore'
+      });
+    } catch (err) {
+      console.error(`配置 tmux 会话失败: ${err.message}`);
+    }
+  }
+
+  attach() {
+    this.attachCount++;
+    if (!this.pty) {
+      this._attachToTmux();
+    }
+    // 每次 attach 时确保鼠标模式开启
+    this._configureTmuxSession();
+  }
+
+  detach() {
+    this.attachCount = Math.max(0, this.attachCount - 1);
+  }
+
+  _attachToTmux() {
+    if (this.pty) return;
+
+    this.pty = pty.spawn('tmux', ['attach-session', '-t', this.tmuxSessionName], {
+      name: 'xterm-256color',
+      cols: 80,
+      rows: 24,
+      cwd: process.env.HOME,
+      env: {
+        ...process.env,
+        TERM: 'xterm-256color'
+      }
+    });
+
+    this.pty.onData((data) => {
+      this.outputBuffer += data;
+      if (this.outputBuffer.length > 100000) {
+        this.outputBuffer = this.outputBuffer.slice(-50000);
+      }
+      this.outputCallbacks.forEach(cb => cb(data));
+
+      // 检测 bell 字符（\x07）- Claude Code 需要用户输入时会发送
+      if (data.includes('\x07')) {
+        this.bellCallbacks.forEach(cb => cb());
+      }
+    });
+
+    this.pty.onExit(({ exitCode }) => {
+      console.log(`PTY 退出: ${this.tmuxSessionName}, code=${exitCode}`);
+      this.pty = null;
+
+      // 检查 tmux 会话是否还存在，如果不存在则重新创建
+      if (this.attachCount > 0) {
+        try {
+          execSync(`tmux has-session -t "${this.tmuxSessionName}" 2>/dev/null`);
+        } catch {
+          // tmux 会话已退出，重新创建
+          console.log(`重新创建 tmux 会话: ${this.tmuxSessionName}`);
+          try {
+            execSync(`tmux new-session -d -s "${this.tmuxSessionName}" -x 80 -y 24`, {
+              stdio: 'ignore'
+            });
+            // 通知客户端会话已重启
+            this.outputCallbacks.forEach(cb => cb('\r\n\x1b[33m[会话已重启]\x1b[0m\r\n'));
+            // 重新连接
+            this._attachToTmux();
+          } catch (err) {
+            console.error(`重新创建 tmux 会话失败: ${err.message}`);
+          }
+        }
+      }
+    });
+  }
+
+  write(data) {
+    if (!this.pty) {
+      this._attachToTmux();
+    }
+    if (this.pty) {
+      this.pty.write(data);
+    }
+  }
+
+  resize(cols, rows) {
+    if (this.pty) {
+      this.pty.resize(cols, rows);
+    }
+    // 同时调整 tmux 窗口大小
+    try {
+      execSync(`tmux resize-window -t "${this.tmuxSessionName}" -x ${cols} -y ${rows} 2>/dev/null`, {
+        stdio: 'ignore'
+      });
+    } catch {}
+  }
+
+  onOutput(callback) {
+    this.outputCallbacks.push(callback);
+    return callback;
+  }
+
+  offOutput(callback) {
+    const index = this.outputCallbacks.indexOf(callback);
+    if (index > -1) {
+      this.outputCallbacks.splice(index, 1);
+    }
+  }
+
+  clearOutputCallbacks() {
+    this.outputCallbacks = [];
+  }
+
+  onBell(callback) {
+    this.bellCallbacks.push(callback);
+    return callback;
+  }
+
+  offBell(callback) {
+    const index = this.bellCallbacks.indexOf(callback);
+    if (index > -1) {
+      this.bellCallbacks.splice(index, 1);
+    }
+  }
+
+  updateSettings(settings) {
+    if (settings.goal !== undefined) this.goal = settings.goal;
+    if (settings.systemPrompt !== undefined) this.systemPrompt = settings.systemPrompt;
+    if (settings.aiEnabled !== undefined) this.aiEnabled = settings.aiEnabled;
+    if (settings.autoMode !== undefined) {
+      this.autoMode = settings.autoMode;
+      if (settings.autoMode) {
+        this.autoCommandCount = 0;
+      }
+    }
+    if (settings.autoActionEnabled !== undefined) {
+      this.autoActionEnabled = settings.autoActionEnabled;
+    }
+    this.updatedAt = new Date();
+  }
+
+  getRecentOutput(lines = 50) {
+    const allLines = this.outputBuffer.split('\n');
+    return allLines.slice(-lines).join('\n');
+  }
+
+  // 获取 tmux 面板的当前可见内容
+  capturePane() {
+    try {
+      const content = execSync(
+        `tmux capture-pane -t "${this.tmuxSessionName}" -p -e`,
+        { encoding: 'utf-8' }
+      );
+      return content.replace(/\n/g, '\r\n');
+    } catch {
+      return '';
+    }
+  }
+
+  // 获取 tmux 面板的完整内容（包含滚动历史）
+  captureFullPane() {
+    try {
+      const content = execSync(
+        `tmux capture-pane -t "${this.tmuxSessionName}" -p -e -S -`,
+        { encoding: 'utf-8' }
+      );
+      return content.replace(/\n/g, '\r\n');
+    } catch {
+      return '';
+    }
+  }
+
+  // 获取滚动历史行数
+  getHistorySize() {
+    try {
+      const size = execSync(
+        `tmux display-message -t "${this.tmuxSessionName}" -p "#{history_size}"`,
+        { encoding: 'utf-8' }
+      ).trim();
+      return parseInt(size, 10) || 0;
+    } catch {
+      return 0;
+    }
+  }
+
+
+  // 获取光标位置
+  getCursorPosition() {
+    try {
+      const info = execSync(
+        `tmux display-message -t "${this.tmuxSessionName}" -p "#{cursor_x},#{cursor_y}"`,
+        { encoding: 'utf-8' }
+      ).trim();
+      const [x, y] = info.split(',').map(n => parseInt(n, 10));
+      return { x: x + 1, y: y + 1 }; // 转为 1-based
+    } catch {
+      return null;
+    }
+  }
+
+  refreshScreen() {
+    // 发送 tmux 刷新命令，让 tmux 重新绘制整个屏幕
+    try {
+      execSync(`tmux refresh-client -t "${this.tmuxSessionName}" 2>/dev/null`, {
+        stdio: 'ignore'
+      });
+    } catch {}
+  }
+
+  getScreenContent() {
+    return this.capturePane();
+  }
+
+  destroy() {
+    if (this.pty) {
+      try {
+        // 先尝试优雅终止
+        this.pty.kill('SIGTERM');
+        // 设置超时强制终止
+        const ptyRef = this.pty;
+        setTimeout(() => {
+          try {
+            if (ptyRef && !ptyRef.killed) {
+              ptyRef.kill('SIGKILL');
+            }
+          } catch (e) {
+            // 忽略强制终止错误
+          }
+        }, 3000);
+      } catch (err) {
+        console.error(`[Session] PTY 终止失败: ${err.message}`);
+      }
+      this.pty = null;
+    }
+    if (this.analysisTimer) {
+      clearTimeout(this.analysisTimer);
+      this.analysisTimer = null;
+    }
+    if (this.autoActionTimer) {
+      clearTimeout(this.autoActionTimer);
+      this.autoActionTimer = null;
+    }
+    // 清理回调
+    this.outputCallbacks = [];
+    // 不删除 tmux session，保留以便恢复
+  }
+
+  killTmuxSession() {
+    try {
+      execSync(`tmux kill-session -t "${this.tmuxSessionName}" 2>/dev/null`, {
+        stdio: 'ignore'
+      });
+    } catch {}
+  }
+
+  toJSON() {
+    return {
+      id: this.id,
+      name: this.name,
+      tmuxSessionName: this.tmuxSessionName,
+      goal: this.goal,
+      systemPrompt: this.systemPrompt,
+      aiEnabled: this.aiEnabled,
+      autoMode: this.autoMode,
+      autoActionEnabled: this.autoActionEnabled,
+      status: this.status,
+      createdAt: this.createdAt,
+      updatedAt: this.updatedAt,
+      projectName: this.projectName,
+      projectDesc: this.projectDesc,
+      workingDir: this.workingDir,
+      apiProvider: this.apiProvider,  // 添加 API 供应商信息
+      // CLI 工具类型和供应商信息（用于监控面板顶部显示）
+      aiType: this.aiType || null,
+      claudeProvider: this.claudeProvider || null,
+      codexProvider: this.codexProvider || null,
+      geminiProvider: this.geminiProvider || null,
+      // 操作统计
+      stats: this.stats || { total: 0, success: 0, failed: 0, aiAnalyzed: 0, preAnalyzed: 0 }
+    };
+  }
+}
+
+export class SessionManager {
+  constructor() {
+    this.sessions = new Map();
+    this._initDb();
+    this._loadSessions();
+  }
+
+  /**
+   * 获取数据库文件路径
+   * 与 ProviderService 使用相同的逻辑，确保数据库文件在同一目录
+   */
+  _getDbPath() {
+    // 如果设置了环境变量，优先使用
+    if (process.env.WEBTMUX_DB_DIR) {
+      return join(process.env.WEBTMUX_DB_DIR, 'webtmux.db');
+    }
+
+    // 统一使用用户数据目录
+    const homeDir = os.homedir();
+    const userDataDir = join(homeDir, '.webtmux', 'db');
+
+    // 如果用户数据目录存在，使用它
+    if (fs.existsSync(userDataDir)) {
+      return join(userDataDir, 'webtmux.db');
+    }
+
+    // 否则检查项目目录的数据库是否存在（向后兼容）
+    const projectDbPath = join(__dirname, '../db/webtmux.db');
+
+    if (fs.existsSync(projectDbPath)) {
+      // 如果项目目录有数据库，迁移到用户数据目录
+      console.log('[SessionManager] 检测到项目目录数据库，准备迁移到用户数据目录');
+
+      // 确保目标目录存在
+      if (!fs.existsSync(userDataDir)) {
+        fs.mkdirSync(userDataDir, { recursive: true });
+      }
+
+      const userDbPath = join(userDataDir, 'webtmux.db');
+
+      // 复制数据库文件
+      try {
+        fs.copyFileSync(projectDbPath, userDbPath);
+        console.log('[SessionManager] 数据库迁移完成');
+        console.log(`[SessionManager] 新数据库位置: ${userDbPath}`);
+      } catch (error) {
+        console.error('[SessionManager] 数据库迁移失败:', error);
+        // 迁移失败，继续使用项目目录
+        return projectDbPath;
+      }
+
+      return userDbPath;
+    }
+
+    // 都不存在，使用用户数据目录（新安装）
+    // 确保目录存在
+    if (!fs.existsSync(userDataDir)) {
+      fs.mkdirSync(userDataDir, { recursive: true });
+    }
+
+    return join(userDataDir, 'webtmux.db');
+  }
+
+  _initDb() {
+    const dbPath = this._getDbPath();
+    this.db = new Database(dbPath);
+    console.log(`[SessionManager] 使用数据库: ${dbPath}`);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        tmux_session_name TEXT,
+        goal TEXT,
+        system_prompt TEXT,
+        ai_enabled INTEGER DEFAULT 1,
+        auto_mode INTEGER DEFAULT 0,
+        auto_action_enabled INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'running',
+        created_at TEXT,
+        updated_at TEXT
+      )
+    `);
+    // 添加新字段（如果不存在）
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN auto_action_enabled INTEGER DEFAULT 0`);
+    } catch {}
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN ai_type TEXT DEFAULT 'claude'`);
+    } catch {}
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN claude_provider TEXT`);
+    } catch {}
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN codex_provider TEXT`);
+    } catch {}
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN gemini_provider TEXT`);
+    } catch {}
+    // 添加操作统计字段
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN stats_total INTEGER DEFAULT 0`);
+    } catch {}
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN stats_success INTEGER DEFAULT 0`);
+    } catch {}
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN stats_failed INTEGER DEFAULT 0`);
+    } catch {}
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN stats_ai_analyzed INTEGER DEFAULT 0`);
+    } catch {}
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN stats_pre_analyzed INTEGER DEFAULT 0`);
+    } catch {}
+  }
+
+  _loadSessions() {
+    const rows = this.db.prepare('SELECT * FROM sessions WHERE status = ?').all('running');
+    for (const row of rows) {
+      const session = new Session({
+        id: row.id,
+        name: row.name,
+        tmuxSessionName: row.tmux_session_name,
+        goal: row.goal,
+        systemPrompt: row.system_prompt,
+        aiEnabled: !!row.ai_enabled,
+        autoMode: !!row.auto_mode,
+        autoActionEnabled: !!row.auto_action_enabled,
+        createdAt: new Date(row.created_at),
+        skipPty: false,
+        isNew: false  // 恢复已有会话
+      });
+
+      // 恢复 AI 类型和供应商信息
+      session.aiType = row.ai_type || 'claude';
+      try {
+        session.claudeProvider = row.claude_provider ? JSON.parse(row.claude_provider) : null;
+      } catch (e) {
+        session.claudeProvider = null;
+      }
+      try {
+        session.codexProvider = row.codex_provider ? JSON.parse(row.codex_provider) : null;
+      } catch (e) {
+        session.codexProvider = null;
+      }
+      try {
+        session.geminiProvider = row.gemini_provider ? JSON.parse(row.gemini_provider) : null;
+      } catch (e) {
+        session.geminiProvider = null;
+      }
+
+      // 恢复操作统计
+      session.stats = {
+        total: row.stats_total || 0,
+        success: row.stats_success || 0,
+        failed: row.stats_failed || 0,
+        aiAnalyzed: row.stats_ai_analyzed || 0,
+        preAnalyzed: row.stats_pre_analyzed || 0
+      };
+
+      this.sessions.set(session.id, session);
+      console.log(`恢复会话: ${session.name} (tmux: ${session.tmuxSessionName}, AI: ${session.aiType}, 自动操作: ${session.autoActionEnabled ? '开' : '关'})`);
+    }
+  }
+
+  _saveSession(session) {
+    const stats = session.stats || { total: 0, success: 0, failed: 0, aiAnalyzed: 0, preAnalyzed: 0 };
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO sessions
+      (id, name, tmux_session_name, goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, status, created_at, updated_at, ai_type, claude_provider, codex_provider, gemini_provider, stats_total, stats_success, stats_failed, stats_ai_analyzed, stats_pre_analyzed)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      session.id,
+      session.name,
+      session.tmuxSessionName,
+      session.goal,
+      session.systemPrompt,
+      session.aiEnabled ? 1 : 0,
+      session.autoMode ? 1 : 0,
+      session.autoActionEnabled ? 1 : 0,
+      session.status,
+      session.createdAt.toISOString(),
+      session.updatedAt.toISOString(),
+      session.aiType || 'claude',
+      session.claudeProvider ? JSON.stringify(session.claudeProvider) : null,
+      session.codexProvider ? JSON.stringify(session.codexProvider) : null,
+      session.geminiProvider ? JSON.stringify(session.geminiProvider) : null,
+      stats.total,
+      stats.success,
+      stats.failed,
+      stats.aiAnalyzed,
+      stats.preAnalyzed
+    );
+  }
+
+  async createSession(options) {
+    const session = new Session({ ...options, isNew: true });
+    this.sessions.set(session.id, session);
+    this._saveSession(session);
+    return session;
+  }
+
+  getSession(id) {
+    return this.sessions.get(id);
+  }
+
+  listSessions() {
+    return Array.from(this.sessions.values()).map(s => s.toJSON());
+  }
+
+  updateSession(session) {
+    this._saveSession(session);
+  }
+
+  /**
+   * 更新会话统计并保存
+   * @param {string} sessionId - 会话 ID
+   * @param {object} statUpdate - 统计更新 { success?: boolean, aiAnalyzed?: boolean, preAnalyzed?: boolean }
+   */
+  updateSessionStats(sessionId, statUpdate) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    // 初始化 stats（如果不存在）
+    if (!session.stats) {
+      session.stats = { total: 0, success: 0, failed: 0, aiAnalyzed: 0, preAnalyzed: 0 };
+    }
+
+    // 更新统计
+    session.stats.total++;
+    if (statUpdate.success === true) {
+      session.stats.success++;
+    } else if (statUpdate.success === false) {
+      session.stats.failed++;
+    }
+    if (statUpdate.aiAnalyzed) {
+      session.stats.aiAnalyzed++;
+    }
+    if (statUpdate.preAnalyzed) {
+      session.stats.preAnalyzed++;
+    }
+
+    // 保存到数据库
+    this._saveSession(session);
+  }
+
+  deleteSession(id) {
+    const session = this.sessions.get(id);
+    if (session) {
+      session.destroy();
+      session.killTmuxSession();
+      session.status = 'deleted';
+      this._saveSession(session);
+      this.sessions.delete(id);
+      return true;
+    }
+    return false;
+  }
+}

@@ -1,0 +1,402 @@
+import React, { useState, useEffect } from 'react';
+import { toast } from '../Toast';
+
+/**
+ * 高级设置组件
+ * 包含健康检查配置、自动故障转移、定时健康检查
+ */
+export default function AdvancedSettings({ onClose }) {
+  const [activeTab, setActiveTab] = useState('health-check'); // 'health-check' | 'failover' | 'scheduler'
+  const [healthCheckConfig, setHealthCheckConfig] = useState({
+    timeoutSecs: 45,
+    maxRetries: 2,
+    degradedThresholdMs: 6000,
+    testModels: {
+      claude: 'claude-haiku-4-5-20251001',
+      codex: 'gpt-4o-mini',
+      gemini: 'gemini-2.0-flash'
+    }
+  });
+  const [failoverConfig, setFailoverConfig] = useState({
+    enabled: false,
+    maxRetries: 3,
+    retryDelayMs: 5000,
+    fallbackOrder: [], // 按优先级排序的供应商 ID 列表
+    excludeFromFailover: [] // 不参与故障转移的供应商 ID 列表
+  });
+  const [schedulerConfig, setSchedulerConfig] = useState({
+    enabled: false,
+    intervalMinutes: 30,
+    checkOnStartup: true,
+    notifyOnFailure: false
+  });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+
+  // 加载所有配置
+  useEffect(() => {
+    loadConfigs();
+  }, []);
+
+  const loadConfigs = async () => {
+    try {
+      const [healthRes, failoverRes, schedulerRes] = await Promise.all([
+        fetch('/api/config/health-check'),
+        fetch('/api/config/failover'),
+        fetch('/api/config/scheduler')
+      ]);
+
+      const [healthData, failoverData, schedulerData] = await Promise.all([
+        healthRes.json(),
+        failoverRes.json(),
+        schedulerRes.json()
+      ]);
+
+      setHealthCheckConfig(prev => ({ ...prev, ...healthData }));
+      setFailoverConfig(prev => ({ ...prev, ...failoverData }));
+      setSchedulerConfig(prev => ({ ...prev, ...schedulerData }));
+    } catch (err) {
+      console.error('加载配置失败:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 保存配置
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const endpoints = {
+        'health-check': {
+          url: '/api/config/health-check',
+          data: healthCheckConfig
+        },
+        'failover': {
+          url: '/api/config/failover',
+          data: failoverConfig
+        },
+        'scheduler': {
+          url: '/api/config/scheduler',
+          data: schedulerConfig
+        }
+      };
+
+      const endpoint = endpoints[activeTab];
+      const res = await fetch(endpoint.url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(endpoint.data)
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        toast.success('配置已保存');
+      } else {
+        toast.error(data.error || '保存失败');
+      }
+    } catch (err) {
+      toast.error('保存失败: ' + err.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // 渲染健康检查配置
+  const renderHealthCheckTab = () => (
+    <div className="space-y-4">
+      <div>
+        <label className="block text-sm text-gray-400 mb-2">超时时间（秒）</label>
+        <input
+          type="number"
+          value={healthCheckConfig.timeoutSecs}
+          onChange={e => setHealthCheckConfig(prev => ({ ...prev, timeoutSecs: parseInt(e.target.value) || 45 }))}
+          className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+          min="5"
+          max="120"
+        />
+        <p className="text-xs text-gray-500 mt-1">API 请求的最大等待时间，建议 30-60 秒</p>
+      </div>
+
+      <div>
+        <label className="block text-sm text-gray-400 mb-2">最大重试次数</label>
+        <input
+          type="number"
+          value={healthCheckConfig.maxRetries}
+          onChange={e => setHealthCheckConfig(prev => ({ ...prev, maxRetries: parseInt(e.target.value) || 2 }))}
+          className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+          min="0"
+          max="5"
+        />
+        <p className="text-xs text-gray-500 mt-1">超时或网络错误时的重试次数</p>
+      </div>
+
+      <div>
+        <label className="block text-sm text-gray-400 mb-2">降级阈值（毫秒）</label>
+        <input
+          type="number"
+          value={healthCheckConfig.degradedThresholdMs}
+          onChange={e => setHealthCheckConfig(prev => ({ ...prev, degradedThresholdMs: parseInt(e.target.value) || 6000 }))}
+          className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+          min="1000"
+          max="30000"
+          step="1000"
+        />
+        <p className="text-xs text-gray-500 mt-1">响应时间超过此值将标记为"降级"状态</p>
+      </div>
+
+      <div className="border-t border-gray-700 pt-4">
+        <h3 className="text-sm text-gray-300 mb-3">测试模型</h3>
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Claude</label>
+            <input
+              type="text"
+              value={healthCheckConfig.testModels?.claude || ''}
+              onChange={e => setHealthCheckConfig(prev => ({
+                ...prev,
+                testModels: { ...prev.testModels, claude: e.target.value }
+              }))}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+              placeholder="claude-haiku-4-5-20251001"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">OpenAI</label>
+            <input
+              type="text"
+              value={healthCheckConfig.testModels?.codex || ''}
+              onChange={e => setHealthCheckConfig(prev => ({
+                ...prev,
+                testModels: { ...prev.testModels, codex: e.target.value }
+              }))}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+              placeholder="gpt-4o-mini"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  // 渲染故障转移配置
+  const renderFailoverTab = () => (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between p-3 bg-gray-800 rounded">
+        <div>
+          <div className="text-sm text-white mb-1">启用自动故障转移</div>
+          <div className="text-xs text-gray-400">当前供应商失败时自动切换到备用供应商</div>
+        </div>
+        <label className="relative inline-flex items-center cursor-pointer">
+          <input
+            type="checkbox"
+            checked={failoverConfig.enabled}
+            onChange={e => setFailoverConfig(prev => ({ ...prev, enabled: e.target.checked }))}
+            className="sr-only peer"
+          />
+          <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+        </label>
+      </div>
+
+      {failoverConfig.enabled && (
+        <>
+          <div>
+            <label className="block text-sm text-gray-400 mb-2">故障转移最大重试次数</label>
+            <input
+              type="number"
+              value={failoverConfig.maxRetries}
+              onChange={e => setFailoverConfig(prev => ({ ...prev, maxRetries: parseInt(e.target.value) || 3 }))}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+              min="1"
+              max="10"
+            />
+            <p className="text-xs text-gray-500 mt-1">尝试切换到其他供应商的最大次数</p>
+          </div>
+
+          <div>
+            <label className="block text-sm text-gray-400 mb-2">重试延迟（毫秒）</label>
+            <input
+              type="number"
+              value={failoverConfig.retryDelayMs}
+              onChange={e => setFailoverConfig(prev => ({ ...prev, retryDelayMs: parseInt(e.target.value) || 5000 }))}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+              min="1000"
+              max="60000"
+              step="1000"
+            />
+            <p className="text-xs text-gray-500 mt-1">切换供应商前的等待时间</p>
+          </div>
+
+          <div className="bg-blue-500/10 border border-blue-500/30 rounded p-3">
+            <div className="text-sm text-blue-400 mb-2">💡 故障转移规则</div>
+            <ul className="text-xs text-gray-400 space-y-1">
+              <li>• 按供应商的 sortIndex 顺序依次尝试</li>
+              <li>• 跳过当前正在使用的供应商</li>
+              <li>• 优先选择最近健康检查成功的供应商</li>
+              <li>• 故障转移成功后会发送通知</li>
+            </ul>
+          </div>
+        </>
+      )}
+    </div>
+  );
+
+  // 渲染定时检查配置
+  const renderSchedulerTab = () => (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between p-3 bg-gray-800 rounded">
+        <div>
+          <div className="text-sm text-white mb-1">启用定时健康检查</div>
+          <div className="text-xs text-gray-400">后台自动定期检查所有供应商的健康状态</div>
+        </div>
+        <label className="relative inline-flex items-center cursor-pointer">
+          <input
+            type="checkbox"
+            checked={schedulerConfig.enabled}
+            onChange={e => setSchedulerConfig(prev => ({ ...prev, enabled: e.target.checked }))}
+            className="sr-only peer"
+          />
+          <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+        </label>
+      </div>
+
+      {schedulerConfig.enabled && (
+        <>
+          <div>
+            <label className="block text-sm text-gray-400 mb-2">检查间隔（分钟）</label>
+            <input
+              type="number"
+              value={schedulerConfig.intervalMinutes}
+              onChange={e => setSchedulerConfig(prev => ({ ...prev, intervalMinutes: parseInt(e.target.value) || 30 }))}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+              min="5"
+              max="1440"
+            />
+            <p className="text-xs text-gray-500 mt-1">建议 15-60 分钟，避免过于频繁</p>
+          </div>
+
+          <div className="space-y-3">
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={schedulerConfig.checkOnStartup}
+                onChange={e => setSchedulerConfig(prev => ({ ...prev, checkOnStartup: e.target.checked }))}
+                className="w-4 h-4 rounded border-gray-600 bg-gray-700 text-blue-500"
+              />
+              <div>
+                <div className="text-sm text-gray-300">服务启动时立即检查</div>
+                <div className="text-xs text-gray-500">启动后立即执行一次健康检查</div>
+              </div>
+            </label>
+
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={schedulerConfig.notifyOnFailure}
+                onChange={e => setSchedulerConfig(prev => ({ ...prev, notifyOnFailure: e.target.checked }))}
+                className="w-4 h-4 rounded border-gray-600 bg-gray-700 text-blue-500"
+              />
+              <div>
+                <div className="text-sm text-gray-300">失败时发送通知</div>
+                <div className="text-xs text-gray-500">供应商健康检查失败时通知用户</div>
+              </div>
+            </label>
+          </div>
+
+          <div className="bg-yellow-500/10 border border-yellow-500/30 rounded p-3">
+            <div className="text-sm text-yellow-400 mb-2">⚠️ 注意事项</div>
+            <ul className="text-xs text-gray-400 space-y-1">
+              <li>• 定时检查会产生 API 调用费用</li>
+              <li>• 建议使用轻量级测试模型</li>
+              <li>• 检查间隔不宜过短</li>
+            </ul>
+          </div>
+        </>
+      )}
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+      <div
+        className="bg-gray-900 rounded-lg w-full max-w-2xl max-h-[85vh] overflow-hidden"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* 头部 */}
+        <div className="flex items-center justify-between p-4 border-b border-gray-700">
+          <h2 className="text-lg font-medium text-white">高级设置</h2>
+          <button
+            onClick={onClose}
+            className="text-gray-400 hover:text-white text-xl"
+          >
+            ×
+          </button>
+        </div>
+
+        {/* 标签切换 */}
+        <div className="flex border-b border-gray-700">
+          <button
+            onClick={() => setActiveTab('health-check')}
+            className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
+              activeTab === 'health-check'
+                ? 'text-blue-400 border-b-2 border-blue-400 bg-gray-800/50'
+                : 'text-gray-400 hover:text-gray-300'
+            }`}
+          >
+            健康检查
+          </button>
+          <button
+            onClick={() => setActiveTab('failover')}
+            className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
+              activeTab === 'failover'
+                ? 'text-blue-400 border-b-2 border-blue-400 bg-gray-800/50'
+                : 'text-gray-400 hover:text-gray-300'
+            }`}
+          >
+            故障转移
+          </button>
+          <button
+            onClick={() => setActiveTab('scheduler')}
+            className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
+              activeTab === 'scheduler'
+                ? 'text-blue-400 border-b-2 border-blue-400 bg-gray-800/50'
+                : 'text-gray-400 hover:text-gray-300'
+            }`}
+          >
+            定时检查
+          </button>
+        </div>
+
+        {/* 内容 */}
+        <div className="p-4 overflow-y-auto max-h-[55vh]">
+          {loading ? (
+            <div className="text-gray-400 text-sm py-8 text-center">加载中...</div>
+          ) : (
+            <>
+              {activeTab === 'health-check' && renderHealthCheckTab()}
+              {activeTab === 'failover' && renderFailoverTab()}
+              {activeTab === 'scheduler' && renderSchedulerTab()}
+            </>
+          )}
+        </div>
+
+        {/* 底部 */}
+        <div className="flex justify-end gap-2 p-4 border-t border-gray-700">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white text-sm rounded transition-colors"
+          >
+            取消
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={saving || loading}
+            className="px-4 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-700 disabled:cursor-not-allowed text-white text-sm rounded transition-colors"
+          >
+            {saving ? '保存中...' : '保存'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

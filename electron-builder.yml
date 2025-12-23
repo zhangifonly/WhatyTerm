@@ -1,0 +1,103 @@
+appId: com.whatyterm.app
+productName: WhatyTerm
+copyright: Copyright © 2024
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - electron/**/*
+  - dist/**/*
+  - package.json
+  - "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}"
+  - "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}"
+  - "!**/node_modules/*.d.ts"
+  - "!**/node_modules/.bin"
+  - "!**/*.{iml,o,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,xproj}"
+  - "!.editorconfig"
+  - "!**/._*"
+  - "!**/{.DS_Store,.git,.hg,.svn,CVS,RCS,SCCS,.gitignore,.gitattributes}"
+  - "!server/**/*"
+
+# 服务端作为额外资源，不打入 asar
+extraResources:
+  - from: server
+    to: server
+    filter:
+      - "**/*"
+      - "!db/*.db"
+  - from: node_modules/better-sqlite3
+    to: node_modules/better-sqlite3
+  - from: node_modules/node-pty
+    to: node_modules/node-pty
+
+asar: true
+# 启用原生模块重新编译
+npmRebuild: true
+nodeGypRebuild: false
+
+# 需要为目标平台编译的原生模块
+nativeRebuilder: sequential
+
+mac:
+  category: public.app-category.developer-tools
+  # icon: build/icon.icns
+  identity: null
+  target:
+    - target: dmg
+      arch:
+        - arm64
+    - target: zip
+      arch:
+        - arm64
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+
+dmg:
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+  window:
+    width: 540
+    height: 380
+
+# Windows 版本需要 WSL2 或 Cygwin 来运行 tmux
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: WebTmux
+
+linux:
+  icon: build/icons
+  category: Development
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+
+publish:
+  provider: generic
+  url: https://example.com/releases
