@@ -1798,7 +1798,7 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
             className={`tab-btn ${activeTab === 'ai' ? 'active' : ''}`}
             onClick={() => setActiveTab('ai')}
           >
-            AI 设置
+            AI监控设置
           </button>
           <button
             className={`tab-btn ${activeTab === 'api' ? 'active' : ''}`}
