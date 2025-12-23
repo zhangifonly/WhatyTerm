@@ -2239,8 +2239,10 @@ io.on('connection', (socket) => {
         content: data
       });
 
-      // 如果 AI 启用，触发分析
-      if (session.aiEnabled) {
+      // 如果 AI 启用且后台自动操作未开启，触发基于目标的分析
+      // 注：如果后台自动操作已开启，则由后台循环处理，无需重复分析
+      const sessionData = sessionManager.getSessionData(sessionId);
+      if (session.aiEnabled && !sessionData?.autoActionEnabled) {
         handleAIAnalysis(sessionId, session, socket);
       }
     };
