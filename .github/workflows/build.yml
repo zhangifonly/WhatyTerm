@@ -25,7 +25,7 @@ jobs:
         run: npm run build
 
       - name: Build Electron (macOS)
-        run: npm run electron:build -- --mac
+        run: npm run electron:build:mac
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -55,7 +55,7 @@ jobs:
         run: npm run build
 
       - name: Build Electron (Windows)
-        run: npm run electron:build -- --win
+        run: npm run electron:build:win
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -77,6 +77,11 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2
 
       - name: Install dependencies
         run: npm ci
