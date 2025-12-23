@@ -120,18 +120,48 @@
     "suggestedAction": "建议操作",
     "autoActionEnabled": "后台自动操作已开启，将自动执行",
     "aiMonitoring": "AI 正在后台监控终端状态，检测到需要操作时会自动执行。",
-    "noAutoActionLogs": "暂无自动操作记录"
+    "noAutoActionLogs": "暂无自动操作记录",
+    "monitoringProvider": "智能监控 API 供应商",
+    "serviceDegraded": "服务降级",
+    "serviceFailed": "服务故障",
+    "nextRetry": "下次重试",
+    "nextCheck": "下次检查",
+    "consecutiveErrors": "连续错误",
+    "consecutiveNetworkErrors": "连续网络错误",
+    "networkOffline": "网络离线",
+    "model": "模型",
+    "times": "次",
+    "serviceFailedMsg": "AI 服务故障",
+    "serviceRecovered": "AI 服务已恢复正常",
+    "requestingAnalysis": "开始请求 AI 状态分析..."
   },
   "session": {
     "title": "会话历史",
-    "systemPrompt": "系统提示词 (可选)"
+    "systemPrompt": "系统提示词 (可选)",
+    "createNew": "创建新会话",
+    "sessionName": "会话名称",
+    "goalWithHint": "目标 (AI 将根据此目标提供建议)",
+    "goalPlaceholder": "例如: 部署 Node.js 应用到服务器",
+    "systemPromptPlaceholder": "自定义 AI 的行为...",
+    "create": "创建",
+    "sessionNamePlaceholder": "my-session"
   },
   "controls": {
     "autoOn": "自动:开",
     "autoOff": "自动:关",
     "hideDebug": "隐藏",
     "showLog": "日志",
-    "continue": "继续"
+    "continue": "继续",
+    "autoRunning": "自动模式运行中",
+    "pause": "暂停 ⏸"
+  },
+  "suggestion": {
+    "aiSuggestion": "AI 建议",
+    "dangerWarning": "此命令可能有风险，请确认后再执行",
+    "execute": "执行 ▶",
+    "ignore": "忽略",
+    "suggestion": "建议",
+    "goalCompleted": "目标已完成"
   },
   "auth": {
     "enabled": "已启用",

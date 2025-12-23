@@ -408,7 +408,7 @@ export default function App() {
 
     socket.on('ai:statusLoading', (data) => {
       setAiStatusLoading(prev => ({ ...prev, [data.sessionId]: true }));
-      addDebugLog('request', { sessionId: data.sessionId, message: '开始请求 AI 状态分析...' });
+      addDebugLog('request', { sessionId: data.sessionId, message: t('aiPanel.requestingAnalysis') });
     });
 
     socket.on('ai:error', (data) => {
@@ -420,11 +420,11 @@ export default function App() {
       setAiHealthStatus(data);
       if (data.status === 'failed') {
         addDebugLog('healthError', {
-          message: `AI 服务故障: ${data.lastError}`,
+          message: `${t('aiPanel.serviceFailedMsg')}: ${data.lastError}`,
           nextRetry: new Date(data.nextRecoveryCheck).toLocaleTimeString()
         });
       } else if (data.status === 'healthy' && data.consecutiveErrors === 0) {
-        addDebugLog('healthRecovered', { message: 'AI 服务已恢复正常' });
+        addDebugLog('healthRecovered', { message: t('aiPanel.serviceRecovered') });
       }
     });
 
@@ -601,30 +601,36 @@ export default function App() {
   useEffect(() => {
     if (pendingScreenContent !== null && terminalInstance.current) {
       const term = terminalInstance.current;
-      // 重置终端
-      term.reset();
 
-      // 先调用 fit 确保尺寸正确
-      if (fitAddon.current) {
-        fitAddon.current.fit();
-        // 同步尺寸到服务器
-        const session = currentSessionRef.current;
-        if (session) {
-          socket.emit('terminal:resize', {
-            sessionId: session.id,
-            cols: term.cols,
-            rows: term.rows
-          });
+      // 只有当有实际内容时才重置终端，避免不必要的清空
+      if (pendingScreenContent.trim().length > 0) {
+        // 重置终端
+        term.reset();
+
+        // 先调用 fit 确保尺寸正确
+        if (fitAddon.current) {
+          fitAddon.current.fit();
+          // 同步尺寸到服务器
+          const session = currentSessionRef.current;
+          if (session) {
+            socket.emit('terminal:resize', {
+              sessionId: session.id,
+              cols: term.cols,
+              rows: term.rows
+            });
+          }
         }
-      }
 
-      // 写入当前可见区域内容
-      const content = pendingScreenContent.replace(/\r\n$/, '');
-      term.write(content);
+        // 写入当前可见区域内容
+        const content = pendingScreenContent.replace(/\r\n$/, '');
+        term.write(content);
 
-      // 设置光标位置
-      if (pendingCursorPosition) {
-        term.write(`\x1b[${pendingCursorPosition.y};${pendingCursorPosition.x}H`);
+        // 设置光标位置
+        if (pendingCursorPosition) {
+          term.write(`\x1b[${pendingCursorPosition.y};${pendingCursorPosition.x}H`);
+        }
+      } else {
+        console.warn('[Terminal] 收到空的屏幕内容，跳过重置以避免清空终端');
       }
 
       setPendingScreenContent(null);
@@ -810,11 +816,11 @@ export default function App() {
                 <div className="ai-suggestion-header">
                   <span className="ai-suggestion-title">
                     {suggestion.type === 'complete' ? (
-                      <><span>✅</span> 目标已完成</>
+                      <><span>✅</span> {t('suggestion.goalCompleted')}</>
                     ) : suggestion.type === 'needInput' ? (
-                      <><span>❓</span> 需要输入</>
+                      <><span>❓</span> {t('common.needInput')}</>
                     ) : (
-                      <><span>💡</span> AI 建议</>
+                      <><span>💡</span> {t('suggestion.aiSuggestion')}</>
                     )}
                   </span>
                 </div>
@@ -824,7 +830,7 @@ export default function App() {
                     <div className="ai-reasoning">{suggestion.summary}</div>
                     <div className="ai-actions">
                       <button className="btn btn-secondary" onClick={() => setSuggestion(null)}>
-                        关闭
+                        {t('common.close')}
                       </button>
                     </div>
                   </>
@@ -833,7 +839,7 @@ export default function App() {
                     <div className="ai-reasoning">{suggestion.question}</div>
                     <div className="ai-actions">
                       <button className="btn btn-secondary" onClick={() => setSuggestion(null)}>
-                        关闭
+                        {t('common.close')}
                       </button>
                     </div>
                   </>
@@ -841,7 +847,7 @@ export default function App() {
                   <>
                     {suggestion.isDangerous && (
                       <div className="danger-warning">
-                        ⚠️ 此命令可能有风险，请确认后再执行
+                        ⚠️ {t('suggestion.dangerWarning')}
                       </div>
                     )}
 
@@ -850,10 +856,10 @@ export default function App() {
 
                     <div className="ai-actions">
                       <button className="btn btn-primary" onClick={executeSuggestion}>
-                        执行 ▶
+                        {t('suggestion.execute')}
                       </button>
                       <button className="btn btn-secondary" onClick={() => setSuggestion(null)}>
-                        忽略
+                        {t('suggestion.ignore')}
                       </button>
                     </div>
                   </>
@@ -866,17 +872,17 @@ export default function App() {
               <div className="ai-suggestion auto-mode-active">
                 <div className="ai-suggestion-header">
                   <span className="ai-suggestion-title">
-                    <span>🤖</span> 自动模式运行中
+                    <span>🤖</span> {t('controls.autoRunning')}
                   </span>
                   <button
                     className="btn btn-secondary btn-small"
                     onClick={() => toggleAutoAction(currentSession.id, false)}
                   >
-                    暂停 ⏸
+                    {t('controls.pause')}
                   </button>
                 </div>
                 <div className="ai-reasoning">
-                  AI 正在后台监控终端状态，检测到需要操作时会自动执行。
+                  {t('aiPanel.aiMonitoring')}
                 </div>
               </div>
             )}
@@ -984,11 +990,11 @@ export default function App() {
                 className={`ai-health-dot ${aiHealthStatus.status} ${aiHealthStatus.networkStatus === 'offline' ? 'offline' : ''}`}
                 title={
                   aiHealthStatus.networkStatus === 'offline'
-                    ? `网络离线\n连续网络错误 ${aiHealthStatus.consecutiveNetworkErrors} 次\n下次检查: ${new Date(aiHealthStatus.nextRecoveryCheck).toLocaleTimeString()}`
+                    ? `${t('aiPanel.networkOffline')}\n${t('aiPanel.consecutiveNetworkErrors')} ${aiHealthStatus.consecutiveNetworkErrors} ${t('aiPanel.times')}\n${t('aiPanel.nextCheck')}: ${new Date(aiHealthStatus.nextRecoveryCheck).toLocaleTimeString()}`
                     : aiHealthStatus.status === 'failed'
-                    ? `服务故障: ${aiHealthStatus.lastError}\n下次重试: ${new Date(aiHealthStatus.nextRecoveryCheck).toLocaleTimeString()}`
+                    ? `${t('aiPanel.serviceFailed')}: ${aiHealthStatus.lastError}\n${t('aiPanel.nextRetry')}: ${new Date(aiHealthStatus.nextRecoveryCheck).toLocaleTimeString()}`
                     : aiHealthStatus.status === 'degraded'
-                    ? `服务降级: 连续错误 ${aiHealthStatus.consecutiveErrors} 次`
+                    ? `${t('aiPanel.serviceDegraded')}: ${t('aiPanel.consecutiveErrors')} ${aiHealthStatus.consecutiveErrors} ${t('aiPanel.times')}`
                     : t('aiPanel.serviceNormal')
                 }
               />
@@ -1349,10 +1355,10 @@ export default function App() {
                 {/* 需要操作提示 */}
                 {aiStatusMap[currentSession.id].needsAction && (
                   <div className="ai-status-section action-needed">
-                    <h4>需要操作</h4>
-                    <p className="action-type">类型: {aiStatusMap[currentSession.id].actionType}</p>
+                    <h4>{t('aiPanel.needAction')}</h4>
+                    <p className="action-type">{t('aiPanel.actionType')}: {aiStatusMap[currentSession.id].actionType}</p>
                     <p className="suggested-action">
-                      建议操作: <code>{aiStatusMap[currentSession.id].suggestedAction}</code>
+                      {t('aiPanel.suggestedAction')}: <code>{aiStatusMap[currentSession.id].suggestedAction}</code>
                     </p>
                     {aiStatusMap[currentSession.id].actionReason && (
                       <p className="action-reason">{aiStatusMap[currentSession.id].actionReason}</p>
@@ -1360,20 +1366,20 @@ export default function App() {
                     {/* 自动操作状态提示 */}
                     {currentSession.autoActionEnabled && (
                       <div className="auto-action-hint">
-                        后台自动操作已开启，将自动执行
+                        {t('aiPanel.autoActionEnabled')}
                       </div>
                     )}
                   </div>
                 )}
                 {aiStatusMap[currentSession.id].suggestion && (
                   <div className="ai-status-section suggestion">
-                    <h4>建议</h4>
+                    <h4>{t('suggestion.suggestion')}</h4>
                     <p>{aiStatusMap[currentSession.id].suggestion}</p>
                   </div>
                 )}
                 {aiStatusMap[currentSession.id].updatedAt && (
                   <div className="ai-status-time">
-                    更新于: {new Date(aiStatusMap[currentSession.id].updatedAt).toLocaleTimeString()}
+                    {t('common.updateAt')}: {new Date(aiStatusMap[currentSession.id].updatedAt).toLocaleTimeString()}
                   </div>
                 )}
               </>
@@ -1392,7 +1398,7 @@ export default function App() {
                 color: '#888'
               }}>
                 <div style={{ marginBottom: '4px' }}>
-                  <span style={{ color: '#aaa' }}>智能监控 API 供应商: </span>
+                  <span style={{ color: '#aaa' }}>{t('aiPanel.monitoringProvider')}: </span>
                   <span style={{ color: '#10b981', fontWeight: 'bold' }}>
                     {aiStatusMap[currentSession.id].providerName}
                   </span>
@@ -1404,7 +1410,7 @@ export default function App() {
                   </span>
                 </div>
                 <div>
-                  <span style={{ color: '#aaa' }}>模型: </span>
+                  <span style={{ color: '#aaa' }}>{t('aiPanel.model')}: </span>
                   <span style={{ color: '#f59e0b', fontFamily: 'monospace', fontSize: '10px' }}>
                     {aiStatusMap[currentSession.id].providerModel || defaultModel}
                   </span>
@@ -2363,6 +2369,7 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
 }
 
 function CreateSessionModal({ onClose, onCreate }) {
+  const { t } = useTranslation();
   const [name, setName] = useState('');
   const [goal, setGoal] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
@@ -2381,10 +2388,10 @@ function CreateSessionModal({ onClose, onCreate }) {
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>创建新会话</h2>
+        <h2>{t('session.createNew')}</h2>
         <form onSubmit={handleSubmit}>
           <div className="form-group">
-            <label>AI 类型</label>
+            <label>{t('common.apiType')}</label>
             <select
               value={aiType}
               onChange={(e) => setAiType(e.target.value)}
@@ -2396,37 +2403,37 @@ function CreateSessionModal({ onClose, onCreate }) {
             </select>
           </div>
           <div className="form-group">
-            <label>会话名称</label>
+            <label>{t('session.sessionName')}</label>
             <input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="my-session"
+              placeholder={t('session.sessionNamePlaceholder')}
             />
           </div>
           <div className="form-group">
-            <label>目标 (AI 将根据此目标提供建议)</label>
+            <label>{t('session.goalWithHint')}</label>
             <input
               type="text"
               value={goal}
               onChange={(e) => setGoal(e.target.value)}
-              placeholder="例如: 部署 Node.js 应用到服务器"
+              placeholder={t('session.goalPlaceholder')}
             />
           </div>
           <div className="form-group">
-            <label>系统提示词 (可选)</label>
+            <label>{t('session.systemPrompt')}</label>
             <textarea
               value={systemPrompt}
               onChange={(e) => setSystemPrompt(e.target.value)}
-              placeholder="自定义 AI 的行为..."
+              placeholder={t('session.systemPromptPlaceholder')}
             />
           </div>
           <div className="modal-actions">
             <button type="button" className="btn btn-secondary" onClick={onClose}>
-              取消
+              {t('common.cancel')}
             </button>
             <button type="submit" className="btn btn-primary">
-              创建
+              {t('session.create')}
             </button>
           </div>
         </form>
@@ -2436,19 +2443,20 @@ function CreateSessionModal({ onClose, onCreate }) {
 }
 
 function HistoryPanel({ sessionId, history, onClose }) {
+  const { t } = useTranslation();
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal history-modal" onClick={(e) => e.stopPropagation()}>
-        <h2>会话历史</h2>
+        <h2>{t('session.title')}</h2>
         <div className="history-panel">
           {history.map((entry) => (
             <div key={entry.id} className={`history-entry ${entry.type}`}>
               <div className="history-time">
                 {new Date(entry.createdAt).toLocaleTimeString()}
                 {' - '}
-                {entry.type === 'input' ? '输入' :
-                 entry.type === 'output' ? '输出' :
-                 entry.type === 'ai_decision' ? 'AI决策' : '系统'}
+                {entry.type === 'input' ? t('common.input') :
+                 entry.type === 'output' ? t('common.output') :
+                 entry.type === 'ai_decision' ? t('common.aiDecision') : t('common.system')}
               </div>
               <div
                 className="history-content"
@@ -2460,7 +2468,7 @@ function HistoryPanel({ sessionId, history, onClose }) {
                 <div
                   className="history-reasoning"
                   dangerouslySetInnerHTML={{
-                    __html: '理由: ' + convertAnsiToHtml(entry.aiReasoning)
+                    __html: t('common.reason') + ': ' + convertAnsiToHtml(entry.aiReasoning)
                   }}
                 />
               )}
@@ -2468,7 +2476,7 @@ function HistoryPanel({ sessionId, history, onClose }) {
           ))}
         </div>
         <div className="modal-actions">
-          <button className="btn btn-secondary" onClick={onClose}>关闭</button>
+          <button className="btn btn-secondary" onClick={onClose}>{t('common.close')}</button>
         </div>
       </div>
     </div>

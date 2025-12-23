@@ -120,18 +120,48 @@
     "suggestedAction": "推奨操作",
     "autoActionEnabled": "バックグラウンド自動操作が有効、自動実行されます",
     "aiMonitoring": "AIがバックグラウンドでターミナルの状態を監視し、操作が必要な場合は自動的に実行します。",
-    "noAutoActionLogs": "自動操作ログがまだありません"
+    "noAutoActionLogs": "自動操作ログがまだありません",
+    "monitoringProvider": "監視APIプロバイダー",
+    "serviceDegraded": "サービス低下",
+    "serviceFailed": "サービス障害",
+    "nextRetry": "次回リトライ",
+    "nextCheck": "次回チェック",
+    "consecutiveErrors": "連続エラー",
+    "consecutiveNetworkErrors": "連続ネットワークエラー",
+    "networkOffline": "ネットワークオフライン",
+    "model": "モデル",
+    "times": "回",
+    "serviceFailedMsg": "AIサービス障害",
+    "serviceRecovered": "AIサービスが復旧しました",
+    "requestingAnalysis": "AIステータス分析をリクエスト中..."
   },
   "session": {
     "title": "セッション履歴",
-    "systemPrompt": "システムプロンプト（オプション）"
+    "systemPrompt": "システムプロンプト（オプション）",
+    "createNew": "新規セッション作成",
+    "sessionName": "セッション名",
+    "goalWithHint": "目標（AIはこれに基づいて提案します）",
+    "goalPlaceholder": "例：Node.jsアプリをサーバーにデプロイ",
+    "systemPromptPlaceholder": "AIの動作をカスタマイズ...",
+    "create": "作成",
+    "sessionNamePlaceholder": "my-session"
   },
   "controls": {
     "autoOn": "自動：ON",
     "autoOff": "自動：OFF",
     "hideDebug": "非表示",
     "showLog": "ログ",
-    "continue": "続ける"
+    "continue": "続ける",
+    "autoRunning": "自動モード実行中",
+    "pause": "一時停止 ⏸"
+  },
+  "suggestion": {
+    "aiSuggestion": "AI提案",
+    "dangerWarning": "このコマンドにはリスクがある可能性があります。実行前に確認してください",
+    "execute": "実行 ▶",
+    "ignore": "無視",
+    "suggestion": "提案",
+    "goalCompleted": "目標達成"
   },
   "auth": {
     "enabled": "有効",

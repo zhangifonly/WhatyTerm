@@ -120,18 +120,48 @@
     "suggestedAction": "Suggested Action",
     "autoActionEnabled": "Auto action enabled, will execute automatically",
     "aiMonitoring": "AI is monitoring terminal status in the background and will automatically execute when action is needed.",
-    "noAutoActionLogs": "No auto action logs yet"
+    "noAutoActionLogs": "No auto action logs yet",
+    "monitoringProvider": "Monitoring API Provider",
+    "serviceDegraded": "Service Degraded",
+    "serviceFailed": "Service Failed",
+    "nextRetry": "Next Retry",
+    "nextCheck": "Next Check",
+    "consecutiveErrors": "Consecutive Errors",
+    "consecutiveNetworkErrors": "Consecutive Network Errors",
+    "networkOffline": "Network Offline",
+    "model": "Model",
+    "times": "times",
+    "serviceFailedMsg": "AI Service Failed",
+    "serviceRecovered": "AI Service Recovered",
+    "requestingAnalysis": "Requesting AI status analysis..."
   },
   "session": {
     "title": "Session History",
-    "systemPrompt": "System Prompt (Optional)"
+    "systemPrompt": "System Prompt (Optional)",
+    "createNew": "Create New Session",
+    "sessionName": "Session Name",
+    "goalWithHint": "Goal (AI will provide suggestions based on this)",
+    "goalPlaceholder": "Example: Deploy Node.js app to server",
+    "systemPromptPlaceholder": "Customize AI behavior...",
+    "create": "Create",
+    "sessionNamePlaceholder": "my-session"
   },
   "controls": {
     "autoOn": "Auto: ON",
     "autoOff": "Auto: OFF",
     "hideDebug": "Hide",
     "showLog": "Log",
-    "continue": "Continue"
+    "continue": "Continue",
+    "autoRunning": "Auto Mode Running",
+    "pause": "Pause ⏸"
+  },
+  "suggestion": {
+    "aiSuggestion": "AI Suggestion",
+    "dangerWarning": "This command may be risky, please confirm before executing",
+    "execute": "Execute ▶",
+    "ignore": "Ignore",
+    "suggestion": "Suggestion",
+    "goalCompleted": "Goal Completed"
   },
   "auth": {
     "enabled": "Enabled",
