@@ -1,4 +1,9 @@
 {
+  "app": {
+    "title": "WebTerm",
+    "subtitle": "WhatyTerm",
+    "welcome": "Welcome to WebTerm"
+  },
   "settings": {
     "ai": "AI Monitoring",
     "api": "API Configuration",
@@ -27,7 +32,8 @@
   "sidebar": {
     "expand": "Expand Sidebar",
     "collapse": "Collapse Sidebar",
-    "deleteSession": "Delete Session"
+    "deleteSession": "Delete Session",
+    "newSession": "+ New"
   },
   "goal": {
     "title": "Goal",
@@ -35,6 +41,7 @@
     "notSet": "Click to set goal"
   },
   "aiPanel": {
+    "title": "AI Status Monitor",
     "expand": "Expand AI Panel",
     "collapse": "Collapse AI Panel",
     "serviceNormal": "Service Normal",

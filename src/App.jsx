@@ -720,9 +720,9 @@ export default function App() {
           {sidebarCollapsed ? '›' : '‹'}
         </button>
         <div className="sidebar-header">
-          <h1>网梯终端 <span style={{ fontSize: '14px', opacity: 0.7, fontWeight: 'normal' }}>WhatyTerm</span></h1>
+          <h1>{t('app.title')} <span style={{ fontSize: '14px', opacity: 0.7, fontWeight: 'normal' }}>{t('app.subtitle')}</span></h1>
           <button className="btn btn-primary btn-small" onClick={() => setShowCreateModal(true)}>
-            + 新建
+            {t('sidebar.newSession')}
           </button>
         </div>
 
@@ -926,7 +926,7 @@ export default function App() {
           </div>
         ) : (
           <div className="empty-state welcome-page">
-            <h2>欢迎使用网梯终端</h2>
+            <h2>{t('app.welcome')}</h2>
             <p className="welcome-subtitle">AI 驱动的智能终端管理工具</p>
 
             <div className="welcome-features">
@@ -977,7 +977,7 @@ export default function App() {
             {aiPanelCollapsed ? '‹' : '›'}
           </button>
           <div className="ai-panel-header">
-            <h3>AI 状态监控</h3>
+            <h3>{t('aiPanel.title')}</h3>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               {/* 健康状态指示器 */}
               <span

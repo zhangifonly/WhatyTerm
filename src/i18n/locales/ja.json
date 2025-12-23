@@ -1,4 +1,9 @@
 {
+  "app": {
+    "title": "ウェブターミナル",
+    "subtitle": "WhatyTerm",
+    "welcome": "ウェブターミナルへようこそ"
+  },
   "settings": {
     "ai": "AI監視設定",
     "api": "API 設定",
@@ -27,7 +32,8 @@
   "sidebar": {
     "expand": "サイドバーを展開",
     "collapse": "サイドバーを折りたたむ",
-    "deleteSession": "セッションを削除"
+    "deleteSession": "セッションを削除",
+    "newSession": "+ 新規"
   },
   "goal": {
     "title": "目標",
@@ -35,6 +41,7 @@
     "notSet": "クリックして目標を設定"
   },
   "aiPanel": {
+    "title": "AIステータス監視",
     "expand": "AIパネルを展開",
     "collapse": "AIパネルを折りたたむ",
     "serviceNormal": "サービス正常",
