@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CC Switch API Test</title>
+</head>
+<body>
+    <h1>CC Switch API Test</h1>
+    <button onclick="testAPI()">Test API</button>
+    <pre id="result"></pre>
+
+    <script>
+        async function testAPI() {
+            const resultEl = document.getElementById('result');
+            try {
+                // Test get providers
+                const response = await fetch('/api/cc-switch/providers?app=claude');
+                const data = await response.json();
+
+                resultEl.textContent = JSON.stringify(data, null, 2);
+
+                if (data.success && data.data.providers) {
+                    console.log('Providers count:', data.data.providers.length);
+                    console.log('First provider:', data.data.providers[0]);
+                } else {
+                    console.error('API returned unexpected format:', data);
+                }
+            } catch (error) {
+                resultEl.textContent = 'Error: ' + error.message;
+                console.error('API call failed:', error);
+            }
+        }
+
+        // Auto test on load
+        window.onload = testAPI;
+    </script>
+</body>
+</html>

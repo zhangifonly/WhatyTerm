@@ -1,0 +1,25 @@
+{
+  "healthCheck": {
+    "timeoutSecs": 45,
+    "maxRetries": 2,
+    "degradedThresholdMs": 6000,
+    "testModels": {
+      "claude": "claude-haiku-4-5-20251001",
+      "codex": "gpt-4o-mini",
+      "gemini": "gemini-2.0-flash"
+    }
+  },
+  "failover": {
+    "enabled": true,
+    "maxRetries": 3,
+    "retryDelayMs": 5000,
+    "fallbackOrder": [],
+    "excludeFromFailover": []
+  },
+  "scheduler": {
+    "enabled": true,
+    "intervalMinutes": 1,
+    "checkOnStartup": false,
+    "notifyOnFailure": true
+  }
+}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+server/db/*.json
+server/db/*.db
+release/
+*.dmg
+*.exe
+*.zip
+*.AppImage
+*.deb

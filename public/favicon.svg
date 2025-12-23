@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#16213e"/>
+    </linearGradient>
+    <linearGradient id="termGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f3460"/>
+      <stop offset="100%" style="stop-color:#1a1a2e"/>
+    </linearGradient>
+    <linearGradient id="aiGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#00d9ff"/>
+      <stop offset="100%" style="stop-color:#7c3aed"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 背景圆角矩形 -->
+  <rect x="20" y="20" width="472" height="472" rx="80" fill="url(#bgGrad)"/>
+
+  <!-- 终端窗口 -->
+  <rect x="60" y="80" width="392" height="320" rx="20" fill="url(#termGrad)" stroke="#3b82f6" stroke-width="4"/>
+
+  <!-- 终端标题栏 -->
+  <rect x="60" y="80" width="392" height="40" rx="20" fill="#0f3460"/>
+  <rect x="60" y="100" width="392" height="20" fill="#0f3460"/>
+
+  <!-- 窗口控制按钮 -->
+  <circle cx="95" cy="100" r="10" fill="#ef4444"/>
+  <circle cx="130" cy="100" r="10" fill="#f59e0b"/>
+  <circle cx="165" cy="100" r="10" fill="#10b981"/>
+
+  <!-- AI 神经网络节点 -->
+  <circle cx="160" cy="220" r="24" fill="url(#aiGrad)" opacity="0.9"/>
+  <circle cx="256" cy="180" r="28" fill="url(#aiGrad)" opacity="0.9"/>
+  <circle cx="352" cy="220" r="24" fill="url(#aiGrad)" opacity="0.9"/>
+  <circle cx="180" cy="320" r="20" fill="url(#aiGrad)" opacity="0.9"/>
+  <circle cx="256" cy="300" r="32" fill="url(#aiGrad)"/>
+  <circle cx="332" cy="320" r="20" fill="url(#aiGrad)" opacity="0.9"/>
+
+  <!-- 连接线 -->
+  <line x1="160" y1="220" x2="256" y2="180" stroke="#00d9ff" stroke-width="3" opacity="0.6"/>
+  <line x1="352" y1="220" x2="256" y2="180" stroke="#00d9ff" stroke-width="3" opacity="0.6"/>
+  <line x1="160" y1="220" x2="180" y2="320" stroke="#00d9ff" stroke-width="3" opacity="0.6"/>
+  <line x1="352" y1="220" x2="332" y2="320" stroke="#00d9ff" stroke-width="3" opacity="0.6"/>
+  <line x1="180" y1="320" x2="256" y2="300" stroke="#00d9ff" stroke-width="3" opacity="0.6"/>
+  <line x1="332" y1="320" x2="256" y2="300" stroke="#00d9ff" stroke-width="3" opacity="0.6"/>
+  <line x1="256" y1="180" x2="256" y2="300" stroke="#00d9ff" stroke-width="4" opacity="0.8"/>
+
+  <!-- 中心 AI 图标 -->
+  <text x="256" y="312" text-anchor="middle" fill="#fff" font-size="28" font-family="Arial" font-weight="bold">AI</text>
+
+  <!-- 底部命令行提示符 -->
+  <text x="90" y="460" fill="#10b981" font-size="36" font-family="monospace" font-weight="bold">&gt;_</text>
+  <text x="150" y="460" fill="#6b7280" font-size="26" font-family="sans-serif">WhatyTerm</text>
+</svg>
