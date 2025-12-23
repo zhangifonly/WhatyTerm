@@ -58,7 +58,21 @@
     "unknown": "Unknown",
     "none": "None",
     "notConfigured": "Not Configured",
-    "copied": "Copied!"
+    "copied": "Copied!",
+    "edit": "Edit",
+    "history": "History",
+    "clear": "Clear",
+    "noSessions": "No Sessions",
+    "needInput": "Need Input",
+    "aiDecision": "AI Decision",
+    "input": "Input",
+    "output": "Output",
+    "system": "System",
+    "username": "Username",
+    "password": "Password",
+    "apiType": "API Type",
+    "reason": "Reason",
+    "updateAt": "Updated at"
   },
   "sidebar": {
     "expand": "Expand Sidebar",
@@ -100,7 +114,17 @@
     "currentState": "Current State",
     "workingDir": "Working Directory",
     "recentAction": "Recent Action",
-    "waitingAiAnalysis": "Waiting for AI analysis..."
+    "waitingAiAnalysis": "Waiting for AI analysis...",
+    "needAction": "Action Required",
+    "actionType": "Type",
+    "suggestedAction": "Suggested Action",
+    "autoActionEnabled": "Auto action enabled, will execute automatically",
+    "aiMonitoring": "AI is monitoring terminal status in the background and will automatically execute when action is needed.",
+    "noAutoActionLogs": "No auto action logs yet"
+  },
+  "session": {
+    "title": "Session History",
+    "systemPrompt": "System Prompt (Optional)"
   },
   "controls": {
     "autoOn": "Auto: ON",
