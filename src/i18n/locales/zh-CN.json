@@ -58,7 +58,21 @@
     "unknown": "未知",
     "none": "无",
     "notConfigured": "未配置",
-    "copied": "已复制!"
+    "copied": "已复制!",
+    "edit": "修改",
+    "history": "历史",
+    "clear": "清空",
+    "noSessions": "暂无会话",
+    "needInput": "需要输入",
+    "aiDecision": "AI决策",
+    "input": "输入",
+    "output": "输出",
+    "system": "系统",
+    "username": "用户名",
+    "password": "密码",
+    "apiType": "API 类型",
+    "reason": "理由",
+    "updateAt": "更新于"
   },
   "sidebar": {
     "expand": "展开侧边栏",
@@ -100,7 +114,17 @@
     "currentState": "当前状态",
     "workingDir": "工作目录",
     "recentAction": "最近操作",
-    "waitingAiAnalysis": "等待 AI 分析..."
+    "waitingAiAnalysis": "等待 AI 分析...",
+    "needAction": "需要操作",
+    "actionType": "类型",
+    "suggestedAction": "建议操作",
+    "autoActionEnabled": "后台自动操作已开启，将自动执行",
+    "aiMonitoring": "AI 正在后台监控终端状态，检测到需要操作时会自动执行。",
+    "noAutoActionLogs": "暂无自动操作记录"
+  },
+  "session": {
+    "title": "会话历史",
+    "systemPrompt": "系统提示词 (可选)"
   },
   "controls": {
     "autoOn": "自动:开",

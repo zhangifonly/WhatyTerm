@@ -58,7 +58,21 @@
     "unknown": "不明",
     "none": "なし",
     "notConfigured": "未設定",
-    "copied": "コピーしました！"
+    "copied": "コピーしました！",
+    "edit": "編集",
+    "history": "履歴",
+    "clear": "クリア",
+    "noSessions": "セッションがありません",
+    "needInput": "入力が必要",
+    "aiDecision": "AI判断",
+    "input": "入力",
+    "output": "出力",
+    "system": "システム",
+    "username": "ユーザー名",
+    "password": "パスワード",
+    "apiType": "APIタイプ",
+    "reason": "理由",
+    "updateAt": "更新日時"
   },
   "sidebar": {
     "expand": "サイドバーを展開",
@@ -100,7 +114,17 @@
     "currentState": "現在の状態",
     "workingDir": "作業ディレクトリ",
     "recentAction": "最近のアクション",
-    "waitingAiAnalysis": "AI分析を待機中..."
+    "waitingAiAnalysis": "AI分析を待機中...",
+    "needAction": "操作が必要",
+    "actionType": "タイプ",
+    "suggestedAction": "推奨操作",
+    "autoActionEnabled": "バックグラウンド自動操作が有効、自動実行されます",
+    "aiMonitoring": "AIがバックグラウンドでターミナルの状態を監視し、操作が必要な場合は自動的に実行します。",
+    "noAutoActionLogs": "自動操作ログがまだありません"
+  },
+  "session": {
+    "title": "セッション履歴",
+    "systemPrompt": "システムプロンプト（オプション）"
   },
   "controls": {
     "autoOn": "自動：ON",
