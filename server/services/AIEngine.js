@@ -39,6 +39,34 @@ const insecureAgent = new Agent({
 
 console.log('[AIEngine] 不使用代理，直连 API');
 
+/**
+ * 根据 AI 类型获取对应的 CLI 命令
+ * @param {string} aiType - AI 类型 (claude/codex/gemini)
+ * @returns {string} CLI 命令
+ */
+function getCliCommand(aiType) {
+  const commands = {
+    'claude': 'claude -c',
+    'codex': 'codex',
+    'gemini': 'gemini'
+  };
+  return commands[aiType] || commands['claude'];
+}
+
+/**
+ * 根据 AI 类型获取 CLI 工具名称
+ * @param {string} aiType - AI 类型 (claude/codex/gemini)
+ * @returns {string} CLI 工具名称
+ */
+function getCliName(aiType) {
+  const names = {
+    'claude': 'Claude Code',
+    'codex': 'OpenAI Codex',
+    'gemini': 'Google Gemini'
+  };
+  return names[aiType] || names['claude'];
+}
+
 const DANGEROUS_PATTERNS = [
   /^rm\s+(-rf?|--recursive)/,
   /^sudo\s+/,
@@ -738,8 +766,10 @@ ${historyText || '(空)'}
   /**
    * 预判断终端状态，避免不必要的AI调用
    * 返回null表示需要AI分析，返回对象表示已判断出结果
+   * @param {string} terminalContent - 终端内容
+   * @param {string} aiType - AI 类型 (claude/codex/gemini)
    */
-  preAnalyzeStatus(terminalContent) {
+  preAnalyzeStatus(terminalContent, aiType = 'claude') {
     if (!terminalContent || terminalContent.trim().length === 0) {
       return {
         currentState: '终端内容为空',
@@ -1008,18 +1038,19 @@ ${historyText || '(空)'}
       };
     }
 
-    // 7. 检测Shell命令行（需要重启Claude Code）
+    // 7. 检测Shell命令行（需要重启 CLI 工具）
     const shellPromptPattern = /^[\$%#]\s*$/m;
     if (shellPromptPattern.test(terminalContent) &&
         !/>\s*$/.test(terminalContent)) {
+      const cliName = getCliName(aiType);
       return {
         currentState: 'Shell命令行',
         workingDir: '未显示',
-        recentAction: 'Claude Code已退出',
+        recentAction: `${cliName}已退出`,
         needsAction: true,
         actionType: 'shell_command',
-        suggestedAction: 'claude -c',
-        actionReason: '重新启动Claude Code继续开发',
+        suggestedAction: getCliCommand(aiType),
+        actionReason: `重新启动${cliName}继续开发`,
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
@@ -1048,15 +1079,22 @@ ${historyText || '(空)'}
     return null;
   }
 
-  async analyzeStatus(terminalContent) {
+  /**
+   * 分析终端状态
+   * @param {string} terminalContent - 终端内容
+   * @param {string} aiType - AI 类型 (claude/codex/gemini)
+   */
+  async analyzeStatus(terminalContent, aiType = 'claude') {
     // 先尝试预判断
-    const preResult = this.preAnalyzeStatus(terminalContent);
+    const preResult = this.preAnalyzeStatus(terminalContent, aiType);
     if (preResult) {
       console.log('[AIEngine] 预判断成功，跳过AI调用:', preResult.currentState);
       return preResult;
     }
 
     // 需要AI分析
+    const cliName = getCliName(aiType);
+    const cliCommand = getCliCommand(aiType);
     const prompt = `分析终端内容，返回纯JSON（不要markdown代码块）。
 
 JSON格式：
@@ -1074,11 +1112,11 @@ JSON格式：
 判断优先级（按顺序）：
 1. 程序运行中（"esc to interrupt"或运行时间如"2m 29s"）→ needsAction:false
 2. 质量调查/评分界面 → needsAction:false
-3. Claude Code确认界面（"Do you want to make/run"+"1. Yes"+"2. Yes, allow for this session"）→ needsAction:true, actionType:"select", suggestedAction:"2"
+3. ${cliName}确认界面（"Do you want to make/run"+"1. Yes"+"2. Yes, allow for this session"）→ needsAction:true, actionType:"select", suggestedAction:"2"
 4. 普通确认界面（"Do you want to proceed?"+"1. Yes"）→ needsAction:true, actionType:"select", suggestedAction:"1"
-5. Claude Code致命错误（"error/fatal/crashed"且卡住）→ needsAction:true, actionType:"text_input", suggestedAction:"/quit"
-6. Shell命令行（普通shell提示符$/%，非Claude的">"）→ needsAction:true, actionType:"shell_command", suggestedAction:"claude -c"
-7. Claude Code空闲（">"提示符，无运行标志）：
+5. ${cliName}致命错误（"error/fatal/crashed"且卡住）→ needsAction:true, actionType:"text_input", suggestedAction:"/quit"
+6. Shell命令行（普通shell提示符$/%，非${cliName}的">"）→ needsAction:true, actionType:"shell_command", suggestedAction:"${cliCommand}"
+7. ${cliName}空闲（">"提示符，无运行标志）：
    - 开发阶段（代码/文件/翻译/文档/类型定义）→ needsAction:true, actionType:"text_input", suggestedAction:"继续"
    - 部署/脚本阶段（npm run/启动/测试/localhost）→ needsAction:false, suggestion:"提醒用户检查"
 8. 其他确认提示（[Y/n]、数字选项）→ needsAction:true, actionType:"confirm/select"

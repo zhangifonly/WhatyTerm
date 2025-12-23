@@ -1481,7 +1481,7 @@ async function runBackgroundAutoAction() {
       }
 
       console.log(`[后台自动操作] 会话 ${session.name}: 分析终端状态...`);
-      const status = await aiEngine.analyzeStatus(terminalContent);
+      const status = await aiEngine.analyzeStatus(terminalContent, session.aiType || 'claude');
 
       // AI 分析成功，更新健康状态（区分AI判断和程序预判断）
       updateAiHealthState(true, null, status?.preAnalyzed || false, sessionData.id);
@@ -1726,7 +1726,7 @@ async function runBackgroundStatusAnalysis() {
       aiContentHashCache.set(sessionData.id, contentHash);
 
       console.log(`[后台AI分析] 会话 ${session.name}: 分析状态...`);
-      const status = await aiEngine.analyzeStatus(terminalContent);
+      const status = await aiEngine.analyzeStatus(terminalContent, session.aiType || 'claude');
 
       // AI 分析成功，更新健康状态（区分AI判断和程序预判断）
       updateAiHealthState(true, null, status?.preAnalyzed || false, sessionData.id);
@@ -2673,7 +2673,7 @@ io.on('connection', (socket) => {
       const terminalContent = session.getScreenContent();
       console.log(`[AI] 请求状态分析，终端内容长度: ${terminalContent.length}`);
 
-      const status = await aiEngine.analyzeStatus(terminalContent);
+      const status = await aiEngine.analyzeStatus(terminalContent, session.aiType || 'claude');
 
       if (status) {
         console.log(`[AI] 状态分析成功:`, status);
