@@ -70,13 +70,10 @@ dmg:
     width: 540
     height: 380
 
-# Windows 版本需要 WSL2 或 Cygwin 来运行 tmux
+# Windows 版本需要 WSL2 来运行
 win:
   target:
     - target: nsis
-      arch:
-        - x64
-    - target: portable
       arch:
         - x64
 
@@ -87,7 +84,7 @@ nsis:
   deleteAppDataOnUninstall: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: WebTmux
+  shortcutName: WhatyTerm
 
 linux:
   icon: build/icons
