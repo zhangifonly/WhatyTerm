@@ -1,0 +1,23 @@
+{
+  "settings": {
+    "ai": "AI Monitoring",
+    "api": "API Configuration",
+    "auth": "Access Control",
+    "interface": "Interface"
+  },
+  "interface": {
+    "language": "Interface Language",
+    "languageHint": "Changes take effect immediately and will be saved automatically.",
+    "chinese": "中文",
+    "english": "English",
+    "japanese": "日本語"
+  },
+  "common": {
+    "close": "Close",
+    "save": "Save",
+    "cancel": "Cancel"
+  },
+  "toast": {
+    "languageSwitched": "Language switched"
+  }
+}

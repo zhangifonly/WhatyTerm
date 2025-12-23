@@ -4,6 +4,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import Anser from 'anser';
 import { ToastContainer, toast } from './components/Toast';
+import { useTranslation } from './i18n';
 
 const socket = io();
 
@@ -1578,7 +1579,7 @@ function QRCodeDisplay({ url }) {
 }
 
 function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, onTunnelUrlChange, socket }) {
-  console.log('[SettingsModal] 组件渲染, settings._providerId:', settings?._providerId);
+  const { t, language, setLanguage: changeLanguage } = useTranslation();
   const [activeTab, setActiveTab] = useState('ai');
   const [authUsername, setAuthUsername] = useState(auth.username || 'admin');
   const [authPassword, setAuthPassword] = useState('');
@@ -1798,19 +1799,25 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
             className={`tab-btn ${activeTab === 'ai' ? 'active' : ''}`}
             onClick={() => setActiveTab('ai')}
           >
-            AI监控设置
+            {t('settings.ai')}
           </button>
           <button
             className={`tab-btn ${activeTab === 'api' ? 'active' : ''}`}
             onClick={() => setActiveTab('api')}
           >
-            API 配置
+            {t('settings.api')}
           </button>
           <button
             className={`tab-btn ${activeTab === 'auth' ? 'active' : ''}`}
             onClick={() => setActiveTab('auth')}
           >
-            访问控制
+            {t('settings.auth')}
+          </button>
+          <button
+            className={`tab-btn ${activeTab === 'interface' ? 'active' : ''}`}
+            onClick={() => setActiveTab('interface')}
+          >
+            {t('settings.interface')}
           </button>
         </div>
 
@@ -2258,6 +2265,93 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
               </button>
               <button type="button" className="btn btn-primary" onClick={handleAuthSetup}>
                 {auth.enabled ? '更新密码' : '启用密码'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'interface' && (
+          <div className="interface-settings">
+            <div className="form-group">
+              <h3 style={{ margin: '0 0 12px 0', fontSize: '16px', color: '#fff' }}>
+                {t('interface.language')}
+              </h3>
+              <small style={{ color: '#888', fontSize: '12px', display: 'block', marginBottom: '16px' }}>
+                {t('interface.languageHint')}
+              </small>
+              <div style={{ display: 'flex', gap: '12px' }}>
+                <button
+                  type="button"
+                  className={`language-btn ${language === 'zh-CN' ? 'active' : ''}`}
+                  onClick={() => {
+                    changeLanguage('zh-CN');
+                    toast.success(t('toast.languageSwitched'));
+                  }}
+                  style={{
+                    flex: 1,
+                    padding: '12px 24px',
+                    background: language === 'zh-CN' ? '#4a9eff' : '#2a2a2a',
+                    border: `2px solid ${language === 'zh-CN' ? '#4a9eff' : '#444'}`,
+                    borderRadius: '8px',
+                    color: '#fff',
+                    fontSize: '14px',
+                    fontWeight: language === 'zh-CN' ? '600' : '400',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  {t('interface.chinese')}
+                </button>
+                <button
+                  type="button"
+                  className={`language-btn ${language === 'en' ? 'active' : ''}`}
+                  onClick={() => {
+                    changeLanguage('en');
+                    toast.success(t('toast.languageSwitched'));
+                  }}
+                  style={{
+                    flex: 1,
+                    padding: '12px 24px',
+                    background: language === 'en' ? '#4a9eff' : '#2a2a2a',
+                    border: `2px solid ${language === 'en' ? '#4a9eff' : '#444'}`,
+                    borderRadius: '8px',
+                    color: '#fff',
+                    fontSize: '14px',
+                    fontWeight: language === 'en' ? '600' : '400',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  {t('interface.english')}
+                </button>
+                <button
+                  type="button"
+                  className={`language-btn ${language === 'ja' ? 'active' : ''}`}
+                  onClick={() => {
+                    changeLanguage('ja');
+                    toast.success(t('toast.languageSwitched'));
+                  }}
+                  style={{
+                    flex: 1,
+                    padding: '12px 24px',
+                    background: language === 'ja' ? '#4a9eff' : '#2a2a2a',
+                    border: `2px solid ${language === 'ja' ? '#4a9eff' : '#444'}`,
+                    borderRadius: '8px',
+                    color: '#fff',
+                    fontSize: '14px',
+                    fontWeight: language === 'ja' ? '600' : '400',
+                    cursor: 'pointer',
+                    transition: 'all 0.2s'
+                  }}
+                >
+                  {t('interface.japanese')}
+                </button>
+              </div>
+            </div>
+
+            <div className="modal-actions">
+              <button type="button" className="btn btn-secondary" onClick={onClose}>
+                {t('common.close')}
               </button>
             </div>
           </div>
