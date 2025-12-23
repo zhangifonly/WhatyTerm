@@ -1,4 +1,9 @@
 {
+  "app": {
+    "title": "网梯终端",
+    "subtitle": "WhatyTerm",
+    "welcome": "欢迎使用网梯终端"
+  },
   "settings": {
     "ai": "AI监控设置",
     "api": "API 配置",
@@ -27,7 +32,8 @@
   "sidebar": {
     "expand": "展开侧边栏",
     "collapse": "收起侧边栏",
-    "deleteSession": "删除会话"
+    "deleteSession": "删除会话",
+    "newSession": "+ 新建"
   },
   "goal": {
     "title": "目标",
@@ -35,6 +41,7 @@
     "notSet": "点击设置目标"
   },
   "aiPanel": {
+    "title": "AI 状态监控",
     "expand": "展开 AI 面板",
     "collapse": "收起 AI 面板",
     "serviceNormal": "服务正常",
