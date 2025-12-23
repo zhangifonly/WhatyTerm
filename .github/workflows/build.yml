@@ -109,10 +109,17 @@ jobs:
         with:
           path: artifacts
 
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: artifacts/**/*
-          draft: true
+          files: |
+            artifacts/WhatyTerm-macOS/*
+            artifacts/WhatyTerm-Windows/*
+            artifacts/WhatyTerm-Linux/*
+          draft: false
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
