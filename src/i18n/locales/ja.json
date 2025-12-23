@@ -15,9 +15,72 @@
   "common": {
     "close": "閉じる",
     "save": "保存",
-    "cancel": "キャンセル"
+    "cancel": "キャンセル",
+    "delete": "削除",
+    "test": "接続テスト",
+    "testing": "テスト中...",
+    "unknown": "不明",
+    "none": "なし",
+    "notConfigured": "未設定",
+    "copied": "コピーしました！"
+  },
+  "sidebar": {
+    "expand": "サイドバーを展開",
+    "collapse": "サイドバーを折りたたむ",
+    "deleteSession": "セッションを削除"
+  },
+  "goal": {
+    "title": "目標",
+    "placeholder": "目標を入力してください。例：\n1. 現在のディレクトリのファイルを一覧表示\n2. 特定の内容を含むファイルを検索\n3. デプロイスクリプトを実行",
+    "notSet": "クリックして目標を設定"
+  },
+  "aiPanel": {
+    "expand": "AIパネルを展開",
+    "collapse": "AIパネルを折りたたむ",
+    "serviceNormal": "サービス正常",
+    "disabled": "無効",
+    "analyzing": "分析中...",
+    "waitingAnalysis": "分析を待機中...",
+    "switchProvider": "APIプロバイダーを切り替え",
+    "local": "ローカル",
+    "global": "グローバル",
+    "deleteLocalConfig": "ローカル設定を削除し、グローバル設定に戻す",
+    "restoreGlobalConfig": "ローカル .claude/settings.local.json を削除し、グローバル設定に戻す",
+    "syncToLocal": "グローバル ~/.claude/settings.json をローカル .claude/settings.local.json に同期",
+    "currentState": "現在の状態",
+    "workingDir": "作業ディレクトリ",
+    "recentAction": "最近のアクション",
+    "waitingAiAnalysis": "AI分析を待機中..."
+  },
+  "controls": {
+    "autoOn": "自動：ON",
+    "autoOff": "自動：OFF",
+    "hideDebug": "非表示",
+    "showLog": "ログ",
+    "continue": "続ける"
+  },
+  "auth": {
+    "enabled": "有効",
+    "disabled": "無効",
+    "newPassword": "新しいパスワード",
+    "setPassword": "パスワード設定",
+    "confirmPassword": "パスワードを再入力",
+    "placeholder": "アクセスパスワードを設定",
+    "placeholderOptional": "空白のままにすると変更されません",
+    "updatePassword": "パスワード更新",
+    "enablePassword": "パスワードを有効化",
+    "enterPassword": "パスワードを入力してください",
+    "login": "ログイン",
+    "loggingIn": "ログイン中...",
+    "passwordMismatch": "パスワードが一致しません",
+    "passwordTooShort": "パスワードは4文字以上必要です",
+    "setupSuccess": "設定に成功しました",
+    "setupFailed": "設定に失敗しました",
+    "disableSuccess": "パスワード保護を無効にしました",
+    "loginFailed": "ログインに失敗しました"
   },
   "toast": {
-    "languageSwitched": "言語を切り替えました"
+    "languageSwitched": "言語を切り替えました",
+    "tunnelUrlSaved": "外部アクセスURLを保存しました"
   }
 }
