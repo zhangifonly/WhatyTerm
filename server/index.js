@@ -16,6 +16,7 @@ import { HistoryLogger } from './services/HistoryLogger.js';
 import { AIEngine } from './services/AIEngine.js';
 import { AuthService } from './services/AuthService.js';
 import { ProviderService } from './services/ProviderService.js';
+import ScheduleManager from './services/ScheduleManager.js';
 import HealthCheckScheduler from './services/HealthCheckScheduler.js';
 import { setupRoutes } from './routes/index.js';
 import claudeSessionFixer from './services/ClaudeSessionFixer.js';
@@ -25,6 +26,10 @@ import { DEFAULT_MODEL } from './config/constants.js';
 import cloudflareTunnel from './services/CloudflareTunnel.js';
 import frpTunnel from './services/FrpTunnel.js';
 import projectTaskReader from './services/ProjectTaskReader.js';
+import RecentProjectsService from './services/RecentProjectsService.js';
+import processDetector from './services/ProcessDetector.js';
+import cliRegistry from './services/CliRegistry.js';
+import cliLearner from './services/CliLearner.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -68,6 +73,7 @@ const aiEngine = new AIEngine();
 const authService = new AuthService();
 const providerService = new ProviderService(io);
 const healthCheckScheduler = new HealthCheckScheduler(io);
+const scheduleManager = new ScheduleManager();
 
 // 启动时执行数据库维护
 (async () => {
@@ -419,6 +425,122 @@ function getCurrentProvider(appType, workingDir = null) {
   });
 }
 
+// 获取所有可用的供应商列表（用于自动切换）
+function getAllProviders(appType) {
+  return new Promise((resolve) => {
+    const ccSwitchDbPath = path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
+
+    if (!existsSync(ccSwitchDbPath)) {
+      return resolve([]);
+    }
+
+    const db = new sqlite3.Database(ccSwitchDbPath, sqlite3.OPEN_READONLY);
+    db.all('SELECT * FROM providers WHERE app_type = ?', [appType], (err, rows) => {
+      db.close();
+      if (err || !rows) {
+        return resolve([]);
+      }
+      resolve(rows.map(row => ({
+        id: row.id,
+        name: row.name,
+        settingsConfig: row.settings_config
+      })));
+    });
+  });
+}
+
+// Claude 供应商优先级列表（按优先级排序）
+const CLAUDE_PROVIDER_PRIORITY = [
+  '88codepaid',      // 主力付费账号
+  'crs.whaty.org',   // 自建 Claude Relay
+  'FoxCode',         // 备用
+];
+
+// 启动时从配置文件加载优先级
+(function loadProviderPriority() {
+  const configPath = path.join(os.homedir(), '.webtmux', 'provider-priority.json');
+  if (existsSync(configPath)) {
+    try {
+      const config = JSON.parse(readFileSync(configPath, 'utf8'));
+      if (config.claude && Array.isArray(config.claude)) {
+        CLAUDE_PROVIDER_PRIORITY.length = 0;
+        CLAUDE_PROVIDER_PRIORITY.push(...config.claude);
+        console.log('[ProviderPriority] 已加载配置:', config.claude);
+      }
+    } catch (e) {
+      console.error('[ProviderPriority] 加载配置失败:', e);
+    }
+  }
+})();
+
+// 尝试自动切换供应商（仅在服务器不可用或余额不足时调用）
+async function tryAutoSwitchProvider(session, sessionData, status) {
+  const aiType = sessionData.aiType || 'claude';
+  const currentProvider = aiType === 'claude' ? session.claudeProvider :
+                          aiType === 'codex' ? session.codexProvider :
+                          session.geminiProvider;
+
+  console.log(`[自动修复] 需要切换供应商，当前: ${currentProvider?.name || '未知'}`);
+  console.log(`[自动修复] 错误原因: ${status.isServerUnavailable ? '服务器不可用' : status.isInsufficientBalance ? '余额不足' : 'thinking不兼容'}`);
+
+  // 获取所有可用供应商
+  const allProviders = await getAllProviders(aiType);
+  if (allProviders.length <= 1) {
+    console.log(`[自动修复] 只有一个供应商，无法切换`);
+    return null;
+  }
+
+  // 按优先级排序供应商
+  const sortedProviders = [...allProviders].sort((a, b) => {
+    const priorityA = CLAUDE_PROVIDER_PRIORITY.indexOf(a.id);
+    const priorityB = CLAUDE_PROVIDER_PRIORITY.indexOf(b.id);
+    // 不在列表中的放最后
+    const orderA = priorityA === -1 ? 999 : priorityA;
+    const orderB = priorityB === -1 ? 999 : priorityB;
+    return orderA - orderB;
+  });
+
+  // 打印供应商切换顺序
+  console.log(`[自动修复] 供应商切换顺序:`);
+  sortedProviders.forEach((p, i) => {
+    const isCurrent = p.id === currentProvider?.id;
+    console.log(`  ${i + 1}. ${p.name} (${p.id})${isCurrent ? ' ← 当前' : ''}`);
+  });
+
+  // 找到当前供应商在排序列表中的位置
+  const currentIndex = sortedProviders.findIndex(p => p.id === currentProvider?.id);
+
+  // 选择下一个供应商
+  let nextProvider = null;
+  for (let i = 1; i < sortedProviders.length; i++) {
+    const nextIndex = (currentIndex + i) % sortedProviders.length;
+    const candidate = sortedProviders[nextIndex];
+    if (candidate.id !== currentProvider?.id) {
+      nextProvider = candidate;
+      break;
+    }
+  }
+
+  if (!nextProvider) {
+    console.log(`[自动修复] 无法找到其他供应商`);
+    return null;
+  }
+
+  console.log(`[自动修复] 建议切换到: ${nextProvider.name} (${nextProvider.id})`);
+
+  return {
+    success: true,
+    newProvider: nextProvider.name,
+    newProviderId: nextProvider.id,
+    allProviders: sortedProviders.map(p => ({
+      id: p.id,
+      name: p.name,
+      isCurrent: p.id === currentProvider?.id
+    })),
+    message: `建议切换到 ${nextProvider.name}`
+  };
+}
+
 // 认证中间件
 const authMiddleware = (req, res, next) => {
   // 登录相关路由不需要认证
@@ -714,6 +836,198 @@ app.get('/api/claude-code/config', (req, res) => {
       apiKey: config.env?.ANTHROPIC_AUTH_TOKEN ? '***已配置***' : '',
       path: configPath
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// 供应商优先级配置 API
+// ============================================
+
+// 获取供应商列表和优先级配置
+app.get('/api/provider-priority', async (req, res) => {
+  try {
+    // 获取所有 Claude 供应商
+    const providers = await getAllProviders('claude');
+
+    // 从配置文件读取优先级
+    const configPath = path.join(os.homedir(), '.webtmux', 'provider-priority.json');
+    let priority = CLAUDE_PROVIDER_PRIORITY; // 默认值
+
+    if (existsSync(configPath)) {
+      try {
+        const config = JSON.parse(readFileSync(configPath, 'utf8'));
+        priority = config.claude || priority;
+      } catch (e) {
+        console.error('[ProviderPriority] 读取配置失败:', e);
+      }
+    }
+
+    res.json({
+      success: true,
+      providers: providers.map(p => ({ id: p.id, name: p.name })),
+      priority
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 保存供应商优先级配置
+app.post('/api/provider-priority', (req, res) => {
+  try {
+    const { priority } = req.body;
+    if (!Array.isArray(priority)) {
+      return res.status(400).json({ error: '优先级必须是数组' });
+    }
+
+    const configDir = path.join(os.homedir(), '.webtmux');
+    const configPath = path.join(configDir, 'provider-priority.json');
+
+    // 确保目录存在
+    if (!existsSync(configDir)) {
+      mkdirSync(configDir, { recursive: true });
+    }
+
+    // 保存配置
+    const config = { claude: priority, updatedAt: new Date().toISOString() };
+    writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+    // 更新内存中的优先级
+    CLAUDE_PROVIDER_PRIORITY.length = 0;
+    CLAUDE_PROVIDER_PRIORITY.push(...priority);
+
+    console.log('[ProviderPriority] 已保存供应商优先级:', priority);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================
+// CLI 工具注册表 API（支持自动学习新 CLI 工具）
+// ============================================
+
+// 获取所有已注册的 CLI 工具
+app.get('/api/cli-tools', (req, res) => {
+  try {
+    const tools = cliRegistry.getAllTools();
+    res.json({ success: true, tools });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取单个 CLI 工具配置
+app.get('/api/cli-tools/:id', (req, res) => {
+  try {
+    const tool = cliRegistry.getTool(req.params.id);
+    if (!tool) {
+      return res.status(404).json({ error: '工具不存在' });
+    }
+    res.json({ success: true, tool });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 注册新的 CLI 工具
+app.post('/api/cli-tools', (req, res) => {
+  try {
+    const result = cliRegistry.registerTool(req.body);
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 更新 CLI 工具配置
+app.put('/api/cli-tools/:id', (req, res) => {
+  try {
+    const result = cliRegistry.updateTool(req.params.id, req.body);
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 删除 CLI 工具
+app.delete('/api/cli-tools/:id', (req, res) => {
+  try {
+    const result = cliRegistry.deleteTool(req.params.id);
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取未知进程列表（用于学习建议）
+app.get('/api/cli-tools/learn/unknown', (req, res) => {
+  try {
+    const unknownProcesses = processDetector.getUnknownProcesses();
+    res.json({ success: true, processes: unknownProcesses });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 从未知进程学习并注册为新 CLI 工具
+app.post('/api/cli-tools/learn/:processName', (req, res) => {
+  try {
+    const result = processDetector.learnFromUnknownProcess(
+      req.params.processName,
+      req.body
+    );
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 从 URL 自动学习 CLI 工具配置
+app.post('/api/cli-tools/learn/url', async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url) {
+      return res.status(400).json({ error: '缺少 URL 参数' });
+    }
+
+    const result = await cliLearner.learnAndRegister('url', { url });
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 从终端内容学习 CLI 工具特征
+app.post('/api/cli-tools/learn/terminal', async (req, res) => {
+  try {
+    const { content, processName } = req.body;
+    if (!content || !processName) {
+      return res.status(400).json({ error: '缺少参数' });
+    }
+
+    const result = await cliLearner.learnAndRegister('terminal', { content, processName });
+    if (!result.success) {
+      return res.status(400).json({ error: result.error });
+    }
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1132,6 +1446,12 @@ async function runBackgroundAutoAction() {
 
     // 跳过正在修复中的会话
     if (session.isFixingClaudeError) continue;
+    // 如果有待处理的修复建议，且自动操作已开启，则清除建议并继续执行修复
+    if (session.pendingFixSuggestion && sessionData.autoActionEnabled) {
+      console.log(`[错误修复] 会话 ${session.name}: 自动操作已开启，清除待处理的修复建议，直接执行修复`);
+      session.pendingFixSuggestion = false;
+      session.pendingFixContext = null;
+    }
     // 跳过已经发送过修复建议的会话（等待用户确认，仅非自动模式）
     if (session.pendingFixSuggestion) continue;
 
@@ -1141,13 +1461,48 @@ async function runBackgroundAutoAction() {
     // 检测 Claude Code API 错误
     const terminalLines = terminalContent.split('\n');
     const last20Lines = terminalLines.slice(-20).join('\n');
-    // 检测 Claude Code 是否在运行（包括运行中和空闲状态）
-    const isClaudeCodePresent = /esc to interrupt|Context left|claude.*thinking|\? for shortcuts|Press up to edit|^>\s*$/m.test(last20Lines);
-    const lastFixTime = session.lastClaudeFixTime || 0;
-    const fixCooldown = 5 * 60 * 1000; // 5 分钟冷却时间
-    const canFix = now - lastFixTime > fixCooldown;
 
-    if (isClaudeCodePresent && canFix && claudeSessionFixer.detectApiError(terminalContent)) {
+    // 检测 CLI 工具是否在运行 - 使用统一的 ProcessDetector 服务
+    const tmuxSession = session.tmuxSessionName;
+    const cliDetection = processDetector.detectWithFallback(tmuxSession, last20Lines);
+    const isClaudeCodePresent = cliDetection.detected;
+
+    const lastFixTime = session.lastClaudeFixTime || 0;
+    const fixAttempts = session.fixAttempts || 0;
+    // 冷却时间：根据修复次数递增（5分钟、15分钟、30分钟...）
+    const baseCooldown = 5 * 60 * 1000;
+    const fixCooldown = baseCooldown * Math.pow(2, Math.min(fixAttempts, 3));
+    const canFix = now - lastFixTime > fixCooldown;
+    const hasApiError = claudeSessionFixer.detectApiError(terminalContent);
+
+    // 调试日志
+    if (hasApiError) {
+      console.log(`[错误检测] 会话 ${session.name}: 检测到API错误, CLI=${cliDetection.cli || 'none'}(${cliDetection.method}), canFix=${canFix}, fixAttempts=${fixAttempts}, cooldown=${fixCooldown/60000}分钟, autoAction=${sessionData.autoActionEnabled}`);
+    }
+
+    // 如果修复次数过多（3次以上），延长冷却时间但不关闭自动开关
+    if (hasApiError && fixAttempts >= 3) {
+      // 计算更长的等待时间（30分钟 * 修复次数，最长2小时）
+      const extendedCooldown = Math.min(30 * 60 * 1000 * (fixAttempts - 2), 2 * 60 * 60 * 1000);
+      const remainingCooldown = Math.max(0, (lastFixTime + extendedCooldown) - now);
+
+      if (remainingCooldown > 0) {
+        const remainingMinutes = Math.ceil(remainingCooldown / 60000);
+        console.log(`[错误检测] 会话 ${session.name}: 修复次数过多(${fixAttempts}次)，等待 ${remainingMinutes} 分钟后重试`);
+        // 不关闭自动开关，只是跳过本次检查
+        continue;
+      }
+
+      // 冷却时间已过，重置修复次数并继续尝试
+      console.log(`[错误检测] 会话 ${session.name}: 冷却时间已过，重置修复次数，继续尝试修复`);
+      session.fixAttempts = 0;
+      historyLogger.log(session.id, {
+        type: 'system',
+        content: `冷却时间已过，重置修复计数，继续自动修复`
+      });
+    }
+
+    if (isClaudeCodePresent && canFix && hasApiError) {
       // 获取 tmux 会话名和工作目录
       const tmuxSession = session.tmuxSessionName;
       let actualWorkingDir = session.workingDir;
@@ -1159,7 +1514,9 @@ async function runBackgroundAutoAction() {
 
       // 自动模式开启时，直接执行修复；否则发送建议等待用户确认
       if (sessionData.autoActionEnabled) {
-        console.log(`[错误修复] 会话 ${session.name}: 检测到 API 错误，自动模式开启，直接执行修复...`);
+        // 增加修复次数计数
+        session.fixAttempts = (session.fixAttempts || 0) + 1;
+        console.log(`[错误修复] 会话 ${session.name}: 检测到 API 错误，自动模式开启，第 ${session.fixAttempts} 次修复...`);
 
         // 开始修复流程
         session.isFixingClaudeError = true;
@@ -1234,7 +1591,9 @@ async function runBackgroundAutoAction() {
 
     // 检测状态
     const isShellPrompt = /[$#%>]\s*$/.test(lastLine) && !/esc to interrupt/i.test(lastLines);
+    // Claude Code 运行中（包括工作中和空闲等待输入状态）
     const isClaudeRunning = /esc to interrupt|Context left|claude.*thinking/i.test(lastLines);
+    const isClaudeReady = /^>\s*$/m.test(lastLines) || /accept edits/i.test(lastLines) || /\? for shortcuts/i.test(lastLines);
 
     // 检查超时（2分钟）
     if (now - ctx.startTime > 120000) {
@@ -1321,16 +1680,39 @@ async function runBackgroundAutoAction() {
       continue;
     }
 
-    // 步骤3完成：Claude 已重启
-    if (session.fixingStep === 3 && isClaudeRunning) {
-      console.log(`[错误修复] 会话 ${session.name}: 步骤3完成 - Claude 已重启，修复流程结束`);
+    // 步骤3完成：Claude 已重启（运行中或空闲等待输入），发送"继续"恢复工作
+    if (session.fixingStep === 3 && (isClaudeRunning || isClaudeReady)) {
+      console.log(`[错误修复] 会话 ${session.name}: 步骤3完成 - Claude 已重启，发送"继续"恢复工作`);
+
+      // 延迟发送"继续"，等待 Claude Code 完全启动
+      const tmuxSession = session.tmuxSessionName;
+      setTimeout(() => {
+        try {
+          // 使用分开发送的方式（模拟人工输入）
+          execSync(`tmux send-keys -t "${tmuxSession}" "继续"`);
+          setTimeout(() => {
+            try {
+              execSync(`tmux send-keys -t "${tmuxSession}" Enter`);
+            } catch (e) {
+              session.write('\r');
+            }
+          }, 100);
+          console.log(`[错误修复] 会话 ${session.name}: 已发送"继续"命令`);
+        } catch (e) {
+          session.write('继续');
+          setTimeout(() => session.write('\r'), 100);
+        }
+      }, 1000);  // 等待 1 秒让 Claude Code 完全启动
+
       historyLogger.log(session.id, {
         type: 'system',
-        content: `Claude Code 已成功重启，修复流程完成！`
+        content: `Claude Code 已成功重启，正在发送"继续"恢复工作...`
       });
+
       session.isFixingClaudeError = false;
       session.fixingStep = 0;
       session.fixContext = null;
+      session.lastClaudeFixTime = now;  // 更新修复时间，避免重复触发
     }
   }
 
@@ -1378,26 +1760,66 @@ async function runBackgroundAutoAction() {
         continue;
       }
 
-      // 先尝试 preAnalyze（不需要 AI API）
-      const preResult = aiEngine.preAnalyzeStatus(terminalContent);
+      // 先尝试 preAnalyze（不需要 AI API）- 传入 tmuxSession 用于进程检测
+      const preResult = aiEngine.preAnalyzeStatus(terminalContent, sessionData.aiType || 'claude', session.tmuxSessionName);
       if (preResult) {
         console.log(`[后台自动操作] 会话 ${session.name}: 预判断成功 - ${preResult.currentState}`);
         // 使用预判断结果，跳过 AI 调用
         const status = preResult;
         updateAiHealthState(true, null, true, sessionData.id);
 
-        // 检查是否需要暂停自动操作（连续错误等情况）
-        if (status.shouldPauseAutoAction) {
-          console.log(`[后台自动操作] 会话 ${session.name}: 检测到连续错误，自动暂停自动操作`);
-          session.autoActionEnabled = false;
-          sessionManager.updateSession(session);
-          // 通知前端
-          io.to(`session:${session.id}`).emit('session:autoActionPaused', {
+        // 检查是否需要自动修复（连续错误等情况）- 不再关闭自动开关
+        if (status.shouldAutoFix) {
+          console.log(`[后台自动操作] 会话 ${session.name}: 检测到连续错误，启动自动修复 (${status.autoFixAction})`);
+
+          // 根据错误类型执行不同的修复策略
+          if (status.autoFixAction === 'switch_provider') {
+            // 服务器不可用或余额不足：尝试切换 API 供应商
+            const switched = await tryAutoSwitchProvider(session, sessionData, status);
+            if (switched) {
+              historyLogger.log(session.id, {
+                type: 'system',
+                content: `检测到 API 不可用，建议切换供应商: ${switched.newProvider}\n供应商列表: ${switched.allProviders.map(p => p.name + (p.isCurrent ? '(当前)' : '')).join(' → ')}`
+              });
+            }
+          } else if (status.autoFixAction === 'run_fixer') {
+            // thinking 错误：启动 ClaudeSessionFixer 修复程序
+            console.log(`[后台自动操作] 会话 ${session.name}: thinking 错误，启动修复程序`);
+            const tmuxSession = session.tmuxSessionName;
+            const workingDir = session.workingDir;
+
+            // 标记正在修复
+            session.isFixingClaudeError = true;
+            session.fixAttempts = (session.fixAttempts || 0) + 1;
+
+            // 调用 ClaudeSessionFixer
+            const fixResult = await claudeSessionFixer.fix(tmuxSession, workingDir);
+
+            historyLogger.log(session.id, {
+              type: 'system',
+              content: `thinking 错误，启动修复程序 (第${session.fixAttempts}次): ${fixResult.success ? '成功' : fixResult.error}`
+            });
+
+            session.isFixingClaudeError = false;
+            session.lastClaudeFixTime = Date.now();
+          } else if (status.autoFixAction === 'wait_and_retry') {
+            // 频率限制：等待后重试
+            console.log(`[后台自动操作] 会话 ${session.name}: 频率限制，等待 60 秒后重试`);
+            session.nextAutoCheckTime = Date.now() + 60000;
+            historyLogger.log(session.id, {
+              type: 'system',
+              content: `API 请求频率受限，等待 60 秒后自动重试`
+            });
+          }
+
+          // 通知前端（但不关闭自动开关）
+          io.to(`session:${session.id}`).emit('session:autoFixing', {
             sessionId: session.id,
             reason: status.actionReason,
-            suggestion: status.suggestion
+            suggestion: status.suggestion,
+            fixAction: status.autoFixAction
           });
-          io.to(`session:${session.id}`).emit('session:updated', session.toJSON());
+
           session.isAutoActioning = false;
           updateCheckState(sessionData.id, false, status);
           continue;
@@ -1410,8 +1832,13 @@ async function runBackgroundAutoAction() {
           const action = status.suggestedAction;
           const lastAction = lastActionMap.get(session.id);
           const contentHash = computeContentHash(terminalContent, 500);
-          if (lastAction && lastAction.action === action && lastAction.contentHash === contentHash && (now - lastAction.time) < 30000) {
-            console.log(`[后台自动操作] 会话 ${session.name}: 跳过重复操作 "${action}"`);
+
+          // 对于选项选择操作，使用更短的冷却时间（3秒）
+          // 因为如果内容没变化，可能是操作没成功，需要重试
+          const cooldownTime = status.actionType === 'select' ? 3000 : 30000;
+
+          if (lastAction && lastAction.action === action && lastAction.contentHash === contentHash && (now - lastAction.time) < cooldownTime) {
+            console.log(`[后台自动操作] 会话 ${session.name}: 跳过重复操作 "${action}" (冷却${cooldownTime/1000}秒)`);
             session.isAutoActioning = false;
             updateCheckState(sessionData.id, false, status);
             continue;
@@ -1557,13 +1984,16 @@ async function runBackgroundAutoAction() {
       if (status && status.needsAction && status.suggestedAction && status.actionType !== 'input') {
         const action = status.suggestedAction;
 
-        // 检查是否在冷却时间内（30秒内不重复执行相同操作）
-        // 但如果终端内容已变化（新的确认菜单），则允许执行
+        // 检查是否在冷却时间内
+        // 对于选项选择操作，使用更短的冷却时间（3秒），因为内容未变可能是操作失败
+        // 其他操作使用 30 秒冷却
         const lastAction = lastActionMap.get(session.id);
         const now = Date.now();
         const contentHash = computeContentHash(terminalContent, 500);
-        if (lastAction && lastAction.action === action && lastAction.contentHash === contentHash && (now - lastAction.time) < 30000) {
-          console.log(`[后台自动操作] 会话 ${session.name}: 跳过重复操作 "${action}" (冷却中，内容未变化，剩余 ${Math.ceil((30000 - (now - lastAction.time)) / 1000)}秒)`);
+        const cooldownTime = status.actionType === 'select' ? 3000 : 30000;
+
+        if (lastAction && lastAction.action === action && lastAction.contentHash === contentHash && (now - lastAction.time) < cooldownTime) {
+          console.log(`[后台自动操作] 会话 ${session.name}: 跳过重复操作 "${action}" (冷却${cooldownTime/1000}秒，剩余 ${Math.ceil((cooldownTime - (now - lastAction.time)) / 1000)}秒)`);
           session.isAutoActioning = false;
           continue;
         }
@@ -1733,26 +2163,24 @@ async function runBackgroundStatusAnalysis() {
 
       if (status) {
         // 如果检测到 CLI 工具运行，动态更新 session 的供应商信息
-        // 即使 detectedCLI 为 null，也尝试根据 session.aiType 更新供应商
+        // 仅在 CLI 类型切换时或供应商未设置时更新，不覆盖用户手动设置的配置
         const cliType = status.detectedCLI || session.aiType;
         if (cliType) {
           // CLI 类型切换时更新 session.aiType
-          if (status.detectedCLI && status.detectedCLI !== session.aiType) {
+          const cliTypeChanged = status.detectedCLI && status.detectedCLI !== session.aiType;
+          if (cliTypeChanged) {
             console.log(`[后台AI分析] 检测到 CLI 工具切换: ${session.aiType} -> ${status.detectedCLI}`);
             session.aiType = status.detectedCLI;
           }
 
-          // 每次都刷新供应商信息（因为 cc-switch 切换后配置可能已更新）
-          // 传递 workingDir 以正确检测本地配置
-          const provider = await getCurrentProvider(cliType, session.workingDir);
+          // 仅在供应商未设置或 CLI 类型切换时才更新供应商
+          // 不要每次都刷新，以保留用户手动设置的配置
           const currentProvider = cliType === 'claude' ? session.claudeProvider :
                                   cliType === 'codex' ? session.codexProvider :
                                   session.geminiProvider;
 
-          // 检查供应商是否变化（比较 URL）
-          const providerChanged = !currentProvider || currentProvider.url !== provider.url;
-
-          if (providerChanged) {
+          if (!currentProvider || cliTypeChanged) {
+            const provider = await getCurrentProvider(cliType, session.workingDir);
             if (cliType === 'claude') {
               session.claudeProvider = provider;
             } else if (cliType === 'codex') {
@@ -2146,7 +2574,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 删除会话
+  // 删除会话（永久删除）
   socket.on('session:delete', (sessionId) => {
     const success = sessionManager.deleteSession(sessionId);
     if (success) {
@@ -2156,6 +2584,122 @@ io.on('connection', (socket) => {
       io.emit('sessions:updated', sessionManager.listSessions());
     } else {
       socket.emit('error', { message: '删除会话失败' });
+    }
+  });
+
+  // 关闭会话（可恢复）
+  socket.on('session:close', (sessionId) => {
+    const result = sessionManager.closeSession(sessionId);
+    if (result.success) {
+      // 清理会话相关的缓存数据
+      cleanupAllSessionCache(sessionId);
+      console.log(`会话已关闭（可恢复）: ${sessionId}`);
+      io.emit('sessions:updated', sessionManager.listSessions());
+      socket.emit('session:closed', result.closedSession);
+      // 广播关闭会话列表更新
+      io.emit('closedSessions:updated', sessionManager.getClosedSessions());
+    } else {
+      socket.emit('error', { message: result.error || '关闭会话失败' });
+    }
+  });
+
+  // 创建会话并运行继续命令（用于最近项目）
+  socket.on('session:createAndResume', async (data) => {
+    try {
+      const session = await sessionManager.createSession({
+        name: data.name,
+        goal: data.projectDesc || '',
+        systemPrompt: ''
+      });
+
+      // 保存项目信息
+      session.aiType = data.aiType || 'claude';
+      session.projectName = data.projectName;
+      session.projectDesc = data.projectDesc;
+      session.workingDir = data.workingDir;
+
+      // 注册 bell 回调
+      registerBellCallback(session);
+
+      // 获取供应商信息
+      const provider = await getCurrentProvider(session.aiType, session.workingDir);
+      if (session.aiType === 'claude') {
+        session.claudeProvider = provider;
+      } else if (session.aiType === 'codex') {
+        session.codexProvider = provider;
+      } else if (session.aiType === 'gemini') {
+        session.geminiProvider = provider;
+      }
+
+      // 保存会话
+      sessionManager.updateSession(session);
+
+      // 广播会话列表更新
+      io.emit('sessions:updated', sessionManager.listSessions());
+
+      // 通知客户端会话已创建
+      socket.emit('session:created', session.toJSON());
+
+      // 延迟执行命令：先 cd 到工作目录，再运行继续命令
+      setTimeout(() => {
+        if (data.workingDir) {
+          session.write(`cd "${data.workingDir}"\r`);
+        }
+        setTimeout(() => {
+          if (data.resumeCommand) {
+            session.write(`${data.resumeCommand}\r`);
+          }
+        }, 300);
+      }, 500);
+
+      console.log(`[RecentProject] 创建会话并恢复: ${data.name} (${data.aiType})`);
+    } catch (error) {
+      console.error('[RecentProject] 创建会话失败:', error);
+      socket.emit('error', { message: '创建会话失败: ' + error.message });
+    }
+  });
+
+  // 获取最近项目列表
+  socket.on('recentProjects:get', async () => {
+    try {
+      const projects = await RecentProjectsService.getAllRecentProjects(10);
+      socket.emit('recentProjects:list', projects);
+    } catch (error) {
+      console.error('[RecentProjects] 获取失败:', error);
+      socket.emit('recentProjects:list', { claude: [], codex: [], gemini: [] });
+    }
+  });
+
+  // 获取关闭的会话列表
+  socket.on('closedSessions:get', () => {
+    const closedSessions = sessionManager.getClosedSessions();
+    socket.emit('closedSessions:list', closedSessions);
+  });
+
+  // 恢复关闭的会话
+  socket.on('session:restore', (closedSessionId) => {
+    const result = sessionManager.restoreSession(closedSessionId);
+    if (result.success) {
+      console.log(`会话已恢复: ${closedSessionId}`);
+      io.emit('sessions:updated', sessionManager.listSessions());
+      io.emit('closedSessions:updated', sessionManager.getClosedSessions());
+      socket.emit('session:restored', result.session);
+    } else {
+      socket.emit('session:restoreError', {
+        error: result.error,
+        expired: result.expired
+      });
+    }
+  });
+
+  // 永久删除关闭的会话
+  socket.on('closedSession:delete', (closedSessionId) => {
+    const result = sessionManager.deleteClosedSession(closedSessionId);
+    if (result.success) {
+      console.log(`已永久删除关闭的会话: ${closedSessionId}`);
+      io.emit('closedSessions:updated', sessionManager.getClosedSessions());
+    } else {
+      socket.emit('error', { message: result.error || '删除失败' });
     }
   });
 
@@ -2386,6 +2930,51 @@ io.on('connection', (socket) => {
     }
   });
 
+  // AI 生成目标
+  socket.on('goal:generate', async (data) => {
+    const session = sessionManager.getSession(data.sessionId);
+    if (!session) {
+      socket.emit('goal:generated', { sessionId: data.sessionId, goal: null, error: '会话不存在' });
+      return;
+    }
+
+    try {
+      // 获取终端内容作为上下文
+      const screenContent = session.getScreenContent ? session.getScreenContent() : '';
+
+      // 构建 prompt
+      const context = [];
+      if (session.projectName) context.push(`项目名称: ${session.projectName}`);
+      if (session.projectDesc) context.push(`项目说明: ${session.projectDesc}`);
+      if (session.workingDir) context.push(`工作目录: ${session.workingDir}`);
+      if (screenContent) context.push(`终端内容:\n${screenContent.slice(-2000)}`);
+
+      const prompt = `基于以下上下文，生成一个简洁的开发目标（一句话，15-30字）：
+
+${context.join('\n\n')}
+
+要求：
+- 用中文回答
+- 只输出目标本身，不要任何前缀或解释
+- 目标应该具体、可执行
+- 如果上下文不足，可以基于项目类型推测一个合理的目标`;
+
+      console.log(`[目标生成] 会话 ${session.name}: 开始生成...`);
+      const goal = await aiEngine.generateText(prompt);
+
+      if (goal) {
+        console.log(`[目标生成] 会话 ${session.name}: ${goal}`);
+        socket.emit('goal:generated', { sessionId: data.sessionId, goal: goal.trim() });
+      } else {
+        console.log(`[目标生成] 会话 ${session.name}: 生成失败`);
+        socket.emit('goal:generated', { sessionId: data.sessionId, goal: null, error: '生成失败' });
+      }
+    } catch (err) {
+      console.error(`[目标生成] 错误:`, err.message);
+      socket.emit('goal:generated', { sessionId: data.sessionId, goal: null, error: err.message });
+    }
+  });
+
   // 执行 AI 建议
   socket.on('ai:execute', async (data) => {
     const session = sessionManager.getSession(data.sessionId);
@@ -2436,6 +3025,87 @@ io.on('connection', (socket) => {
       });
 
       console.log(`[自动操作] 会话 ${session.name}: ${data.enabled ? '开启' : '关闭'}`);
+    }
+  });
+
+  // ========== 预约管理事件 ==========
+
+  // 创建预约
+  socket.on('schedule:create', (data) => {
+    try {
+      const schedule = scheduleManager.createSchedule(data);
+      socket.emit('schedule:created', schedule);
+      socket.emit('schedule:list', scheduleManager.getSessionSchedules(data.sessionId));
+      console.log(`[预约] 创建预约: ${schedule.id}`);
+    } catch (error) {
+      socket.emit('schedule:error', { error: error.message });
+      console.error('[预约] 创建失败:', error);
+    }
+  });
+
+  // 获取会话的所有预约
+  socket.on('schedule:getList', (data) => {
+    try {
+      const schedules = scheduleManager.getSessionSchedules(data.sessionId);
+      socket.emit('schedule:list', schedules);
+    } catch (error) {
+      socket.emit('schedule:error', { error: error.message });
+      console.error('[预约] 获取列表失败:', error);
+    }
+  });
+
+  // 更新预约
+  socket.on('schedule:update', (data) => {
+    try {
+      const { id, ...updates } = data;
+      const schedule = scheduleManager.updateSchedule(id, updates);
+      if (schedule) {
+        socket.emit('schedule:updated', schedule);
+        socket.emit('schedule:list', scheduleManager.getSessionSchedules(schedule.sessionId));
+        console.log(`[预约] 更新预约: ${id}`);
+      } else {
+        socket.emit('schedule:error', { error: '预约不存在' });
+      }
+    } catch (error) {
+      socket.emit('schedule:error', { error: error.message });
+      console.error('[预约] 更新失败:', error);
+    }
+  });
+
+  // 删除预约
+  socket.on('schedule:delete', (data) => {
+    try {
+      const schedule = scheduleManager.getSchedule(data.id);
+      const success = scheduleManager.deleteSchedule(data.id);
+      if (success) {
+        socket.emit('schedule:deleted', { id: data.id });
+        if (schedule) {
+          socket.emit('schedule:list', scheduleManager.getSessionSchedules(schedule.sessionId));
+        }
+        console.log(`[预约] 删除预约: ${data.id}`);
+      } else {
+        socket.emit('schedule:error', { error: '预约不存在' });
+      }
+    } catch (error) {
+      socket.emit('schedule:error', { error: error.message });
+      console.error('[预约] 删除失败:', error);
+    }
+  });
+
+  // 启用/禁用预约
+  socket.on('schedule:toggle', (data) => {
+    try {
+      const schedule = scheduleManager.toggleSchedule(data.id, data.enabled);
+      if (schedule) {
+        socket.emit('schedule:updated', schedule);
+        socket.emit('schedule:list', scheduleManager.getSessionSchedules(schedule.sessionId));
+        console.log(`[预约] ${data.enabled ? '启用' : '禁用'}预约: ${data.id}`);
+      } else {
+        socket.emit('schedule:error', { error: '预约不存在' });
+      }
+    } catch (error) {
+      socket.emit('schedule:error', { error: error.message });
+      console.error('[预约] 切换状态失败:', error);
     }
   });
 
@@ -2795,6 +3465,29 @@ io.on('connection', (socket) => {
       session.isAnalyzing = true;
 
       try {
+        // 优先使用 analyzeStatus 的结果（专门针对 CLI 工具优化）
+        // 使用 getScreenContent() 获取当前屏幕内容，与后台分析保持一致
+        const terminalContent = session.getScreenContent();
+        const statusResult = aiEngine.preAnalyzeStatus(terminalContent, session.aiType || 'claude', session.tmuxSessionName);
+
+        if (statusResult) {
+          if (statusResult.needsAction && statusResult.suggestedAction) {
+            // 使用状态分析的结果作为建议
+            io.to(`session:${sessionId}`).emit('ai:suggestion', {
+              sessionId,
+              command: statusResult.suggestedAction,
+              reasoning: statusResult.actionReason || statusResult.currentState,
+              isDangerous: false
+            });
+          } else {
+            // 不需要操作时，清除旧的建议
+            io.to(`session:${sessionId}`).emit('ai:executed');
+          }
+          // preAnalyzeStatus 已返回结果，不再调用 analyze()
+          return;
+        }
+
+        // 只有当 preAnalyzeStatus 无法判断时，才使用基于目标的分析
         const history = historyLogger.getHistory(sessionId, 50);
         const suggestion = await aiEngine.analyze({
           goal: session.goal,
@@ -2867,6 +3560,27 @@ server.listen(PORT, async () => {
     console.error('[Server] 启动健康检查调度器失败:', err);
   }
 
+  // 启动预约调度器
+  scheduleManager.onScheduleTrigger((schedule) => {
+    console.log(`[预约] 触发预约: ${schedule.id}, 会话: ${schedule.sessionId}, 动作: ${schedule.action}`);
+
+    const session = sessionManager.getSession(schedule.sessionId);
+    if (session) {
+      const enabled = schedule.action === 'enable';
+      session.updateSettings({ autoActionEnabled: enabled });
+      sessionManager.updateSession(session);
+
+      io.to(`session:${schedule.sessionId}`).emit('session:updated', session.toJSON());
+      io.emit('sessions:updated', sessionManager.listSessions());
+
+      historyLogger.log(schedule.sessionId, {
+        type: 'system',
+        content: `预约触发: ${enabled ? '开启' : '关闭'}AI监控`
+      });
+    }
+  });
+  scheduleManager.startScheduler();
+
   // 启动隧道服务（优先 FRP 测速选择，回退到 Cloudflare）
   try {
     let tunnelUrl = null;
@@ -2920,15 +3634,14 @@ server.listen(PORT, async () => {
       // 这样即使 CLI 没有运行，面板也能显示 CC Switch 中配置的供应商
       let needsUpdate = false;
 
-      // 获取 Claude 供应商（每次启动都更新，确保使用最新配置）
+      // 获取 Claude 供应商（仅在未设置时填充，不覆盖用户手动设置的配置）
       // 传递 workingDir 以正确检测本地配置
-      const claudeProvider = await getCurrentProvider('claude', session.workingDir);
-      if (claudeProvider.exists) {
-        const oldName = session.claudeProvider?.name;
-        session.claudeProvider = claudeProvider;
-        if (oldName !== claudeProvider.name) {
+      if (!session.claudeProvider) {
+        const claudeProvider = await getCurrentProvider('claude', session.workingDir);
+        if (claudeProvider.exists) {
+          session.claudeProvider = claudeProvider;
           needsUpdate = true;
-          console.log(`[启动检测] Session ${session.name}: 更新 Claude 供应商 ${oldName || '无'} -> ${claudeProvider.name}`);
+          console.log(`[启动检测] Session ${session.name}: 补充 Claude 供应商 ${claudeProvider.name}`);
         }
       }
 

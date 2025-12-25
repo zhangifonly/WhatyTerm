@@ -6,6 +6,7 @@
     "description": "AI 驱动的智能终端管理工具"
   },
   "welcome": {
+    "start": "开始",
     "coreFeatures": "核心功能",
     "aiMonitoring": "AI 智能监控",
     "aiMonitoringDesc": "自动分析终端状态，识别等待输入、错误提示等场景",
@@ -54,6 +55,8 @@
     "save": "保存",
     "cancel": "取消",
     "delete": "删除",
+    "create": "创建",
+    "confirm": "确认",
     "test": "测试连接",
     "testing": "测试中...",
     "unknown": "未知",
@@ -79,6 +82,7 @@
     "expand": "展开侧边栏",
     "collapse": "收起侧边栏",
     "deleteSession": "删除会话",
+    "closeSession": "关闭会话",
     "newSession": "+ 新建"
   },
   "goal": {
@@ -153,6 +157,7 @@
     "hideDebug": "隐藏",
     "showLog": "日志",
     "continue": "继续",
+    "analyzeNow": "立即分析",
     "autoRunning": "自动模式运行中",
     "pause": "暂停 ⏸"
   },
@@ -191,6 +196,62 @@
   "provider": {
     "cliOnlyWarning": "⚠️ 安全提示：选用标记为 \"Cli Only\" 的供应商可能导致账号风险。此类服务商仅限 Claude Code CLI 使用，用于其他场景可能被识别为异常请求并导致账号受限。请谨慎使用。"
   },
+  "schedule": {
+    "title": "AI 监控预约",
+    "manage": "预约设置",
+    "empty": "暂无预约，点击下方按钮创建",
+    "createNew": "创建新预约",
+    "edit": "编辑预约",
+    "delete": "删除预约",
+    "enable": "启用",
+    "disable": "禁用",
+    "confirmDelete": "确定要删除这个预约吗？",
+    "error": "操作失败",
+    "nextRunLabel": "下次执行",
+    "noNextRun": "未设置",
+    "expired": "已过期",
+    "types": {
+      "daily": "每天",
+      "weekly": "每周",
+      "weekdays": "指定周几",
+      "once": "单次"
+    },
+    "actions": {
+      "enable": "开启监控",
+      "disable": "关闭监控"
+    },
+    "weekdays": {
+      "sun": "周日",
+      "mon": "周一",
+      "tue": "周二",
+      "wed": "周三",
+      "thu": "周四",
+      "fri": "周五",
+      "sat": "周六"
+    },
+    "form": {
+      "action": "执行动作",
+      "type": "预约类型",
+      "weekdays": "选择周几",
+      "date": "选择日期",
+      "time": "选择时间"
+    },
+    "timeDesc": {
+      "daily": "每天 {{time}}",
+      "weekly": "每周一 {{time}}",
+      "weekdays": "每 {{days}} {{time}}",
+      "once": "{{date}} {{time}}"
+    },
+    "nextRun": {
+      "days": "{{days}} 天 {{hours}} 小时后",
+      "hours": "{{hours}} 小时 {{minutes}} 分钟后",
+      "minutes": "{{minutes}} 分钟后"
+    },
+    "validation": {
+      "selectWeekdays": "请选择至少一个工作日",
+      "selectDate": "请选择日期"
+    }
+  },
   "about": {
     "appName": "WhatyTerm（网梯终端）",
     "description": "AI 智能终端管理工具",
@@ -228,5 +289,32 @@
   "toast": {
     "languageSwitched": "语言已切换",
     "tunnelUrlSaved": "外部访问 URL 已保存"
+  },
+  "closedSessions": {
+    "title": "最近关闭的会话",
+    "restore": "恢复",
+    "delete": "删除",
+    "confirmDelete": "确定要永久删除这个会话吗？",
+    "sessionExpired": "会话已失效，tmux 进程不存在",
+    "restoreFailed": "恢复失败",
+    "timeAgo": {
+      "justNow": "刚刚",
+      "minutes": "{{count}} 分钟前",
+      "hours": "{{count}} 小时前",
+      "days": "{{count}} 天前"
+    }
+  },
+  "recentProjects": {
+    "title": "最近项目",
+    "loading": "加载中...",
+    "continue": "继续",
+    "showMore": "更多...",
+    "collapse": "收起",
+    "timeAgo": {
+      "justNow": "刚刚",
+      "minutes": "{{count}} 分钟前",
+      "hours": "{{count}} 小时前",
+      "days": "{{count}} 天前"
+    }
   }
 }

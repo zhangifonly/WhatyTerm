@@ -7,6 +7,7 @@ import { ProxyAgent, Agent } from 'undici';
 import Database from 'better-sqlite3';
 import ProviderService from './ProviderService.js';
 import ConfigService from './ConfigService.js';
+import processDetector from './ProcessDetector.js';
 import { DEFAULT_MODEL, CLAUDE_CODE_FAKE, CODEX_FAKE } from '../config/constants.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -728,35 +729,64 @@ ${historyText || '(空)'}
 
   /**
    * 检测终端中运行的 CLI 工具类型
-   * 返回 'claude' | 'codex' | 'gemini' | null
+   * 优先使用 tmux 进程检测，回退到终端内容分析
+   * @param {string} terminalContent - 终端内容
+   * @param {string} tmuxSession - tmux 会话名称（可选，用于进程检测）
+   * @returns {string|null} 'claude' | 'codex' | 'gemini' | null
    */
-  detectRunningCLI(terminalContent) {
-    if (!terminalContent) return null;
-
-    // 检测 Claude Code 特征（必须在 Codex 之前检测）
-    // - ">" 提示符（Claude Code 的主提示符）
-    // - "esc to interrupt" （运行中的提示）
-    // - "Clauding…" / "Thinking…" / "Hatching…" （Claude Code 运行中的状态）
-    // - "accept edits" （Claude Code 状态栏）
-    // - "Do you want to make/run" （确认界面）
-    // - Claude Code 特有的输出格式
-    if (/>\s*$/.test(terminalContent) ||
-        /esc to interrupt/i.test(terminalContent) ||
-        /Clauding|Thinking|Hatching/i.test(terminalContent) ||
-        /accept edits/i.test(terminalContent) ||
-        /Do you want to (make this edit|create|delete|run)/i.test(terminalContent) ||
-        /Claude Code|claude-cli/i.test(terminalContent)) {
-      return 'claude';
+  detectRunningCLI(terminalContent, tmuxSession = null) {
+    // 优先使用进程检测（更可靠）
+    if (tmuxSession) {
+      const processResult = processDetector.detectCLI(tmuxSession);
+      if (processResult.detected) {
+        console.log(`[AIEngine] 进程检测到 CLI: ${processResult.cli} (${processResult.processName}, PID: ${processResult.pid})`);
+        return processResult.cli;
+      }
     }
 
-    // 检测 Codex CLI 特征
-    // - Codex 特有的提示符或输出（排除会话名称中的 "Codex"）
-    if (/codex-cli|openai.*codex/i.test(terminalContent)) {
+    // 回退到终端内容分析
+    if (!terminalContent) return null;
+
+    // 只检查最后 30 行内容，避免被历史记录干扰
+    const lines = terminalContent.split('\n');
+    const lastLines = lines.slice(-30).join('\n');
+
+    // 检测 shell 命令行提示符（CLI 已退出的标志）
+    // 如果最后几行是 shell 提示符，说明 CLI 已退出
+    const last5Lines = lines.slice(-5).join('\n');
+
+    // 如果最后几行是普通 shell 提示符（包含用户名@主机名），CLI 已退出
+    if (/\w+@\w+.*[%$#]\s*$/.test(last5Lines)) {
+      return null;
+    }
+
+    // 检测 Codex CLI 特征（必须在 Claude Code 之前检测，因为两者都有 > 提示符）
+    if (/OpenAI Codex|codex-cli|openai.*codex/i.test(lastLines) ||
+        /Updated Plan|Worked for \d+m\s+\d+s/i.test(lastLines) ||
+        /^[•●]\s*(Ran|Explored|Read)\s/m.test(lastLines) ||
+        /Reviewing local code|Generating response/i.test(lastLines) ||
+        /Summarize recent commits/i.test(lastLines) ||
+        /model:\s*(gpt-|o\d-|codex)/i.test(lastLines)) {
       return 'codex';
     }
 
+    // 检测 Claude Code 特征
+    if (/esc to interrupt/i.test(lastLines) ||
+        /Clauding|Hatching/i.test(lastLines) ||
+        /accept edits/i.test(lastLines) ||
+        /Do you want to (make this edit|create|delete|run)/i.test(lastLines) ||
+        /Claude Code|claude-cli/i.test(lastLines) ||
+        /Running \d+ Task agents/i.test(lastLines)) {
+      return 'claude';
+    }
+
     // 检测 Gemini CLI 特征
-    if (/gemini|gemini-cli/i.test(terminalContent)) {
+    if (/gemini-2\.5-(flash|pro)|gemini-cli|@google\/gemini/i.test(lastLines) ||
+        /GoogleSearch\s+Searching/i.test(lastLines) ||
+        /✦\s*I have successfully/i.test(lastLines) ||
+        /Ready\s*\(\d+\s*tools?\)/i.test(lastLines) ||
+        /Google Gemini/i.test(lastLines) ||
+        /(ReadFile|WriteFile|Shell)\s+(Reading|Writing|Running)/i.test(lastLines)) {
       return 'gemini';
     }
 
@@ -768,8 +798,9 @@ ${historyText || '(空)'}
    * 返回null表示需要AI分析，返回对象表示已判断出结果
    * @param {string} terminalContent - 终端内容
    * @param {string} aiType - AI 类型 (claude/codex/gemini)
+   * @param {string} tmuxSession - tmux 会话名称（可选，用于进程检测）
    */
-  preAnalyzeStatus(terminalContent, aiType = 'claude') {
+  preAnalyzeStatus(terminalContent, aiType = 'claude', tmuxSession = null) {
     if (!terminalContent || terminalContent.trim().length === 0) {
       return {
         currentState: '终端内容为空',
@@ -786,28 +817,67 @@ ${historyText || '(空)'}
       };
     }
 
-    // 检测运行的 CLI 工具
-    const detectedCLI = this.detectRunningCLI(terminalContent);
+    // 检测运行的 CLI 工具（优先使用进程检测）
+    const detectedCLI = this.detectRunningCLI(terminalContent, tmuxSession);
 
-    // 1. 检测Claude Code确认界面（需要选择"2"）- 最高优先级
     // 先清理 ANSI 转义序列，确保正则能正确匹配
     const cleanContent = terminalContent.replace(/\x1b\[[0-9;]*m/g, '');
 
-    // 检测编辑/创建/删除/运行确认界面
-    const isEditConfirm = /Do you want to (make this edit|create|delete|run)/i.test(cleanContent);
-    const hasOption1Yes = /1\.\s*Yes/i.test(cleanContent);
-    const hasOption2Yes = /2\.\s*Yes/i.test(cleanContent);
+    // 0. 最高优先级：检测程序运行中（必须在确认界面之前）
+    // 如果程序正在运行，即使历史中有确认界面内容，也应该返回"运行中"
+    // 但要排除确认界面的情况（确认界面显示时程序实际上已暂停）
+    let isRunning = false;
+    const cliName = getCliName(aiType);
 
-    if (isEditConfirm && hasOption1Yes && hasOption2Yes) {
-      console.log('[AIEngine] 检测到 Claude Code 确认界面，选择选项 2');
+    // 先检查是否是确认界面（排除误判）
+    const isConfirmDialog = (/Do you want to proceed\?/i.test(cleanContent) ||
+                             /Do you want to (make this edit|create|delete|run)/i.test(cleanContent)) &&
+                            /1\.\s*Yes/i.test(cleanContent);
+
+    if (aiType === 'claude') {
+      // Claude Code 运行中标志
+      // 如果是确认界面，不判断为运行中
+      const hasRunningIndicator = /esc to interrupt/i.test(cleanContent) ||
+                                  /ctrl\+t to show todos/i.test(cleanContent);
+      // 运行时间只在最后500字符内检测，避免匹配到历史 timeout 参数
+      const last500 = cleanContent.slice(-500);
+      const hasRecentRuntime = /\(\d+m\s*\d+s\)|\d+m\s+\d+s\s*$/.test(last500);
+
+      isRunning = !isConfirmDialog && (hasRunningIndicator || hasRecentRuntime);
+    } else if (aiType === 'codex') {
+      // Codex CLI 运行中标志（排除确认界面）
+      isRunning = !isConfirmDialog && (
+        /\(\d+s\s*[•·]?\s*esc to interrupt\)/i.test(cleanContent) ||
+        /(Reviewing|Generating|Executing|Processing|Thinking).*\(\d+s/i.test(cleanContent) ||
+        /esc to interrupt/i.test(cleanContent)
+      );
+    } else if (aiType === 'gemini') {
+      // Gemini CLI 运行中标志（排除确认界面）
+      isRunning = !isConfirmDialog && (
+        /GoogleSearch\s+Searching/i.test(cleanContent) ||
+        /(ReadFile|WriteFile|Shell)\s+(Reading|Writing|Running)/i.test(cleanContent) ||
+        /gemini-2\.5.*\.\.\./i.test(cleanContent) ||
+        /(Thinking|Generating|Processing).*\.\.\./i.test(cleanContent)
+      );
+    } else {
+      // 通用检测（排除确认界面）
+      const last500 = cleanContent.slice(-500);
+      isRunning = !isConfirmDialog && (
+        /esc to interrupt/i.test(cleanContent) ||
+        /\(\d+m\s*\d+s\)|\d+m\s+\d+s\s*$/.test(last500)
+      );
+    }
+
+    if (isRunning) {
+      console.log(`[AIEngine] 检测到程序运行中, CLI: ${cliName}`);
       return {
-        currentState: 'Claude Code确认界面',
+        currentState: '程序运行中',
         workingDir: '未显示',
-        recentAction: '等待确认',
-        needsAction: true,
-        actionType: 'select',
-        suggestedAction: '2',
-        actionReason: '选择"允许本次会话"以自动化流程',
+        recentAction: '执行中',
+        needsAction: false,
+        actionType: 'none',
+        suggestedAction: null,
+        actionReason: `${cliName} 正在工作，不应打断`,
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
@@ -815,7 +885,174 @@ ${historyText || '(空)'}
       };
     }
 
-    // 2. 检测普通确认界面（Do you want to proceed?）
+    // 1. 检测确认界面（Do you want to...）
+    const isEditConfirm = /Do you want to (make this edit|create|delete|run)/i.test(cleanContent);
+    const hasOption1Yes = /1\.\s*Yes/i.test(cleanContent);
+    const hasOption2Yes = /2\.\s*Yes/i.test(cleanContent);
+
+    if (isEditConfirm && hasOption1Yes) {
+      // 有选项2时选2（允许本次会话），否则选1
+      const selectOption = hasOption2Yes ? '2' : '1';
+      console.log(`[AIEngine] 检测到 Claude Code 确认界面，选择选项 ${selectOption}`);
+      return {
+        currentState: 'Claude Code确认界面',
+        workingDir: '未显示',
+        recentAction: '等待确认',
+        needsAction: true,
+        actionType: 'select',
+        suggestedAction: selectOption,
+        actionReason: hasOption2Yes ? '选择"允许本次会话"以自动化流程' : '选择"Yes"继续执行',
+        suggestion: null,
+        updatedAt: new Date().toISOString(),
+        preAnalyzed: true,
+        detectedCLI
+      };
+    }
+
+    // 2. 检测 API 错误
+    // 区分两种情况：
+    // - thinking block 相关错误：需要完整修复流程（ClaudeSessionFixer），不在这里处理
+    // - 其他可重试错误（rate_limit 等）：可以简单发送"继续"重试
+    const hasInputPromptForError = /^>\s*$/m.test(cleanContent) || /\n>\s*$/m.test(cleanContent);
+
+    // 需要完整修复的错误（thinking block 相关）- 交给 ClaudeSessionFixer 处理
+    const needsSessionFix = /invalid.*signature.*in.*thinking/i.test(cleanContent) ||
+                            /thinking.*block.*not.*allowed/i.test(cleanContent) ||
+                            /invalid.*thinking.*block/i.test(cleanContent) ||
+                            /thinking\.signature.*Field required/i.test(cleanContent) ||  // 新增
+                            /signature.*Field required/i.test(cleanContent) ||  // 新增
+                            /tool_use_id/i.test(cleanContent) && /API Error/i.test(cleanContent);
+
+    if (needsSessionFix && hasInputPromptForError) {
+      // 不自动操作，让 server/index.js 的 ClaudeSessionFixer 来处理
+      console.log('[AIEngine] 检测到需要修复的 API 错误（thinking block/tool_use_id），交给修复流程处理');
+      return {
+        currentState: 'API错误需要修复',
+        workingDir: '未显示',
+        recentAction: 'API调用失败',
+        needsAction: false,  // 不自动操作
+        actionType: 'none',
+        suggestedAction: null,
+        actionReason: '检测到 thinking block 签名错误，需要修复会话历史',
+        suggestion: '等待自动修复流程执行',
+        updatedAt: new Date().toISOString(),
+        preAnalyzed: true,
+        detectedCLI,
+        needsSessionFix: true  // 标记需要修复
+      };
+    }
+
+    // 可重试的 API 错误（如 rate_limit）
+    const hasRetryableError = /API Error.*rate_limit/i.test(cleanContent) ||
+                              /API Error.*overloaded/i.test(cleanContent) ||
+                              /API Error.*5\d{2}/i.test(cleanContent);  // 5xx 服务器错误
+
+    if (hasRetryableError && hasInputPromptForError) {
+      console.log('[AIEngine] 检测到可重试的 API 错误，发送"继续"重试');
+      return {
+        currentState: 'API错误可重试',
+        workingDir: '未显示',
+        recentAction: 'API调用失败',
+        needsAction: true,
+        actionType: 'text_input',
+        suggestedAction: '继续',
+        actionReason: '检测到可重试的 API 错误，自动发送"继续"重试',
+        suggestion: null,
+        updatedAt: new Date().toISOString(),
+        preAnalyzed: true,
+        detectedCLI
+      };
+    }
+
+    // 3. 先检测询问问题状态（优先级高于编辑确认）
+    // 因为状态栏的 "shift+tab to cycle" 始终存在，不能仅凭此判断编辑确认
+    const last1000Chars = terminalContent.slice(-1000);
+    const cleanLast1000 = last1000Chars.replace(/\x1b\[[0-9;]*m/g, '');
+    const hasInputPromptEarly = /^>\s*$/m.test(cleanLast1000) || />\s*\|/.test(cleanLast1000) || /\n>\s*$/.test(cleanLast1000);
+
+    if (hasInputPromptEarly) {
+      // 检测"是否需要..."类询问 - 应该自动回答"继续"或让用户决定
+      const isNeedQuestion = /是否需要.{0,50}[？?]/i.test(cleanLast1000);
+      if (isNeedQuestion) {
+        console.log('[AIEngine] 检测到"是否需要..."询问，建议用户回复');
+        return {
+          currentState: 'Claude Code询问下一步',
+          workingDir: '未显示',
+          recentAction: '显示询问',
+          needsAction: true,
+          actionType: 'text_input',
+          suggestedAction: '继续',
+          actionReason: '检测到询问，建议继续执行',
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI
+        };
+      }
+
+      // 检测"是否继续"类问题 - 应该自动回答"继续"
+      const isContinueQuestionEarly = /是否继续.{0,20}[？?]/i.test(cleanLast1000);
+      if (isContinueQuestionEarly) {
+        console.log('[AIEngine] 检测到"是否继续"问题，自动回答继续');
+        return {
+          currentState: 'Claude Code询问是否继续',
+          workingDir: '未显示',
+          recentAction: '显示问题',
+          needsAction: true,
+          actionType: 'text_input',
+          suggestedAction: '继续',
+          actionReason: '自动回答继续以保持工作流程',
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI
+        };
+      }
+
+      // 检测"请告知..."类询问 - 需要用户输入
+      const isAskForInput = /请告知.{0,30}[。？?]/i.test(cleanLast1000);
+      if (isAskForInput) {
+        console.log('[AIEngine] 检测到"请告知..."询问，等待用户输入');
+        return {
+          currentState: '等待用户输入',
+          workingDir: '未显示',
+          recentAction: '显示询问',
+          needsAction: false,
+          actionType: 'none',
+          suggestedAction: null,
+          actionReason: '等待用户提供信息，不自动操作',
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI
+        };
+      }
+    }
+
+    // 4. 检测 Claude Code 编辑确认界面（>> accept edits on）
+    // 注意：必须有 ">>" 双箭头才是真正的编辑确认界面
+    // 单独的 "shift+tab to cycle" 只是状态栏提示，不代表有编辑等待确认
+    // 真正的编辑确认界面会显示文件路径和 diff 内容
+    const hasDoubleArrow = /^>>\s/m.test(cleanContent) || /\n>>\s/m.test(cleanContent);
+    const hasEditContent = /\+\+\+|---|\@\@.*\@\@/m.test(cleanContent); // diff 格式
+    if (hasDoubleArrow && (hasEditContent || /accept edits/i.test(cleanContent))) {
+      console.log('[AIEngine] 检测到 Claude Code 编辑确认界面(Tab模式)，等待用户确认');
+      return {
+        currentState: 'Claude Code等待编辑确认',
+        workingDir: '未显示',
+        recentAction: '等待用户按Tab确认编辑',
+        needsAction: false,
+        actionType: 'none',
+        suggestedAction: null,
+        actionReason: '用户需要按 Tab 键确认或拒绝编辑，不自动操作',
+        suggestion: null,
+        updatedAt: new Date().toISOString(),
+        preAnalyzed: true,
+        detectedCLI
+      };
+    }
+
+    // 5. 检测普通确认界面（Do you want to proceed?）
     // 如果有选项 2，选择 2（允许本次会话不再询问）；否则选择 1
     if (/Do you want to proceed\?/i.test(cleanContent) &&
         /1\.\s*Yes/i.test(cleanContent)) {
@@ -836,40 +1073,21 @@ ${historyText || '(空)'}
       };
     }
 
-    // 2.5 检测 Claude Code 编辑确认状态
-    // 当显示 "accept edits on" 时，说明 Claude Code 正在等待用户确认编辑
-    // 此时不应该给出任何 shell 命令建议
-    if (/accept edits on/i.test(cleanContent)) {
+    // 2.6 检测 Claude Code 空闲状态
+    // 当显示 "> " 单箭头提示符时，说明 Claude Code 处于空闲状态，等待用户输入
+    // 注意："accept edits on" 底部状态栏是正常状态，但 ">> accept edits" 双箭头是编辑确认界面
+    // 重要：必须排除 ">> accept edits" 和 "shift+tab to cycle" 的情况
+    const hasPrompt = /^>\s*$/m.test(cleanContent) || /\n>\s*$/m.test(cleanContent);
+    const isEditConfirmMode = />>.*accept edits/i.test(cleanContent) || /shift\+tab to cycle/i.test(cleanContent);
+    if (hasPrompt && /accept edits/i.test(cleanContent) && !isEditConfirmMode) {
       return {
-        currentState: 'Claude Code等待确认编辑',
+        currentState: 'Claude Code空闲中',
         workingDir: '未显示',
-        recentAction: '等待编辑确认',
+        recentAction: '等待用户输入',
         needsAction: false,
         actionType: 'none',
         suggestedAction: null,
-        actionReason: 'Claude Code正在等待用户确认或拒绝编辑建议',
-        suggestion: null,
-        updatedAt: new Date().toISOString(),
-        preAnalyzed: true,
-        detectedCLI
-      };
-    }
-
-    // 2.6 检测程序运行中
-    // 当显示 "esc to interrupt" 或运行时间（如 1h 8m 37s）时，说明程序正在运行
-    // 注意：使用清理后的内容进行检测
-    const isRunning = /esc to interrupt/i.test(cleanContent) ||
-                      /\d+[msh]\s+\d+[msh]/.test(cleanContent) ||
-                      /ctrl\+t to show todos/i.test(cleanContent);
-    if (isRunning) {
-      return {
-        currentState: '程序运行中',
-        workingDir: '未显示',
-        recentAction: '执行中',
-        needsAction: false,
-        actionType: 'none',
-        suggestedAction: null,
-        actionReason: '程序正在运行，不应打断',
+        actionReason: 'Claude Code已完成任务，等待用户输入新指令',
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
@@ -982,7 +1200,10 @@ ${historyText || '(空)'}
       };
     }
 
-    // 5. 检测连续错误（需要暂停自动运行）
+    // 5. 检测连续错误（尝试自动修复，不关闭自动开关）
+    // 只检查最近 30 行内容，避免被历史错误干扰
+    const recentLines = cleanContent.split('\n').slice(-30).join('\n');
+
     // 统计错误出现次数
     const errorPatterns = [
       /Error writing file/gi,
@@ -993,27 +1214,69 @@ ${historyText || '(空)'}
     ];
     let totalErrors = 0;
     for (const pattern of errorPatterns) {
-      const matches = terminalContent.match(pattern);
+      const matches = recentLines.match(pattern);
       if (matches) {
         totalErrors += matches.length;
       }
     }
-    // 如果错误出现 3 次或以上，暂停自动运行
+
+    // 检测是否是 thinking block 相关错误（需要启动修复程序）
+    const isThinkingError = /invalid.*signature.*in.*thinking/i.test(recentLines) ||
+                            /thinking.*block.*not.*allowed/i.test(recentLines) ||
+                            /invalid.*thinking.*block/i.test(recentLines);
+
+    // 检测是否是频率限制错误（只需等待重试）
+    const isRateLimitError = /请求过于频繁|rate.?limit|too many requests|429/i.test(recentLines);
+
+    // 检测是否是服务器不可用错误（需要切换供应商）
+    const isServerUnavailable = /服务器不可用|server.*unavailable|502|503|504|service.*unavailable/i.test(recentLines);
+
+    // 检测是否是余额不足错误（需要切换供应商）
+    const isInsufficientBalance = /余额不足|insufficient.*balance|quota.*exceeded|credit.*exhausted/i.test(recentLines);
+
+    // 如果错误出现 3 次或以上，尝试自动修复（不关闭自动开关）
     if (totalErrors >= 3) {
-      console.log(`[AIEngine] 检测到连续错误 (${totalErrors}次)，建议暂停自动运行`);
+      let suggestion = '等待 60 秒后自动重试';
+      let autoFixAction = 'wait_and_retry';  // 默认等待重试
+
+      // 只有服务器不可用或余额不足才切换供应商
+      if (isServerUnavailable) {
+        suggestion = '服务器不可用，需要切换供应商';
+        autoFixAction = 'switch_provider';
+      } else if (isInsufficientBalance) {
+        suggestion = '余额不足，需要切换供应商';
+        autoFixAction = 'switch_provider';
+      } else if (isThinkingError) {
+        suggestion = 'thinking 模式不兼容，启动修复程序';
+        autoFixAction = 'run_fixer';  // 启动修复程序
+      }
+      // 频率限制和其他错误都只等待重试
+
+      const errorType = isServerUnavailable ? '服务器不可用' :
+                        isInsufficientBalance ? '余额不足' :
+                        isThinkingError ? 'thinking错误' :
+                        isRateLimitError ? '频率限制' : '普通错误';
+
+      console.log(`[AIEngine] 检测到连续错误 (${totalErrors}次)，类型: ${errorType}，修复策略: ${autoFixAction}`);
       return {
         currentState: '连续错误',
         workingDir: '未显示',
         recentAction: '多次错误',
-        needsAction: false,
-        actionType: 'none',
+        needsAction: true,
+        actionType: 'auto_fix',
         suggestedAction: null,
-        actionReason: `检测到 ${totalErrors} 次错误，暂停自动运行以避免无限循环`,
-        suggestion: '请检查 API 连接或手动处理错误',
+        actionReason: `检测到 ${totalErrors} 次错误，${suggestion}`,
+        suggestion,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
         detectedCLI,
-        shouldPauseAutoAction: true  // 标记需要暂停自动操作
+        shouldAutoFix: true,
+        autoFixAction,
+        isServerUnavailable,
+        isInsufficientBalance,
+        isThinkingError,
+        isRateLimitError,
+        errorCount: totalErrors
       };
     }
 
@@ -1057,20 +1320,25 @@ ${historyText || '(空)'}
       };
     }
 
-    // 7. 检测Shell命令行（需要重启 CLI 工具）
-    const shellPromptPattern = /^[\$%#]\s*$/m;
-    if (shellPromptPattern.test(terminalContent) &&
-        !/>\s*$/.test(terminalContent)) {
+    // 7. 检测Shell命令行（CLI 已退出，不需要紧急操作）
+    // 匹配常见 shell 提示符格式：
+    // - user@host path % (zsh)
+    // - user@host:path$ (bash)
+    // - 单独的 $ % # 符号
+    const isShellPrompt = /\w+@\w+.*[%$#]\s*$/.test(cleanContent) ||  // user@host ... %
+                          /^[\$%#]\s*$/m.test(cleanContent);           // 单独的 $ % #
+
+    if (isShellPrompt && !/^>\s*$/m.test(cleanContent)) {
       const cliName = getCliName(aiType);
       return {
         currentState: 'Shell命令行',
         workingDir: '未显示',
         recentAction: `${cliName}已退出`,
-        needsAction: true,
-        actionType: 'shell_command',
-        suggestedAction: getCliCommand(aiType),
-        actionReason: `重新启动${cliName}继续开发`,
-        suggestion: null,
+        needsAction: false,
+        actionType: 'none',
+        suggestedAction: null,
+        actionReason: null,
+        suggestion: `可输入 ${getCliCommand(aiType)} 重新启动${cliName}`,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
         detectedCLI

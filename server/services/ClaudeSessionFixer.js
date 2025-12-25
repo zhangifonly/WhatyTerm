@@ -35,7 +35,9 @@ class ClaudeSessionFixer {
       /interleaved.*thinking.*error/i,
       /API Error:\s*400.*thinking/i,
       /invalid.*thinking.*block/i,
-      /invalid.*signature.*in.*thinking/i,  // 新增：thinking block 签名错误
+      /invalid.*signature.*in.*thinking/i,  // thinking block 签名错误
+      /thinking\.signature.*Field required/i,  // 新增：thinking.signature: Field required
+      /signature.*Field required/i,  // 新增：通用签名字段缺失
       // 通用会话污染错误
       /unexpected.*content.*type/i,
       /invalid.*message.*format/i
@@ -153,12 +155,36 @@ class ClaudeSessionFixer {
           if (data.message && data.message.content && Array.isArray(data.message.content)) {
             const originalLen = data.message.content.length;
 
-            // 移除 thinking 类型的内容块
-            data.message.content = data.message.content.filter(c =>
-              !(typeof c === 'object' && c.type === 'thinking')
-            );
+            // 移除 thinking 类型的内容块（完全移除，包括有 signature 的）
+            data.message.content = data.message.content.filter(c => {
+              if (typeof c === 'object' && c.type === 'thinking') {
+                return false;  // 移除所有 thinking blocks
+              }
+              // 也移除可能残留的 signature 字段
+              if (typeof c === 'object' && c.signature) {
+                delete c.signature;
+              }
+              return true;
+            });
 
             removedCount += originalLen - data.message.content.length;
+          }
+
+          // 也检查顶层 content 数组（某些格式）
+          if (data.content && Array.isArray(data.content)) {
+            const originalLen = data.content.length;
+
+            data.content = data.content.filter(c => {
+              if (typeof c === 'object' && c.type === 'thinking') {
+                return false;
+              }
+              if (typeof c === 'object' && c.signature) {
+                delete c.signature;
+              }
+              return true;
+            });
+
+            removedCount += originalLen - data.content.length;
           }
 
           fixedLines.push(JSON.stringify(data) + '\n');
