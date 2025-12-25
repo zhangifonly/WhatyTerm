@@ -1221,10 +1221,26 @@ body {
 
 /* 设置模态框 */
 .settings-modal {
-  width: 500px !important;
-  max-height: 90vh;
+  width: 900px !important;
+  max-width: 95vw;
+  height: 80vh;
+  max-height: 800px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 标签栏固定在顶部 */
+.settings-modal .settings-tabs {
+  flex-shrink: 0;
+}
+
+/* 内容区域滚动 */
+.settings-modal .settings-content {
+  flex: 1;
   overflow-y: auto;
   overflow-x: visible;
+  padding-bottom: 20px;
 }
 
 /* 确保 select 下拉菜单不被截断 */
@@ -1236,12 +1252,6 @@ body {
 .settings-modal .form-group {
   position: relative;
   overflow: visible;
-}
-
-/* API 配置标签页时使用更宽的模态框 */
-.settings-modal.api-tab {
-  width: 900px !important;
-  max-width: 95vw;
 }
 
 .settings-modal select {
@@ -1738,20 +1748,25 @@ body {
 /* 设置页面标签页 */
 .settings-tabs {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   margin-bottom: 20px;
   border-bottom: 1px solid hsl(var(--border));
   padding-bottom: 12px;
+  overflow-x: auto;
+  flex-wrap: nowrap;
 }
 
 .tab-btn {
   background: transparent;
   border: none;
   color: hsl(var(--muted-foreground));
-  padding: 8px 16px;
+  padding: 8px 14px;
   cursor: pointer;
   border-radius: 4px;
   transition: all 0.2s;
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-size: 13px;
 }
 
 .tab-btn:hover {
@@ -2930,17 +2945,15 @@ body {
     font-size: 12px;
   }
 
-  /* 设置对话框标签页 */
+  /* 设置对话框标签页 - 小屏幕横向滚动 */
   .settings-tabs {
-    flex-wrap: wrap;
     gap: 4px;
+    padding-bottom: 8px;
   }
 
   .tab-btn {
-    padding: 8px 12px;
+    padding: 6px 10px;
     font-size: 12px;
-    flex: 1;
-    min-width: 80px;
   }
 
   /* 表单 */

@@ -2081,6 +2081,7 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
           </button>
         </div>
 
+        <div className="settings-content">
         {activeTab === 'ai' && (
           <form onSubmit={(e) => {
             e.preventDefault();
@@ -2656,6 +2657,7 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
         {activeTab === 'about' && (
           <AboutPage socket={socket} onClose={onClose} />
         )}
+        </div>
       </div>
     </div>
   );
