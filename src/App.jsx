@@ -5,6 +5,11 @@ import { FitAddon } from '@xterm/addon-fit';
 import Anser from 'anser';
 import { ToastContainer, toast } from './components/Toast';
 import { useTranslation } from './i18n';
+import ScheduleManager from './components/ScheduleManager';
+import ClosedSessionsList from './components/ClosedSessionsList';
+import RecentProjects from './components/RecentProjects';
+import CliToolsManager from './components/CliToolsManager';
+import ProviderPriority from './components/ProviderPriority';
 
 const socket = io();
 
@@ -106,14 +111,17 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [editingGoal, setEditingGoal] = useState(false);
   const [goalInput, setGoalInput] = useState('');
+  const [generatingGoal, setGeneratingGoal] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showScheduleManager, setShowScheduleManager] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [aiPanelCollapsed, setAiPanelCollapsed] = useState(false);
   const [aiSettings, setAiSettings] = useState({
     model: 'sonnet',
     apiUrl: 'https://agent-ai.webtrn.cn/v1/chat/completions',
     maxTokens: 500,
-    temperature: 0.7
+    temperature: 0.7,
+    showSuggestions: false  // 默认关闭 AI 建议弹窗
   });
   const [tunnelUrl, setTunnelUrl] = useState('');
   const [showQRCode, setShowQRCode] = useState(false);
@@ -404,6 +412,11 @@ export default function App() {
       setAiStatusMap(prev => ({ ...prev, [data.sessionId]: data }));
       setAiStatusLoading(prev => ({ ...prev, [data.sessionId]: false }));
       addDebugLog('response', data);
+
+      // 当状态是不需要操作时（如程序运行中），清除当前会话的旧建议
+      if (data.needsAction === false && data.sessionId === currentSessionRef.current?.id) {
+        setSuggestion(null);
+      }
     });
 
     socket.on('ai:statusLoading', (data) => {
@@ -651,6 +664,29 @@ export default function App() {
     setShowCreateModal(false);
   };
 
+  // 打开最近项目（如果已有会话则切换，否则创建新会话）
+  const handleOpenRecentProject = (project) => {
+    // 检查是否有现有会话在该项目目录下工作
+    const existingSession = sessions.find(s => s.workingDir === project.path);
+
+    if (existingSession) {
+      // 已有会话，直接切换
+      console.log(`[App] 项目 ${project.name} 已有会话 ${existingSession.id}，切换过去`);
+      attachSession(existingSession.id);
+    } else {
+      // 没有现有会话，创建新会话
+      const sessionData = {
+        name: project.name,
+        aiType: project.aiType,
+        workingDir: project.path,
+        projectName: project.name,
+        projectDesc: `Continue ${project.aiType} session`,
+        resumeCommand: project.resumeCommand
+      };
+      socket.emit('session:createAndResume', sessionData);
+    }
+  };
+
   // 执行 AI 建议
   const executeSuggestion = () => {
     if (suggestion && currentSession) {
@@ -678,6 +714,36 @@ export default function App() {
       setSuggestion(null);
     }
     setEditingGoal(false);
+  };
+
+  // AI 生成目标
+  const handleGenerateGoal = () => {
+    if (!currentSession || generatingGoal) return;
+
+    setGeneratingGoal(true);
+    socket.emit('goal:generate', {
+      sessionId: currentSession.id
+    });
+
+    // 监听生成结果
+    const handleGoalGenerated = (data) => {
+      if (data.sessionId === currentSession.id) {
+        setGeneratingGoal(false);
+        if (data.goal) {
+          setGoalInput(data.goal);
+          setEditingGoal(true);  // 打开编辑模式让用户确认
+        }
+        socket.off('goal:generated', handleGoalGenerated);
+      }
+    };
+
+    socket.on('goal:generated', handleGoalGenerated);
+
+    // 超时处理
+    setTimeout(() => {
+      setGeneratingGoal(false);
+      socket.off('goal:generated', handleGoalGenerated);
+    }, 30000);
   };
 
   // 保存 AI 设置
@@ -726,7 +792,13 @@ export default function App() {
           {sidebarCollapsed ? '›' : '‹'}
         </button>
         <div className="sidebar-header">
-          <h1>{t('app.title')} <span style={{ fontSize: '14px', opacity: 0.7, fontWeight: 'normal' }}>{t('app.subtitle')}</span></h1>
+          <h1
+            onClick={() => setCurrentSession(null)}
+            style={{ cursor: 'pointer' }}
+            title={t('welcome.startHint')}
+          >
+            {t('app.title')} <span style={{ fontSize: '14px', opacity: 0.7, fontWeight: 'normal' }}>{t('app.subtitle')}</span>
+          </h1>
           <button className="btn btn-primary btn-small" onClick={() => setShowCreateModal(true)}>
             {t('sidebar.newSession')}
           </button>
@@ -736,9 +808,13 @@ export default function App() {
           {sessions.map((session) => (
             <div
               key={session.id}
-              className={`session-item ${currentSession?.id === session.id ? 'active' : ''}`}
+              className={`session-item ${currentSession?.id === session.id ? 'active' : ''} ${aiStatusMap[session.id]?.needsAction && !session.autoActionEnabled ? 'needs-action' : ''}`}
               onClick={() => attachSession(session.id)}
             >
+              {/* 需要操作时显示红色徽章（自动模式开启时不显示，因为会自动处理） */}
+              {aiStatusMap[session.id]?.needsAction && !session.autoActionEnabled && (
+                <span className="action-badge" title={aiStatusMap[session.id]?.suggestedAction || '需要操作'} />
+              )}
               <div className="session-header">
                 <div className="session-name">
                   <span className={`session-status ${session.autoActionEnabled ? 'auto' : 'paused'}`} />
@@ -748,14 +824,12 @@ export default function App() {
                   className="btn-delete"
                   onClick={(e) => {
                     e.stopPropagation();
-                    {
-                      socket.emit('session:delete', session.id);
-                      if (currentSession?.id === session.id) {
-                        setCurrentSession(null);
-                      }
+                    socket.emit('session:close', session.id);
+                    if (currentSession?.id === session.id) {
+                      setCurrentSession(null);
                     }
                   }}
-                  title={t('sidebar.deleteSession')}
+                  title={t('sidebar.closeSession')}
                 >
                   ×
                 </button>
@@ -810,8 +884,12 @@ export default function App() {
           <div className="terminal-container">
             <div className="terminal-wrapper" ref={terminalRef} />
 
-            {/* AI 建议卡片 - 仅在非自动模式下显示 */}
-            {suggestion && !currentSession.autoActionEnabled && (
+            {/* AI 建议卡片 - 仅在开启建议显示、非自动模式下显示，且 AI 状态允许操作 */}
+            {suggestion && aiSettings.showSuggestions && !currentSession.autoActionEnabled &&
+             aiStatusMap[currentSession.id]?.needsAction !== false &&
+             !aiStatusMap[currentSession.id]?.currentState?.includes('等待') &&
+             !aiStatusMap[currentSession.id]?.currentState?.includes('运行中') &&
+             aiStatusMap[currentSession.id]?.currentState !== '确认界面' && (
               <div className="ai-suggestion">
                 <div className="ai-suggestion-header">
                   <span className="ai-suggestion-title">
@@ -918,6 +996,28 @@ export default function App() {
                       {t('goal.title')}: {currentSession.goal || t('goal.notSet')}
                     </span>
                     <div className="settings-actions">
+                      <button
+                        className="btn btn-secondary btn-small btn-icon"
+                        onClick={handleGenerateGoal}
+                        disabled={generatingGoal}
+                        title="AI 生成目标"
+                      >
+                        {generatingGoal ? (
+                          <span className="loading-spinner-small"></span>
+                        ) : (
+                          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M15 4V2"/>
+                            <path d="M15 16v-2"/>
+                            <path d="M8 9h2"/>
+                            <path d="M20 9h2"/>
+                            <path d="M17.8 11.8 19 13"/>
+                            <path d="M15 9h0"/>
+                            <path d="M17.8 6.2 19 5"/>
+                            <path d="m3 21 9-9"/>
+                            <path d="M12.2 6.2 11 5"/>
+                          </svg>
+                        )}
+                      </button>
                       <button className="btn btn-secondary btn-small" onClick={startEditGoal}>
                         修改
                       </button>
@@ -932,42 +1032,148 @@ export default function App() {
           </div>
         ) : (
           <div className="empty-state welcome-page">
-            <h2>{t('app.welcome')}</h2>
-            <p className="welcome-subtitle">{t('app.description')}</p>
+            {/* 顶部标题区 */}
+            <div className="welcome-header">
+              <h2>{t('app.welcome')}</h2>
+              <p className="welcome-subtitle">{t('app.description')}</p>
+              <button
+                className="btn btn-primary welcome-start-btn"
+                onClick={() => setShowCreateModal(true)}
+              >
+                + {t('session.createNew')}
+              </button>
+            </div>
 
-            <div className="welcome-features">
-              <div className="feature-section">
-                <h3>{t('welcome.coreFeatures')}</h3>
-                <ul>
-                  <li><strong>{t('welcome.aiMonitoring')}</strong> - {t('welcome.aiMonitoringDesc')}</li>
-                  <li><strong>{t('welcome.automation')}</strong> - {t('welcome.automationDesc')}</li>
-                  <li><strong>{t('welcome.multiSession')}</strong> - {t('welcome.multiSessionDesc')}</li>
-                  <li><strong>{t('welcome.remoteAccess')}</strong> - {t('welcome.remoteAccessDesc')}</li>
-                </ul>
+            {/* 三栏内容区 */}
+            <div className="welcome-content">
+              {/* 左栏：最近项目 */}
+              <div className="welcome-column">
+                <div className="welcome-card">
+                  <h3 className="welcome-card-title">{t('recentProjects.title')}</h3>
+                  <RecentProjects
+                    socket={socket}
+                    onOpenProject={(project) => {
+                      handleOpenRecentProject(project);
+                    }}
+                    compact={true}
+                  />
+                </div>
+
+                <div className="welcome-card">
+                  <h3 className="welcome-card-title">{t('closedSessions.title')}</h3>
+                  <ClosedSessionsList
+                    socket={socket}
+                    onRestore={(session) => {
+                      if (session?.id) {
+                        attachSession(session.id);
+                      }
+                    }}
+                    compact={true}
+                  />
+                </div>
               </div>
 
-              <div className="feature-section">
-                <h3>{t('welcome.usageTips')}</h3>
-                <ul>
-                  <li><strong>{t('welcome.createSession')}</strong> - {t('welcome.createSessionDesc')}</li>
-                  <li><strong>{t('welcome.aiSwitch')}</strong> - {t('welcome.aiSwitchDesc')}</li>
-                  <li><strong>{t('welcome.autoMode')}</strong> - {t('welcome.autoModeDesc')}</li>
-                  <li><strong>{t('welcome.manualConfirm')}</strong> - {t('welcome.manualConfirmDesc')}</li>
-                </ul>
+              {/* 中栏：核心功能 */}
+              <div className="welcome-column">
+                <div className="welcome-card feature-card">
+                  <h3 className="welcome-card-title">{t('welcome.coreFeatures')}</h3>
+                  <div className="feature-grid">
+                    <div className="feature-item">
+                      <div className="feature-icon-box">🤖</div>
+                      <div className="feature-content">
+                        <strong>{t('welcome.aiMonitoring')}</strong>
+                        <p>{t('welcome.aiMonitoringDesc')}</p>
+                      </div>
+                    </div>
+                    <div className="feature-item">
+                      <div className="feature-icon-box">⚡</div>
+                      <div className="feature-content">
+                        <strong>{t('welcome.automation')}</strong>
+                        <p>{t('welcome.automationDesc')}</p>
+                      </div>
+                    </div>
+                    <div className="feature-item">
+                      <div className="feature-icon-box">📱</div>
+                      <div className="feature-content">
+                        <strong>{t('welcome.multiSession')}</strong>
+                        <p>{t('welcome.multiSessionDesc')}</p>
+                      </div>
+                    </div>
+                    <div className="feature-item">
+                      <div className="feature-icon-box">🌐</div>
+                      <div className="feature-content">
+                        <strong>{t('welcome.remoteAccess')}</strong>
+                        <p>{t('welcome.remoteAccessDesc')}</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
 
-              <div className="feature-section">
-                <h3>{t('welcome.shortcuts')}</h3>
-                <ul>
-                  <li><strong>{t('welcome.settings')}</strong> - {t('welcome.settingsDesc')}</li>
-                  <li><strong>{t('welcome.terminalInput')}</strong> - {t('welcome.terminalInputDesc')}</li>
-                  <li><strong>{t('welcome.sessionSwitch')}</strong> - {t('welcome.sessionSwitchDesc')}</li>
-                  <li><strong>{t('welcome.statusPanel')}</strong> - {t('welcome.statusPanelDesc')}</li>
-                </ul>
+              {/* 右栏：使用指南 */}
+              <div className="welcome-column">
+                <div className="welcome-card">
+                  <h3 className="welcome-card-title">{t('welcome.usageTips')}</h3>
+                  <div className="tips-list">
+                    <div className="tip-item">
+                      <span className="tip-number">1</span>
+                      <div className="tip-content">
+                        <strong>{t('welcome.createSession')}</strong>
+                        <p>{t('welcome.createSessionDesc')}</p>
+                      </div>
+                    </div>
+                    <div className="tip-item">
+                      <span className="tip-number">2</span>
+                      <div className="tip-content">
+                        <strong>{t('welcome.aiSwitch')}</strong>
+                        <p>{t('welcome.aiSwitchDesc')}</p>
+                      </div>
+                    </div>
+                    <div className="tip-item">
+                      <span className="tip-number">3</span>
+                      <div className="tip-content">
+                        <strong>{t('welcome.autoMode')}</strong>
+                        <p>{t('welcome.autoModeDesc')}</p>
+                      </div>
+                    </div>
+                    <div className="tip-item">
+                      <span className="tip-number">4</span>
+                      <div className="tip-content">
+                        <strong>{t('welcome.manualConfirm')}</strong>
+                        <p>{t('welcome.manualConfirmDesc')}</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="welcome-card">
+                  <h3 className="welcome-card-title">{t('welcome.shortcuts')}</h3>
+                  <div className="shortcuts-list">
+                    <div className="shortcut-item">
+                      <span className="shortcut-key">{t('welcome.settings')}</span>
+                      <span className="shortcut-desc">{t('welcome.settingsDesc')}</span>
+                    </div>
+                    <div className="shortcut-item">
+                      <span className="shortcut-key">{t('welcome.terminalInput')}</span>
+                      <span className="shortcut-desc">{t('welcome.terminalInputDesc')}</span>
+                    </div>
+                    <div className="shortcut-item">
+                      <span className="shortcut-key">{t('welcome.sessionSwitch')}</span>
+                      <span className="shortcut-desc">{t('welcome.sessionSwitchDesc')}</span>
+                    </div>
+                    <div className="shortcut-item">
+                      <span className="shortcut-key">{t('welcome.statusPanel')}</span>
+                      <span className="shortcut-desc">{t('welcome.statusPanelDesc')}</span>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
 
-            <p className="welcome-hint">{t('welcome.startHint')}</p>
+            {/* 底部提示 */}
+            <div className="welcome-footer">
+              <p>{t('welcome.startHint')}</p>
+            </div>
           </div>
         )}
       </main>
@@ -1427,10 +1633,17 @@ export default function App() {
             </button>
             <button
               className="btn btn-secondary btn-small"
+              onClick={() => setShowScheduleManager(true)}
+              title={t('schedule.title')}
+            >
+              📅 {t('schedule.manage')}
+            </button>
+            <button
+              className="btn btn-secondary btn-small"
               onClick={() => socket.emit('ai:requestStatus', { sessionId: currentSession.id })}
               disabled={aiStatusLoading[currentSession.id]}
             >
-              AI决策
+              {t('controls.analyzeNow')}
             </button>
             <button
               className="btn btn-secondary btn-small"
@@ -1528,6 +1741,15 @@ export default function App() {
           tunnelUrl={tunnelUrl}
           onTunnelUrlChange={saveTunnelUrl}
           socket={socket}
+        />
+      )}
+
+      {/* 预约管理器 */}
+      {showScheduleManager && currentSession && (
+        <ScheduleManager
+          socket={socket}
+          sessionId={currentSession.id}
+          onClose={() => setShowScheduleManager(false)}
         />
       )}
     </div>
@@ -1838,6 +2060,18 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
             onClick={() => setActiveTab('interface')}
           >
             {t('settings.interface')}
+          </button>
+          <button
+            className={`tab-btn ${activeTab === 'cli-tools' ? 'active' : ''}`}
+            onClick={() => setActiveTab('cli-tools')}
+          >
+            CLI 工具
+          </button>
+          <button
+            className={`tab-btn ${activeTab === 'provider-priority' ? 'active' : ''}`}
+            onClick={() => setActiveTab('provider-priority')}
+          >
+            供应商切换
           </button>
           <button
             className={`tab-btn ${activeTab === 'about' ? 'active' : ''}`}
@@ -2183,6 +2417,23 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
                 />
               </div>
             </div>
+
+            {/* AI 建议弹窗开关 */}
+            <div className="form-group" style={{ marginTop: '16px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={settings.showSuggestions || false}
+                  onChange={(e) => updateField('showSuggestions', e.target.checked)}
+                  style={{ width: '16px', height: '16px' }}
+                />
+                <span>显示 AI 建议弹窗</span>
+              </label>
+              <small style={{ color: '#888', fontSize: '12px', marginTop: '4px', display: 'block' }}>
+                关闭后，AI 分析结果仅在右侧面板显示，不会弹出建议卡片
+              </small>
+            </div>
+
             <div className="modal-actions">
               <button type="button" className="btn btn-secondary" onClick={onClose}>
                 取消
@@ -2392,6 +2643,14 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
               </button>
             </div>
           </div>
+        )}
+
+        {activeTab === 'cli-tools' && (
+          <CliToolsManager />
+        )}
+
+        {activeTab === 'provider-priority' && (
+          <ProviderPriority />
         )}
 
         {activeTab === 'about' && (

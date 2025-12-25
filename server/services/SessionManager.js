@@ -510,6 +510,26 @@ export class SessionManager {
         updated_at TEXT
       )
     `);
+
+    // 创建关闭会话表（用于恢复功能）
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS closed_sessions (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        tmux_session_name TEXT,
+        goal TEXT,
+        system_prompt TEXT,
+        ai_enabled INTEGER DEFAULT 1,
+        auto_mode INTEGER DEFAULT 0,
+        auto_action_enabled INTEGER DEFAULT 0,
+        ai_type TEXT DEFAULT 'claude',
+        project_name TEXT,
+        project_desc TEXT,
+        work_dir TEXT,
+        closed_at INTEGER NOT NULL
+      )
+    `);
+
     // 添加新字段（如果不存在）
     try {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN auto_action_enabled INTEGER DEFAULT 0`);
@@ -673,6 +693,226 @@ export class SessionManager {
 
     // 保存到数据库
     this._saveSession(session);
+  }
+
+  /**
+   * 关闭会话（可恢复）
+   * 保留 tmux 会话，将会话信息保存到 closed_sessions 表
+   */
+  closeSession(id) {
+    const session = this.sessions.get(id);
+    if (!session) {
+      return { success: false, error: '会话不存在' };
+    }
+
+    try {
+      // 停止 pty 但不杀 tmux 会话
+      session.destroy();
+
+      // 保存到 closed_sessions 表
+      const stmt = this.db.prepare(`
+        INSERT OR REPLACE INTO closed_sessions
+        (id, name, tmux_session_name, goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, ai_type, project_name, project_desc, work_dir, closed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      stmt.run(
+        session.id,
+        session.name,
+        session.tmuxSessionName,
+        session.goal || '',
+        session.systemPrompt || '',
+        session.aiEnabled ? 1 : 0,
+        session.autoMode ? 1 : 0,
+        session.autoActionEnabled ? 1 : 0,
+        session.aiType || 'claude',
+        session.projectName || '',
+        session.projectDesc || '',
+        session.workDir || '',
+        Date.now()
+      );
+
+      // 从 sessions 表中删除
+      const deleteStmt = this.db.prepare('DELETE FROM sessions WHERE id = ?');
+      deleteStmt.run(id);
+
+      // 从内存中移除
+      this.sessions.delete(id);
+
+      console.log(`[SessionManager] 会话已关闭（可恢复）: ${session.name}`);
+      return { success: true, closedSession: this._getClosedSessionById(id) };
+    } catch (error) {
+      console.error('[SessionManager] 关闭会话失败:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * 恢复关闭的会话
+   */
+  restoreSession(closedSessionId) {
+    try {
+      const closedSession = this._getClosedSessionById(closedSessionId);
+      if (!closedSession) {
+        return { success: false, error: '关闭的会话不存在' };
+      }
+
+      // 检查 tmux 会话是否还存在
+      let tmuxExists = false;
+      try {
+        execSync(`tmux has-session -t ${closedSession.tmuxSessionName} 2>/dev/null`);
+        tmuxExists = true;
+      } catch {
+        tmuxExists = false;
+      }
+
+      if (!tmuxExists) {
+        // tmux 会话已失效，删除记录并返回错误
+        this.deleteClosedSession(closedSessionId);
+        return { success: false, error: '会话已失效，tmux 进程不存在', expired: true };
+      }
+
+      // 创建新的 Session 对象并恢复
+      const session = new Session({
+        id: closedSession.id,
+        name: closedSession.name,
+        tmuxSessionName: closedSession.tmuxSessionName,
+        goal: closedSession.goal,
+        systemPrompt: closedSession.systemPrompt,
+        aiEnabled: closedSession.aiEnabled,
+        autoMode: closedSession.autoMode,
+        autoActionEnabled: closedSession.autoActionEnabled,
+        aiType: closedSession.aiType,
+        projectName: closedSession.projectName,
+        projectDesc: closedSession.projectDesc,
+        workDir: closedSession.workDir,
+        isNew: false,
+        skipPty: false
+      });
+
+      // 添加到内存
+      this.sessions.set(session.id, session);
+
+      // 保存到 sessions 表
+      this._saveSession(session);
+
+      // 从 closed_sessions 表中删除
+      const deleteStmt = this.db.prepare('DELETE FROM closed_sessions WHERE id = ?');
+      deleteStmt.run(closedSessionId);
+
+      console.log(`[SessionManager] 会话已恢复: ${session.name}`);
+      return { success: true, session: session.toJSON() };
+    } catch (error) {
+      console.error('[SessionManager] 恢复会话失败:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * 获取关闭的会话列表
+   */
+  getClosedSessions() {
+    try {
+      // 清理超过24小时的旧记录
+      const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+      this.db.prepare('DELETE FROM closed_sessions WHERE closed_at < ?').run(oneDayAgo);
+
+      // 获取最近的关闭会话（最多10个）
+      const stmt = this.db.prepare(`
+        SELECT * FROM closed_sessions
+        ORDER BY closed_at DESC
+        LIMIT 10
+      `);
+      const rows = stmt.all();
+
+      // 检查每个会话的 tmux 是否还存在
+      const validSessions = [];
+      for (const row of rows) {
+        let tmuxExists = false;
+        try {
+          execSync(`tmux has-session -t ${row.tmux_session_name} 2>/dev/null`);
+          tmuxExists = true;
+        } catch {
+          tmuxExists = false;
+        }
+
+        if (tmuxExists) {
+          validSessions.push({
+            id: row.id,
+            name: row.name,
+            tmuxSessionName: row.tmux_session_name,
+            goal: row.goal,
+            aiType: row.ai_type,
+            projectName: row.project_name,
+            projectDesc: row.project_desc,
+            workDir: row.work_dir,
+            closedAt: row.closed_at
+          });
+        } else {
+          // tmux 已不存在，删除记录
+          this.db.prepare('DELETE FROM closed_sessions WHERE id = ?').run(row.id);
+        }
+      }
+
+      return validSessions;
+    } catch (error) {
+      console.error('[SessionManager] 获取关闭会话列表失败:', error);
+      return [];
+    }
+  }
+
+  /**
+   * 永久删除关闭的会话
+   */
+  deleteClosedSession(closedSessionId) {
+    try {
+      const closedSession = this._getClosedSessionById(closedSessionId);
+      if (!closedSession) {
+        return { success: false, error: '会话不存在' };
+      }
+
+      // 尝试杀掉 tmux 会话
+      try {
+        execSync(`tmux kill-session -t ${closedSession.tmuxSessionName} 2>/dev/null`);
+      } catch {
+        // tmux 会话可能已经不存在，忽略错误
+      }
+
+      // 从数据库中删除
+      const stmt = this.db.prepare('DELETE FROM closed_sessions WHERE id = ?');
+      stmt.run(closedSessionId);
+
+      console.log(`[SessionManager] 已永久删除关闭的会话: ${closedSession.name}`);
+      return { success: true };
+    } catch (error) {
+      console.error('[SessionManager] 永久删除会话失败:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * 获取单个关闭会话的详情
+   */
+  _getClosedSessionById(id) {
+    const stmt = this.db.prepare('SELECT * FROM closed_sessions WHERE id = ?');
+    const row = stmt.get(id);
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      name: row.name,
+      tmuxSessionName: row.tmux_session_name,
+      goal: row.goal,
+      systemPrompt: row.system_prompt,
+      aiEnabled: Boolean(row.ai_enabled),
+      autoMode: Boolean(row.auto_mode),
+      autoActionEnabled: Boolean(row.auto_action_enabled),
+      aiType: row.ai_type,
+      projectName: row.project_name,
+      projectDesc: row.project_desc,
+      workDir: row.work_dir,
+      closedAt: row.closed_at
+    };
   }
 
   deleteSession(id) {

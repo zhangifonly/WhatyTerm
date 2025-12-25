@@ -1,0 +1,224 @@
+.closed-sessions {
+  margin-bottom: 2rem;
+  padding: 1.5rem;
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+}
+
+.closed-sessions-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.closed-sessions-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.closed-sessions-header .count {
+  font-size: 0.75rem;
+  background: var(--accent-color);
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.closed-sessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.closed-session-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.closed-session-card:hover {
+  border-color: var(--accent-color);
+  box-shadow: 0 2px 8px rgba(0, 123, 255, 0.15);
+  transform: translateY(-1px);
+}
+
+.closed-session-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.closed-session-name {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.closed-session-name .name {
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.closed-session-name .ai-type {
+  font-size: 0.7rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+
+.closed-session-name .ai-type.claude {
+  background: rgba(139, 92, 246, 0.2);
+  color: #a78bfa;
+}
+
+.closed-session-name .ai-type.codex {
+  background: rgba(34, 197, 94, 0.2);
+  color: #4ade80;
+}
+
+.closed-session-name .ai-type.gemini {
+  background: rgba(251, 191, 36, 0.2);
+  color: #fbbf24;
+}
+
+.closed-session-goal {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 0.25rem;
+}
+
+.closed-session-time {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.closed-session-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-left: 1rem;
+}
+
+.closed-session-actions button {
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: 1px solid transparent;
+}
+
+.btn-restore {
+  background: var(--accent-color);
+  color: #fff;
+  border-color: var(--accent-color);
+}
+
+.btn-restore:hover {
+  background: #0056b3;
+  transform: scale(1.02);
+}
+
+.btn-delete-closed {
+  background: transparent;
+  color: #ef4444;
+  border-color: #ef4444;
+}
+
+.btn-delete-closed:hover {
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.closed-sessions-empty {
+  text-align: center;
+  padding: 1.5rem;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+  .closed-session-card {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .closed-session-actions {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .closed-session-actions button {
+    flex: 1;
+  }
+}
+
+/* ========================================
+   Compact 模式样式 - VS Code 风格
+   ======================================== */
+
+.closed-sessions.compact {
+  padding: 0;
+  background: transparent;
+  border: none;
+  margin-bottom: 0;
+}
+
+.closed-sessions.compact .compact-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.closed-sessions.compact .compact-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.closed-sessions.compact .compact-item:hover {
+  background: hsl(var(--primary) / 0.1);
+}
+
+.closed-sessions.compact .compact-name {
+  font-size: 13px;
+  color: hsl(var(--primary));
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.closed-sessions.compact .compact-path {
+  font-size: 12px;
+  color: hsl(var(--muted-foreground));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}

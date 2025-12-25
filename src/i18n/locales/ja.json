@@ -6,6 +6,7 @@
     "description": "AI駆動のインテリジェントターミナル管理ツール"
   },
   "welcome": {
+    "start": "スタート",
     "coreFeatures": "主な機能",
     "aiMonitoring": "AIスマート監視",
     "aiMonitoringDesc": "ターミナルの状態を自動的に分析し、入力待ちやエラーメッセージを識別します",
@@ -54,6 +55,8 @@
     "save": "保存",
     "cancel": "キャンセル",
     "delete": "削除",
+    "create": "作成",
+    "confirm": "確認",
     "test": "接続テスト",
     "testing": "テスト中...",
     "unknown": "不明",
@@ -79,6 +82,7 @@
     "expand": "サイドバーを展開",
     "collapse": "サイドバーを折りたたむ",
     "deleteSession": "セッションを削除",
+    "closeSession": "セッションを閉じる",
     "newSession": "+ 新規"
   },
   "goal": {
@@ -153,6 +157,7 @@
     "hideDebug": "非表示",
     "showLog": "ログ",
     "continue": "続ける",
+    "analyzeNow": "今すぐ分析",
     "autoRunning": "自動モード実行中",
     "pause": "一時停止 ⏸"
   },
@@ -191,6 +196,62 @@
   "provider": {
     "cliOnlyWarning": "⚠️ セキュリティ通知：「Cli Only」としてマークされたプロバイダーを使用すると、アカウントリスクが発生する可能性があります。これらのプロバイダーは Claude Code CLI 専用に設計されており、他のシナリオで使用すると異常なリクエストとしてフラグが立てられ、アカウント制限が発生する可能性があります。慎重に使用してください。"
   },
+  "schedule": {
+    "title": "AI監視スケジュール",
+    "manage": "スケジュール設定",
+    "empty": "スケジュールがありません。下のボタンをクリックして作成してください",
+    "createNew": "新しいスケジュールを作成",
+    "edit": "スケジュールを編集",
+    "delete": "スケジュールを削除",
+    "enable": "有効",
+    "disable": "無効",
+    "confirmDelete": "このスケジュールを削除してもよろしいですか？",
+    "error": "操作に失敗しました",
+    "nextRunLabel": "次回実行",
+    "noNextRun": "未設定",
+    "expired": "期限切れ",
+    "types": {
+      "daily": "毎日",
+      "weekly": "毎週",
+      "weekdays": "曜日指定",
+      "once": "一回のみ"
+    },
+    "actions": {
+      "enable": "監視を有効化",
+      "disable": "監視を無効化"
+    },
+    "weekdays": {
+      "sun": "日",
+      "mon": "月",
+      "tue": "火",
+      "wed": "水",
+      "thu": "木",
+      "fri": "金",
+      "sat": "土"
+    },
+    "form": {
+      "action": "実行アクション",
+      "type": "スケジュールタイプ",
+      "weekdays": "曜日を選択",
+      "date": "日付を選択",
+      "time": "時刻を選択"
+    },
+    "timeDesc": {
+      "daily": "毎日 {{time}}",
+      "weekly": "毎週月曜日 {{time}}",
+      "weekdays": "毎 {{days}} {{time}}",
+      "once": "{{date}} {{time}}"
+    },
+    "nextRun": {
+      "days": "{{days}}日{{hours}}時間後",
+      "hours": "{{hours}}時間{{minutes}}分後",
+      "minutes": "{{minutes}}分後"
+    },
+    "validation": {
+      "selectWeekdays": "少なくとも1つの曜日を選択してください",
+      "selectDate": "日付を選択してください"
+    }
+  },
   "about": {
     "appName": "WhatyTerm",
     "description": "AI搭載インテリジェントターミナル管理ツール",
@@ -228,5 +289,32 @@
   "toast": {
     "languageSwitched": "言語を切り替えました",
     "tunnelUrlSaved": "外部アクセスURLを保存しました"
+  },
+  "closedSessions": {
+    "title": "最近閉じたセッション",
+    "restore": "復元",
+    "delete": "削除",
+    "confirmDelete": "このセッションを完全に削除してもよろしいですか？",
+    "sessionExpired": "セッションが期限切れです。tmuxプロセスが存在しません",
+    "restoreFailed": "復元に失敗しました",
+    "timeAgo": {
+      "justNow": "たった今",
+      "minutes": "{{count}}分前",
+      "hours": "{{count}}時間前",
+      "days": "{{count}}日前"
+    }
+  },
+  "recentProjects": {
+    "title": "最近のプロジェクト",
+    "loading": "読み込み中...",
+    "continue": "続ける",
+    "showMore": "もっと見る...",
+    "collapse": "折りたたむ",
+    "timeAgo": {
+      "justNow": "たった今",
+      "minutes": "{{count}}分前",
+      "hours": "{{count}}時間前",
+      "days": "{{count}}日前"
+    }
   }
 }
