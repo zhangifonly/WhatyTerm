@@ -5,6 +5,7 @@ import './ClosedSessionsList.css';
 const ClosedSessionsList = ({ socket, onRestore, compact = false }) => {
   const { t } = useTranslation();
   const [closedSessions, setClosedSessions] = useState([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!socket) return;
@@ -15,6 +16,7 @@ const ClosedSessionsList = ({ socket, onRestore, compact = false }) => {
     // 监听列表更新
     const handleList = (sessions) => {
       setClosedSessions(sessions);
+      setLoading(false);
     };
 
     const handleUpdated = (sessions) => {
@@ -70,6 +72,23 @@ const ClosedSessionsList = ({ socket, onRestore, compact = false }) => {
     if (hours < 24) return t('closedSessions.timeAgo.hours', { count: hours });
     return t('closedSessions.timeAgo.days', { count: Math.floor(hours / 24) });
   };
+
+  // 骨架屏加载
+  if (loading) {
+    if (compact) {
+      return (
+        <div className="closed-sessions compact skeleton-loading">
+          {[1, 2].map(i => (
+            <div key={i} className="skeleton-item">
+              <div className="skeleton-line skeleton-name"></div>
+              <div className="skeleton-line skeleton-path"></div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+    return null;
+  }
 
   if (closedSessions.length === 0) {
     return null;

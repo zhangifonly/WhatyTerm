@@ -568,6 +568,10 @@ export class SessionManager {
     try {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN original_goal TEXT`);
     } catch {}
+    // 修复旧数据：如果 original_goal 为空但 goal 有值，则复制 goal 到 original_goal
+    try {
+      this.db.exec(`UPDATE sessions SET original_goal = goal WHERE original_goal IS NULL AND goal IS NOT NULL AND goal <> ''`);
+    } catch {}
   }
 
   _loadSessions() {

@@ -2691,9 +2691,10 @@ io.on('connection', (socket) => {
   });
 
   // 获取最近项目列表
-  socket.on('recentProjects:get', async () => {
+  socket.on('recentProjects:get', async (options = {}) => {
     try {
-      const projects = await RecentProjectsService.getAllRecentProjects(10);
+      const limit = options.limit || 50;  // 默认返回 50 个项目
+      const projects = await RecentProjectsService.getAllRecentProjects(limit);
       socket.emit('recentProjects:list', projects);
     } catch (error) {
       console.error('[RecentProjects] 获取失败:', error);
