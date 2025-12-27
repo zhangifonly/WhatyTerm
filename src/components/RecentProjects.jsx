@@ -54,10 +54,25 @@ const RecentProjects = ({ socket, onOpenProject, compact = false }) => {
                      (projects.gemini?.length || 0);
 
   if (loading) {
+    // 骨架屏 - 改善感知加载速度
+    if (compact) {
+      return (
+        <div className="recent-projects compact skeleton-loading">
+          {[1, 2, 3].map(i => (
+            <div key={i} className="skeleton-item">
+              <div className="skeleton-line skeleton-name"></div>
+              <div className="skeleton-line skeleton-path"></div>
+            </div>
+          ))}
+        </div>
+      );
+    }
     return (
       <div className="recent-projects loading">
-        <div className="loading-spinner"></div>
-        <span>{t('recentProjects.loading')}</span>
+        <div className="skeleton-item">
+          <div className="skeleton-line skeleton-name"></div>
+          <div className="skeleton-line skeleton-path"></div>
+        </div>
       </div>
     );
   }

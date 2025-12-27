@@ -95,8 +95,8 @@
     "title": "Goal",
     "placeholder": "Enter goals, for example:\n1. List files in current directory\n2. Find files with specific content\n3. Execute deployment script",
     "notSet": "Click to set goal",
-    "restore": "Restore",
-    "restoreTooltip": "Restore to the initial goal when session was created"
+    "regenerate": "Regenerate",
+    "regenerateTooltip": "Read project config files to regenerate goal"
   },
   "stats": {
     "title": "AI Operation Statistics (Current Session)",

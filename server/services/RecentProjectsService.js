@@ -71,6 +71,51 @@ export class RecentProjectsService {
   }
 
   /**
+   * 解码 Claude 项目目录名为实际路径
+   * Claude 编码规则: / -> -，但目录名中的 - 保持不变
+   * 需要逐级验证路径是否存在
+   */
+  static _decodeClaudePath(encodedName) {
+    // 去掉开头的 -，然后按 - 分割
+    const parts = encodedName.replace(/^-/, '').split('-');
+
+    // 逐级构建路径，合并不存在的部分
+    let currentPath = '/';
+    let i = 0;
+
+    while (i < parts.length) {
+      // 尝试单个部分
+      let testPath = path.join(currentPath, parts[i]);
+
+      if (fs.existsSync(testPath)) {
+        currentPath = testPath;
+        i++;
+      } else {
+        // 尝试合并多个部分（处理目录名中包含 - 的情况）
+        let found = false;
+        for (let j = i + 1; j <= parts.length; j++) {
+          const combined = parts.slice(i, j).join('-');
+          testPath = path.join(currentPath, combined);
+
+          if (fs.existsSync(testPath)) {
+            currentPath = testPath;
+            i = j;
+            found = true;
+            break;
+          }
+        }
+
+        if (!found) {
+          // 无法找到有效路径
+          return null;
+        }
+      }
+    }
+
+    return currentPath;
+  }
+
+  /**
    * 获取 Claude Code 最近项目
    */
   static async getClaudeProjects(limit = 10) {
@@ -87,11 +132,15 @@ export class RecentProjectsService {
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
 
-        // 解码目录名为路径: -Users-xxx -> /Users/xxx
-        const projectPath = entry.name.replace(/^-/, '/').replace(/-/g, '/');
+        // 解码目录名为路径
+        const projectPath = this._decodeClaudePath(entry.name);
 
-        // 检查路径是否存在
-        if (!fs.existsSync(projectPath)) continue;
+        // 检查路径是否有效
+        if (!projectPath || !fs.existsSync(projectPath)) continue;
+
+        // 排除非项目目录（如 Documents、Desktop 等根目录）
+        const pathParts = projectPath.split(path.sep).filter(Boolean);
+        if (pathParts.length <= 3) continue;  // 至少要 /Users/xxx/Documents/project
 
         const dirPath = path.join(projectsDir, entry.name);
         const stat = fs.statSync(dirPath);
@@ -145,7 +194,7 @@ export class RecentProjectsService {
 
             for (const file of files) {
               const filePath = path.join(dayDir, file);
-              const cwd = await this._extractCodexCwd(filePath);
+              const cwd = this._extractCodexCwd(filePath);
 
               if (cwd && fs.existsSync(cwd)) {
                 const stat = fs.statSync(filePath);
@@ -179,12 +228,22 @@ export class RecentProjectsService {
   /**
    * 从 Codex jsonl 文件提取 cwd
    * session_meta 总是在第一行
+   * 优化：使用流式读取只获取第一行，避免读取整个文件
    */
-  static async _extractCodexCwd(filePath) {
+  static _extractCodexCwd(filePath) {
     try {
-      // 只读取第一行（session_meta 总是第一行）
-      const content = fs.readFileSync(filePath, 'utf-8');
-      const firstLine = content.split('\n')[0];
+      // 使用 Buffer 只读取文件开头部分（足够包含 session_meta）
+      const fd = fs.openSync(filePath, 'r');
+      const buffer = Buffer.alloc(4096); // 4KB 足够读取第一行
+      const bytesRead = fs.readSync(fd, buffer, 0, 4096, 0);
+      fs.closeSync(fd);
+
+      if (bytesRead === 0) return null;
+
+      const content = buffer.toString('utf-8', 0, bytesRead);
+      const newlineIndex = content.indexOf('\n');
+      const firstLine = newlineIndex > 0 ? content.slice(0, newlineIndex) : content;
+
       if (!firstLine) return null;
 
       const data = JSON.parse(firstLine);
@@ -200,6 +259,7 @@ export class RecentProjectsService {
   /**
    * 获取 Gemini CLI 最近项目
    * Gemini 使用路径的 SHA256 哈希作为目录名
+   * 优化：按 mtime 排序哈希目录，只扫描必要的候选路径
    */
   static async getGeminiProjects(limit = 10) {
     const tmpDir = path.join(HOME_DIR, '.gemini', 'tmp');
@@ -209,15 +269,31 @@ export class RecentProjectsService {
     }
 
     try {
-      const projects = [];
+      // 获取所有 Gemini 哈希目录并按 mtime 排序
       const geminiDirs = fs.readdirSync(tmpDir)
-        .filter(f => f !== 'bin' && f.length === 64); // SHA256 哈希长度
+        .filter(f => f !== 'bin' && f.length === 64)
+        .map(name => {
+          const dirPath = path.join(tmpDir, name);
+          try {
+            const stat = fs.statSync(dirPath);
+            return { name, mtime: stat.mtime.getTime() };
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.mtime - a.mtime)
+        .slice(0, limit * 2); // 多取一些以防部分无法匹配
 
       if (geminiDirs.length === 0) {
         return [];
       }
 
-      // 扫描常用项目父目录
+      // 构建哈希到 mtime 的映射
+      const hashToMtime = new Map(geminiDirs.map(d => [d.name, d.mtime]));
+      const hashSet = new Set(geminiDirs.map(d => d.name));
+
+      // 扫描常用项目父目录（优化：只扫描存在的目录）
       const scanParentDirs = [
         HOME_DIR,
         path.join(HOME_DIR, 'Documents'),
@@ -228,57 +304,64 @@ export class RecentProjectsService {
         path.join(HOME_DIR, 'Code'),
         path.join(HOME_DIR, 'Developer'),
         path.join(HOME_DIR, 'Desktop')
-      ];
+      ].filter(dir => fs.existsSync(dir));
 
-      // 收集所有可能的项目目录（包括二级目录）
-      const candidatePaths = new Set();
+      const projects = [];
+      const foundHashes = new Set();
 
+      // 只在需要更多结果时继续扫描
       for (const parentDir of scanParentDirs) {
-        if (!fs.existsSync(parentDir)) continue;
+        if (projects.length >= limit) break;
 
         try {
           const entries = fs.readdirSync(parentDir, { withFileTypes: true });
           for (const entry of entries) {
-            if (entry.isDirectory() && !entry.name.startsWith('.')) {
-              const level1Path = path.join(parentDir, entry.name);
-              candidatePaths.add(level1Path);
+            if (projects.length >= limit) break;
+            if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
 
-              // 也扫描二级目录
-              try {
-                const subEntries = fs.readdirSync(level1Path, { withFileTypes: true });
-                for (const subEntry of subEntries) {
-                  if (subEntry.isDirectory() && !subEntry.name.startsWith('.')) {
-                    candidatePaths.add(path.join(level1Path, subEntry.name));
-                  }
+            const level1Path = path.join(parentDir, entry.name);
+            const hash1 = crypto.createHash('sha256').update(level1Path).digest('hex');
+
+            if (hashSet.has(hash1) && !foundHashes.has(hash1)) {
+              foundHashes.add(hash1);
+              projects.push({
+                name: path.basename(level1Path),
+                path: level1Path,
+                description: this._getProjectDescription(level1Path),
+                lastUsed: hashToMtime.get(hash1),
+                aiType: 'gemini',
+                resumeCommand: 'gemini --resume'
+              });
+            }
+
+            // 扫描二级目录
+            try {
+              const subEntries = fs.readdirSync(level1Path, { withFileTypes: true });
+              for (const subEntry of subEntries) {
+                if (projects.length >= limit) break;
+                if (!subEntry.isDirectory() || subEntry.name.startsWith('.')) continue;
+
+                const level2Path = path.join(level1Path, subEntry.name);
+                const hash2 = crypto.createHash('sha256').update(level2Path).digest('hex');
+
+                if (hashSet.has(hash2) && !foundHashes.has(hash2)) {
+                  foundHashes.add(hash2);
+                  projects.push({
+                    name: path.basename(level2Path),
+                    path: level2Path,
+                    description: this._getProjectDescription(level2Path),
+                    lastUsed: hashToMtime.get(hash2),
+                    aiType: 'gemini',
+                    resumeCommand: 'gemini --resume'
+                  });
                 }
-              } catch {
-                // 忽略无权限的子目录
               }
+            } catch {
+              // 忽略无权限的子目录
             }
           }
         } catch {
           // 忽略无权限的目录
-        }
-      }
-
-      // 为每个候选路径计算哈希并匹配
-      for (const projectPath of candidatePaths) {
-        const hash = crypto.createHash('sha256')
-          .update(projectPath)
-          .digest('hex');
-
-        if (geminiDirs.includes(hash)) {
-          const geminiDir = path.join(tmpDir, hash);
-          const stat = fs.statSync(geminiDir);
-
-          projects.push({
-            name: path.basename(projectPath),
-            path: projectPath,
-            description: this._getProjectDescription(projectPath),
-            lastUsed: stat.mtime.getTime(),
-            aiType: 'gemini',
-            resumeCommand: 'gemini --resume'
-          });
         }
       }
 

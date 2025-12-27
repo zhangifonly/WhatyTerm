@@ -541,10 +541,12 @@ export default function App() {
       fontSize: 14,
       fontFamily: 'Monaco, Menlo, monospace',
       scrollback: 5000,
+      allowProposedApi: true,
       theme: {
         background: '#000000',
         foreground: '#eaeaea',
-        cursor: '#e94560'
+        cursor: '#e94560',
+        selectionBackground: 'rgba(255, 255, 255, 0.3)'  // 选中文本背景色
       }
     });
 
@@ -720,7 +722,7 @@ export default function App() {
   };
 
   // AI 生成目标
-  const handleGenerateGoal = () => {
+  const handleGenerateGoal = (autoApply = false) => {
     if (!currentSession || generatingGoal) return;
 
     setGeneratingGoal(true);
@@ -733,8 +735,14 @@ export default function App() {
       if (data.sessionId === currentSession.id) {
         setGeneratingGoal(false);
         if (data.goal) {
-          setGoalInput(data.goal);
-          setEditingGoal(true);  // 打开编辑模式让用户确认
+          if (autoApply) {
+            // 直接应用生成的目标（用于"重新生成"按钮）
+            socket.emit('session:update', { id: currentSession.id, goal: data.goal });
+          } else {
+            // 打开编辑模式让用户确认（用于魔法棒按钮）
+            setGoalInput(data.goal);
+            setEditingGoal(true);
+          }
         }
         socket.off('goal:generated', handleGoalGenerated);
       }
@@ -1030,17 +1038,14 @@ export default function App() {
                       <button className="btn btn-secondary btn-small" onClick={startEditGoal}>
                         {t('common.edit')}
                       </button>
-                      {currentSession.originalGoal && currentSession.goal !== currentSession.originalGoal && (
-                        <button
-                          className="btn btn-secondary btn-small"
-                          onClick={() => {
-                            socket.emit('session:update', { id: currentSession.id, goal: currentSession.originalGoal });
-                          }}
-                          title={t('goal.restoreTooltip')}
-                        >
-                          {t('goal.restore')}
-                        </button>
-                      )}
+                      <button
+                        className="btn btn-secondary btn-small"
+                        onClick={() => handleGenerateGoal(true)}
+                        disabled={generatingGoal}
+                        title={t('goal.regenerateTooltip')}
+                      >
+                        {generatingGoal ? '...' : t('goal.regenerate')}
+                      </button>
                       <button className="btn btn-secondary btn-small" onClick={() => setShowHistory(true)}>
                         {t('common.history')}
                       </button>

@@ -95,8 +95,8 @@
     "title": "目标",
     "placeholder": "输入目标，例如：\n1. 列出当前目录文件\n2. 查找包含特定内容的文件\n3. 执行部署脚本",
     "notSet": "点击设置目标",
-    "restore": "还原",
-    "restoreTooltip": "还原为创建会话时的初始目标"
+    "regenerate": "重新生成",
+    "regenerateTooltip": "读取项目配置文件重新生成目标"
   },
   "stats": {
     "title": "AI 操作统计（本会话）",

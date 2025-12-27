@@ -222,3 +222,49 @@
   flex: 1;
   min-width: 0;
 }
+
+/* ========================================
+   骨架屏加载样式
+   ======================================== */
+
+.closed-sessions.skeleton-loading {
+  padding: 0;
+}
+
+.closed-sessions .skeleton-item {
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+
+.closed-sessions .skeleton-line {
+  height: 14px;
+  background: linear-gradient(
+    90deg,
+    hsl(var(--muted) / 0.3) 25%,
+    hsl(var(--muted) / 0.5) 50%,
+    hsl(var(--muted) / 0.3) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s infinite;
+  border-radius: 4px;
+}
+
+.closed-sessions .skeleton-name {
+  width: 35%;
+  margin-bottom: 6px;
+}
+
+.closed-sessions .skeleton-path {
+  width: 60%;
+  height: 12px;
+  opacity: 0.6;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
