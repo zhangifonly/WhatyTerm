@@ -48,7 +48,13 @@
     "languageHint": "Changes take effect immediately and will be saved automatically.",
     "chinese": "中文",
     "english": "English",
-    "japanese": "日本語"
+    "japanese": "日本語",
+    "confirmCloseSession": "Confirm Before Closing Session",
+    "confirmCloseSessionHint": "When enabled, a confirmation dialog will appear when clicking the close button to prevent accidental closure.",
+    "confirmCloseTitle": "Confirm Close Session",
+    "confirmCloseMessage": "Are you sure you want to close session \"{{name}}\"?",
+    "enabled": "Enabled",
+    "disabled": "Disabled"
   },
   "common": {
     "close": "Close",
@@ -88,7 +94,9 @@
   "goal": {
     "title": "Goal",
     "placeholder": "Enter goals, for example:\n1. List files in current directory\n2. Find files with specific content\n3. Execute deployment script",
-    "notSet": "Click to set goal"
+    "notSet": "Click to set goal",
+    "restore": "Restore",
+    "restoreTooltip": "Restore to the initial goal when session was created"
   },
   "stats": {
     "title": "AI Operation Statistics (Current Session)",

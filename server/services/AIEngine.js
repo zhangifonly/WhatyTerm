@@ -1200,7 +1200,7 @@ ${historyText || '(空)'}
       };
     }
 
-    // 5. 检测连续错误（尝试自动修复，不关闭自动开关）
+    // 5. 检测 API 错误（需要 AI 判断错误类型）
     // 只检查最近 30 行内容，避免被历史错误干扰
     const recentLines = cleanContent.split('\n').slice(-30).join('\n');
 
@@ -1220,62 +1220,23 @@ ${historyText || '(空)'}
       }
     }
 
-    // 检测是否是 thinking block 相关错误（需要启动修复程序）
-    const isThinkingError = /invalid.*signature.*in.*thinking/i.test(recentLines) ||
-                            /thinking.*block.*not.*allowed/i.test(recentLines) ||
-                            /invalid.*thinking.*block/i.test(recentLines);
-
-    // 检测是否是频率限制错误（只需等待重试）
-    const isRateLimitError = /请求过于频繁|rate.?limit|too many requests|429/i.test(recentLines);
-
-    // 检测是否是服务器不可用错误（需要切换供应商）
-    const isServerUnavailable = /服务器不可用|server.*unavailable|502|503|504|service.*unavailable/i.test(recentLines);
-
-    // 检测是否是余额不足错误（需要切换供应商）
-    const isInsufficientBalance = /余额不足|insufficient.*balance|quota.*exceeded|credit.*exhausted/i.test(recentLines);
-
-    // 如果错误出现 3 次或以上，尝试自动修复（不关闭自动开关）
-    if (totalErrors >= 3) {
-      let suggestion = '等待 60 秒后自动重试';
-      let autoFixAction = 'wait_and_retry';  // 默认等待重试
-
-      // 只有服务器不可用或余额不足才切换供应商
-      if (isServerUnavailable) {
-        suggestion = '服务器不可用，需要切换供应商';
-        autoFixAction = 'switch_provider';
-      } else if (isInsufficientBalance) {
-        suggestion = '余额不足，需要切换供应商';
-        autoFixAction = 'switch_provider';
-      } else if (isThinkingError) {
-        suggestion = 'thinking 模式不兼容，启动修复程序';
-        autoFixAction = 'run_fixer';  // 启动修复程序
-      }
-      // 频率限制和其他错误都只等待重试
-
-      const errorType = isServerUnavailable ? '服务器不可用' :
-                        isInsufficientBalance ? '余额不足' :
-                        isThinkingError ? 'thinking错误' :
-                        isRateLimitError ? '频率限制' : '普通错误';
-
-      console.log(`[AIEngine] 检测到连续错误 (${totalErrors}次)，类型: ${errorType}，修复策略: ${autoFixAction}`);
+    // 如果检测到错误，返回特殊标记，让调用方进行 AI 错误分析
+    if (totalErrors >= 1) {
+      console.log(`[AIEngine] 检测到 API 错误 (${totalErrors}次)，需要 AI 分析错误类型`);
       return {
-        currentState: '连续错误',
+        currentState: 'API错误待分析',
         workingDir: '未显示',
-        recentAction: '多次错误',
-        needsAction: true,
-        actionType: 'auto_fix',
+        recentAction: 'API错误',
+        needsAction: false,  // 暂不操作，等 AI 分析
+        actionType: 'none',
         suggestedAction: null,
-        actionReason: `检测到 ${totalErrors} 次错误，${suggestion}`,
-        suggestion,
+        actionReason: '检测到 API 错误，需要 AI 分析错误类型',
+        suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
         detectedCLI,
-        shouldAutoFix: true,
-        autoFixAction,
-        isServerUnavailable,
-        isInsufficientBalance,
-        isThinkingError,
-        isRateLimitError,
+        needsErrorAnalysis: true,  // 标记需要 AI 错误分析
+        errorContent: recentLines,  // 传递错误内容供 AI 分析
         errorCount: totalErrors
       };
     }
@@ -1516,5 +1477,89 @@ ${terminalContent || '(空)'}
       console.error('[AIEngine] 文本生成失败:', err.message);
       return null;
     }
+  }
+
+  /**
+   * AI 分析 API 错误类型，决定修复策略
+   * @param {string} errorContent - 错误内容（终端最近输出）
+   * @returns {Promise<object>} - 分析结果
+   */
+  async analyzeApiError(errorContent) {
+    const prompt = `分析以下 API 错误信息，判断错误类型并建议修复策略。
+
+错误内容：
+---
+${errorContent}
+---
+
+请判断这是什么类型的错误，返回纯 JSON（不要 markdown 代码块）：
+
+{
+  "errorType": "错误类型，必须是以下之一：insufficient_balance（余额/额度不足）、server_unavailable（服务器不可用）、rate_limit（频率限制）、thinking_error（thinking模式不兼容）、auth_error（认证错误但非余额问题）、other（其他错误）",
+  "action": "建议操作，必须是以下之一：switch_provider（切换供应商）、run_fixer（运行修复程序）、wait_and_retry（等待后重试）、none（无需操作）",
+  "reason": "判断理由，简短说明",
+  "waitSeconds": 等待秒数（仅当 action 为 wait_and_retry 时需要，默认 60）
+}
+
+判断规则：
+1. 如果错误信息包含"余额不足"、"额度不足"、"credit"、"quota"、"balance"等与账户额度相关的词，且表示无法继续使用，则为 insufficient_balance，建议 switch_provider
+2. 如果错误是 502、503、504 或明确说服务器不可用、超时、连接失败，则为 server_unavailable，建议 switch_provider
+3. 如果错误是 429 或提到 rate limit、请求过于频繁，则为 rate_limit，建议 wait_and_retry
+4. 如果错误涉及 thinking block、signature、不支持的模式，则为 thinking_error，建议 run_fixer
+5. 如果是认证错误（401）但不涉及余额，则为 auth_error，建议 switch_provider
+6. 其他错误默认 wait_and_retry
+
+直接返回 JSON，以 { 开头：`;
+
+    try {
+      const content = await this._callApiWithFailover(prompt);
+      if (!content) {
+        return this._getDefaultErrorAnalysis();
+      }
+
+      // 解析 JSON 响应
+      let jsonStr = content;
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        jsonStr = jsonMatch[0];
+      }
+
+      const result = JSON.parse(jsonStr);
+      console.log(`[AIEngine] AI 错误分析结果: ${result.errorType} -> ${result.action} (${result.reason})`);
+
+      return {
+        errorType: result.errorType || 'other',
+        action: result.action || 'wait_and_retry',
+        reason: result.reason || '未知原因',
+        waitSeconds: result.waitSeconds || 60,
+        isInsufficientBalance: result.errorType === 'insufficient_balance',
+        isServerUnavailable: result.errorType === 'server_unavailable',
+        isRateLimitError: result.errorType === 'rate_limit',
+        isThinkingError: result.errorType === 'thinking_error',
+        shouldAutoFix: true,
+        autoFixAction: result.action
+      };
+    } catch (err) {
+      console.error('[AIEngine] AI 错误分析失败:', err.message);
+      return this._getDefaultErrorAnalysis();
+    }
+  }
+
+  /**
+   * 获取默认的错误分析结果（AI 分析失败时使用）
+   */
+  _getDefaultErrorAnalysis() {
+    return {
+      errorType: 'other',
+      action: 'wait_and_retry',
+      reason: 'AI 分析失败，默认等待重试',
+      waitSeconds: 60,
+      isInsufficientBalance: false,
+      isServerUnavailable: false,
+      isRateLimitError: false,
+      isThinkingError: false,
+      shouldAutoFix: true,
+      autoFixAction: 'wait_and_retry'
+    };
   }
 }

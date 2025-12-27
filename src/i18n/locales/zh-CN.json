@@ -48,7 +48,13 @@
     "languageHint": "切换后立即生效，设置将自动保存。",
     "chinese": "中文",
     "english": "English",
-    "japanese": "日本語"
+    "japanese": "日本語",
+    "confirmCloseSession": "关闭会话前确认",
+    "confirmCloseSessionHint": "开启后，点击关闭按钮时会弹出确认对话框，防止误操作。",
+    "confirmCloseTitle": "确认关闭会话",
+    "confirmCloseMessage": "确定要关闭会话「{{name}}」吗？",
+    "enabled": "已开启",
+    "disabled": "已关闭"
   },
   "common": {
     "close": "关闭",
@@ -88,7 +94,9 @@
   "goal": {
     "title": "目标",
     "placeholder": "输入目标，例如：\n1. 列出当前目录文件\n2. 查找包含特定内容的文件\n3. 执行部署脚本",
-    "notSet": "点击设置目标"
+    "notSet": "点击设置目标",
+    "restore": "还原",
+    "restoreTooltip": "还原为创建会话时的初始目标"
   },
   "stats": {
     "title": "AI 操作统计（本会话）",

@@ -72,6 +72,7 @@ export class Session {
     const rawTmuxName = options.tmuxSessionName || `webtmux-${this.id.slice(0, 8)}`;
     this.tmuxSessionName = sanitizeTmuxSessionName(rawTmuxName);
     this.goal = options.goal || '';
+    this.originalGoal = options.originalGoal || options.goal || '';  // 保存原始目标
     this.systemPrompt = options.systemPrompt || '';
     this.aiEnabled = options.aiEnabled ?? true;
     this.autoMode = options.autoMode ?? false;
@@ -406,6 +407,7 @@ export class Session {
       name: this.name,
       tmuxSessionName: this.tmuxSessionName,
       goal: this.goal,
+      originalGoal: this.originalGoal,  // 原始目标
       systemPrompt: this.systemPrompt,
       aiEnabled: this.aiEnabled,
       autoMode: this.autoMode,
@@ -562,6 +564,10 @@ export class SessionManager {
     try {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN stats_pre_analyzed INTEGER DEFAULT 0`);
     } catch {}
+    // 添加原始目标字段
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN original_goal TEXT`);
+    } catch {}
   }
 
   _loadSessions() {
@@ -572,6 +578,7 @@ export class SessionManager {
         name: row.name,
         tmuxSessionName: row.tmux_session_name,
         goal: row.goal,
+        originalGoal: row.original_goal || row.goal,
         systemPrompt: row.system_prompt,
         aiEnabled: !!row.ai_enabled,
         autoMode: !!row.auto_mode,
@@ -617,14 +624,15 @@ export class SessionManager {
     const stats = session.stats || { total: 0, success: 0, failed: 0, aiAnalyzed: 0, preAnalyzed: 0 };
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO sessions
-      (id, name, tmux_session_name, goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, status, created_at, updated_at, ai_type, claude_provider, codex_provider, gemini_provider, stats_total, stats_success, stats_failed, stats_ai_analyzed, stats_pre_analyzed)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, status, created_at, updated_at, ai_type, claude_provider, codex_provider, gemini_provider, stats_total, stats_success, stats_failed, stats_ai_analyzed, stats_pre_analyzed)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       session.id,
       session.name,
       session.tmuxSessionName,
       session.goal,
+      session.originalGoal || session.goal,
       session.systemPrompt,
       session.aiEnabled ? 1 : 0,
       session.autoMode ? 1 : 0,

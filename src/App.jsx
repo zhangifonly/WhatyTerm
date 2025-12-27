@@ -121,8 +121,11 @@ export default function App() {
     apiUrl: 'https://agent-ai.webtrn.cn/v1/chat/completions',
     maxTokens: 500,
     temperature: 0.7,
-    showSuggestions: false  // 默认关闭 AI 建议弹窗
+    showSuggestions: false,  // 默认关闭 AI 建议弹窗
+    confirmCloseSession: true  // 默认开启关闭会话确认
   });
+  // 关闭会话确认对话框状态
+  const [closeSessionConfirm, setCloseSessionConfirm] = useState({ show: false, session: null });
   const [tunnelUrl, setTunnelUrl] = useState('');
   const [showQRCode, setShowQRCode] = useState(false);
   const [aiStatusMap, setAiStatusMap] = useState({});
@@ -824,9 +827,15 @@ export default function App() {
                   className="btn-delete"
                   onClick={(e) => {
                     e.stopPropagation();
-                    socket.emit('session:close', session.id);
-                    if (currentSession?.id === session.id) {
-                      setCurrentSession(null);
+                    if (aiSettings.confirmCloseSession) {
+                      // 显示确认对话框
+                      setCloseSessionConfirm({ show: true, session });
+                    } else {
+                      // 直接关闭
+                      socket.emit('session:close', session.id);
+                      if (currentSession?.id === session.id) {
+                        setCurrentSession(null);
+                      }
                     }
                   }}
                   title={t('sidebar.closeSession')}
@@ -1019,10 +1028,21 @@ export default function App() {
                         )}
                       </button>
                       <button className="btn btn-secondary btn-small" onClick={startEditGoal}>
-                        修改
+                        {t('common.edit')}
                       </button>
+                      {currentSession.originalGoal && currentSession.goal !== currentSession.originalGoal && (
+                        <button
+                          className="btn btn-secondary btn-small"
+                          onClick={() => {
+                            socket.emit('session:update', { id: currentSession.id, goal: currentSession.originalGoal });
+                          }}
+                          title={t('goal.restoreTooltip')}
+                        >
+                          {t('goal.restore')}
+                        </button>
+                      )}
                       <button className="btn btn-secondary btn-small" onClick={() => setShowHistory(true)}>
-                        历史
+                        {t('common.history')}
                       </button>
                     </div>
                   </>
@@ -1751,6 +1771,42 @@ export default function App() {
           sessionId={currentSession.id}
           onClose={() => setShowScheduleManager(false)}
         />
+      )}
+
+      {/* 关闭会话确认对话框 */}
+      {closeSessionConfirm.show && closeSessionConfirm.session && (
+        <div className="modal-overlay" onClick={() => setCloseSessionConfirm({ show: false, session: null })}>
+          <div className="modal confirm-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '400px' }}>
+            <h2 style={{ marginBottom: '16px', fontSize: '18px' }}>{t('interface.confirmCloseTitle')}</h2>
+            <p style={{ marginBottom: '24px', color: 'var(--text-secondary)' }}>
+              {t('interface.confirmCloseMessage', { name: closeSessionConfirm.session.projectName || closeSessionConfirm.session.name })}
+            </p>
+            <div className="modal-actions" style={{ justifyContent: 'flex-end', gap: '12px' }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setCloseSessionConfirm({ show: false, session: null })}
+              >
+                {t('common.cancel')}
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={() => {
+                  const session = closeSessionConfirm.session;
+                  socket.emit('session:close', session.id);
+                  if (currentSession?.id === session.id) {
+                    setCurrentSession(null);
+                  }
+                  setCloseSessionConfirm({ show: false, session: null });
+                }}
+                style={{ background: '#dc2626', borderColor: '#dc2626' }}
+              >
+                {t('common.confirm')}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
     </ToastContainer>
@@ -2636,6 +2692,43 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
                   {t('interface.japanese')}
                 </button>
               </div>
+            </div>
+
+            {/* 关闭会话确认开关 */}
+            <div className="form-group" style={{ marginTop: '24px' }}>
+              <h3 style={{ margin: '0 0 12px 0', fontSize: '16px', color: '#fff' }}>
+                {t('interface.confirmCloseSession')}
+              </h3>
+              <small style={{ color: '#888', fontSize: '12px', display: 'block', marginBottom: '16px' }}>
+                {t('interface.confirmCloseSessionHint')}
+              </small>
+              <label style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+                cursor: 'pointer',
+                padding: '12px 16px',
+                background: '#2a2a2a',
+                borderRadius: '8px',
+                border: '1px solid #444'
+              }}>
+                <input
+                  type="checkbox"
+                  checked={settings.confirmCloseSession !== false}
+                  onChange={(e) => {
+                    onChange({ ...settings, confirmCloseSession: e.target.checked });
+                    onSave();
+                  }}
+                  style={{
+                    width: '18px',
+                    height: '18px',
+                    cursor: 'pointer'
+                  }}
+                />
+                <span style={{ color: '#fff', fontSize: '14px' }}>
+                  {settings.confirmCloseSession !== false ? t('interface.enabled') : t('interface.disabled')}
+                </span>
+              </label>
             </div>
 
             <div className="modal-actions">
