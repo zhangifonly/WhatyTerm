@@ -48,7 +48,13 @@
     "languageHint": "変更はすぐに反映され、自動的に保存されます。",
     "chinese": "中文",
     "english": "English",
-    "japanese": "日本語"
+    "japanese": "日本語",
+    "confirmCloseSession": "セッションを閉じる前に確認",
+    "confirmCloseSessionHint": "有効にすると、閉じるボタンをクリックしたときに確認ダイアログが表示され、誤操作を防ぎます。",
+    "confirmCloseTitle": "セッションを閉じる確認",
+    "confirmCloseMessage": "セッション「{{name}}」を閉じてもよろしいですか？",
+    "enabled": "有効",
+    "disabled": "無効"
   },
   "common": {
     "close": "閉じる",
@@ -88,7 +94,9 @@
   "goal": {
     "title": "目標",
     "placeholder": "目標を入力してください。例：\n1. 現在のディレクトリのファイルを一覧表示\n2. 特定の内容を含むファイルを検索\n3. デプロイスクリプトを実行",
-    "notSet": "クリックして目標を設定"
+    "notSet": "クリックして目標を設定",
+    "restore": "復元",
+    "restoreTooltip": "セッション作成時の初期目標に復元"
   },
   "stats": {
     "title": "AI操作統計（現在のセッション）",

@@ -1765,8 +1765,39 @@ async function runBackgroundAutoAction() {
       if (preResult) {
         console.log(`[后台自动操作] 会话 ${session.name}: 预判断成功 - ${preResult.currentState}`);
         // 使用预判断结果，跳过 AI 调用
-        const status = preResult;
+        let status = preResult;
         updateAiHealthState(true, null, true, sessionData.id);
+
+        // 检查是否需要 AI 错误分析（检测到 API 错误但需要判断类型）
+        if (status.needsErrorAnalysis && status.errorContent) {
+          console.log(`[后台自动操作] 会话 ${session.name}: 需要 AI 分析错误类型`);
+          try {
+            const errorAnalysis = await aiEngine.analyzeApiError(status.errorContent);
+            console.log(`[后台自动操作] AI 错误分析结果: ${errorAnalysis.errorType} -> ${errorAnalysis.action}`);
+
+            // 合并分析结果到 status
+            status = {
+              ...status,
+              ...errorAnalysis,
+              needsAction: true,
+              actionType: 'auto_fix',
+              actionReason: `AI分析: ${errorAnalysis.reason}`,
+              suggestion: errorAnalysis.reason
+            };
+          } catch (err) {
+            console.error(`[后台自动操作] AI 错误分析失败:`, err.message);
+            // 分析失败时使用默认策略
+            status = {
+              ...status,
+              shouldAutoFix: true,
+              autoFixAction: 'wait_and_retry',
+              needsAction: true,
+              actionType: 'auto_fix',
+              actionReason: 'AI 分析失败，默认等待重试',
+              suggestion: '等待 60 秒后重试'
+            };
+          }
+        }
 
         // 检查是否需要自动修复（连续错误等情况）- 不再关闭自动开关
         if (status.shouldAutoFix) {
