@@ -109,3 +109,63 @@ body: {
 
 - 测试脚本：`test-claude-code-fake.js`
 - 已实现位置：`server/services/AIEngine.js` 的 `_callClaudeApi` 方法
+
+## 版本发布流程
+
+每次发布新版本时，需要执行以下步骤：
+
+### 1. 更新版本号并提交
+
+```bash
+# 修改 package.json 中的 version 字段
+# 提交代码
+git add -A && git commit -m "版本更新至 x.x.x"
+git push
+```
+
+### 2. 构建安装包
+
+```bash
+# 构建 macOS 安装包（Intel + ARM64）
+npm run electron:build:mac
+
+# 构建 Windows 安装包
+npm run electron:build:win
+
+# 或一次性构建全部
+npm run electron:build:all
+```
+
+构建产物位于 `release/` 目录：
+- `WhatyTerm-x.x.x.dmg` - macOS Intel 版
+- `WhatyTerm-x.x.x-arm64.dmg` - macOS ARM64 版
+- `WhatyTerm Setup x.x.x.exe` - Windows 版
+
+### 3. 上传安装包到服务器
+
+```bash
+# 创建版本目录
+ssh us-lax02 "mkdir -p /var/www/downloads/whatyterm/vx.x.x"
+
+# 上传文件
+scp release/WhatyTerm-x.x.x.dmg us-lax02:/var/www/downloads/whatyterm/vx.x.x/
+scp release/WhatyTerm-x.x.x-arm64.dmg us-lax02:/var/www/downloads/whatyterm/vx.x.x/
+scp "release/WhatyTerm Setup x.x.x.exe" us-lax02:/var/www/downloads/whatyterm/vx.x.x/
+```
+
+### 4. 更新下载页面
+
+```bash
+# 更新 ai.whaty.org 下载页面的版本号
+ssh us-lax02 "sed -i 's/v旧版本/v新版本/g; s/旧版本/新版本/g' /var/www/downloads/index.html"
+
+# 验证更新
+ssh us-lax02 "grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' /var/www/downloads/index.html | head -5"
+```
+
+### 下载页面信息
+
+- **网站地址**: https://ai.whaty.org/
+- **服务器**: US-LAX02
+- **HTML 文件**: `/var/www/downloads/index.html`
+- **安装包目录**: `/var/www/downloads/whatyterm/v版本号/`
