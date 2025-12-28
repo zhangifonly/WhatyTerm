@@ -1166,12 +1166,34 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
     }
   });
 
-  // 获取按会话分组的录制统计
+  // 获取按会话分组的录制统计（包含项目信息）
   app.get('/api/storage/recordings/by-session', (req, res) => {
     try {
       const recorder = getTerminalRecorder();
-      const sessions = recorder.getStatsBySession();
-      res.json(sessions);
+      const recordings = recorder.getStatsBySession();
+
+      // 获取所有会话信息
+      const allSessions = sessionManager.listSessions();
+      const sessionMap = {};
+      allSessions.forEach(s => {
+        sessionMap[s.id] = {
+          name: s.name,
+          projectName: s.projectName,
+          projectDir: s.projectDir,
+          projectDesc: s.projectDesc
+        };
+      });
+
+      // 合并项目信息
+      const result = recordings.map(r => ({
+        ...r,
+        projectName: sessionMap[r.sessionId]?.projectName || null,
+        projectDir: sessionMap[r.sessionId]?.projectDir || null,
+        projectDesc: sessionMap[r.sessionId]?.projectDesc || null,
+        name: sessionMap[r.sessionId]?.name || r.sessionId
+      }));
+
+      res.json(result);
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

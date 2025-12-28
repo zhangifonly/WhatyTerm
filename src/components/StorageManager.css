@@ -151,9 +151,9 @@
 
 .storage-manager .session-item {
   display: grid;
-  grid-template-columns: 1fr 80px 100px 60px;
+  grid-template-columns: 1fr 70px 80px 50px;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 10px 12px;
   align-items: center;
   border-bottom: 1px solid var(--border-color, #252540);
   font-size: 12px;
@@ -167,11 +167,34 @@
   background: var(--bg-secondary, #252540);
 }
 
-.storage-manager .session-id {
+.storage-manager .session-info {
+  overflow: hidden;
+}
+
+.storage-manager .session-name {
   color: var(--text-primary, #fff);
+  font-weight: 500;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.storage-manager .session-dir {
+  font-size: 11px;
+  color: #4a9eff;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+
+.storage-manager .session-desc {
+  font-size: 10px;
+  color: #888;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
 }
 
 .storage-manager .session-size {
