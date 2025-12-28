@@ -153,31 +153,61 @@ ${taskData.content}
 
   /**
    * 快速获取项目描述（不调用 AI，用于显示）
+   * 返回格式：标题 + 详细描述
    */
   async getQuickProjectDesc(workingDir) {
     if (!workingDir) return '';
 
-    // 按优先级尝试读取文件
-    const descFiles = ['CLAUDE.md', 'README.md', '.claude/future-plans.md'];
+    const descFiles = ['CLAUDE.md', 'README.md'];
 
     for (const fileName of descFiles) {
       const filePath = path.join(workingDir, fileName);
       try {
         const content = await fs.readFile(filePath, 'utf-8');
         const lines = content.split('\n');
+        let title = '';
+        let firstText = '';
 
         for (let i = 0; i < Math.min(lines.length, 30); i++) {
           const line = lines[i].trim();
-          // 跳过标题、代码块、列表等
-          if (line &&
+          if (!line || line.startsWith('```')) continue;
+
+          // 找第一个标题
+          if (!title && line.startsWith('# ')) {
+            title = line.slice(2).trim().slice(0, 100);
+          }
+          // 找第一个有意义的文本
+          if (!firstText &&
               !line.startsWith('#') &&
-              !line.startsWith('```') &&
               !line.startsWith('-') &&
               !line.startsWith('*') &&
               !line.startsWith('|') &&
-              line.length > 10) {
-            return line.slice(0, 150);
+              !line.startsWith('!') &&
+              !line.startsWith('[') &&
+              !line.startsWith('<') &&              // 跳过 HTML 标签
+              !line.match(/^\*\*[^*]+\*\*:/) &&
+              !line.match(/!\[.*\]\(.*\)/) &&
+              !line.match(/^\[.*\]:/) &&
+              !line.match(/^<[^>]+>/) &&            // 跳过 HTML 标签
+              !line.endsWith('：') &&
+              !line.endsWith(':') &&
+              line.length > 15) {
+            // 处理引用块：去掉 > 前缀
+            let text = line.startsWith('>') ? line.slice(1).trim() : line;
+            if (text.length > 15) {
+              firstText = text.slice(0, 150);
+            }
           }
+
+          if (title && firstText) break;
+        }
+
+        // 组合标题和描述
+        if (title && firstText) {
+          return `${title} - ${firstText}`;
+        }
+        if (title || firstText) {
+          return title || firstText;
         }
       } catch {}
     }

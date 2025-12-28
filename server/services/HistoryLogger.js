@@ -110,7 +110,7 @@ export class HistoryLogger {
     `);
 
     const rows = stmt.all(limit);
-    return rows.reverse().map(row => ({
+    return rows.map(row => ({
       id: row.id,
       sessionId: row.session_id,
       type: row.type,

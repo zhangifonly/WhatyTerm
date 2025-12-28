@@ -200,6 +200,23 @@ export default function App() {
     socket.on('sessions:list', handleSessionsList);
     socket.on('sessions:updated', handleSessionsList);
 
+    // 处理 socket 重连：重新 attach 到当前会话
+    socket.on('connect', () => {
+      console.log('[Socket] 已连接');
+      // 重连后重新获取会话列表
+      socket.emit('sessions:list');
+      // 如果有当前会话，重新 attach
+      const currentSession = currentSessionRef.current;
+      if (currentSession) {
+        console.log('[Socket] 重连后重新 attach 到会话:', currentSession.id);
+        socket.emit('session:attach', currentSession.id);
+      }
+    });
+
+    socket.on('disconnect', (reason) => {
+      console.log('[Socket] 断开连接:', reason);
+    });
+
     socket.on('session:attached', (data) => {
       // 使用完整内容（包含滚动历史），如果没有则使用当前屏幕内容
       setPendingScreenContent(data.fullContent || data.screenContent || '');
@@ -251,6 +268,8 @@ export default function App() {
     socket.emit('sessions:list');
 
     return () => {
+      socket.off('connect');
+      socket.off('disconnect');
       socket.off('sessions:list');
       socket.off('sessions:updated');
       socket.off('session:attached');
@@ -731,7 +750,7 @@ export default function App() {
         aiType: project.aiType,
         workingDir: project.path,
         projectName: project.name,
-        projectDesc: `Continue ${project.aiType} session`,
+        projectDesc: '',  // 由服务器端从项目文件提取
         resumeCommand: project.resumeCommand
       };
       socket.emit('session:createAndResume', sessionData);
