@@ -1172,11 +1172,14 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
       const recorder = getTerminalRecorder();
       const recordings = recorder.getStatsBySession();
 
-      // 获取所有会话信息
+      // 从录制数据库获取保存的会话信息
+      const savedInfo = recorder.getAllSessionInfo();
+
+      // 获取当前活跃会话信息（作为补充）
       const allSessions = sessionManager.listSessions();
-      const sessionMap = {};
+      const activeMap = {};
       allSessions.forEach(s => {
-        sessionMap[s.id] = {
+        activeMap[s.id] = {
           name: s.name,
           projectName: s.projectName,
           projectDir: s.projectDir,
@@ -1184,14 +1187,19 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
         };
       });
 
-      // 合并项目信息
-      const result = recordings.map(r => ({
-        ...r,
-        projectName: sessionMap[r.sessionId]?.projectName || null,
-        projectDir: sessionMap[r.sessionId]?.projectDir || null,
-        projectDesc: sessionMap[r.sessionId]?.projectDesc || null,
-        name: sessionMap[r.sessionId]?.name || r.sessionId
-      }));
+      // 合并项目信息（优先使用保存的，其次使用活跃会话的）
+      const result = recordings.map(r => {
+        const saved = savedInfo[r.sessionId];
+        const active = activeMap[r.sessionId];
+        const info = saved || active || {};
+        return {
+          ...r,
+          projectName: info.projectName || null,
+          projectDir: info.projectDir || null,
+          projectDesc: info.projectDesc || null,
+          name: info.name || r.sessionId
+        };
+      });
 
       res.json(result);
     } catch (err) {

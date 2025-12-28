@@ -3076,6 +3076,14 @@ io.on('connection', (socket) => {
       const termSize = session.pty ? { cols: session.pty.cols, rows: session.pty.rows } : null;
       terminalRecorder.recordOutput(sessionId, data, termSize);
 
+      // 保存会话项目信息（用于历史记录显示）
+      terminalRecorder.saveSessionInfo(sessionId, {
+        projectName: session.projectName,
+        projectDir: session.projectDir,
+        projectDesc: session.projectDesc,
+        name: session.name
+      });
+
       // 如果 AI 启用且后台自动操作未开启，触发基于目标的分析
       // 注：如果后台自动操作已开启，则由后台循环处理，无需重复分析
       if (session.aiEnabled && !session.autoActionEnabled) {
