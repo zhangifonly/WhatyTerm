@@ -1141,26 +1141,32 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
 
       if (fs.existsSync(logsDbPath)) {
         logsStats.size = fs.statSync(logsDbPath).size;
-        try {
-          const logsDb = new sqlite3.Database(logsDbPath);
-          logsDb.get('SELECT COUNT(*) as count, MIN(timestamp) as oldest FROM ai_logs', (err, row) => {
-            if (!err && row) {
-              logsStats.count = row.count || 0;
-              logsStats.oldestTime = row.oldest;
-            }
-            logsDb.close();
+        const logsDb = new sqlite3.Database(logsDbPath, sqlite3.OPEN_READONLY);
+        logsDb.get('SELECT COUNT(*) as count, MIN(timestamp) as oldest FROM ai_logs', (err, row) => {
+          logsDb.close();
+          if (!err && row) {
+            logsStats.count = row.count || 0;
+            logsStats.oldestTime = row.oldest;
+          }
+          res.json({
+            recordings: {
+              size: recStats.totalSize || 0,
+              count: recStats.totalEvents || 0,
+              oldestTime: recStats.oldestTime || null
+            },
+            logs: logsStats
           });
-        } catch (e) { /* ignore */ }
+        });
+      } else {
+        res.json({
+          recordings: {
+            size: recStats.totalSize || 0,
+            count: recStats.totalEvents || 0,
+            oldestTime: recStats.oldestTime || null
+          },
+          logs: logsStats
+        });
       }
-
-      res.json({
-        recordings: {
-          size: recStats.totalSize || 0,
-          count: recStats.totalEvents || 0,
-          oldestTime: recStats.oldestTime || null
-        },
-        logs: logsStats
-      });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -1210,8 +1216,9 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
   // 删除指定会话的录制
   app.delete('/api/storage/recordings/:sessionId', (req, res) => {
     try {
+      const { minutes } = req.body || {};
       const recorder = getTerminalRecorder();
-      const deleted = recorder.deleteSession(req.params.sessionId);
+      const deleted = recorder.deleteSessionOlderThan(req.params.sessionId, minutes || 0);
       res.json({ success: true, deleted });
     } catch (err) {
       res.status(500).json({ error: err.message });
@@ -1254,16 +1261,31 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
   // 清理数据
   app.post('/api/storage/clean/:type', (req, res) => {
     const { type } = req.params;
+    const { hours } = req.body; // 可选：清理最近多少小时的数据，不传则清理全部
     try {
       let deleted = 0;
       if (type === 'recordings') {
         const recorder = getTerminalRecorder();
-        deleted = recorder.cleanOldRecordings(0); // 清理所有
+        deleted = recorder.cleanRecentRecordings(hours || 0);
       } else if (type === 'logs') {
         const logsDbPath = path.join(os.homedir(), '.webtmux', 'db', 'ai-logs.db');
         if (fs.existsSync(logsDbPath)) {
-          fs.unlinkSync(logsDbPath);
-          deleted = 1;
+          if (hours) {
+            // 按时间范围删除最近N小时
+            const cutoff = Date.now() - hours * 60 * 60 * 1000;
+            const logsDb = new sqlite3.Database(logsDbPath);
+            logsDb.run('DELETE FROM ai_logs WHERE timestamp > ?', [cutoff], function(err) {
+              logsDb.close();
+              if (err) {
+                return res.status(500).json({ error: err.message });
+              }
+              res.json({ success: true, deleted: this.changes });
+            });
+            return;
+          } else {
+            fs.unlinkSync(logsDbPath);
+            deleted = 1;
+          }
         }
       }
       res.json({ success: true, deleted });

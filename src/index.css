@@ -1626,6 +1626,8 @@ body {
   align-items: center;
   position: relative;
   z-index: 1;
+  flex-wrap: nowrap;
+  gap: 8px;
 }
 
 .ai-panel-header h3 {
@@ -1702,6 +1704,7 @@ body {
   transition: all 0.2s;
   display: inline-block;
   font-weight: 500;
+  white-space: nowrap;
 }
 
 .ai-stats:hover {

@@ -248,7 +248,7 @@ export class TerminalRecorder {
   }
 
   /**
-   * 清理旧录制数据
+   * 清理旧录制数据（保留最近N小时）
    */
   cleanOldRecordings(hoursToKeep = 24) {
     const cutoff = Date.now() - hoursToKeep * 60 * 60 * 1000;
@@ -265,12 +265,77 @@ export class TerminalRecorder {
   }
 
   /**
+   * 删除最近N小时的录制数据
+   */
+  cleanRecentRecordings(hours) {
+    if (!hours || hours <= 0) {
+      // 删除全部
+      const stmt = this.db.prepare(`DELETE FROM recordings`);
+      const result = stmt.run();
+      console.log(`[TerminalRecorder] 已清理全部 ${result.changes} 条录制数据`);
+      return result.changes;
+    }
+
+    const cutoff = Date.now() - hours * 60 * 60 * 1000;
+    const stmt = this.db.prepare(`
+      DELETE FROM recordings WHERE base_time > ?
+    `);
+    const result = stmt.run(cutoff);
+
+    if (result.changes > 0) {
+      console.log(`[TerminalRecorder] 已清理最近 ${hours} 小时的 ${result.changes} 条录制数据`);
+    }
+
+    return result.changes;
+  }
+
+  /**
    * 删除会话的所有录制
    */
   deleteSession(sessionId) {
     this.buffers.delete(sessionId);
     const stmt = this.db.prepare(`DELETE FROM recordings WHERE session_id = ?`);
     return stmt.run(sessionId).changes;
+  }
+
+  /**
+   * 按时间范围删除会话录制
+   */
+  deleteSessionByTime(sessionId, hours = 0) {
+    this.buffers.delete(sessionId);
+
+    if (!hours || hours <= 0) {
+      // 删除全部
+      const stmt = this.db.prepare(`DELETE FROM recordings WHERE session_id = ?`);
+      return stmt.run(sessionId).changes;
+    }
+
+    // 删除最近N小时的数据
+    const cutoff = Date.now() - hours * 60 * 60 * 1000;
+    const stmt = this.db.prepare(`
+      DELETE FROM recordings WHERE session_id = ? AND base_time > ?
+    `);
+    return stmt.run(sessionId, cutoff).changes;
+  }
+
+  /**
+   * 删除会话中N分钟以前的旧数据
+   */
+  deleteSessionOlderThan(sessionId, minutes = 0) {
+    this.buffers.delete(sessionId);
+
+    if (!minutes || minutes <= 0) {
+      // 删除全部
+      const stmt = this.db.prepare(`DELETE FROM recordings WHERE session_id = ?`);
+      return stmt.run(sessionId).changes;
+    }
+
+    // 删除N分钟以前的数据
+    const cutoff = Date.now() - minutes * 60 * 1000;
+    const stmt = this.db.prepare(`
+      DELETE FROM recordings WHERE session_id = ? AND base_time < ?
+    `);
+    return stmt.run(sessionId, cutoff).changes;
   }
 
   /**

@@ -133,7 +133,7 @@
 
 .session-list-header {
   display: grid;
-  grid-template-columns: 1fr 80px 100px 60px;
+  grid-template-columns: 1fr 60px 80px 70px;
   gap: 8px;
   padding: 8px 12px;
   background: var(--bg-secondary, #252540);
@@ -151,7 +151,7 @@
 
 .storage-manager .session-item {
   display: grid;
-  grid-template-columns: 1fr 70px 80px 50px;
+  grid-template-columns: 1fr 60px 80px 70px;
   gap: 8px;
   padding: 10px 12px;
   align-items: center;
@@ -208,4 +208,92 @@
 .btn-xs {
   padding: 2px 8px;
   font-size: 11px;
+}
+
+.storage-manager .session-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+/* 删除数据时间范围选择 */
+.clean-section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color, #333);
+}
+
+.clean-label {
+  font-size: 12px;
+  color: #888;
+  display: block;
+  margin-bottom: 10px;
+}
+
+.time-range-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border-color, #444);
+  color: var(--text-secondary, #aaa);
+}
+
+.btn-outline:hover {
+  background: var(--bg-secondary, #252540);
+  border-color: #4a9eff;
+  color: #4a9eff;
+}
+
+/* 删除菜单 */
+.delete-menu-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 999;
+}
+
+.delete-menu {
+  position: fixed;
+  z-index: 1000;
+  background: var(--bg-tertiary, #1e1e2e);
+  border: 1px solid var(--border-color, #444);
+  border-radius: 8px;
+  padding: 8px 0;
+  min-width: 140px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.delete-menu-title {
+  padding: 6px 12px;
+  font-size: 11px;
+  color: #888;
+  border-bottom: 1px solid var(--border-color, #333);
+  margin-bottom: 4px;
+}
+
+.delete-menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text-primary, #fff);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.delete-menu-item:hover {
+  background: var(--bg-secondary, #252540);
+}
+
+.delete-menu-item:last-child {
+  color: #ef4444;
 }
