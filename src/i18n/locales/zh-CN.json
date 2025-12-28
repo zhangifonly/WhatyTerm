@@ -70,7 +70,7 @@
     "notConfigured": "未配置",
     "copied": "已复制!",
     "edit": "修改",
-    "history": "历史",
+    "history": "终端历史回放",
     "clear": "清空",
     "noSessions": "暂无会话",
     "needInput": "需要输入",
@@ -108,7 +108,13 @@
     "sessionDuration": "会话时长",
     "minutes": "分钟",
     "hours": "小时",
-    "days": "天"
+    "days": "天",
+    "tokenUsage": "Token 消耗",
+    "inputTokens": "输入",
+    "outputTokens": "输出",
+    "cacheRead": "缓存命中",
+    "totalTokens": "总计",
+    "requests": "请求数"
   },
   "aiPanel": {
     "title": "AI 状态监控",
@@ -163,7 +169,7 @@
     "autoOn": "自动:开",
     "autoOff": "自动:关",
     "hideDebug": "隐藏",
-    "showLog": "日志",
+    "showLog": "监控操作日志",
     "continue": "继续",
     "analyzeNow": "立即分析",
     "autoRunning": "自动模式运行中",

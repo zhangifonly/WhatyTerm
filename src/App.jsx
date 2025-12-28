@@ -10,6 +10,8 @@ import ClosedSessionsList from './components/ClosedSessionsList';
 import RecentProjects from './components/RecentProjects';
 import CliToolsManager from './components/CliToolsManager';
 import ProviderPriority from './components/ProviderPriority';
+import TerminalPlayback from './components/TerminalPlayback';
+import StorageManager from './components/StorageManager';
 
 const socket = io();
 
@@ -17,6 +19,9 @@ const socket = io();
 let lastInputTime = 0;
 let lastInputData = '';
 const INPUT_DEBOUNCE_MS = 50; // 50ms 内的相同输入视为重复
+
+// IME 输入法状态跟踪
+let isComposing = false;
 
 // 认证状态 Hook
 function useAuth() {
@@ -103,11 +108,16 @@ const convertAnsiToHtml = (text) => {
 export default function App() {
   const { t } = useTranslation();
   const auth = useAuth();
-  const [sessions, setSessions] = useState([]);
+  // 从 localStorage 读取缓存的会话列表，加速首页加载
+  const [sessions, setSessions] = useState(() => {
+    try {
+      const cached = localStorage.getItem('webtmux_sessions_cache');
+      return cached ? JSON.parse(cached) : [];
+    } catch { return []; }
+  });
   const [currentSession, setCurrentSession] = useState(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [suggestion, setSuggestion] = useState(null);
-  const [history, setHistory] = useState([]);
   const [showHistory, setShowHistory] = useState(false);
   const [editingGoal, setEditingGoal] = useState(false);
   const [goalInput, setGoalInput] = useState('');
@@ -153,6 +163,9 @@ export default function App() {
   const [switchMessage, setSwitchMessage] = useState('');
   const [dropdownPosition, setDropdownPosition] = useState({ top: 0, left: 0 });
   const providerButtonRef = useRef(null);
+  // 会话悬停提示状态
+  const [hoveredSession, setHoveredSession] = useState(null);
+  const [tooltipPosition, setTooltipPosition] = useState({ top: 0 });
   // 注意：autoActionEnabled 现在存储在服务器端，通过 session.autoActionEnabled 获取
 
   const terminalRef = useRef(null);
@@ -175,21 +188,22 @@ export default function App() {
 
   // 初始化 Socket 监听
   useEffect(() => {
-    socket.on('sessions:list', setSessions);
-    socket.on('sessions:updated', setSessions);
+    // 更新会话列表并缓存到 localStorage
+    const handleSessionsList = (data) => {
+      setSessions(data);
+      try {
+        localStorage.setItem('webtmux_sessions_cache', JSON.stringify(data));
+      } catch { /* 忽略存储错误 */ }
+    };
+
+    socket.on('sessions:list', handleSessionsList);
+    socket.on('sessions:updated', handleSessionsList);
 
     socket.on('session:attached', (data) => {
       // 使用完整内容（包含滚动历史），如果没有则使用当前屏幕内容
       setPendingScreenContent(data.fullContent || data.screenContent || '');
       setPendingCursorPosition(data.cursorPosition);
       setCurrentSession(data.session);
-    });
-
-    // 历史记录异步加载，不阻塞终端显示
-    socket.on('session:history', (data) => {
-      if (data.sessionId === currentSessionRef.current?.id) {
-        setHistory(data.history);
-      }
     });
 
     socket.on('session:updated', (sessionUpdate) => {
@@ -239,7 +253,6 @@ export default function App() {
       socket.off('sessions:list');
       socket.off('sessions:updated');
       socket.off('session:attached');
-      socket.off('session:history');
       socket.off('session:updated');
       socket.off('terminal:output');
       socket.off('ai:suggestion');
@@ -561,10 +574,35 @@ export default function App() {
       }
     });
 
+    // 获取终端的 textarea 元素，用于监听 IME 事件
+    const textareaElement = terminalRef.current?.querySelector('textarea.xterm-helper-textarea');
+
+    // 监听 IME composition 事件
+    const handleCompositionStart = () => {
+      isComposing = true;
+      console.log('[Terminal] IME composition started');
+    };
+
+    const handleCompositionEnd = () => {
+      isComposing = false;
+      console.log('[Terminal] IME composition ended');
+    };
+
+    if (textareaElement) {
+      textareaElement.addEventListener('compositionstart', handleCompositionStart);
+      textareaElement.addEventListener('compositionend', handleCompositionEnd);
+    }
+
     // 注册输入监听器（dispose 时会自动清理）
     term.onData((data) => {
       const session = currentSessionRef.current;
       if (session) {
+        // IME 组合中时跳过发送（等待组合完成）
+        if (isComposing) {
+          console.log('[Terminal] Skipping input during IME composition');
+          return;
+        }
+
         // 防止重复发送（React StrictMode / HMR 可能导致重复注册监听器）
         const now = Date.now();
         if (data === lastInputData && now - lastInputTime < INPUT_DEBOUNCE_MS) {
@@ -607,6 +645,13 @@ export default function App() {
     return () => {
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
+      // 清理 IME 事件监听器
+      if (textareaElement) {
+        textareaElement.removeEventListener('compositionstart', handleCompositionStart);
+        textareaElement.removeEventListener('compositionend', handleCompositionEnd);
+      }
+      // 重置 IME 状态
+      isComposing = false;
       // 清理终端实例（会自动清理 onData 监听器）
       if (terminalInstance.current) {
         terminalInstance.current.dispose();
@@ -821,6 +866,14 @@ export default function App() {
               key={session.id}
               className={`session-item ${currentSession?.id === session.id ? 'active' : ''} ${aiStatusMap[session.id]?.needsAction && !session.autoActionEnabled ? 'needs-action' : ''}`}
               onClick={() => attachSession(session.id)}
+              onMouseEnter={(e) => {
+                if (session.projectDesc || session.goal) {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setTooltipPosition({ top: rect.top });
+                  setHoveredSession(session);
+                }
+              }}
+              onMouseLeave={() => setHoveredSession(null)}
             >
               {/* 需要操作时显示红色徽章（自动模式开启时不显示，因为会自动处理） */}
               {aiStatusMap[session.id]?.needsAction && !session.autoActionEnabled && (
@@ -856,10 +909,6 @@ export default function App() {
               )}
               {!session.projectDesc && session.goal && (
                 <div className="session-goal">目标: {session.goal.split('\n')[0].slice(0, 40)}{session.goal.length > 40 ? '...' : ''}</div>
-              )}
-              {/* 会话悬停提示 */}
-              {(session.projectDesc || session.goal) && (
-                <div className="session-tooltip">{session.projectDesc || session.goal}</div>
               )}
               <div className="session-ai-status">
                 {session.autoActionEnabled ? '🤖 自动' : '💡 建议'}
@@ -1045,9 +1094,6 @@ export default function App() {
                         title={t('goal.regenerateTooltip')}
                       >
                         {generatingGoal ? '...' : t('goal.regenerate')}
-                      </button>
-                      <button className="btn btn-secondary btn-small" onClick={() => setShowHistory(true)}>
-                        {t('common.history')}
                       </button>
                     </div>
                   </>
@@ -1295,8 +1341,11 @@ export default function App() {
                 <h4 style={{ margin: 0 }}>
                   {currentSession.aiType === 'claude' ? 'Claude API' :
                    currentSession.aiType === 'codex' ? 'Codex API' :
-                   currentSession.aiType === 'gemini' ? 'Gemini API' : 'AI API'}
+                   currentSession.aiType === 'gemini' ? 'Gemini API' :
+                   currentSession.aiType === 'droid' ? 'Droid' : 'AI API'}
                 </h4>
+                {/* Droid 使用官方账号，不显示供应商切换按钮 */}
+                {currentSession.aiType !== 'droid' && (
                 <button
                   ref={providerButtonRef}
                   onClick={openProviderDropdown}
@@ -1314,9 +1363,30 @@ export default function App() {
                 >
                   ▼
                 </button>
+                )}
               </div>
 
               {(() => {
+                // Droid 使用官方账号，特殊处理
+                if (currentSession.aiType === 'droid') {
+                  return (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <p style={{ fontWeight: 500, color: 'hsl(280 70% 55%)', margin: 0 }}>
+                        Factory.ai 官方
+                      </p>
+                      <span style={{
+                        fontSize: '9px',
+                        padding: '1px 4px',
+                        borderRadius: '3px',
+                        background: 'hsl(280 70% 45% / 0.2)',
+                        color: 'hsl(280 70% 65%)'
+                      }}>
+                        OAuth
+                      </span>
+                    </div>
+                  );
+                }
+
                 const provider = currentSession.aiType === 'claude' ? currentSession.claudeProvider :
                                 currentSession.aiType === 'codex' ? currentSession.codexProvider :
                                 currentSession.aiType === 'gemini' ? currentSession.geminiProvider : null;
@@ -1677,17 +1747,10 @@ export default function App() {
               {showDebugPanel ? t('controls.hideDebug') : t('controls.showLog')}
             </button>
             <button
-              className="btn btn-primary btn-small"
-              onClick={() => {
-                // 关键：分两次发送，模拟人工输入
-                socket.emit('terminal:input', { sessionId: currentSession.id, input: t('controls.continue') });
-                setTimeout(() => {
-                  socket.emit('terminal:input', { sessionId: currentSession.id, input: '\r' });
-                }, 50);
-                addDebugLog('test', { message: `测试: 分开发送 ${t('controls.continue')} + CR` });
-              }}
+              className="btn btn-secondary btn-small"
+              onClick={() => setShowHistory(true)}
             >
-              {t('controls.continue')}
+              {t('common.history')}
             </button>
           </div>
 
@@ -1747,11 +1810,10 @@ export default function App() {
         />
       )}
 
-      {/* 历史记录面板 */}
+      {/* 终端回放面板 */}
       {showHistory && currentSession && (
-        <HistoryPanel
+        <TerminalPlayback
           sessionId={currentSession.id}
-          history={history}
           onClose={() => setShowHistory(false)}
         />
       )}
@@ -1811,6 +1873,16 @@ export default function App() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* 全局会话悬停提示 - 使用 fixed 定位避免被遮挡 */}
+      {hoveredSession && (
+        <div
+          className="session-tooltip visible"
+          style={{ top: tooltipPosition.top }}
+        >
+          {hoveredSession.projectDesc || hoveredSession.goal}
         </div>
       )}
     </div>
@@ -2133,6 +2205,12 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
             onClick={() => setActiveTab('provider-priority')}
           >
             供应商切换
+          </button>
+          <button
+            className={`tab-btn ${activeTab === 'storage' ? 'active' : ''}`}
+            onClick={() => setActiveTab('storage')}
+          >
+            存储管理
           </button>
           <button
             className={`tab-btn ${activeTab === 'about' ? 'active' : ''}`}
@@ -2752,6 +2830,10 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
           <ProviderPriority />
         )}
 
+        {activeTab === 'storage' && (
+          <StorageManager socket={socket} />
+        )}
+
         {activeTab === 'about' && (
           <AboutPage socket={socket} onClose={onClose} />
         )}
@@ -3000,47 +3082,6 @@ function CreateSessionModal({ onClose, onCreate }) {
             </button>
           </div>
         </form>
-      </div>
-    </div>
-  );
-}
-
-function HistoryPanel({ sessionId, history, onClose }) {
-  const { t } = useTranslation();
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal history-modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{t('session.title')}</h2>
-        <div className="history-panel">
-          {history.map((entry) => (
-            <div key={entry.id} className={`history-entry ${entry.type}`}>
-              <div className="history-time">
-                {new Date(entry.createdAt).toLocaleTimeString()}
-                {' - '}
-                {entry.type === 'input' ? t('common.input') :
-                 entry.type === 'output' ? t('common.output') :
-                 entry.type === 'ai_decision' ? t('common.aiDecision') : t('common.system')}
-              </div>
-              <div
-                className="history-content"
-                dangerouslySetInnerHTML={{
-                  __html: (entry.type === 'input' ? '$ ' : '') + convertAnsiToHtml(entry.content || '')
-                }}
-              />
-              {entry.aiReasoning && (
-                <div
-                  className="history-reasoning"
-                  dangerouslySetInnerHTML={{
-                    __html: t('common.reason') + ': ' + convertAnsiToHtml(entry.aiReasoning)
-                  }}
-                />
-              )}
-            </div>
-          ))}
-        </div>
-        <div className="modal-actions">
-          <button className="btn btn-secondary" onClick={onClose}>{t('common.close')}</button>
-        </div>
       </div>
     </div>
   );
