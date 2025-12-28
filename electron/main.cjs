@@ -1,15 +1,51 @@
-const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, shell, utilityProcess } = require('electron');
 const path = require('path');
 const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 
 let mainWindow;
 let serverProcess;
+let logStream;
 
 // 检查是否是开发模式
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 const isWindows = process.platform === 'win32';
 const isMac = process.platform === 'darwin';
+
+// 获取日志目录（安装目录下的 logs 文件夹）
+function getLogPath() {
+  if (isDev) {
+    return path.join(__dirname, '..', 'logs');
+  }
+  // 生产环境：使用安装目录
+  return path.join(path.dirname(app.getPath('exe')), 'logs');
+}
+
+// 初始化日志
+function initLog() {
+  const logDir = getLogPath();
+  if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir, { recursive: true });
+  }
+  const logFile = path.join(logDir, `whatyterm-${new Date().toISOString().slice(0, 10)}.log`);
+  logStream = fs.createWriteStream(logFile, { flags: 'a' });
+  writeLog('========================================');
+  writeLog(`WhatyTerm 启动 - ${new Date().toISOString()}`);
+  writeLog(`平台: ${process.platform}, 架构: ${process.arch}`);
+  writeLog(`Electron: ${process.versions.electron}, Node: ${process.versions.node}`);
+  writeLog(`安装目录: ${path.dirname(app.getPath('exe'))}`);
+  writeLog('========================================');
+}
+
+// 写入日志
+function writeLog(message) {
+  const timestamp = new Date().toISOString();
+  const logLine = `[${timestamp}] ${message}\n`;
+  if (logStream) {
+    logStream.write(logLine);
+  }
+  console.log(message);
+}
 
 // 获取资源目录
 function getResourcesPath() {
@@ -70,17 +106,23 @@ async function installTmuxMac() {
 
 // 检查 WSL2 是否安装
 function checkWSL() {
+  // 优先使用 wsl -l -v 检测，这个命令更可靠
+  try {
+    const result = execSync('wsl -l -v', { stdio: 'pipe', encoding: 'utf-8' });
+    // 如果有任何发行版列出，说明 WSL 已安装
+    if (result && result.trim().length > 0) {
+      return true;
+    }
+  } catch {
+    // 忽略错误，继续尝试其他方式
+  }
+
+  // 备用检测：wsl --status
   try {
     const result = execSync('wsl --status', { stdio: 'pipe', encoding: 'utf-8' });
     return result.includes('默认版本') || result.includes('Default Version') || result.includes('WSL');
   } catch {
-    // 尝试另一种检测方式
-    try {
-      execSync('wsl -l -v', { stdio: 'pipe' });
-      return true;
-    } catch {
-      return false;
-    }
+    return false;
   }
 }
 
@@ -438,52 +480,62 @@ function createWindow() {
 
 function startServer() {
   if (isDev) {
-    console.log('[Electron] 开发模式，跳过启动内置服务器');
+    writeLog('[Electron] 开发模式，跳过启动内置服务器');
     return;
   }
 
-  console.log('[Electron] 启动内置服务器...');
+  writeLog('[Electron] 启动内置服务器...');
 
   const resourcesPath = getResourcesPath();
   const serverPath = path.join(resourcesPath, 'server', 'index.js');
   const nodePath = path.join(resourcesPath, 'node_modules');
 
-  console.log('[Electron] 服务器路径:', serverPath);
-  console.log('[Electron] 模块路径:', nodePath);
-  console.log('[Electron] 平台:', process.platform);
+  writeLog(`[Electron] 资源目录: ${resourcesPath}`);
+  writeLog(`[Electron] 服务器路径: ${serverPath}`);
+  writeLog(`[Electron] 模块路径: ${nodePath}`);
+  writeLog(`[Electron] 服务器文件存在: ${fs.existsSync(serverPath)}`);
+
+  // 检查 server/package.json 是否存在
+  const serverPkgPath = path.join(resourcesPath, 'server', 'package.json');
+  writeLog(`[Electron] server/package.json 存在: ${fs.existsSync(serverPkgPath)}`);
 
   // Windows 下需要设置 WSL 模式环境变量
   const env = {
     ...process.env,
     NODE_ENV: 'production',
     PORT: '3000',
-    NODE_PATH: nodePath
+    NODE_PATH: nodePath,
+    ELECTRON_RUN_AS_NODE: '1'  // 让 Electron 以 Node.js 模式运行
   };
 
   if (isWindows) {
     env.WEBTMUX_USE_WSL = 'true';
   }
 
-  serverProcess = spawn('node', [serverPath], {
+  writeLog('[Electron] 使用 ELECTRON_RUN_AS_NODE 模式启动服务器');
+  writeLog(`[Electron] execPath: ${process.execPath}`);
+
+  // 使用 Electron 自带的 Node.js 运行服务器
+  serverProcess = spawn(process.execPath, [serverPath], {
     cwd: resourcesPath,
     env,
     stdio: ['pipe', 'pipe', 'pipe']
   });
 
   serverProcess.stdout.on('data', (data) => {
-    console.log(`[Server] ${data}`);
+    writeLog(`[Server] ${data.toString().trim()}`);
   });
 
   serverProcess.stderr.on('data', (data) => {
-    console.error(`[Server Error] ${data}`);
+    writeLog(`[Server Error] ${data.toString().trim()}`);
   });
 
   serverProcess.on('close', (code) => {
-    console.log(`[Server] 进程退出，代码: ${code}`);
+    writeLog(`[Server] 进程退出，代码: ${code}`);
   });
 
   serverProcess.on('error', (err) => {
-    console.error('[Server] 启动错误:', err);
+    writeLog(`[Server] 启动错误: ${err.message}`);
   });
 }
 
@@ -498,9 +550,13 @@ function stopServer() {
 // ==================== 应用生命周期 ====================
 
 app.whenReady().then(async () => {
+  // 初始化日志
+  initLog();
+
   // 检查依赖
   const dependenciesOk = await showDependencyDialog();
   if (!dependenciesOk) {
+    writeLog('[Electron] 依赖检查失败，退出应用');
     app.quit();
     return;
   }
