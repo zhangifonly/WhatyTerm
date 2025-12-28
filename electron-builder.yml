@@ -22,24 +22,26 @@ files:
 
 # 服务端作为额外资源，不打入 asar
 extraResources:
-  - from: server/config
-    to: server/config
-  - from: server/routes
-    to: server/routes
-  - from: server/services
-    to: server/services
-  - from: server/index.js
-    to: server/index.js
-  - from: node_modules/better-sqlite3/build
-    to: node_modules/better-sqlite3/build
-  - from: node_modules/better-sqlite3/package.json
-    to: node_modules/better-sqlite3/package.json
-  - from: node_modules/node-pty/build
-    to: node_modules/node-pty/build
-  - from: node_modules/node-pty/package.json
-    to: node_modules/node-pty/package.json
-  - from: node_modules/node-pty/lib
-    to: node_modules/node-pty/lib
+  # 服务器代码
+  - from: server
+    to: server
+  # 完整打包 node_modules（排除开发工具和缓存）
+  - from: node_modules
+    to: node_modules
+    filter:
+      - "**/*"
+      - "!.cache/**"
+      - "!.bin/**"
+      - "!electron/**"
+      - "!electron-builder/**"
+      - "!vite/**"
+      - "!@vitejs/**"
+      - "!postcss/**"
+      - "!tailwindcss/**"
+      - "!autoprefixer/**"
+      - "!typescript/**"
+      - "!eslint/**"
+      - "!prettier/**"
 
 asar: true
 # 原生模块配置
@@ -91,6 +93,7 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: WhatyTerm
+  include: build/installer.nsh
 
 linux:
   icon: build/icons
