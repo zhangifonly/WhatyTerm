@@ -211,18 +211,24 @@ body {
 }
 
 .sidebar-header {
-  padding: 18px 16px;
+  padding: 18px 12px;
   border-bottom: 1px solid hsl(var(--border) / 0.5);
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: nowrap;
+  gap: 6px;
   position: relative;
   z-index: 1;
+  overflow: hidden;
 }
 
 .sidebar-header h1 {
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
   color: hsl(var(--foreground));
   background: linear-gradient(135deg,
     hsl(var(--foreground)) 0%,
@@ -233,12 +239,14 @@ body {
 }
 
 .btn {
-  padding: 8px 16px;
+  padding: 8px 12px;
   border: none;
   border-radius: 8px;
   cursor: pointer;
   font-size: 14px;
   font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
   transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
