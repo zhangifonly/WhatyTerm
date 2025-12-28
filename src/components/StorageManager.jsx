@@ -4,10 +4,11 @@
  */
 
 import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from '../i18n';
 import './StorageManager.css';
 
-export default function StorageManager({ socket }) {
+export default function StorageManager({ socket, onPlayback }) {
   const { t } = useTranslation();
 
   // 存储统计
@@ -30,6 +31,7 @@ export default function StorageManager({ socket }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState({ type: '', text: '' });
+  const [deleteMenu, setDeleteMenu] = useState(null); // { sessionId, x, y }
 
   useEffect(() => {
     loadData();
@@ -72,12 +74,17 @@ export default function StorageManager({ socket }) {
     setTimeout(() => setMessage({ type: '', text: '' }), 3000);
   };
 
-  const deleteSessionRecording = async (sessionId) => {
-    if (!confirm('确定要删除该项目的历史记录吗？')) return;
+  const deleteSessionRecording = async (sessionId, minutes = 0) => {
+    setDeleteMenu(null);
     try {
-      const res = await fetch(`/api/storage/recordings/${sessionId}`, { method: 'DELETE' });
+      const res = await fetch(`/api/storage/recordings/${sessionId}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ minutes })
+      });
       if (res.ok) {
-        setMessage({ type: 'success', text: '已删除' });
+        const data = await res.json();
+        setMessage({ type: 'success', text: `已删除 ${data.deleted || 0} 条记录` });
         loadData();
       }
     } catch (err) {
@@ -86,12 +93,65 @@ export default function StorageManager({ socket }) {
     setTimeout(() => setMessage({ type: '', text: '' }), 3000);
   };
 
-  const cleanData = async (type) => {
-    if (!confirm(`确定要清理所有${type === 'recordings' ? '终端回放' : '监控日志'}数据吗？`)) return;
+  const showDeleteMenu = (e, session) => {
+    e.stopPropagation();
+    const rect = e.target.getBoundingClientRect();
+    // 计算时间跨度（毫秒）
+    const duration = Date.now() - (session.startTime || Date.now());
+    setDeleteMenu({
+      sessionId: session.sessionId,
+      x: rect.left,
+      y: rect.bottom + 4,
+      duration
+    });
+  };
+
+  // 根据时间跨度动态生成删除选项
+  const getTimeRanges = (durationMs) => {
+    const minutes = durationMs / (60 * 1000);
+    const hours = durationMs / (60 * 60 * 1000);
+    const days = durationMs / (24 * 60 * 60 * 1000);
+
+    const ranges = [];
+
+    if (minutes <= 60) {
+      // 1小时内：按分钟
+      if (minutes > 5) ranges.push({ label: '5分钟前', minutes: 5 });
+      if (minutes > 15) ranges.push({ label: '15分钟前', minutes: 15 });
+      if (minutes > 30) ranges.push({ label: '30分钟前', minutes: 30 });
+    } else if (hours <= 24) {
+      // 24小时内：按小时
+      if (hours > 1) ranges.push({ label: '1小时前', minutes: 60 });
+      if (hours > 3) ranges.push({ label: '3小时前', minutes: 180 });
+      if (hours > 6) ranges.push({ label: '6小时前', minutes: 360 });
+      if (hours > 12) ranges.push({ label: '12小时前', minutes: 720 });
+    } else {
+      // 超过24小时：按天
+      if (days > 1) ranges.push({ label: '1天前', minutes: 1440 });
+      if (days > 7) ranges.push({ label: '7天前', minutes: 10080 });
+      if (days > 30) ranges.push({ label: '30天前', minutes: 43200 });
+      if (days > 90) ranges.push({ label: '90天前', minutes: 129600 });
+    }
+
+    ranges.push({ label: '全部', minutes: 0 });
+    return ranges;
+  };
+
+  // 删除不再需要的静态 timeRanges
+
+  const cleanData = async (type, hours = 0) => {
+    const timeLabel = hours === 0 ? '全部' : timeRanges.find(r => r.hours === hours)?.label || `${hours}小时`;
+    const typeLabel = type === 'recordings' ? '终端回放' : '监控日志';
+    if (!confirm(`确定要清理${timeLabel}的${typeLabel}数据吗？`)) return;
     try {
-      const res = await fetch(`/api/storage/clean/${type}`, { method: 'POST' });
+      const res = await fetch(`/api/storage/clean/${type}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ hours })
+      });
       if (res.ok) {
-        setMessage({ type: 'success', text: '已清理' });
+        const data = await res.json();
+        setMessage({ type: 'success', text: `已清理 ${data.deleted || 0} 条记录` });
         loadData();
       }
     } catch (err) {
@@ -159,11 +219,17 @@ export default function StorageManager({ socket }) {
           {sessionRecordings.length === 0 ? (
             <div className="session-list-empty">暂无历史记录</div>
           ) : (
-            sessionRecordings.map(s => (
+            sessionRecordings.map(s => {
+              // 智能获取显示名称：项目名 > 目录名 > 会话名 > 格式化ID
+              const displayName = s.projectName
+                || (s.projectDir ? s.projectDir.split('/').pop() : null)
+                || s.name
+                || `会话 ${s.sessionId.slice(0, 6)}`;
+              return (
               <div key={s.sessionId} className="session-item">
                 <div className="session-info">
-                  <div className="session-name" title={s.projectName || s.name}>
-                    {s.projectName || s.name || s.sessionId.slice(0, 8)}
+                  <div className="session-name" title={s.projectName || s.projectDir || s.name || s.sessionId}>
+                    {displayName}
                   </div>
                   {s.projectDir && (
                     <div className="session-dir" title={s.projectDir}>
@@ -178,14 +244,26 @@ export default function StorageManager({ socket }) {
                 </div>
                 <span className="session-size">{formatSize(s.size)}</span>
                 <span className="session-time">{formatDate(s.startTime).split(' ')[0]}</span>
-                <button
-                  className="btn btn-danger btn-xs"
-                  onClick={() => deleteSessionRecording(s.sessionId)}
-                >
-                  删除
-                </button>
+                <div className="session-actions">
+                  {onPlayback && (
+                    <button
+                      className="btn btn-primary btn-xs"
+                      onClick={() => onPlayback(s.sessionId)}
+                      title="历史回放"
+                    >
+                      ▶
+                    </button>
+                  )}
+                  <button
+                    className="btn btn-danger btn-xs"
+                    onClick={(e) => showDeleteMenu(e, s)}
+                    title="删除"
+                  >
+                    ✕
+                  </button>
+                </div>
               </div>
-            ))
+            )})
           )}
         </div>
 
@@ -216,7 +294,6 @@ export default function StorageManager({ socket }) {
 
         <div className="storage-actions">
           <button className="btn btn-secondary btn-small" onClick={() => exportData('recordings')}>导出全部</button>
-          <button className="btn btn-danger btn-small" onClick={() => cleanData('recordings')}>清空全部</button>
         </div>
       </div>
 
@@ -261,7 +338,6 @@ export default function StorageManager({ socket }) {
 
         <div className="storage-actions">
           <button className="btn btn-secondary btn-small" onClick={() => exportData('logs')}>导出日志</button>
-          <button className="btn btn-danger btn-small" onClick={() => cleanData('logs')}>清空日志</button>
         </div>
       </div>
 
@@ -270,6 +346,26 @@ export default function StorageManager({ socket }) {
           {saving ? '保存中...' : '保存设置'}
         </button>
       </div>
+
+      {/* 删除时间范围菜单 - 使用 Portal 渲染到 body */}
+      {deleteMenu && createPortal(
+        <>
+          <div className="delete-menu-overlay" onClick={() => setDeleteMenu(null)} />
+          <div className="delete-menu" style={{ left: deleteMenu.x, top: deleteMenu.y }}>
+            <div className="delete-menu-title">删除数据</div>
+            {getTimeRanges(deleteMenu.duration).map(r => (
+              <button
+                key={r.minutes}
+                className="delete-menu-item"
+                onClick={() => deleteSessionRecording(deleteMenu.sessionId, r.minutes)}
+              >
+                {r.label}
+              </button>
+            ))}
+          </div>
+        </>,
+        document.body
+      )}
     </div>
   );
 }

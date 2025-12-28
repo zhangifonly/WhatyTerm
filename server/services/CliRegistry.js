@@ -51,8 +51,8 @@ const DEFAULT_CLI_TOOLS = {
   },
   droid: {
     id: 'droid',
-    name: 'Droid AI',
-    processNames: ['droid'],
+    name: 'Droid AI (Factory)',
+    processNames: ['droid', 'factory', 'factory-cli'],
     terminalPatterns: {
       running: ['esc to interrupt', '\\(\\d+m\\s*\\d+s\\)', 'Thinking'],
       idle: ['^>\\s*', 'IDE\\s*⚙', '\\? for help'],
@@ -78,23 +78,6 @@ const DEFAULT_CLI_TOOLS = {
     commands: {
       start: 'gemini',
       quit: '/quit'
-    },
-    builtin: true,
-    enabled: true,
-    createdAt: '2025-01-01T00:00:00.000Z'
-  },
-  factory: {
-    id: 'factory',
-    name: 'Factory AI',
-    processNames: ['factory', 'factory-cli'],
-    terminalPatterns: {
-      running: ['Running|Executing|Processing', '\\.\\.\\.$'],
-      idle: ['^>\\s*$', 'factory>'],
-      confirm: ['\\[y/N\\]', '\\[Y/n\\]']
-    },
-    commands: {
-      start: 'factory',
-      quit: 'exit'
     },
     builtin: true,
     enabled: true,

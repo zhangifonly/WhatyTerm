@@ -119,6 +119,7 @@ export default function App() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [suggestion, setSuggestion] = useState(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [playbackSessionId, setPlaybackSessionId] = useState(null); // 用于存储管理的回放
   const [editingGoal, setEditingGoal] = useState(false);
   const [goalInput, setGoalInput] = useState('');
   const [generatingGoal, setGeneratingGoal] = useState(false);
@@ -1261,7 +1262,7 @@ export default function App() {
           </button>
           <div className="ai-panel-header">
             <h3>{t('aiPanel.title')}</h3>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'nowrap', flexShrink: 0 }}>
               {/* 健康状态指示器 */}
               <span
                 className={`ai-health-dot ${aiHealthStatus.status} ${aiHealthStatus.networkStatus === 'offline' ? 'offline' : ''}`}
@@ -1811,10 +1812,17 @@ export default function App() {
       )}
 
       {/* 终端回放面板 */}
-      {showHistory && currentSession && (
+      {(showHistory && currentSession) && (
         <TerminalPlayback
           sessionId={currentSession.id}
           onClose={() => setShowHistory(false)}
+        />
+      )}
+      {/* 存储管理的回放面板 */}
+      {playbackSessionId && (
+        <TerminalPlayback
+          sessionId={playbackSessionId}
+          onClose={() => setPlaybackSessionId(null)}
         />
       )}
       {/* AI 设置对话框 */}
@@ -1828,6 +1836,10 @@ export default function App() {
           tunnelUrl={tunnelUrl}
           onTunnelUrlChange={saveTunnelUrl}
           socket={socket}
+          onPlayback={(sessionId) => {
+            setShowSettings(false);
+            setPlaybackSessionId(sessionId);
+          }}
         />
       )}
 
@@ -1941,7 +1953,7 @@ function QRCodeDisplay({ url }) {
   );
 }
 
-function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, onTunnelUrlChange, socket }) {
+function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, onTunnelUrlChange, socket, onPlayback }) {
   const { t, language, setLanguage: changeLanguage } = useTranslation();
   const [activeTab, setActiveTab] = useState('ai');
   const [authUsername, setAuthUsername] = useState(auth.username || 'admin');
@@ -2831,7 +2843,7 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
         )}
 
         {activeTab === 'storage' && (
-          <StorageManager socket={socket} />
+          <StorageManager socket={socket} onPlayback={onPlayback} />
         )}
 
         {activeTab === 'about' && (
