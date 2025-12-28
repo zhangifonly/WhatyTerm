@@ -149,7 +149,7 @@
   font-size: 12px;
 }
 
-.session-item {
+.storage-manager .session-item {
   display: grid;
   grid-template-columns: 1fr 80px 100px 60px;
   gap: 8px;
@@ -159,26 +159,26 @@
   font-size: 12px;
 }
 
-.session-item:last-child {
+.storage-manager .session-item:last-child {
   border-bottom: none;
 }
 
-.session-item:hover {
+.storage-manager .session-item:hover {
   background: var(--bg-secondary, #252540);
 }
 
-.session-id {
+.storage-manager .session-id {
   color: var(--text-primary, #fff);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.session-size {
+.storage-manager .session-size {
   color: #4a9eff;
 }
 
-.session-time {
+.storage-manager .session-time {
   color: #888;
 }
 
