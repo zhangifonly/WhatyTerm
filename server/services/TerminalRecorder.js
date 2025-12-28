@@ -57,6 +57,18 @@ export class TerminalRecorder {
       this.db.exec(`ALTER TABLE recordings ADD COLUMN rows INTEGER DEFAULT 30`);
     } catch (e) { /* 字段已存在 */ }
 
+    // 创建会话信息表（保存项目名称等）
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS session_info (
+        session_id TEXT PRIMARY KEY,
+        project_name TEXT,
+        project_dir TEXT,
+        project_desc TEXT,
+        name TEXT,
+        updated_at INTEGER
+      )
+    `);
+
     console.log('[TerminalRecorder] 数据库初始化完成');
   }
 
@@ -306,6 +318,51 @@ export class TerminalRecorder {
       startTime: row.start_time,
       endTime: row.end_time
     }));
+  }
+
+  /**
+   * 保存会话项目信息
+   */
+  saveSessionInfo(sessionId, info) {
+    const stmt = this.db.prepare(`
+      INSERT OR REPLACE INTO session_info
+      (session_id, project_name, project_dir, project_desc, name, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      sessionId,
+      info.projectName || null,
+      info.projectDir || null,
+      info.projectDesc || null,
+      info.name || null,
+      Date.now()
+    );
+  }
+
+  /**
+   * 获取会话项目信息
+   */
+  getSessionInfo(sessionId) {
+    const stmt = this.db.prepare(`SELECT * FROM session_info WHERE session_id = ?`);
+    return stmt.get(sessionId);
+  }
+
+  /**
+   * 获取所有会话项目信息
+   */
+  getAllSessionInfo() {
+    const stmt = this.db.prepare(`SELECT * FROM session_info`);
+    const rows = stmt.all();
+    const map = {};
+    rows.forEach(r => {
+      map[r.session_id] = {
+        projectName: r.project_name,
+        projectDir: r.project_dir,
+        projectDesc: r.project_desc,
+        name: r.name
+      };
+    });
+    return map;
   }
 
   /**
