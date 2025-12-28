@@ -43,7 +43,7 @@ function maskApiKey(key) {
 }
 
 // 从 CLAUDE.md 或 README.md 提取项目描述
-// 优先使用第一个标题（# xxx），因为它通常最能代表项目
+// 返回格式：标题 + 详细描述（如果有）
 async function extractProjectDesc(workingDir) {
   if (!workingDir) return '';
 
@@ -52,33 +52,52 @@ async function extractProjectDesc(workingDir) {
     const claudeMdPath = `${workingDir}/CLAUDE.md`;
     const readmePath = `${workingDir}/README.md`;
 
-    // 提取描述的逻辑：优先标题，其次普通文本
+    // 提取描述的逻辑：标题 + 第一段有意义的文本
     const extractFromContent = (content) => {
       const lines = content.split('\n');
       let title = '';
       let firstText = '';
 
-      for (let i = 0; i < Math.min(lines.length, 20); i++) {
+      for (let i = 0; i < Math.min(lines.length, 30); i++) {
         const line = lines[i].trim();
         if (!line || line.startsWith('```')) continue;
 
         // 找第一个标题
         if (!title && line.startsWith('# ')) {
           let extractedTitle = line.slice(2).trim();
-          // 去除常见的文件名前缀（如 "CLAUDE.md - " 或 "README.md - "）
           extractedTitle = extractedTitle.replace(/^(CLAUDE\.md|README\.md)\s*[-–—:：]\s*/i, '');
           title = extractedTitle.slice(0, 100);
         }
-        // 找第一个普通文本（非标题、非列表、非代码块）
-        if (!firstText && !line.startsWith('#') && !line.startsWith('-') && !line.startsWith('*') && !line.startsWith('>')) {
-          firstText = line.slice(0, 100);
+        // 找第一个有意义的文本（非标题、非列表、非代码块、非表格、非图片）
+        if (!firstText &&
+            !line.startsWith('#') &&
+            !line.startsWith('-') &&
+            !line.startsWith('*') &&
+            !line.startsWith('|') &&
+            !line.startsWith('!') &&
+            !line.startsWith('[') &&
+            !line.startsWith('<') &&
+            !line.match(/^\*\*[^*]+\*\*:/) &&
+            !line.match(/!\[.*\]\(.*\)/) &&
+            !line.match(/^\[.*\]:/) &&
+            !line.match(/^<[^>]+>/) &&
+            !line.endsWith('：') &&
+            !line.endsWith(':') &&
+            line.length > 15) {
+          let text = line.startsWith('>') ? line.slice(1).trim() : line;
+          if (text.length > 15) {
+            firstText = text.slice(0, 150);
+          }
         }
 
         // 如果都找到了就退出
         if (title && firstText) break;
       }
 
-      // 优先返回标题
+      // 组合标题和描述
+      if (title && firstText) {
+        return `${title} - ${firstText}`;
+      }
       return title || firstText;
     };
 
@@ -99,73 +118,23 @@ async function extractProjectDesc(workingDir) {
   return '';
 }
 
-// 从 goal.md 或 CLAUDE.md 提取项目目标
+// 从 goal.md、CLAUDE.md 或 README.md 提取项目目标
 async function extractProjectGoal(workingDir) {
   if (!workingDir) return '';
 
   const fs = await import('fs/promises');
 
-  // 首先尝试从 goal.md 读取
-  try {
-    const goalMdPath = `${workingDir}/goal.md`;
-    const content = await fs.readFile(goalMdPath, 'utf-8');
+  // 从内容中提取目标的通用函数
+  const extractGoalFromContent = (content) => {
     const lines = content.split('\n');
-
-    // 提取目标：跳过标题，找第一个有意义的内容段落
-    let goalLines = [];
-    let foundContent = false;
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
-
-      // 跳过空行和顶级标题
-      if (!line || line.startsWith('# ')) continue;
-
-      // 遇到二级标题时，提取其后的内容
-      if (line.startsWith('## ')) {
-        foundContent = true;
-        continue;
-      }
-
-      // 收集内容（主题、特殊要求等）
-      if (foundContent || (!line.startsWith('#') && line.length > 0)) {
-        // 清理列表标记
-        let cleanLine = line;
-        if (cleanLine.startsWith('- ')) cleanLine = cleanLine.slice(2);
-        if (cleanLine.startsWith('* ')) cleanLine = cleanLine.slice(2);
-        if (/^\d+\.\s/.test(cleanLine)) cleanLine = cleanLine.replace(/^\d+\.\s/, '');
-
-        if (cleanLine && !cleanLine.startsWith('**') || cleanLine.includes('：')) {
-          goalLines.push(cleanLine);
-        }
-
-        // 收集足够的内容后停止
-        if (goalLines.join('').length > 200) break;
-      }
-    }
-
-    // 合并目标内容，限制长度
-    const goal = goalLines.join(' ').slice(0, 300);
-    if (goal) return goal;
-  } catch {
-    // goal.md 不存在，继续尝试从 CLAUDE.md 读取
-  }
-
-  // 如果 goal.md 不存在，尝试从 CLAUDE.md 的概览/描述中提取
-  try {
-    const claudeMdPath = `${workingDir}/CLAUDE.md`;
-    const content = await fs.readFile(claudeMdPath, 'utf-8');
-    const lines = content.split('\n');
-
-    // 寻找 "概览"、"Overview"、"目标" 等章节，或第一段非标题文本
     let inOverviewSection = false;
     let goalLines = [];
 
     for (let i = 0; i < Math.min(lines.length, 50); i++) {
       const line = lines[i].trim();
 
-      // 检测概览/目标章节
-      if (line.match(/^##\s*(概览|Overview|目标|Goal|简介|Introduction|About)/i)) {
+      // 检测概览/目标章节（扩展匹配）
+      if (line.match(/^##\s*(概览|Overview|目标|Goal|简介|Introduction|About|项目概述|Description)/i)) {
         inOverviewSection = true;
         continue;
       }
@@ -175,22 +144,60 @@ async function extractProjectGoal(workingDir) {
         break;
       }
 
-      // 收集概览章节的内容
-      if (inOverviewSection && line && !line.startsWith('#') && !line.startsWith('```')) {
+      // 收集概览章节的内容（过滤表格行）
+      if (inOverviewSection && line &&
+          !line.startsWith('#') &&
+          !line.startsWith('```') &&
+          !line.startsWith('|') &&
+          !line.match(/^[-|:]+$/)) {  // 过滤表格分隔线
         goalLines.push(line);
         if (goalLines.join('').length > 200) break;
       }
 
       // 如果没有概览章节，收集第一段普通文本
-      if (!inOverviewSection && goalLines.length === 0 && line && !line.startsWith('#') && !line.startsWith('-') && !line.startsWith('*') && !line.startsWith('```') && !line.startsWith('>')) {
+      if (!inOverviewSection && goalLines.length === 0 && line &&
+          !line.startsWith('#') &&
+          !line.startsWith('-') &&
+          !line.startsWith('*') &&
+          !line.startsWith('```') &&
+          !line.startsWith('>') &&
+          !line.startsWith('|') &&
+          line.length > 15) {
         goalLines.push(line);
       }
     }
 
-    const goal = goalLines.join(' ').slice(0, 300);
+    return goalLines.join(' ').slice(0, 300);
+  };
+
+  // 首先尝试从 goal.md 读取
+  try {
+    const goalMdPath = `${workingDir}/goal.md`;
+    const content = await fs.readFile(goalMdPath, 'utf-8');
+    const goal = extractGoalFromContent(content);
     if (goal) return goal;
   } catch {
-    // CLAUDE.md 也不存在
+    // goal.md 不存在
+  }
+
+  // 尝试从 CLAUDE.md 读取
+  try {
+    const claudeMdPath = `${workingDir}/CLAUDE.md`;
+    const content = await fs.readFile(claudeMdPath, 'utf-8');
+    const goal = extractGoalFromContent(content);
+    if (goal) return goal;
+  } catch {
+    // CLAUDE.md 不存在
+  }
+
+  // 尝试从 README.md 读取
+  try {
+    const readmePath = `${workingDir}/README.md`;
+    const content = await fs.readFile(readmePath, 'utf-8');
+    const goal = extractGoalFromContent(content);
+    if (goal) return goal;
+  } catch {
+    // README.md 也不存在
   }
 
   return '';

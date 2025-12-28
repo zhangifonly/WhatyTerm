@@ -1135,28 +1135,31 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
       const recorder = getTerminalRecorder();
       const recStats = recorder.getStats();
 
-      // 获取日志统计
-      const logsDbPath = path.join(os.homedir(), '.webtmux', 'db', 'ai-logs.db');
+      // 获取日志统计 - 从 webtmux.db 的 history 表读取
+      const webtmuxDbPath = path.join(os.homedir(), '.webtmux', 'db', 'webtmux.db');
       let logsStats = { size: 0, count: 0, oldestTime: null };
 
-      if (fs.existsSync(logsDbPath)) {
-        logsStats.size = fs.statSync(logsDbPath).size;
-        const logsDb = new sqlite3.Database(logsDbPath, sqlite3.OPEN_READONLY);
-        logsDb.get('SELECT COUNT(*) as count, MIN(timestamp) as oldest FROM ai_logs', (err, row) => {
-          logsDb.close();
-          if (!err && row) {
-            logsStats.count = row.count || 0;
-            logsStats.oldestTime = row.oldest;
+      if (fs.existsSync(webtmuxDbPath)) {
+        logsStats.size = fs.statSync(webtmuxDbPath).size;
+        const logsDb = new sqlite3.Database(webtmuxDbPath, sqlite3.OPEN_READONLY);
+        logsDb.get(
+          "SELECT COUNT(*) as count, MIN(created_at) as oldest FROM history WHERE type = 'ai_decision'",
+          (err, row) => {
+            logsDb.close();
+            if (!err && row) {
+              logsStats.count = row.count || 0;
+              logsStats.oldestTime = row.oldest;
+            }
+            res.json({
+              recordings: {
+                size: recStats.totalSize || 0,
+                count: recStats.totalEvents || 0,
+                oldestTime: recStats.oldestTime || null
+              },
+              logs: logsStats
+            });
           }
-          res.json({
-            recordings: {
-              size: recStats.totalSize || 0,
-              count: recStats.totalEvents || 0,
-              oldestTime: recStats.oldestTime || null
-            },
-            logs: logsStats
-          });
-        });
+        );
       } else {
         res.json({
           recordings: {
