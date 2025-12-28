@@ -151,9 +151,9 @@ export default function StorageManager({ socket }) {
         {/* 项目列表 */}
         <div className="session-list">
           <div className="session-list-header">
-            <span>项目 ID</span>
+            <span>项目</span>
             <span>大小</span>
-            <span>时间范围</span>
+            <span>日期</span>
             <span>操作</span>
           </div>
           {sessionRecordings.length === 0 ? (
@@ -161,9 +161,21 @@ export default function StorageManager({ socket }) {
           ) : (
             sessionRecordings.map(s => (
               <div key={s.sessionId} className="session-item">
-                <span className="session-id" title={s.sessionId}>
-                  {s.sessionId.length > 12 ? s.sessionId.slice(0, 12) + '...' : s.sessionId}
-                </span>
+                <div className="session-info">
+                  <div className="session-name" title={s.projectName || s.name}>
+                    {s.projectName || s.name || s.sessionId.slice(0, 8)}
+                  </div>
+                  {s.projectDir && (
+                    <div className="session-dir" title={s.projectDir}>
+                      {s.projectDir.split('/').slice(-2).join('/')}
+                    </div>
+                  )}
+                  {s.projectDesc && (
+                    <div className="session-desc" title={s.projectDesc}>
+                      {s.projectDesc.slice(0, 30)}{s.projectDesc.length > 30 ? '...' : ''}
+                    </div>
+                  )}
+                </div>
                 <span className="session-size">{formatSize(s.size)}</span>
                 <span className="session-time">{formatDate(s.startTime).split(' ')[0]}</span>
                 <button
