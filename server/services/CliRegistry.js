@@ -49,6 +49,23 @@ const DEFAULT_CLI_TOOLS = {
     enabled: true,
     createdAt: '2025-01-01T00:00:00.000Z'
   },
+  droid: {
+    id: 'droid',
+    name: 'Droid AI',
+    processNames: ['droid'],
+    terminalPatterns: {
+      running: ['esc to interrupt', '\\(\\d+m\\s*\\d+s\\)', 'Thinking'],
+      idle: ['^>\\s*', 'IDE\\s*⚙', '\\? for help'],
+      confirm: ['Do you want to', 'Auto \\(Off\\)']
+    },
+    commands: {
+      start: 'droid',
+      quit: '/quit'
+    },
+    builtin: true,
+    enabled: true,
+    createdAt: '2025-01-01T00:00:00.000Z'
+  },
   gemini: {
     id: 'gemini',
     name: 'Google Gemini',
@@ -180,6 +197,30 @@ class CliRegistry {
     for (const tool of this.getAllTools()) {
       if (tool.processNames.some(name => lowerName.includes(name.toLowerCase()))) {
         return tool;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 通过命令查找 CLI 工具
+   * @param {string} cmd - 用户输入的命令（如 "droid", "claude -c"）
+   */
+  findByCommand(cmd) {
+    const cmdLower = cmd.toLowerCase().trim();
+    const cmdFirst = cmdLower.split(/\s+/)[0]; // 取第一个词
+
+    for (const tool of this.getAllTools()) {
+      // 检查进程名
+      if (tool.processNames.some(name => name.toLowerCase() === cmdFirst)) {
+        return tool;
+      }
+      // 检查启动命令
+      if (tool.commands?.start) {
+        const startCmd = tool.commands.start.toLowerCase().split(/\s+/)[0];
+        if (startCmd === cmdFirst) {
+          return tool;
+        }
       }
     }
     return null;

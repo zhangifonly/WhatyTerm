@@ -3,7 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import crypto from 'crypto';
-import { HEALTH_CHECK_MODELS, CLAUDE_CODE_FAKE } from '../config/constants.js';
+import { HEALTH_CHECK_MODELS, CLAUDE_CODE_FAKE, CODEX_FAKE, GEMINI_FAKE } from '../config/constants.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -278,14 +278,22 @@ export class ProviderHealthCheck {
       };
 
       if (isResponsesApi) {
-        // Codex Responses API 格式
+        // Codex Responses API 格式（使用正确的 input 数组格式）
         body = {
           model: actualModel,
-          input: 'hi',
+          input: [
+            {
+              type: 'message',
+              role: 'user',
+              content: [
+                { type: 'input_text', text: 'hi' }
+              ]
+            }
+          ],
           stream: false  // Responses API 健康检查用非流式更简单
         };
         // 添加 Codex CLI 伪装头
-        headers['User-Agent'] = 'codex_cli_rs/0.71.0';
+        headers['User-Agent'] = CODEX_FAKE.userAgent;
         headers['openai-beta'] = 'responses';
       } else {
         // OpenAI Chat Completions API 格式
@@ -364,7 +372,8 @@ export class ProviderHealthCheck {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${config.apiKey}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'User-Agent': GEMINI_FAKE.userAgent
         },
         body: JSON.stringify({
           model: model,

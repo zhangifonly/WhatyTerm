@@ -70,7 +70,7 @@
     "notConfigured": "未設定",
     "copied": "コピーしました！",
     "edit": "編集",
-    "history": "履歴",
+    "history": "ターミナル再生",
     "clear": "クリア",
     "noSessions": "セッションがありません",
     "needInput": "入力が必要",
@@ -108,7 +108,13 @@
     "sessionDuration": "セッション時間",
     "minutes": "分",
     "hours": "時間",
-    "days": "日"
+    "days": "日",
+    "tokenUsage": "トークン消費",
+    "inputTokens": "入力",
+    "outputTokens": "出力",
+    "cacheRead": "キャッシュヒット",
+    "totalTokens": "合計",
+    "requests": "リクエスト数"
   },
   "aiPanel": {
     "title": "AIステータス監視",
@@ -163,7 +169,7 @@
     "autoOn": "自動：ON",
     "autoOff": "自動：OFF",
     "hideDebug": "非表示",
-    "showLog": "ログ",
+    "showLog": "監視操作ログ",
     "continue": "続ける",
     "analyzeNow": "今すぐ分析",
     "autoRunning": "自動モード実行中",

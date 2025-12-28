@@ -70,7 +70,7 @@
     "notConfigured": "Not Configured",
     "copied": "Copied!",
     "edit": "Edit",
-    "history": "History",
+    "history": "Terminal Replay",
     "clear": "Clear",
     "noSessions": "No Sessions",
     "needInput": "Need Input",
@@ -108,7 +108,13 @@
     "sessionDuration": "Session Duration",
     "minutes": "minutes",
     "hours": "hours",
-    "days": "days"
+    "days": "days",
+    "tokenUsage": "Token Usage",
+    "inputTokens": "Input",
+    "outputTokens": "Output",
+    "cacheRead": "Cache Hit",
+    "totalTokens": "Total",
+    "requests": "Requests"
   },
   "aiPanel": {
     "title": "AI Status Monitor",
@@ -163,7 +169,7 @@
     "autoOn": "Auto: ON",
     "autoOff": "Auto: OFF",
     "hideDebug": "Hide",
-    "showLog": "Log",
+    "showLog": "Monitor Log",
     "continue": "Continue",
     "analyzeNow": "Analyze Now",
     "autoRunning": "Auto Mode Running",

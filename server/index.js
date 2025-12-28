@@ -3,7 +3,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, watch } from 'fs';
 import session from 'express-session';
 import crypto from 'crypto';
 import { execSync } from 'child_process';
@@ -28,8 +28,10 @@ import frpTunnel from './services/FrpTunnel.js';
 import projectTaskReader from './services/ProjectTaskReader.js';
 import RecentProjectsService from './services/RecentProjectsService.js';
 import processDetector from './services/ProcessDetector.js';
+import { getTerminalRecorder } from './services/TerminalRecorder.js';
 import cliRegistry from './services/CliRegistry.js';
 import cliLearner from './services/CliLearner.js';
+import tokenStatsService from './services/TokenStatsService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -39,6 +41,163 @@ function maskApiKey(key) {
   if (!key || key.length < 12) return key ? '***' : '';
   return key.substring(0, 8) + '***' + key.substring(key.length - 4);
 }
+
+// 从 CLAUDE.md 或 README.md 提取项目描述
+// 优先使用第一个标题（# xxx），因为它通常最能代表项目
+async function extractProjectDesc(workingDir) {
+  if (!workingDir) return '';
+
+  try {
+    const fs = await import('fs/promises');
+    const claudeMdPath = `${workingDir}/CLAUDE.md`;
+    const readmePath = `${workingDir}/README.md`;
+
+    // 提取描述的逻辑：优先标题，其次普通文本
+    const extractFromContent = (content) => {
+      const lines = content.split('\n');
+      let title = '';
+      let firstText = '';
+
+      for (let i = 0; i < Math.min(lines.length, 20); i++) {
+        const line = lines[i].trim();
+        if (!line || line.startsWith('```')) continue;
+
+        // 找第一个标题
+        if (!title && line.startsWith('# ')) {
+          let extractedTitle = line.slice(2).trim();
+          // 去除常见的文件名前缀（如 "CLAUDE.md - " 或 "README.md - "）
+          extractedTitle = extractedTitle.replace(/^(CLAUDE\.md|README\.md)\s*[-–—:：]\s*/i, '');
+          title = extractedTitle.slice(0, 100);
+        }
+        // 找第一个普通文本（非标题、非列表、非代码块）
+        if (!firstText && !line.startsWith('#') && !line.startsWith('-') && !line.startsWith('*') && !line.startsWith('>')) {
+          firstText = line.slice(0, 100);
+        }
+
+        // 如果都找到了就退出
+        if (title && firstText) break;
+      }
+
+      // 优先返回标题
+      return title || firstText;
+    };
+
+    // 优先读取 CLAUDE.md
+    try {
+      const content = await fs.readFile(claudeMdPath, 'utf-8');
+      const desc = extractFromContent(content);
+      if (desc) return desc;
+    } catch {}
+
+    // CLAUDE.md 不存在或无有效内容，尝试 README.md
+    try {
+      const content = await fs.readFile(readmePath, 'utf-8');
+      return extractFromContent(content);
+    } catch {}
+  } catch {}
+
+  return '';
+}
+
+// 从 goal.md 或 CLAUDE.md 提取项目目标
+async function extractProjectGoal(workingDir) {
+  if (!workingDir) return '';
+
+  const fs = await import('fs/promises');
+
+  // 首先尝试从 goal.md 读取
+  try {
+    const goalMdPath = `${workingDir}/goal.md`;
+    const content = await fs.readFile(goalMdPath, 'utf-8');
+    const lines = content.split('\n');
+
+    // 提取目标：跳过标题，找第一个有意义的内容段落
+    let goalLines = [];
+    let foundContent = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+
+      // 跳过空行和顶级标题
+      if (!line || line.startsWith('# ')) continue;
+
+      // 遇到二级标题时，提取其后的内容
+      if (line.startsWith('## ')) {
+        foundContent = true;
+        continue;
+      }
+
+      // 收集内容（主题、特殊要求等）
+      if (foundContent || (!line.startsWith('#') && line.length > 0)) {
+        // 清理列表标记
+        let cleanLine = line;
+        if (cleanLine.startsWith('- ')) cleanLine = cleanLine.slice(2);
+        if (cleanLine.startsWith('* ')) cleanLine = cleanLine.slice(2);
+        if (/^\d+\.\s/.test(cleanLine)) cleanLine = cleanLine.replace(/^\d+\.\s/, '');
+
+        if (cleanLine && !cleanLine.startsWith('**') || cleanLine.includes('：')) {
+          goalLines.push(cleanLine);
+        }
+
+        // 收集足够的内容后停止
+        if (goalLines.join('').length > 200) break;
+      }
+    }
+
+    // 合并目标内容，限制长度
+    const goal = goalLines.join(' ').slice(0, 300);
+    if (goal) return goal;
+  } catch {
+    // goal.md 不存在，继续尝试从 CLAUDE.md 读取
+  }
+
+  // 如果 goal.md 不存在，尝试从 CLAUDE.md 的概览/描述中提取
+  try {
+    const claudeMdPath = `${workingDir}/CLAUDE.md`;
+    const content = await fs.readFile(claudeMdPath, 'utf-8');
+    const lines = content.split('\n');
+
+    // 寻找 "概览"、"Overview"、"目标" 等章节，或第一段非标题文本
+    let inOverviewSection = false;
+    let goalLines = [];
+
+    for (let i = 0; i < Math.min(lines.length, 50); i++) {
+      const line = lines[i].trim();
+
+      // 检测概览/目标章节
+      if (line.match(/^##\s*(概览|Overview|目标|Goal|简介|Introduction|About)/i)) {
+        inOverviewSection = true;
+        continue;
+      }
+
+      // 遇到下一个二级标题时停止
+      if (inOverviewSection && line.startsWith('## ')) {
+        break;
+      }
+
+      // 收集概览章节的内容
+      if (inOverviewSection && line && !line.startsWith('#') && !line.startsWith('```')) {
+        goalLines.push(line);
+        if (goalLines.join('').length > 200) break;
+      }
+
+      // 如果没有概览章节，收集第一段普通文本
+      if (!inOverviewSection && goalLines.length === 0 && line && !line.startsWith('#') && !line.startsWith('-') && !line.startsWith('*') && !line.startsWith('```') && !line.startsWith('>')) {
+        goalLines.push(line);
+      }
+    }
+
+    const goal = goalLines.join(' ').slice(0, 300);
+    if (goal) return goal;
+  } catch {
+    // CLAUDE.md 也不存在
+  }
+
+  return '';
+}
+
+// 注意：refreshSessionMetadata 和 refreshAllSessionsMetadata 功能已合并到 updateAllSessionsProjectInfo() 中
+// 该函数从 tmux 获取 workingDir，并刷新 projectName、projectDesc、goal
 
 const app = express();
 const server = createServer(app);
@@ -69,6 +228,7 @@ app.use(sessionMiddleware);
 
 const sessionManager = new SessionManager();
 const historyLogger = new HistoryLogger();
+const terminalRecorder = getTerminalRecorder();
 const aiEngine = new AIEngine();
 const authService = new AuthService();
 const providerService = new ProviderService(io);
@@ -728,7 +888,27 @@ app.post('/api/claude-code/config', async (req, res) => {
       config.alwaysThinkingEnabled = globalConfig.alwaysThinkingEnabled;
     }
 
-    // 4. permissions（合并：本地优先，全局补充）
+    // 4. CLAUDE_CODE_MAX_OUTPUT_TOKENS（最大输出 token）
+    if (globalConfig.CLAUDE_CODE_MAX_OUTPUT_TOKENS !== undefined) {
+      config.CLAUDE_CODE_MAX_OUTPUT_TOKENS = globalConfig.CLAUDE_CODE_MAX_OUTPUT_TOKENS;
+    }
+
+    // 5. MAX_THINKING_TOKENS（最大思考 token）
+    if (globalConfig.MAX_THINKING_TOKENS !== undefined) {
+      config.MAX_THINKING_TOKENS = globalConfig.MAX_THINKING_TOKENS;
+    }
+
+    // 6. maxContextTokens（最大上下文 token）
+    if (globalConfig.maxContextTokens !== undefined) {
+      config.maxContextTokens = globalConfig.maxContextTokens;
+    }
+
+    // 7. enabledPlugins（启用的插件）
+    if (globalConfig.enabledPlugins) {
+      config.enabledPlugins = { ...globalConfig.enabledPlugins };
+    }
+
+    // 8. permissions（合并：本地优先，全局补充）
     if (localPermissions || globalConfig.permissions) {
       config.permissions = {
         allow: [...(localPermissions?.allow || []), ...(globalConfig.permissions?.allow || [])].filter((v, i, a) => a.indexOf(v) === i),
@@ -1028,6 +1208,113 @@ app.post('/api/cli-tools/learn/terminal', async (req, res) => {
       return res.status(400).json({ error: result.error });
     }
     res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ==================== Token 统计 API ====================
+
+// 获取全局 Token 统计摘要
+app.get('/api/token-stats/summary', (req, res) => {
+  try {
+    const summary = tokenStatsService.getGlobalSummary();
+    res.json({ success: true, data: summary });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取今日 Token 统计
+app.get('/api/token-stats/today', (req, res) => {
+  try {
+    const stats = tokenStatsService.getTodayStats();
+    res.json({ success: true, data: stats });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取最近 N 天的每日统计
+app.get('/api/token-stats/daily', (req, res) => {
+  try {
+    const days = parseInt(req.query.days) || 7;
+    const stats = tokenStatsService.getRecentDailyStats(days);
+    res.json({ success: true, data: stats });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取所有供应商的 Token 统计
+app.get('/api/token-stats/providers', (req, res) => {
+  try {
+    const stats = tokenStatsService.getProviderStats();
+    res.json({ success: true, data: stats });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取指定供应商的 Token 统计
+app.get('/api/token-stats/providers/:name', (req, res) => {
+  try {
+    const stats = tokenStatsService.getProviderStats(req.params.name);
+    res.json({ success: true, data: stats });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取供应商按时间统计
+app.get('/api/token-stats/providers/:name/timeline', (req, res) => {
+  try {
+    const { granularity = 'day', startTime, endTime } = req.query;
+    const stats = tokenStatsService.getProviderStatsByTime(
+      req.params.name,
+      granularity,
+      startTime ? parseInt(startTime) : null,
+      endTime ? parseInt(endTime) : null
+    );
+    res.json({ success: true, data: stats });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取会话的 Token 统计
+app.get('/api/token-stats/sessions/:sessionId', (req, res) => {
+  try {
+    const summary = tokenStatsService.getSessionSummary(req.params.sessionId);
+    const byProvider = tokenStatsService.getSessionStats(req.params.sessionId);
+    res.json({ success: true, data: { summary, byProvider } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取会话按时间统计
+app.get('/api/token-stats/sessions/:sessionId/timeline', (req, res) => {
+  try {
+    const { granularity = 'hour', startTime, endTime } = req.query;
+    const stats = tokenStatsService.getSessionStatsByTime(
+      req.params.sessionId,
+      granularity,
+      startTime ? parseInt(startTime) : null,
+      endTime ? parseInt(endTime) : null
+    );
+    res.json({ success: true, data: stats });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取模型统计
+app.get('/api/token-stats/models', (req, res) => {
+  try {
+    const { provider } = req.query;
+    const stats = tokenStatsService.getModelStats(provider || null);
+    res.json({ success: true, data: stats });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1371,51 +1658,46 @@ async function updateAllSessionsProjectInfo() {
       workingDir = execSync(`tmux display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
     } catch { continue; }
 
-    if (!workingDir || workingDir === session.workingDir) continue;
+    // 设置 workingDir（即使没有变化也要设置，确保刷新时可用）
+    const workingDirChanged = workingDir && workingDir !== session.workingDir;
+    if (workingDir) {
+      session.workingDir = workingDir;
+    }
+
+    // 如果工作目录没有变化，尝试刷新 goal（因为 goal.md 内容可能变化）
+    if (!workingDirChanged && session.workingDir) {
+      const goalFromFile = await extractProjectGoal(session.workingDir);
+      if (goalFromFile && goalFromFile !== session.goal) {
+        session.goal = goalFromFile;
+        session.originalGoal = goalFromFile;
+        sessionManager.updateSession(session);
+        io.emit('session:updated', {
+          id: session.id,
+          goal: session.goal
+        });
+      }
+    }
+
+    if (!workingDirChanged) continue;
 
     const projectName = workingDir.split('/').filter(Boolean).pop() || workingDir;
 
     if (session.projectName === projectName) continue;
 
     session.projectName = projectName;
-    session.workingDir = workingDir;
 
     // 尝试读取项目说明
-    try {
-      const fs = await import('fs/promises');
-      let projectDesc = '';
+    const projectDesc = await extractProjectDesc(workingDir);
+    if (projectDesc) {
+      session.projectDesc = projectDesc;
+    }
 
-      const claudeMdPath = `${workingDir}/CLAUDE.md`;
-      const readmePath = `${workingDir}/README.md`;
-
-      try {
-        const content = await fs.readFile(claudeMdPath, 'utf-8');
-        const lines = content.split('\n');
-        for (let i = 0; i < Math.min(lines.length, 20); i++) {
-          const line = lines[i].trim();
-          if (line && !line.startsWith('#') && !line.startsWith('```') && !line.startsWith('-')) {
-            projectDesc = line.slice(0, 100);
-            break;
-          }
-        }
-      } catch {
-        try {
-          const content = await fs.readFile(readmePath, 'utf-8');
-          const lines = content.split('\n');
-          for (let i = 0; i < Math.min(lines.length, 20); i++) {
-            const line = lines[i].trim();
-            if (line && !line.startsWith('#') && !line.startsWith('```') && !line.startsWith('-')) {
-              projectDesc = line.slice(0, 100);
-              break;
-            }
-          }
-        } catch {}
-      }
-
-      if (projectDesc) {
-        session.projectDesc = projectDesc;
-      }
-    } catch {}
+    // 尝试读取项目目标
+    const projectGoal = await extractProjectGoal(workingDir);
+    if (projectGoal && (session.goal.startsWith('Continue ') || !session.goal)) {
+      session.goal = projectGoal;
+      session.originalGoal = projectGoal;
+    }
 
     console.log(`[会话信息] ${session.name}: 项目=${projectName}, 说明=${session.projectDesc || '无'}`);
 
@@ -1424,6 +1706,7 @@ async function updateAllSessionsProjectInfo() {
       id: session.id,
       projectName: session.projectName,
       projectDesc: session.projectDesc,
+      goal: session.goal,
       workingDir: session.workingDir
     });
   }
@@ -1939,7 +2222,7 @@ async function runBackgroundAutoAction() {
       }
 
       console.log(`[后台自动操作] 会话 ${session.name}: 分析终端状态...`);
-      const status = await aiEngine.analyzeStatus(terminalContent, session.aiType || 'claude');
+      const status = await aiEngine.analyzeStatus(terminalContent, session.aiType || 'claude', sessionData.id);
 
       // AI 分析成功，更新健康状态（区分AI判断和程序预判断）
       updateAiHealthState(true, null, status?.preAnalyzed || false, sessionData.id);
@@ -1960,44 +2243,10 @@ async function runBackgroundAutoAction() {
           session.workingDir = workingDir;
 
           // 尝试读取项目说明
-          try {
-            const fs = await import('fs/promises');
-            let projectDesc = '';
-
-            // 优先读取 CLAUDE.md
-            const claudeMdPath = `${workingDir}/CLAUDE.md`;
-            const readmePath = `${workingDir}/README.md`;
-
-            try {
-              const content = await fs.readFile(claudeMdPath, 'utf-8');
-              // 提取第一个标题后的第一段作为说明
-              const lines = content.split('\n');
-              for (let i = 0; i < Math.min(lines.length, 20); i++) {
-                const line = lines[i].trim();
-                if (line && !line.startsWith('#') && !line.startsWith('```') && !line.startsWith('-')) {
-                  projectDesc = line.slice(0, 100);
-                  break;
-                }
-              }
-            } catch {
-              // 尝试读取 README.md
-              try {
-                const content = await fs.readFile(readmePath, 'utf-8');
-                const lines = content.split('\n');
-                for (let i = 0; i < Math.min(lines.length, 20); i++) {
-                  const line = lines[i].trim();
-                  if (line && !line.startsWith('#') && !line.startsWith('```') && !line.startsWith('-')) {
-                    projectDesc = line.slice(0, 100);
-                    break;
-                  }
-                }
-              } catch {}
-            }
-
-            if (projectDesc) {
-              session.projectDesc = projectDesc;
-            }
-          } catch {}
+          const projectDesc = await extractProjectDesc(workingDir);
+          if (projectDesc) {
+            session.projectDesc = projectDesc;
+          }
 
           // 通知前端更新
           io.emit('session:updated', {
@@ -2187,7 +2436,7 @@ async function runBackgroundStatusAnalysis() {
       aiContentHashCache.set(sessionData.id, contentHash);
 
       console.log(`[后台AI分析] 会话 ${session.name}: 分析状态...`);
-      const status = await aiEngine.analyzeStatus(terminalContent, session.aiType || 'claude');
+      const status = await aiEngine.analyzeStatus(terminalContent, session.aiType || 'claude', sessionData.id);
 
       // AI 分析成功，更新健康状态（区分AI判断和程序预判断）
       updateAiHealthState(true, null, status?.preAnalyzed || false, sessionData.id);
@@ -2531,9 +2780,12 @@ io.on('connection', (socket) => {
   });
 
   // 获取会话列表
-  socket.on('sessions:list', () => {
+  socket.on('sessions:list', async () => {
     const startTime = Date.now();
     const sessions = sessionManager.listSessions();
+
+    // 项目元数据刷新已由 updateAllSessionsProjectInfo() 定期处理
+
     const elapsed = Date.now() - startTime;
     if (elapsed > 50) {
       console.log(`[性能] 会话列表加载耗时: ${elapsed}ms`);
@@ -2577,7 +2829,7 @@ io.on('connection', (socket) => {
       // 立即检测终端内容，识别是否有 CLI 工具在运行
       try {
         const terminalContent = session.getScreenContent();
-        const detectedCLI = aiEngine.detectRunningCLI(terminalContent);
+        const detectedCLI = aiEngine.detectRunningCLI(terminalContent, session.tmuxSessionName);
 
         if (detectedCLI && detectedCLI !== session.aiType) {
           console.log(`[Session创建] 检测到 CLI 工具: ${detectedCLI}`);
@@ -2646,8 +2898,18 @@ io.on('connection', (socket) => {
       // 保存项目信息
       session.aiType = data.aiType || 'claude';
       session.projectName = data.projectName;
-      session.projectDesc = data.projectDesc;
       session.workingDir = data.workingDir;
+
+      // 从项目目录读取真正的项目描述（CLAUDE.md 或 README.md）和目标（goal.md）
+      const projectDesc = await extractProjectDesc(data.workingDir);
+      session.projectDesc = projectDesc || data.projectDesc;
+
+      // 尝试从 goal.md 读取项目目标
+      const projectGoal = await extractProjectGoal(data.workingDir);
+      if (projectGoal) {
+        session.goal = projectGoal;
+        session.originalGoal = projectGoal;
+      }
 
       // 注册 bell 回调
       registerBellCallback(session);
@@ -2810,10 +3072,9 @@ io.on('connection', (socket) => {
         data
       });
 
-      historyLogger.log(sessionId, {
-        type: 'output',
-        content: data
-      });
+      // 录制终端输出（包含终端尺寸）
+      const termSize = session.pty ? { cols: session.pty.cols, rows: session.pty.rows } : null;
+      terminalRecorder.recordOutput(sessionId, data, termSize);
 
       // 如果 AI 启用且后台自动操作未开启，触发基于目标的分析
       // 注：如果后台自动操作已开启，则由后台循环处理，无需重复分析
@@ -2851,11 +3112,11 @@ io.on('connection', (socket) => {
         const cmd = session._inputBuffer.trim();
         console.log(`[终端输入] 会话 ${session.name}: 检测命令 "${cmd}"`);
 
-        // 检测 AI CLI 命令 (claude, codex, gemini)
-        const cliMatch = cmd.match(/^(claude|codex|gemini)(\s|$)/);
-        if (cliMatch) {
-          const cliType = cliMatch[1];
-          console.log(`[CLI检测] 检测到 ${cliType} 启动命令`);
+        // 使用 CliRegistry 动态检测 CLI 命令
+        const detectedTool = cliRegistry.findByCommand(cmd);
+        if (detectedTool) {
+          const cliType = detectedTool.id;
+          console.log(`[CLI检测] 检测到 ${detectedTool.name} (${cliType}) 启动命令`);
           session.aiType = cliType;
 
           // 先获取当前工作目录，以便正确检测本地配置
@@ -2927,11 +3188,8 @@ io.on('connection', (socket) => {
 
       session.write(data.input);
 
-      historyLogger.log(data.sessionId, {
-        type: 'input',
-        content: data.input,
-        aiGenerated: false
-      });
+      // 录制终端输入
+      terminalRecorder.recordInput(data.sessionId, data.input);
     }
   });
 
@@ -3376,7 +3634,7 @@ ${context.join('\n\n')}
       const terminalContent = session.getScreenContent();
       console.log(`[AI] 请求状态分析，终端内容长度: ${terminalContent.length}`);
 
-      const status = await aiEngine.analyzeStatus(terminalContent, session.aiType || 'claude');
+      const status = await aiEngine.analyzeStatus(terminalContent, session.aiType || 'claude', data.sessionId);
 
       if (status) {
         console.log(`[AI] 状态分析成功:`, status);
@@ -3585,6 +3843,9 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, async () => {
   console.log(`WebTmux 服务器运行在 http://localhost:${PORT}`);
 
+  // 注意：项目元数据（projectDesc、goal）的刷新已集成到 updateAllSessionsProjectInfo() 中
+  // 该函数会在启动后 3 秒执行，并每 30 秒定期刷新
+
   // 启动定时健康检查调度器
   try {
     await healthCheckScheduler.start();
@@ -3645,55 +3906,102 @@ server.listen(PORT, async () => {
   }
 
   // 对所有恢复的 session 进行初始 CLI 工具检测和供应商信息补充
-  // 直接访问 sessions Map 获取完整的 Session 实例
+  // 使用并行处理加速启动
   console.log(`[启动检测] 开始检测 ${sessionManager.sessions.size} 个会话的 CLI 工具`);
-  for (const session of sessionManager.sessions.values()) {
-    // 为所有恢复的会话注册 bell 回调
-    registerBellCallback(session);
 
+  // 先同步注册 bell 回调和检测 CLI（这些是快速操作）
+  for (const session of sessionManager.sessions.values()) {
+    registerBellCallback(session);
     try {
       const terminalContent = session.getScreenContent();
-      const detectedCLI = aiEngine.detectRunningCLI(terminalContent);
-
-      console.log(`[启动检测] Session ${session.name}: 当前类型=${session.aiType}, 检测到=${detectedCLI || '无'}`);
-
+      const detectedCLI = aiEngine.detectRunningCLI(terminalContent, session.tmuxSessionName);
       if (detectedCLI && detectedCLI !== session.aiType) {
-        console.log(`[启动检测] Session ${session.name}: 检测到 CLI 工具切换 ${session.aiType} -> ${detectedCLI}`);
+        console.log(`[启动检测] Session ${session.name}: CLI 切换 ${session.aiType} -> ${detectedCLI}`);
         session.aiType = detectedCLI;
       }
+    } catch (err) {
+      console.error(`[启动检测] Session ${session.name} CLI检测失败:`, err.message);
+    }
+  }
 
-      // 始终从 CC Switch 获取当前激活的供应商信息（无论是否检测到 CLI）
-      // 这样即使 CLI 没有运行，面板也能显示 CC Switch 中配置的供应商
-      let needsUpdate = false;
+  // 异步并行获取供应商信息（不阻塞启动）
+  (async () => {
+    const tasks = Array.from(sessionManager.sessions.values()).map(async (session) => {
+      try {
+        let needsUpdate = false;
 
-      // 获取 Claude 供应商（仅在未设置时填充，不覆盖用户手动设置的配置）
-      // 传递 workingDir 以正确检测本地配置
-      if (!session.claudeProvider) {
+        if (!session.claudeProvider) {
+          const claudeProvider = await getCurrentProvider('claude', session.workingDir);
+          if (claudeProvider.exists) {
+            session.claudeProvider = claudeProvider;
+            needsUpdate = true;
+          }
+        }
+
+        if (!session.codexProvider) {
+          const codexProvider = await getCurrentProvider('codex');
+          if (codexProvider.exists) {
+            session.codexProvider = codexProvider;
+            needsUpdate = true;
+          }
+        }
+
+        if (needsUpdate) {
+          sessionManager.updateSession(session);
+        }
+      } catch (err) {
+        console.error(`[启动检测] Session ${session.name} 供应商获取失败:`, err.message);
+      }
+    });
+
+    await Promise.all(tasks);
+    console.log(`[启动检测] 供应商信息补充完成`);
+    // 通知前端更新会话列表
+    io.emit('sessions:updated', sessionManager.listSessions());
+  })();
+
+  console.log(`[启动检测] 完成（供应商信息后台加载中）`);
+
+  // 监听全局 Claude 配置文件变化，自动刷新所有会话的供应商信息
+  const claudeSettingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+  let configWatchDebounce = null;
+
+  const refreshAllProviders = async () => {
+    console.log('[配置监听] 检测到全局配置变化，刷新所有会话的供应商信息');
+    const sessions = Array.from(sessionManager.sessions.values());
+
+    for (const session of sessions) {
+      try {
         const claudeProvider = await getCurrentProvider('claude', session.workingDir);
         if (claudeProvider.exists) {
           session.claudeProvider = claudeProvider;
-          needsUpdate = true;
-          console.log(`[启动检测] Session ${session.name}: 补充 Claude 供应商 ${claudeProvider.name}`);
+          sessionManager.updateSession(session);
         }
+      } catch (err) {
+        console.error(`[配置监听] 刷新会话 ${session.name} 供应商失败:`, err.message);
       }
-
-      // 获取 Codex 供应商
-      if (!session.codexProvider) {
-        const codexProvider = await getCurrentProvider('codex');
-        if (codexProvider.exists) {
-          session.codexProvider = codexProvider;
-          needsUpdate = true;
-          console.log(`[启动检测] Session ${session.name}: 补充 Codex 供应商 ${codexProvider.name}`);
-        }
-      }
-
-      // 保存到数据库
-      if (needsUpdate) {
-        sessionManager.updateSession(session);
-      }
-    } catch (err) {
-      console.error(`[启动检测] Session ${session.name} 检测失败:`, err.message);
     }
+
+    io.emit('sessions:updated', sessionManager.listSessions());
+    console.log(`[配置监听] 已刷新 ${sessions.length} 个会话的供应商信息`);
+  };
+
+  if (existsSync(claudeSettingsPath)) {
+    try {
+      watch(claudeSettingsPath, (eventType) => {
+        if (eventType === 'change') {
+          // 防抖：500ms 内多次变化只触发一次刷新
+          if (configWatchDebounce) {
+            clearTimeout(configWatchDebounce);
+          }
+          configWatchDebounce = setTimeout(refreshAllProviders, 500);
+        }
+      });
+      console.log(`[配置监听] 已启动全局配置文件监听: ${claudeSettingsPath}`);
+    } catch (err) {
+      console.error('[配置监听] 启动文件监听失败:', err.message);
+    }
+  } else {
+    console.log('[配置监听] 全局配置文件不存在，跳过监听');
   }
-  console.log(`[启动检测] 完成`);
 });

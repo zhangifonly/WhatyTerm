@@ -176,7 +176,7 @@
 }
 
 /* ========================================
-   Compact 模式样式 - VS Code 风格
+   Compact 模式样式 - 现代化设计
    ======================================== */
 
 .closed-sessions.compact {
@@ -194,33 +194,42 @@
 
 .closed-sessions.compact .compact-item {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
-  border-radius: 4px;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  border: 1px solid transparent;
+  margin-bottom: 2px;
 }
 
 .closed-sessions.compact .compact-item:hover {
-  background: hsl(var(--primary) / 0.1);
+  background: hsl(var(--primary) / 0.08);
+  border-color: hsl(var(--primary) / 0.15);
+  transform: translateX(4px);
 }
 
 .closed-sessions.compact .compact-name {
   font-size: 13px;
-  color: hsl(var(--primary));
-  font-weight: 500;
+  color: hsl(var(--foreground));
+  font-weight: 600;
   flex-shrink: 0;
 }
 
+.closed-sessions.compact .compact-item:hover .compact-name {
+  color: hsl(var(--primary));
+}
+
 .closed-sessions.compact .compact-path {
-  font-size: 12px;
+  font-size: 11px;
   color: hsl(var(--muted-foreground));
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   flex: 1;
   min-width: 0;
+  opacity: 0.6;
 }
 
 /* ========================================

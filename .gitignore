@@ -10,3 +10,4 @@ release/
 *.zip
 *.AppImage
 *.deb
+data/

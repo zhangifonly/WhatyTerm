@@ -8,6 +8,7 @@ import Database from 'better-sqlite3';
 import ProviderService from './ProviderService.js';
 import ConfigService from './ConfigService.js';
 import processDetector from './ProcessDetector.js';
+import tokenStatsService from './TokenStatsService.js';
 import { DEFAULT_MODEL, CLAUDE_CODE_FAKE, CODEX_FAKE } from '../config/constants.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -49,7 +50,8 @@ function getCliCommand(aiType) {
   const commands = {
     'claude': 'claude -c',
     'codex': 'codex',
-    'gemini': 'gemini'
+    'gemini': 'gemini',
+    'droid': 'droid'
   };
   return commands[aiType] || commands['claude'];
 }
@@ -63,7 +65,8 @@ function getCliName(aiType) {
   const names = {
     'claude': 'Claude Code',
     'codex': 'OpenAI Codex',
-    'gemini': 'Google Gemini'
+    'gemini': 'Google Gemini',
+    'droid': 'Droid AI'
   };
   return names[aiType] || names['claude'];
 }
@@ -329,11 +332,22 @@ export class AIEngine {
   /**
    * 带故障转移的 API 调用
    * 当前供应商失败时，自动切换到下一个可用供应商
+   * @param {string} prompt - 提示词
+   * @param {object} options - 可选参数
+   * @param {string} options.sessionId - 会话 ID（用于 token 统计）
+   * @param {string} options.requestType - 请求类型（用于 token 统计）
+   * @returns {string} 返回 AI 响应文本（保持向后兼容）
    */
-  async _callApiWithFailover(prompt) {
+  async _callApiWithFailover(prompt, options = {}) {
+    const { sessionId, requestType = 'analyze' } = options;
+
     // 如果未启用故障转移，直接调用
     if (!this.failoverConfig || !this.failoverConfig.enabled) {
-      return this._callApi(prompt);
+      const response = await this._callApi(prompt);
+      // 记录 token 统计（不影响原有逻辑）
+      this._recordTokenUsage(response, sessionId, requestType);
+      // 返回文本保持兼容
+      return response?.text ?? response;
     }
 
     const maxRetries = this.failoverConfig.maxRetries || 3;
@@ -343,7 +357,7 @@ export class AIEngine {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         // 尝试调用当前供应商
-        const result = await this._callApi(prompt);
+        const response = await this._callApi(prompt);
 
         // 如果成功且不是第一次尝试，说明发生了故障转移
         if (attempt > 0) {
@@ -351,7 +365,10 @@ export class AIEngine {
           console.log(`[AIEngine] 故障转移成功，切换到供应商: ${currentProvider?.name || 'unknown'}`);
         }
 
-        return result;
+        // 记录 token 统计（不影响原有逻辑）
+        this._recordTokenUsage(response, sessionId, requestType);
+        // 返回文本保持兼容
+        return response?.text ?? response;
       } catch (error) {
         lastError = error;
         console.error(`[AIEngine] API 调用失败 (尝试 ${attempt + 1}/${maxRetries}):`, error.message);
@@ -375,6 +392,29 @@ export class AIEngine {
 
     // 所有尝试都失败
     throw new Error(`故障转移失败，已尝试 ${maxRetries} 次: ${lastError?.message || '未知错误'}`);
+  }
+
+  /**
+   * 记录 token 使用统计（内部方法，不影响主流程）
+   */
+  _recordTokenUsage(response, sessionId, requestType) {
+    try {
+      if (!response || !response.usage) return;
+
+      const providerInfo = this.getCurrentProviderInfo();
+      tokenStatsService.recordUsage({
+        sessionId,
+        providerName: providerInfo?.name || 'unknown',
+        providerUrl: providerInfo?.url || '',
+        model: response.model || 'unknown',
+        usage: response.usage,
+        requestType,
+        success: true
+      });
+    } catch (err) {
+      // 统计失败不影响主流程
+      console.error('[AIEngine] Token 统计记录失败:', err.message);
+    }
   }
 
   /**
@@ -465,7 +505,15 @@ export class AIEngine {
     }
 
     const data = await response.json();
-    return data.choices?.[0]?.message?.content || null;
+    // 返回包含 text 和 usage 的对象
+    return {
+      text: data.choices?.[0]?.message?.content || null,
+      usage: data.usage ? {
+        input_tokens: data.usage.prompt_tokens || 0,
+        output_tokens: data.usage.completion_tokens || 0
+      } : null,
+      model: data.model || config.model || 'unknown'
+    };
   }
 
   // Claude 原生 API 调用（带 Claude Code 伪装）
@@ -513,7 +561,12 @@ export class AIEngine {
     }
 
     const data = await response.json();
-    return data.content?.[0]?.text || null;
+    // 返回包含 text 和 usage 的对象
+    return {
+      text: data.content?.[0]?.text || null,
+      usage: data.usage || null,
+      model: data.model || config.model || 'unknown'
+    };
   }
 
   // Codex API 调用（带 Codex CLI 伪装，使用 OpenAI Responses API 格式）
@@ -533,10 +586,20 @@ export class AIEngine {
     };
 
     // 构建请求体（OpenAI Responses API 格式）
-    // 注意：不使用 instructions 字段，因为某些 Codex 中继服务不支持
+    // 使用正确的 input 数组格式
+    // 注意：不发送 instructions 字段，因为某些供应商（如 FoxCode）不接受自定义 instructions
+    // 供应商会使用自己的默认 instructions
     const requestBody = {
       model: config.model || 'gpt-5-codex',
-      input: prompt,
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [
+            { type: 'input_text', text: prompt }
+          ]
+        }
+      ],
       stream: false
     };
 
@@ -562,7 +625,8 @@ export class AIEngine {
 
     // 如果是 SSE 流式响应，解析事件流
     if (contentType.includes('text/event-stream') || responseText.startsWith('event:')) {
-      return this._parseCodexSSE(responseText);
+      const { text, usage } = this._parseCodexSSE(responseText);
+      return { text, usage, model: config.model || 'gpt-5-codex' };
     }
 
     // 尝试解析为 JSON
@@ -570,26 +634,41 @@ export class AIEngine {
       const data = JSON.parse(responseText);
       // Responses API 返回格式：{ output: [{ type: 'message', content: [...] }] }
       const output = data.output || [];
+      let text = null;
       for (const item of output) {
         if (item.type === 'message' && item.content) {
           for (const content of item.content) {
             if (content.type === 'output_text') {
-              return content.text;
+              text = content.text;
+              break;
             }
           }
         }
+        if (text) break;
       }
       // 回退：尝试其他可能的响应格式
-      return data.choices?.[0]?.message?.content || data.text || null;
+      if (!text) {
+        text = data.choices?.[0]?.message?.content || data.text || null;
+      }
+      // 返回包含 text 和 usage 的对象
+      return {
+        text,
+        usage: data.usage ? {
+          input_tokens: data.usage.prompt_tokens || data.usage.input_tokens || 0,
+          output_tokens: data.usage.completion_tokens || data.usage.output_tokens || 0
+        } : null,
+        model: data.model || config.model || 'gpt-5-codex'
+      };
     } catch (e) {
       console.error('[AIEngine] Codex 响应解析失败:', e);
-      return null;
+      return { text: null, usage: null, model: config.model || 'gpt-5-codex' };
     }
   }
 
   // 解析 Codex SSE 流式响应
   _parseCodexSSE(sseText) {
     let result = '';
+    let usage = null;
     const lines = sseText.split('\n');
 
     for (const line of lines) {
@@ -609,6 +688,13 @@ export class AIEngine {
                 }
               }
             }
+            // 提取 usage 信息
+            if (data.response?.usage) {
+              usage = {
+                input_tokens: data.response.usage.input_tokens || 0,
+                output_tokens: data.response.usage.output_tokens || 0
+              };
+            }
           }
 
           // 处理增量文本事件
@@ -621,7 +707,7 @@ export class AIEngine {
       }
     }
 
-    return result || null;
+    return { text: result || null, usage };
   }
 
   async analyze({ goal, systemPrompt, history }) {
@@ -790,6 +876,14 @@ ${historyText || '(空)'}
       return 'gemini';
     }
 
+    // 检测 Droid CLI 特征
+    if (/GPT5-Codex.*\[Custom\]/i.test(lastLines) ||
+        /droid.*v\d+\.\d+/i.test(lastLines) ||
+        /IDE\s*⚙/i.test(lastLines) ||
+        /Auto \(Off\).*shift\+tab/i.test(lastLines)) {
+      return 'droid';
+    }
+
     return null;
   }
 
@@ -859,6 +953,13 @@ ${historyText || '(空)'}
         /gemini-2\.5.*\.\.\./i.test(cleanContent) ||
         /(Thinking|Generating|Processing).*\.\.\./i.test(cleanContent)
       );
+    } else if (aiType === 'droid') {
+      // Droid CLI 运行中标志（排除确认界面）
+      isRunning = !isConfirmDialog && (
+        /esc to interrupt/i.test(cleanContent) ||
+        /Thinking|Processing|Generating/i.test(cleanContent) ||
+        /\(\d+m\s*\d+s\)|\d+m\s+\d+s\s*$/.test(cleanContent.slice(-500))
+      );
     } else {
       // 通用检测（排除确认界面）
       const last500 = cleanContent.slice(-500);
@@ -893,9 +994,9 @@ ${historyText || '(空)'}
     if (isEditConfirm && hasOption1Yes) {
       // 有选项2时选2（允许本次会话），否则选1
       const selectOption = hasOption2Yes ? '2' : '1';
-      console.log(`[AIEngine] 检测到 Claude Code 确认界面，选择选项 ${selectOption}`);
+      console.log(`[AIEngine] 检测到 ${cliName} 确认界面，选择选项 ${selectOption}`);
       return {
-        currentState: 'Claude Code确认界面',
+        currentState: `${cliName}确认界面`,
         workingDir: '未显示',
         recentAction: '等待确认',
         needsAction: true,
@@ -976,7 +1077,7 @@ ${historyText || '(空)'}
       if (isNeedQuestion) {
         console.log('[AIEngine] 检测到"是否需要..."询问，建议用户回复');
         return {
-          currentState: 'Claude Code询问下一步',
+          currentState: `${cliName}询问下一步`,
           workingDir: '未显示',
           recentAction: '显示询问',
           needsAction: true,
@@ -995,7 +1096,7 @@ ${historyText || '(空)'}
       if (isContinueQuestionEarly) {
         console.log('[AIEngine] 检测到"是否继续"问题，自动回答继续');
         return {
-          currentState: 'Claude Code询问是否继续',
+          currentState: `${cliName}询问是否继续`,
           workingDir: '未显示',
           recentAction: '显示问题',
           needsAction: true,
@@ -1036,9 +1137,9 @@ ${historyText || '(空)'}
     const hasDoubleArrow = /^>>\s/m.test(cleanContent) || /\n>>\s/m.test(cleanContent);
     const hasEditContent = /\+\+\+|---|\@\@.*\@\@/m.test(cleanContent); // diff 格式
     if (hasDoubleArrow && (hasEditContent || /accept edits/i.test(cleanContent))) {
-      console.log('[AIEngine] 检测到 Claude Code 编辑确认界面(Tab模式)，等待用户确认');
+      console.log(`[AIEngine] 检测到 ${cliName} 编辑确认界面(Tab模式)，等待用户确认`);
       return {
-        currentState: 'Claude Code等待编辑确认',
+        currentState: `${cliName}等待编辑确认`,
         workingDir: '未显示',
         recentAction: '等待用户按Tab确认编辑',
         needsAction: false,
@@ -1081,13 +1182,13 @@ ${historyText || '(空)'}
     const isEditConfirmMode = />>.*accept edits/i.test(cleanContent) || /shift\+tab to cycle/i.test(cleanContent);
     if (hasPrompt && /accept edits/i.test(cleanContent) && !isEditConfirmMode) {
       return {
-        currentState: 'Claude Code空闲中',
+        currentState: `${cliName}空闲中`,
         workingDir: '未显示',
         recentAction: '等待用户输入',
         needsAction: false,
         actionType: 'none',
         suggestedAction: null,
-        actionReason: 'Claude Code已完成任务，等待用户输入新指令',
+        actionReason: `${cliName}已完成任务，等待用户输入新指令`,
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
@@ -1109,7 +1210,7 @@ ${historyText || '(空)'}
       if (isContinueQuestion) {
         console.log('[AIEngine] 检测到"是否继续"问题，自动回答继续');
         return {
-          currentState: 'Claude Code询问是否继续',
+          currentState: `${cliName}询问是否继续`,
           workingDir: '未显示',
           recentAction: '显示问题',
           needsAction: true,
@@ -1148,7 +1249,7 @@ ${historyText || '(空)'}
       if (isDevelopmentContext) {
         console.log('[AIEngine] 检测到开发阶段空闲状态，自动发送继续');
         return {
-          currentState: 'Claude Code空闲',
+          currentState: `${cliName}空闲`,
           workingDir: '未显示',
           recentAction: '等待输入',
           needsAction: true,
@@ -1263,17 +1364,34 @@ ${historyText || '(空)'}
       };
     }
 
-    // 6. 检测致命错误（需要退出）
-    if (/(fatal|crashed|Error:.*cannot continue)/i.test(terminalContent) &&
-        !/Do you want to proceed\?/i.test(terminalContent)) {
+    // 6. 检测 CLI 崩溃后回到 Shell（需要自动恢复）
+    // 特征：终端内容包含 Node.js 崩溃错误 + shell 提示符
+    const crashPatterns = [
+      /RangeError:\s*Maximum call stack size exceeded/i,
+      /FATAL ERROR/i,
+      /JavaScript heap out of memory/i,
+      /SIGKILL|SIGTERM|SIGSEGV/,
+      /Error:.*cannot continue/i,
+      /Unhandled.*rejection/i,
+      /TypeError:.*undefined/i,
+      /SyntaxError:.*Unexpected/i
+    ];
+
+    const hasCrashError = crashPatterns.some(pattern => pattern.test(terminalContent));
+    const isShellPrompt = /\w+@\w+.*[%$#]\s*$/.test(cleanContent) ||  // user@host ... %
+                          /^[\$%#]\s*$/m.test(cleanContent);           // 单独的 $ % #
+
+    // 如果检测到崩溃错误且回到了 shell 提示符，需要自动恢复
+    if (hasCrashError && isShellPrompt) {
+      const cliCommand = getCliCommand(aiType);
       return {
-        currentState: 'Claude Code致命错误',
+        currentState: `${cliName}崩溃`,
         workingDir: '未显示',
-        recentAction: '发生错误',
+        recentAction: 'CLI异常退出',
         needsAction: true,
         actionType: 'text_input',
-        suggestedAction: '/quit',
-        actionReason: 'Claude Code遇到致命错误，需要退出',
+        suggestedAction: cliCommand,
+        actionReason: `${cliName}崩溃后退出，需要重新启动继续开发`,
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
@@ -1281,16 +1399,27 @@ ${historyText || '(空)'}
       };
     }
 
-    // 7. 检测Shell命令行（CLI 已退出，不需要紧急操作）
-    // 匹配常见 shell 提示符格式：
-    // - user@host path % (zsh)
-    // - user@host:path$ (bash)
-    // - 单独的 $ % # 符号
-    const isShellPrompt = /\w+@\w+.*[%$#]\s*$/.test(cleanContent) ||  // user@host ... %
-                          /^[\$%#]\s*$/m.test(cleanContent);           // 单独的 $ % #
+    // 7. 检测致命错误（CLI 还在运行，需要退出）
+    if (/(fatal|crashed|Error:.*cannot continue)/i.test(terminalContent) &&
+        !/Do you want to proceed\?/i.test(terminalContent) &&
+        !isShellPrompt) {
+      return {
+        currentState: `${cliName}致命错误`,
+        workingDir: '未显示',
+        recentAction: '发生错误',
+        needsAction: true,
+        actionType: 'text_input',
+        suggestedAction: '/quit',
+        actionReason: `${cliName}遇到致命错误，需要退出`,
+        suggestion: null,
+        updatedAt: new Date().toISOString(),
+        preAnalyzed: true,
+        detectedCLI
+      };
+    }
 
+    // 8. 检测Shell命令行（CLI 正常退出，不需要紧急操作）
     if (isShellPrompt && !/^>\s*$/m.test(cleanContent)) {
-      const cliName = getCliName(aiType);
       return {
         currentState: 'Shell命令行',
         workingDir: '未显示',
@@ -1306,7 +1435,7 @@ ${historyText || '(空)'}
       };
     }
 
-    // 8. 检测部署/脚本阶段关键词
+    // 9. 检测部署/脚本阶段关键词
     if (/(npm run|yarn start|启动服务|localhost:\d+|server.*running|deployment)/i.test(terminalContent)) {
       return {
         currentState: '部署/脚本阶段',
@@ -1332,7 +1461,7 @@ ${historyText || '(空)'}
    * @param {string} terminalContent - 终端内容
    * @param {string} aiType - AI 类型 (claude/codex/gemini)
    */
-  async analyzeStatus(terminalContent, aiType = 'claude') {
+  async analyzeStatus(terminalContent, aiType = 'claude', sessionId = null) {
     // 先尝试预判断
     const preResult = this.preAnalyzeStatus(terminalContent, aiType);
     if (preResult) {
@@ -1377,7 +1506,10 @@ ${terminalContent || '(空)'}
 直接返回JSON，以{开头：`;
 
     try {
-      const content = await this._callApiWithFailover(prompt);
+      const content = await this._callApiWithFailover(prompt, {
+        sessionId,
+        requestType: 'analyzeStatus'
+      });
 
       if (!content) {
         return null;

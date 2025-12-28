@@ -1,6 +1,7 @@
 import ProviderService from '../services/ProviderService.js';
 import ProviderHealthCheck from '../services/ProviderHealthCheck.js';
 import ConfigService from '../services/ConfigService.js';
+import { getTerminalRecorder } from '../services/TerminalRecorder.js';
 import presets from '../config/providerPresets.js';
 import sqlite3 from 'sqlite3';
 import path from 'path';
@@ -77,6 +78,36 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
     const { limit = 500 } = req.query;
     const logs = historyLogger.getAllAiLogs(parseInt(limit));
     res.json(logs);
+  });
+
+  // ========== 终端回放 API ==========
+
+  // 获取会话录制时间范围
+  app.get('/api/sessions/:id/recordings/range', (req, res) => {
+    const recorder = getTerminalRecorder();
+    const range = recorder.getTimeRange(req.params.id);
+    if (!range) {
+      return res.json({ hasRecordings: false });
+    }
+    res.json({ hasRecordings: true, ...range });
+  });
+
+  // 获取会话录制数据
+  app.get('/api/sessions/:id/recordings', (req, res) => {
+    const { start, end, limit } = req.query;
+    const recorder = getTerminalRecorder();
+    const startTime = start ? parseInt(start) : 0;
+    const endTime = end ? parseInt(end) : Date.now();
+    const limitNum = limit ? parseInt(limit) : 0;
+    const events = recorder.getRecordings(req.params.id, startTime, endTime, limitNum);
+    res.json(events);
+  });
+
+  // 获取录制统计
+  app.get('/api/recordings/stats', (req, res) => {
+    const recorder = getTerminalRecorder();
+    const stats = recorder.getStats();
+    res.json(stats);
   });
 
   // 获取当前使用的 API 供应商（从 CC Switch 数据库读取）
@@ -1089,6 +1120,152 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
       res.json(result);
     } catch (error) {
       res.status(400).json({ success: false, error: error.message });
+    }
+  });
+
+  // ============================================
+  // 存储管理 API
+  // ============================================
+
+  const storageSettingsPath = path.join(os.homedir(), '.webtmux', 'storage-settings.json');
+
+  // 获取存储统计
+  app.get('/api/storage/stats', (req, res) => {
+    try {
+      const recorder = getTerminalRecorder();
+      const recStats = recorder.getStats();
+
+      // 获取日志统计
+      const logsDbPath = path.join(os.homedir(), '.webtmux', 'db', 'ai-logs.db');
+      let logsStats = { size: 0, count: 0, oldestTime: null };
+
+      if (fs.existsSync(logsDbPath)) {
+        logsStats.size = fs.statSync(logsDbPath).size;
+        try {
+          const logsDb = new sqlite3.Database(logsDbPath);
+          logsDb.get('SELECT COUNT(*) as count, MIN(timestamp) as oldest FROM ai_logs', (err, row) => {
+            if (!err && row) {
+              logsStats.count = row.count || 0;
+              logsStats.oldestTime = row.oldest;
+            }
+            logsDb.close();
+          });
+        } catch (e) { /* ignore */ }
+      }
+
+      res.json({
+        recordings: {
+          size: recStats.totalSize || 0,
+          count: recStats.totalEvents || 0,
+          oldestTime: recStats.oldestTime || null
+        },
+        logs: logsStats
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 获取按会话分组的录制统计
+  app.get('/api/storage/recordings/by-session', (req, res) => {
+    try {
+      const recorder = getTerminalRecorder();
+      const sessions = recorder.getStatsBySession();
+      res.json(sessions);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 删除指定会话的录制
+  app.delete('/api/storage/recordings/:sessionId', (req, res) => {
+    try {
+      const recorder = getTerminalRecorder();
+      const deleted = recorder.deleteSession(req.params.sessionId);
+      res.json({ success: true, deleted });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 获取存储设置
+  app.get('/api/storage/settings', (req, res) => {
+    try {
+      if (fs.existsSync(storageSettingsPath)) {
+        const data = JSON.parse(fs.readFileSync(storageSettingsPath, 'utf-8'));
+        res.json(data);
+      } else {
+        res.json({
+          recordingsMaxSize: 500,
+          recordingsRetentionDays: 7,
+          logsMaxSize: 100,
+          logsRetentionDays: 30
+        });
+      }
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 保存存储设置
+  app.post('/api/storage/settings', (req, res) => {
+    try {
+      const dir = path.dirname(storageSettingsPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(storageSettingsPath, JSON.stringify(req.body, null, 2));
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 清理数据
+  app.post('/api/storage/clean/:type', (req, res) => {
+    const { type } = req.params;
+    try {
+      let deleted = 0;
+      if (type === 'recordings') {
+        const recorder = getTerminalRecorder();
+        deleted = recorder.cleanOldRecordings(0); // 清理所有
+      } else if (type === 'logs') {
+        const logsDbPath = path.join(os.homedir(), '.webtmux', 'db', 'ai-logs.db');
+        if (fs.existsSync(logsDbPath)) {
+          fs.unlinkSync(logsDbPath);
+          deleted = 1;
+        }
+      }
+      res.json({ success: true, deleted });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 导出数据
+  app.get('/api/storage/export/:type', (req, res) => {
+    const { type } = req.params;
+    try {
+      if (type === 'recordings') {
+        const recorder = getTerminalRecorder();
+        const data = recorder.exportAll();
+        res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Content-Disposition', 'attachment; filename=recordings.json');
+        res.send(JSON.stringify(data, null, 2));
+      } else if (type === 'logs') {
+        const logsDbPath = path.join(os.homedir(), '.webtmux', 'db', 'ai-logs.db');
+        if (fs.existsSync(logsDbPath)) {
+          res.setHeader('Content-Type', 'application/octet-stream');
+          res.setHeader('Content-Disposition', 'attachment; filename=ai-logs.db');
+          res.sendFile(logsDbPath);
+        } else {
+          res.status(404).json({ error: '日志文件不存在' });
+        }
+      } else {
+        res.status(400).json({ error: '未知类型' });
+      }
+    } catch (err) {
+      res.status(500).json({ error: err.message });
     }
   });
 }

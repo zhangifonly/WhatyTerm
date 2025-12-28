@@ -3,13 +3,31 @@
  * 所有需要共享的常量都在这里定义，便于维护
  */
 
+import { execSync } from 'child_process';
+
+// 动态获取本机 CLI 版本号
+function getLocalVersion(command, fallback) {
+  try {
+    const output = execSync(command, { timeout: 3000, encoding: 'utf-8' });
+    const match = output.match(/(\d+\.\d+\.\d+)/);
+    return match ? match[1] : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+// 启动时读取本机版本（带回退默认值）
+const CLAUDE_VERSION = getLocalVersion('claude --version 2>/dev/null', '2.0.76');
+const CODEX_VERSION = getLocalVersion('codex --version 2>/dev/null', '0.77.0');
+const GEMINI_VERSION = getLocalVersion('gemini --version 2>/dev/null', '0.21.3');
+
 // 默认模型（选择最便宜的 Haiku）
 // 当 Anthropic 发布新版本时，只需修改这里
 export const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
 
 // Claude Code 伪装配置
 export const CLAUDE_CODE_FAKE = {
-  userAgent: 'claude-cli/2.0.69 (external, cli)',
+  userAgent: `claude-cli/${CLAUDE_VERSION} (external, cli)`,
   headers: {
     'x-app': 'cli',
     'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14',
@@ -20,12 +38,18 @@ export const CLAUDE_CODE_FAKE = {
 
 // Codex CLI 伪装配置
 export const CODEX_FAKE = {
-  userAgent: 'codex_cli_rs/0.71.0',
+  userAgent: `codex_cli_rs/${CODEX_VERSION}`,
   headers: {
     'openai-beta': 'responses'
   },
   // Codex 系统指令（简化版，完整版太长）
   instructions: "You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI on a user's computer."
+};
+
+// Gemini CLI 伪装配置
+export const GEMINI_FAKE = {
+  userAgent: `gemini-cli/${GEMINI_VERSION}`,
+  headers: {}
 };
 
 // AI 分析间隔（毫秒）
