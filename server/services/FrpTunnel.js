@@ -301,8 +301,10 @@ subdomain = "${this.subdomain}"
       const frpcPath = this.getFrpcExecutable();
       console.log(`[FrpTunnel] 使用 frpc: ${frpcPath}`);
 
+      const isWindows = process.platform === 'win32';
       this.frpProcess = spawn(frpcPath, ['-c', this.configPath], {
-        stdio: ['ignore', 'pipe', 'pipe']
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: isWindows  // Windows 上需要使用 shell
       });
 
       let connected = false;

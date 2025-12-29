@@ -113,6 +113,14 @@ export class ProviderService {
    */
   _readProviders() {
     try {
+      // 文件不存在时返回空结构，不报错
+      if (!fs.existsSync(this.providersFile)) {
+        return {
+          claude: { current: null, providers: {} },
+          codex: { current: null, providers: {} },
+          gemini: { current: null, providers: {} }
+        };
+      }
       const data = fs.readFileSync(this.providersFile, 'utf8');
       return JSON.parse(data);
     } catch (error) {

@@ -109,9 +109,31 @@ class CloudflareTunnel {
     const cloudflaredPath = this.getCloudflaredExecutable();
     console.log(`[CloudflareTunnel] 启动 Quick Tunnel... (使用: ${cloudflaredPath})`);
 
+    // 检查可执行文件是否存在
+    if (!existsSync(cloudflaredPath)) {
+      console.error('[CloudflareTunnel] cloudflared 可执行文件不存在:', cloudflaredPath);
+      return null;
+    }
+
+    // Windows 上检查文件大小，确保不是损坏的文件
+    const isWindows = process.platform === 'win32';
+    try {
+      const stats = require('fs').statSync(cloudflaredPath);
+      if (stats.size < 1000000) { // cloudflared 至少有几 MB
+        console.error('[CloudflareTunnel] cloudflared 文件可能损坏，大小异常:', stats.size);
+        // 删除损坏的文件，下次会重新下载
+        require('fs').unlinkSync(cloudflaredPath);
+        return null;
+      }
+    } catch (err) {
+      console.error('[CloudflareTunnel] 检查文件失败:', err.message);
+    }
+
     return new Promise((resolve) => {
+      // Windows 上使用 shell: true 来正确执行 .exe 文件
       this.process = spawn(cloudflaredPath, ['tunnel', '--url', `http://localhost:${this.localPort}`], {
-        stdio: ['ignore', 'pipe', 'pipe']
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: isWindows
       });
 
       let urlFound = false;
