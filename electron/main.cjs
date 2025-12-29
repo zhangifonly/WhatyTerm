@@ -641,25 +641,50 @@ app.on('before-quit', () => {
 function waitForServer(url, timeout) {
   return new Promise((resolve, reject) => {
     const startTime = Date.now();
+    let attemptCount = 0;
+
     const check = () => {
+      attemptCount++;
       const http = require('http');
-      const req = http.get(url, (res) => {
+      // Windows 上使用 127.0.0.1 代替 localhost，避免 DNS 解析问题
+      const checkUrl = url.replace('localhost', '127.0.0.1');
+
+      if (attemptCount % 10 === 1) {
+        writeLog(`[Electron] 检测服务器 (第 ${attemptCount} 次): ${checkUrl}`);
+      }
+
+      const req = http.get(checkUrl, (res) => {
+        writeLog(`[Electron] 服务器响应: ${res.statusCode}`);
         if (res.statusCode === 200) {
           resolve();
         } else {
           retry();
         }
       });
-      req.on('error', retry);
-      req.setTimeout(1000, retry);
+
+      req.on('error', (err) => {
+        if (attemptCount % 10 === 1) {
+          writeLog(`[Electron] 连接错误 (第 ${attemptCount} 次): ${err.code || err.message}`);
+        }
+        retry();
+      });
+
+      req.setTimeout(2000, () => {
+        writeLog(`[Electron] 连接超时 (第 ${attemptCount} 次)`);
+        req.destroy();
+        retry();
+      });
     };
+
     const retry = () => {
       if (Date.now() - startTime > timeout) {
+        writeLog(`[Electron] 服务器检测超时，共尝试 ${attemptCount} 次`);
         reject(new Error('Server startup timeout'));
       } else {
         setTimeout(check, 500);
       }
     };
+
     check();
   });
 }
