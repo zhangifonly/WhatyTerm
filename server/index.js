@@ -3858,8 +3858,9 @@ ${context.join('\n\n')}
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, async () => {
-  console.log(`WebTmux 服务器运行在 http://localhost:${PORT}`);
+const HOST = process.env.HOST || '127.0.0.1';
+server.listen(PORT, HOST, async () => {
+  console.log(`WebTmux 服务器运行在 http://${HOST}:${PORT}`);
 
   // 注意：项目元数据（projectDesc、goal）的刷新已集成到 updateAllSessionsProjectInfo() 中
   // 该函数会在启动后 3 秒执行，并每 30 秒定期刷新
