@@ -3,7 +3,7 @@ import ProviderHealthCheck from '../services/ProviderHealthCheck.js';
 import ConfigService from '../services/ConfigService.js';
 import { getTerminalRecorder } from '../services/TerminalRecorder.js';
 import presets from '../config/providerPresets.js';
-import sqlite3 from 'sqlite3';
+import Database from 'better-sqlite3';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -127,82 +127,66 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
         });
       }
 
-      const db = new sqlite3.Database(ccSwitchDbPath, sqlite3.OPEN_READONLY);
+      const db = new Database(ccSwitchDbPath, { readonly: true });
+      const row = db.prepare('SELECT * FROM providers WHERE app_type = ? AND is_current = 1').get(appType);
+      db.close();
 
-      // 查询当前激活的供应商
-      db.get('SELECT * FROM providers WHERE app_type = ? AND is_current = 1',
-        [appType],
-        (err, row) => {
-          db.close();
+      if (!row) {
+        return res.json({
+          name: '未配置',
+          url: '',
+          app: appType,
+          exists: false
+        });
+      }
 
-          if (err) {
-            console.error(`[API] 查询 ${appType} 当前供应商失败:`, err);
-            return res.status(500).json({
-              error: '获取供应商信息失败',
-              name: '错误',
-              url: '',
-              app: appType,
-              exists: false
-            });
-          }
+      // 解析 settings_config 获取 API 地址
+      let apiUrl = '';
+      try {
+        if (row.settings_config) {
+          const config = JSON.parse(row.settings_config);
 
-          if (!row) {
-            return res.json({
-              name: '未配置',
-              url: '',
-              app: appType,
-              exists: false
-            });
-          }
-
-          // 解析 settings_config 获取 API 地址
-          let apiUrl = '';
-          try {
-            if (row.settings_config) {
-              const config = JSON.parse(row.settings_config);
-
-              if (appType === 'claude') {
-                // Claude 使用 env.ANTHROPIC_BASE_URL
-                apiUrl = config.env?.ANTHROPIC_BASE_URL || config.baseURL || '';
-              } else if (appType === 'codex') {
-                // Codex 使用 TOML 格式的 config 字段
-                if (config.config) {
-                  // 从 TOML 中提取 base_url
-                  const baseUrlMatch = config.config.match(/base_url\s*=\s*"([^"]+)"/);
-                  if (baseUrlMatch) {
-                    apiUrl = baseUrlMatch[1];
-                  }
-                }
-              } else if (appType === 'gemini') {
-                // Gemini CLI - 预留支持，待确认具体配置格式
-                // 尝试多种可能的字段
-                apiUrl = config.env?.GEMINI_API_BASE ||
-                         config.env?.GOOGLE_API_BASE ||
-                         config.baseURL ||
-                         '';
-                // 如果是 TOML 格式
-                if (!apiUrl && config.config) {
-                  const baseUrlMatch = config.config.match(/(?:base_url|api_base)\s*=\s*"([^"]+)"/);
-                  if (baseUrlMatch) {
-                    apiUrl = baseUrlMatch[1];
-                  }
-                }
-              } else {
-                // 其他应用类型尝试通用字段
-                apiUrl = config.baseURL || config.env?.BASE_URL || '';
+          if (appType === 'claude') {
+            // Claude 使用 env.ANTHROPIC_BASE_URL
+            apiUrl = config.env?.ANTHROPIC_BASE_URL || config.baseURL || '';
+          } else if (appType === 'codex') {
+            // Codex 使用 TOML 格式的 config 字段
+            if (config.config) {
+              // 从 TOML 中提取 base_url
+              const baseUrlMatch = config.config.match(/base_url\s*=\s*"([^"]+)"/);
+              if (baseUrlMatch) {
+                apiUrl = baseUrlMatch[1];
               }
             }
-          } catch (parseError) {
-            console.error(`[API] 解析 ${appType} settings_config 失败:`, parseError);
+          } else if (appType === 'gemini') {
+            // Gemini CLI - 预留支持，待确认具体配置格式
+            // 尝试多种可能的字段
+            apiUrl = config.env?.GEMINI_API_BASE ||
+                     config.env?.GOOGLE_API_BASE ||
+                     config.baseURL ||
+                     '';
+            // 如果是 TOML 格式
+            if (!apiUrl && config.config) {
+              const baseUrlMatch = config.config.match(/(?:base_url|api_base)\s*=\s*"([^"]+)"/);
+              if (baseUrlMatch) {
+                apiUrl = baseUrlMatch[1];
+              }
+            }
+          } else {
+            // 其他应用类型尝试通用字段
+            apiUrl = config.baseURL || config.env?.BASE_URL || '';
           }
+        }
+      } catch (parseError) {
+        console.error(`[API] 解析 ${appType} settings_config 失败:`, parseError);
+      }
 
-          res.json({
-            name: row.name || '未命名',
-            url: apiUrl,
-            app: appType,
-            exists: true
-          });
-        });
+      res.json({
+        name: row.name || '未命名',
+        url: apiUrl,
+        app: appType,
+        exists: true
+      });
     } catch (error) {
       console.error('[API] 获取当前供应商失败:', error);
       res.status(500).json({
@@ -226,45 +210,34 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
         return res.json({ providers: [], error: 'CC Switch 数据库不存在' });
       }
 
-      const db = new sqlite3.Database(ccSwitchDbPath, sqlite3.OPEN_READONLY);
+      const db = new Database(ccSwitchDbPath, { readonly: true });
+      const rows = db.prepare('SELECT * FROM providers ORDER BY app_type, sort_index, created_at').all();
+      db.close();
 
-      db.all(
-        'SELECT * FROM providers ORDER BY app_type, sort_index, created_at',
-        [],
-        (err, rows) => {
-          db.close();
-
-          if (err) {
-            console.error('[API] 查询 CC Switch 供应商失败:', err);
-            return res.status(500).json({ providers: [], error: err.message });
+      // 转换数据格式
+      const providers = rows.map(row => {
+        let settingsConfig = {};
+        try {
+          if (row.settings_config) {
+            settingsConfig = JSON.parse(row.settings_config);
           }
-
-          // 转换数据格式
-          const providers = rows.map(row => {
-            let settingsConfig = {};
-            try {
-              if (row.settings_config) {
-                settingsConfig = JSON.parse(row.settings_config);
-              }
-            } catch (e) {
-              console.error('[API] 解析 settings_config 失败:', e);
-            }
-
-            return {
-              id: row.id,
-              name: row.name,
-              appType: row.app_type,
-              isCurrent: row.is_current === 1,
-              settingsConfig,
-              category: row.category,
-              sortIndex: row.sort_index,
-              createdAt: row.created_at
-            };
-          });
-
-          res.json({ providers });
+        } catch (e) {
+          console.error('[API] 解析 settings_config 失败:', e);
         }
-      );
+
+        return {
+          id: row.id,
+          name: row.name,
+          appType: row.app_type,
+          isCurrent: row.is_current === 1,
+          settingsConfig,
+          category: row.category,
+          sortIndex: row.sort_index,
+          createdAt: row.created_at
+        };
+      });
+
+      res.json({ providers });
     } catch (error) {
       console.error('[API] 获取 CC Switch 供应商失败:', error);
       res.status(500).json({ providers: [], error: error.message });
@@ -1141,35 +1114,27 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
 
       if (fs.existsSync(webtmuxDbPath)) {
         logsStats.size = fs.statSync(webtmuxDbPath).size;
-        const logsDb = new sqlite3.Database(webtmuxDbPath, sqlite3.OPEN_READONLY);
-        logsDb.get(
-          "SELECT COUNT(*) as count, MIN(created_at) as oldest FROM history WHERE type = 'ai_decision'",
-          (err, row) => {
-            logsDb.close();
-            if (!err && row) {
-              logsStats.count = row.count || 0;
-              logsStats.oldestTime = row.oldest;
-            }
-            res.json({
-              recordings: {
-                size: recStats.totalSize || 0,
-                count: recStats.totalEvents || 0,
-                oldestTime: recStats.oldestTime || null
-              },
-              logs: logsStats
-            });
+        try {
+          const logsDb = new Database(webtmuxDbPath, { readonly: true });
+          const row = logsDb.prepare("SELECT COUNT(*) as count, MIN(created_at) as oldest FROM history WHERE type = 'ai_decision'").get();
+          logsDb.close();
+          if (row) {
+            logsStats.count = row.count || 0;
+            logsStats.oldestTime = row.oldest;
           }
-        );
-      } else {
-        res.json({
-          recordings: {
-            size: recStats.totalSize || 0,
-            count: recStats.totalEvents || 0,
-            oldestTime: recStats.oldestTime || null
-          },
-          logs: logsStats
-        });
+        } catch (dbErr) {
+          console.error('[API] 读取日志统计失败:', dbErr);
+        }
       }
+
+      res.json({
+        recordings: {
+          size: recStats.totalSize || 0,
+          count: recStats.totalEvents || 0,
+          oldestTime: recStats.oldestTime || null
+        },
+        logs: logsStats
+      });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -1276,15 +1241,14 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
           if (hours) {
             // 按时间范围删除最近N小时
             const cutoff = Date.now() - hours * 60 * 60 * 1000;
-            const logsDb = new sqlite3.Database(logsDbPath);
-            logsDb.run('DELETE FROM ai_logs WHERE timestamp > ?', [cutoff], function(err) {
+            try {
+              const logsDb = new Database(logsDbPath);
+              const result = logsDb.prepare('DELETE FROM ai_logs WHERE timestamp > ?').run(cutoff);
               logsDb.close();
-              if (err) {
-                return res.status(500).json({ error: err.message });
-              }
-              res.json({ success: true, deleted: this.changes });
-            });
-            return;
+              deleted = result.changes;
+            } catch (dbErr) {
+              return res.status(500).json({ error: dbErr.message });
+            }
           } else {
             fs.unlinkSync(logsDbPath);
             deleted = 1;

@@ -1,6 +1,6 @@
 import express from 'express';
 import ConfigManager from '../services/ConfigManager.js';
-import sqlite3 from 'sqlite3';
+import Database from 'better-sqlite3';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -21,49 +21,38 @@ router.get('/profiles', (req, res) => {
       const ccSwitchDbPath = path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
 
       if (fs.existsSync(ccSwitchDbPath)) {
-        const db = new sqlite3.Database(ccSwitchDbPath, sqlite3.OPEN_READONLY);
+        const db = new Database(ccSwitchDbPath, { readonly: true });
+        const rows = db.prepare('SELECT * FROM providers').all();
+        db.close();
 
-        db.all('SELECT * FROM providers', [], (err, rows) => {
-          db.close();
+        // 合并 CC Switch providers 和 Claude Code profiles
+        const ccSwitchProviders = rows.map(row => ({
+          name: row.id,
+          display_name: row.name,
+          app_type: row.app_type,
+          path: `cc-switch://${row.id}`,
+          is_current: row.is_current === 1,
+          created_at: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+          modified_at: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+          category: row.category,
+          icon: row.icon,
+          icon_color: row.icon_color,
+          settings_config: row.settings_config ? JSON.parse(row.settings_config) : {},
+          source: 'cc-switch'
+        }));
 
-          if (err) {
-            console.error('[CC Switch] 读取数据库失败:', err);
-            // 如果读取失败，只返回 Claude Code profiles
-            return res.json({
-              success: true,
-              data: { profiles }
-            });
-          }
+        // 标记 Claude Code profiles 的来源
+        const claudeProfiles = profiles.map(p => ({
+          ...p,
+          source: 'claude-code'
+        }));
 
-          // 合并 CC Switch providers 和 Claude Code profiles
-          const ccSwitchProviders = rows.map(row => ({
-            name: row.id,
-            display_name: row.name,
-            app_type: row.app_type,
-            path: `cc-switch://${row.id}`,
-            is_current: row.is_current === 1,
-            created_at: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
-            modified_at: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
-            category: row.category,
-            icon: row.icon,
-            icon_color: row.icon_color,
-            settings_config: row.settings_config ? JSON.parse(row.settings_config) : {},
-            source: 'cc-switch'
-          }));
+        // 合并两个列表
+        const allProfiles = [...ccSwitchProviders, ...claudeProfiles];
 
-          // 标记 Claude Code profiles 的来源
-          const claudeProfiles = profiles.map(p => ({
-            ...p,
-            source: 'claude-code'
-          }));
-
-          // 合并两个列表
-          const allProfiles = [...ccSwitchProviders, ...claudeProfiles];
-
-          res.json({
-            success: true,
-            data: { profiles: allProfiles }
-          });
+        res.json({
+          success: true,
+          data: { profiles: allProfiles }
         });
       } else {
         // 如果 CC Switch 数据库不存在，只返回 Claude Code profiles
@@ -247,49 +236,34 @@ router.get('/current', (req, res) => {
     // 检查 CC Switch 数据库中是否有当前激活的供应商
     const ccSwitchDbPath = path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
 
+    let ccSwitchCurrent = null;
     if (fs.existsSync(ccSwitchDbPath)) {
-      const db = new sqlite3.Database(ccSwitchDbPath, sqlite3.OPEN_READONLY);
-
-      db.get('SELECT id FROM providers WHERE app_type = ? AND is_current = 1',
-        [app],
-        (err, row) => {
-          db.close();
-
-          if (err) {
-            console.error('[CC Switch] 查询当前供应商失败:', err);
-          }
-
-          const response = {
-            current: row ? row.id : currentProfile,
-            empty_mode: isEmptyMode
-          };
-
-          if (isEmptyMode) {
-            const status = configManager.getEmptyModeStatus();
-            response.empty_mode_status = status;
-          }
-
-          res.json({
-            success: true,
-            data: response
-          });
-        });
-    } else {
-      const response = {
-        current: currentProfile,
-        empty_mode: isEmptyMode
-      };
-
-      if (isEmptyMode) {
-        const status = configManager.getEmptyModeStatus();
-        response.empty_mode_status = status;
+      try {
+        const db = new Database(ccSwitchDbPath, { readonly: true });
+        const row = db.prepare('SELECT id FROM providers WHERE app_type = ? AND is_current = 1').get(app);
+        db.close();
+        if (row) {
+          ccSwitchCurrent = row.id;
+        }
+      } catch (err) {
+        console.error('[CC Switch] 查询当前供应商失败:', err);
       }
-
-      res.json({
-        success: true,
-        data: response
-      });
     }
+
+    const response = {
+      current: ccSwitchCurrent || currentProfile,
+      empty_mode: isEmptyMode
+    };
+
+    if (isEmptyMode) {
+      const status = configManager.getEmptyModeStatus();
+      response.empty_mode_status = status;
+    }
+
+    res.json({
+      success: true,
+      data: response
+    });
   } catch (error) {
     res.status(500).json({
       success: false,
@@ -316,78 +290,41 @@ router.post('/switch', (req, res) => {
       const ccSwitchDbPath = path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
 
       if (fs.existsSync(ccSwitchDbPath)) {
-        const db = new sqlite3.Database(ccSwitchDbPath, sqlite3.OPEN_READWRITE);
+        const db = new Database(ccSwitchDbPath);
 
         // 检查该 profile 是否存在于 CC Switch 数据库中
-        db.get('SELECT id, app_type FROM providers WHERE id = ? AND app_type = ?',
-          [profile, app || 'claude'],
-          (err, row) => {
-            if (err) {
-              db.close();
-              console.error('[CC Switch] 查询失败:', err);
-              // 如果查询失败，回退到 Claude Code 模式
-              configManager.applyProfile(profile);
-              message = `Switched to configuration: ${profile}`;
+        const row = db.prepare('SELECT id, app_type FROM providers WHERE id = ? AND app_type = ?').get(profile, app || 'claude');
 
-              return res.json({
-                success: true,
-                message,
-                data: { profile }
-              });
-            }
+        if (row) {
+          // 是 CC Switch 供应商，更新数据库
+          const appType = row.app_type;
 
-            if (row) {
-              // 是 CC Switch 供应商，更新数据库
-              const appType = row.app_type;
+          // 先取消该 app_type 下所有供应商的 is_current 标记
+          db.prepare('UPDATE providers SET is_current = 0 WHERE app_type = ?').run(appType);
 
-              // 先取消该 app_type 下所有供应商的 is_current 标记
-              db.run('UPDATE providers SET is_current = 0 WHERE app_type = ?',
-                [appType],
-                (updateErr) => {
-                  if (updateErr) {
-                    db.close();
-                    console.error('[CC Switch] 更新失败:', updateErr);
-                    return res.status(500).json({
-                      success: false,
-                      error: updateErr.message
-                    });
-                  }
+          // 设置当前供应商为 current
+          db.prepare('UPDATE providers SET is_current = 1 WHERE id = ? AND app_type = ?').run(profile, appType);
 
-                  // 设置当前供应商为 current
-                  db.run('UPDATE providers SET is_current = 1 WHERE id = ? AND app_type = ?',
-                    [profile, appType],
-                    (setErr) => {
-                      db.close();
+          db.close();
 
-                      if (setErr) {
-                        console.error('[CC Switch] 设置当前供应商失败:', setErr);
-                        return res.status(500).json({
-                          success: false,
-                          error: setErr.message
-                        });
-                      }
-
-                      message = `Switched to ${appType} provider: ${profile}`;
-                      return res.json({
-                        success: true,
-                        message,
-                        data: { profile }
-                      });
-                    });
-                });
-            } else {
-              // 不是 CC Switch 供应商，使用 Claude Code 配置管理
-              db.close();
-              configManager.applyProfile(profile);
-              message = `Switched to configuration: ${profile}`;
-
-              return res.json({
-                success: true,
-                message,
-                data: { profile }
-              });
-            }
+          message = `Switched to ${appType} provider: ${profile}`;
+          return res.json({
+            success: true,
+            message,
+            data: { profile }
           });
+        } else {
+          // 不是 CC Switch 供应商，使用 Claude Code 配置管理
+          db.close();
+          configManager.applyProfile(profile);
+          message = `Switched to configuration: ${profile}`;
+
+          return res.json({
+            success: true,
+            message,
+            data: { profile }
+          });
+        }
       } else {
         // CC Switch 数据库不存在，使用 Claude Code 配置管理
         configManager.applyProfile(profile);
@@ -399,10 +336,6 @@ router.post('/switch', (req, res) => {
           data: { profile }
         });
       }
-
-      // 注意：由于数据库操作是异步的，上面的代码会通过回调返回响应
-      // 所以这里不需要再返回响应
-      return;
     }
 
     res.json({
