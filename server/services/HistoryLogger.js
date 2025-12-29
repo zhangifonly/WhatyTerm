@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { existsSync, mkdirSync } from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -9,6 +10,13 @@ const __dirname = dirname(__filename);
 export class HistoryLogger {
   constructor() {
     const dbPath = join(__dirname, '../db/webtmux.db');
+    const dbDir = dirname(dbPath);
+
+    // 确保数据库目录存在
+    if (!existsSync(dbDir)) {
+      mkdirSync(dbDir, { recursive: true });
+    }
+
     this.db = new Database(dbPath);
     this._initTables();
   }

@@ -19,7 +19,9 @@ class ScheduleManager {
     }
 
     const dbPath = path.join(configDir, 'webtmux.db');
+    console.log(`[ScheduleManager] 数据库路径: ${dbPath}`);
     this.db = new Database(dbPath);
+    console.log(`[ScheduleManager] 数据库已打开`);
     this.initDatabase();
     this.checkInterval = null;
     this.callbacks = {
@@ -93,7 +95,10 @@ class ScheduleManager {
 
       case 'weekdays':
         // 指定周几：找到下一个匹配的工作日
-        const targetDays = JSON.parse(schedule.weekdays || '[]');
+        // weekdays 可能是数组或 JSON 字符串
+        const targetDays = Array.isArray(schedule.weekdays)
+          ? schedule.weekdays
+          : JSON.parse(schedule.weekdays || '[]');
         if (targetDays.length === 0) return null;
 
         let daysToAdd = 0;
@@ -141,6 +146,8 @@ class ScheduleManager {
     const now = Date.now();
     const nextRun = this.calculateNextRun(schedule);
 
+    console.log(`[ScheduleManager] 创建预约: id=${id}, nextRun=${nextRun}`);
+
     if (nextRun === null) {
       throw new Error('无法计算下次执行时间');
     }
@@ -150,7 +157,7 @@ class ScheduleManager {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
-    stmt.run(
+    const result = stmt.run(
       id,
       schedule.sessionId,
       schedule.type,
@@ -163,7 +170,12 @@ class ScheduleManager {
       nextRun
     );
 
-    return this.getSchedule(id);
+    console.log(`[ScheduleManager] 插入结果: changes=${result.changes}, lastInsertRowid=${result.lastInsertRowid}`);
+
+    const created = this.getSchedule(id);
+    console.log(`[ScheduleManager] 查询创建的预约: ${created ? 'found' : 'not found'}`);
+
+    return created;
   }
 
   /**
@@ -237,13 +249,22 @@ class ScheduleManager {
       WHERE id = ?
     `);
 
+    // 确保 enabled 字段是整数（SQLite 不接受布尔值）
+    let enabledValue;
+    if (updates.enabled !== undefined) {
+      enabledValue = updates.enabled ? 1 : 0;
+    } else {
+      // schedule.enabled 可能是布尔值（从 getSchedule 返回），需要转换
+      enabledValue = schedule.enabled ? 1 : 0;
+    }
+
     stmt.run(
       updates.type || schedule.type,
       updates.action || schedule.action,
       updates.time || schedule.time,
       updates.weekdays ? JSON.stringify(updates.weekdays) : schedule.weekdays,
       updates.date !== undefined ? updates.date : schedule.date,
-      updates.enabled !== undefined ? (updates.enabled ? 1 : 0) : schedule.enabled,
+      enabledValue,
       nextRun,
       id
     );

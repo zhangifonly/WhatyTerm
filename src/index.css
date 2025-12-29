@@ -1642,6 +1642,8 @@ body {
   font-size: 14px;
   font-weight: 700;
   color: hsl(var(--foreground));
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .ai-status-indicator {

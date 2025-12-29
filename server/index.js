@@ -3338,10 +3338,11 @@ ${context.join('\n\n')}
   // 创建预约
   socket.on('schedule:create', (data) => {
     try {
+      console.log(`[预约] 创建请求, sessionId: ${data.sessionId}, type: ${data.type}, time: ${data.time}`);
       const schedule = scheduleManager.createSchedule(data);
       socket.emit('schedule:created', schedule);
       socket.emit('schedule:list', scheduleManager.getSessionSchedules(data.sessionId));
-      console.log(`[预约] 创建预约: ${schedule.id}`);
+      console.log(`[预约] 创建成功: ${schedule.id}, sessionId: ${schedule.sessionId}`);
     } catch (error) {
       socket.emit('schedule:error', { error: error.message });
       console.error('[预约] 创建失败:', error);
@@ -3351,7 +3352,9 @@ ${context.join('\n\n')}
   // 获取会话的所有预约
   socket.on('schedule:getList', (data) => {
     try {
+      console.log(`[预约] 获取列表请求, sessionId: ${data.sessionId}`);
       const schedules = scheduleManager.getSessionSchedules(data.sessionId);
+      console.log(`[预约] 返回 ${schedules.length} 条预约`);
       socket.emit('schedule:list', schedules);
     } catch (error) {
       socket.emit('schedule:error', { error: error.message });

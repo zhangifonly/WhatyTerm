@@ -8,7 +8,12 @@ import { execSync } from 'child_process';
 // 动态获取本机 CLI 版本号
 function getLocalVersion(command, fallback) {
   try {
-    const output = execSync(command, { timeout: 3000, encoding: 'utf-8' });
+    // 跨平台：直接执行命令，通过 try-catch 处理错误，不依赖 shell 重定向
+    const output = execSync(command, {
+      timeout: 3000,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe']  // 捕获 stderr 避免输出
+    });
     const match = output.match(/(\d+\.\d+\.\d+)/);
     return match ? match[1] : fallback;
   } catch {
@@ -17,9 +22,9 @@ function getLocalVersion(command, fallback) {
 }
 
 // 启动时读取本机版本（带回退默认值）
-const CLAUDE_VERSION = getLocalVersion('claude --version 2>/dev/null', '2.0.76');
-const CODEX_VERSION = getLocalVersion('codex --version 2>/dev/null', '0.77.0');
-const GEMINI_VERSION = getLocalVersion('gemini --version 2>/dev/null', '0.21.3');
+const CLAUDE_VERSION = getLocalVersion('claude --version', '2.0.76');
+const CODEX_VERSION = getLocalVersion('codex --version', '0.77.0');
+const GEMINI_VERSION = getLocalVersion('gemini --version', '0.21.3');
 
 // 默认模型（选择最便宜的 Haiku）
 // 当 Anthropic 发布新版本时，只需修改这里
