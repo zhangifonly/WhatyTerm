@@ -1376,4 +1376,147 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
       res.status(500).json({ error: err.message });
     }
   });
+
+  // ============================================
+  // CLI 工具管理 API (Claude/Codex/Gemini)
+  // ============================================
+
+  /**
+   * 获取所有 CLI 工具状态
+   * GET /api/cli-tools
+   */
+  app.get('/api/cli-tools', (req, res) => {
+    try {
+      const status = dependencyManager.getCliStatus();
+      res.json(status);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 获取所有状态（依赖 + CLI 工具）
+   * GET /api/all-dependencies
+   */
+  app.get('/api/all-dependencies', (req, res) => {
+    try {
+      const status = dependencyManager.getAllStatus();
+      res.json(status);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 安装指定 CLI 工具
+   * POST /api/cli-tools/:name/install
+   */
+  app.post('/api/cli-tools/:name/install', async (req, res) => {
+    const { name } = req.params;
+
+    try {
+      const progressCallback = (message) => {
+        if (io) {
+          io.emit('cli:progress', { name, message });
+        }
+      };
+
+      const result = await dependencyManager.installCli(name, progressCallback);
+
+      if (io) {
+        io.emit('cli:installed', { name, success: true, ...result });
+      }
+
+      res.json({ success: true, ...result });
+    } catch (err) {
+      if (io) {
+        io.emit('cli:installed', { name, success: false, error: err.message });
+      }
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 更新指定 CLI 工具
+   * POST /api/cli-tools/:name/update
+   */
+  app.post('/api/cli-tools/:name/update', async (req, res) => {
+    const { name } = req.params;
+
+    try {
+      const progressCallback = (message) => {
+        if (io) {
+          io.emit('cli:progress', { name, message });
+        }
+      };
+
+      const result = await dependencyManager.updateCli(name, progressCallback);
+
+      if (io) {
+        io.emit('cli:updated', { name, success: true, ...result });
+      }
+
+      res.json({ success: true, ...result });
+    } catch (err) {
+      if (io) {
+        io.emit('cli:updated', { name, success: false, error: err.message });
+      }
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 检查 CLI 工具是否有更新
+   * GET /api/cli-tools/:name/check-update
+   */
+  app.get('/api/cli-tools/:name/check-update', async (req, res) => {
+    const { name } = req.params;
+
+    try {
+      const result = await dependencyManager.checkCliUpdate(name);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 安装所有 CLI 工具
+   * POST /api/cli-tools/install-all
+   */
+  app.post('/api/cli-tools/install-all', async (req, res) => {
+    try {
+      const progressCallback = (message) => {
+        if (io) {
+          io.emit('cli:progress', { name: 'all', message });
+        }
+      };
+
+      const results = await dependencyManager.installAllCli(progressCallback);
+
+      if (io) {
+        io.emit('cli:install-all-complete', results);
+      }
+
+      res.json({ success: true, results });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 检查所有 CLI 工具是否有更新
+   * GET /api/cli-tools/check-updates
+   */
+  app.get('/api/cli-tools/check-updates', async (req, res) => {
+    try {
+      const results = {};
+      for (const name of ['claude', 'codex', 'gemini']) {
+        results[name] = await dependencyManager.checkCliUpdate(name);
+      }
+      res.json(results);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
 }
