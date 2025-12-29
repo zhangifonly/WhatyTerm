@@ -10,6 +10,7 @@
 import Database from 'better-sqlite3';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { existsSync, mkdirSync } from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -22,6 +23,13 @@ class TokenStatsService {
 
   _initDb() {
     const dbPath = join(__dirname, '../../data/token_stats.db');
+    const dbDir = dirname(dbPath);
+
+    // 确保数据库目录存在
+    if (!existsSync(dbDir)) {
+      mkdirSync(dbDir, { recursive: true });
+    }
+
     this.db = new Database(dbPath);
 
     // 创建 token 使用记录表（详细记录每次 API 调用）

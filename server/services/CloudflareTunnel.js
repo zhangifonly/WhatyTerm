@@ -36,7 +36,10 @@ class CloudflareTunnel {
    */
   async checkInstalled() {
     return new Promise((resolve) => {
-      const check = spawn('which', ['cloudflared']);
+      // 跨平台检查命令：Windows 使用 where，其他系统使用 which
+      const isWindows = process.platform === 'win32';
+      const cmd = isWindows ? 'where' : 'which';
+      const check = spawn(cmd, ['cloudflared'], { shell: isWindows });
       check.on('close', (code) => {
         resolve(code === 0);
       });

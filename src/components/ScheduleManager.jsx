@@ -41,13 +41,19 @@ const ScheduleManager = ({ socket, sessionId, onClose }) => {
   ];
 
   useEffect(() => {
-    if (!socket || !sessionId) return;
+    console.log('[ScheduleManager] useEffect triggered, socket:', !!socket, 'sessionId:', sessionId);
+    if (!socket || !sessionId) {
+      console.log('[ScheduleManager] Missing socket or sessionId, returning');
+      return;
+    }
 
     // 获取预约列表
+    console.log('[ScheduleManager] Emitting schedule:getList for sessionId:', sessionId);
     socket.emit('schedule:getList', { sessionId });
 
     // 监听预约列表更新
     const handleList = (data) => {
+      console.log('[ScheduleManager] Received schedule:list, data:', data);
       setSchedules(data);
     };
 
@@ -352,12 +358,47 @@ const ScheduleManager = ({ socket, sessionId, onClose }) => {
 
             <div className="form-group">
               <label>{t('schedule.form.time')}</label>
-              <input
-                type="time"
-                value={formData.time}
-                onChange={(e) => setFormData({ ...formData, time: e.target.value })}
-                required
-              />
+              {/* 预设时间快捷按钮 */}
+              <div className="preset-time-buttons">
+                {['06:00', '08:00', '09:00', '12:00', '18:00', '21:00'].map(preset => (
+                  <button
+                    key={preset}
+                    type="button"
+                    className={`preset-time-button ${formData.time === preset ? 'active' : ''}`}
+                    onClick={() => setFormData({ ...formData, time: preset })}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
+              {/* 自定义时间选择器 */}
+              <div className="custom-time-picker">
+                <select
+                  value={formData.time.split(':')[0]}
+                  onChange={(e) => {
+                    const minutes = formData.time.split(':')[1] || '00';
+                    setFormData({ ...formData, time: `${e.target.value}:${minutes}` });
+                  }}
+                  className="time-select"
+                >
+                  {Array.from({ length: 24 }, (_, i) => i.toString().padStart(2, '0')).map(hour => (
+                    <option key={hour} value={hour}>{hour}</option>
+                  ))}
+                </select>
+                <span className="time-separator">:</span>
+                <select
+                  value={formData.time.split(':')[1] || '00'}
+                  onChange={(e) => {
+                    const hours = formData.time.split(':')[0] || '00';
+                    setFormData({ ...formData, time: `${hours}:${e.target.value}` });
+                  }}
+                  className="time-select"
+                >
+                  {['00', '15', '30', '45'].map(minute => (
+                    <option key={minute} value={minute}>{minute}</option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             <div className="form-actions">
