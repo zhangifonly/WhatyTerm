@@ -7,7 +7,6 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, watch }
 import session from 'express-session';
 import crypto from 'crypto';
 import { execSync } from 'child_process';
-import sqlite3 from 'sqlite3';
 import Database from 'better-sqlite3';
 import os from 'os';
 import path from 'path';
@@ -461,17 +460,18 @@ function getCurrentProvider(appType, workingDir = null) {
       });
     }
 
-    const db = new sqlite3.Database(ccSwitchDbPath, sqlite3.OPEN_READONLY);
+    // 使用 better-sqlite3 同步读取
+    try {
+      const db = new Database(ccSwitchDbPath, { readonly: true });
 
-    // 如果有实际的 API URL，尝试在数据库中匹配
-    if (actualApiUrl) {
-      // 查询所有该类型的供应商，找到匹配的
-      db.all('SELECT * FROM providers WHERE app_type = ?', [appType], (err, rows) => {
+      // 如果有实际的 API URL，尝试在数据库中匹配
+      if (actualApiUrl) {
+        const rows = db.prepare('SELECT * FROM providers WHERE app_type = ?').all(appType);
         db.close();
 
         const globalInfo = configSource === 'local' ? buildGlobalInfo(rows) : null;
 
-        if (err || !rows || rows.length === 0) {
+        if (!rows || rows.length === 0) {
           return resolve({
             name: '未知供应商',
             url: actualApiUrl,
@@ -527,93 +527,101 @@ function getCurrentProvider(appType, workingDir = null) {
           configSource: configSource,
           globalConfig: globalInfo
         });
-      });
-    } else {
-      // 没有实际配置，回退到查询 is_current = 1
-      db.get('SELECT * FROM providers WHERE app_type = ? AND is_current = 1',
-        [appType],
-        (err, row) => {
-          db.close();
+      } else {
+        // 没有实际配置，回退到查询 is_current = 1
+        const row = db.prepare('SELECT * FROM providers WHERE app_type = ? AND is_current = 1').get(appType);
+        db.close();
 
-          if (err || !row) {
-            return resolve({
-              name: '未配置',
-              url: '',
-              app: appType,
-              exists: false,
-              configSource: 'global'
-            });
-          }
-
-          // 解析 settings_config 获取完整配置
-          let apiUrl = '';
-          let apiKey = '';
-          let model = '';
-          let apiType = 'openai';
-
-          try {
-            if (row.settings_config) {
-              const config = JSON.parse(row.settings_config);
-
-              if (appType === 'claude') {
-                apiUrl = config.env?.ANTHROPIC_BASE_URL || config.baseURL || '';
-                apiKey = config.env?.ANTHROPIC_AUTH_TOKEN || config.env?.ANTHROPIC_API_KEY || '';
-                model = config.env?.ANTHROPIC_MODEL || config.model || '';
-                apiType = apiUrl.includes('/v1/messages') ? 'claude' : 'openai';
-              } else if (appType === 'codex') {
-                apiUrl = config.env?.OPENAI_BASE_URL || config.baseURL || '';
-                apiKey = config.env?.OPENAI_API_KEY || config.env?.OPENAI_AUTH_TOKEN || '';
-                model = config.env?.OPENAI_MODEL || config.model || '';
-                apiType = 'openai';
-              } else if (appType === 'gemini') {
-                apiUrl = config.env?.GEMINI_BASE_URL || config.baseURL || config.env?.BASE_URL || '';
-                apiKey = config.env?.GEMINI_API_KEY || config.env?.API_KEY || '';
-                model = config.env?.GEMINI_MODEL || config.model || '';
-                apiType = 'openai';
-              }
-            }
-          } catch (parseError) {
-            console.error(`[getCurrentProvider] 解析 ${appType} settings_config 失败:`, parseError);
-          }
-
-          resolve({
-            id: row.id,
-            name: row.name || '未命名',
-            url: apiUrl,
-            apiKey: maskApiKey(apiKey),
-            model: model,
-            apiType: apiType,
+        if (!row) {
+          return resolve({
+            name: '未配置',
+            url: '',
             app: appType,
-            exists: true,
+            exists: false,
             configSource: 'global'
           });
+        }
+
+        // 解析 settings_config 获取完整配置
+        let apiUrl = '';
+        let apiKey = '';
+        let model = '';
+        let apiType = 'openai';
+
+        try {
+          if (row.settings_config) {
+            const config = JSON.parse(row.settings_config);
+
+            if (appType === 'claude') {
+              apiUrl = config.env?.ANTHROPIC_BASE_URL || config.baseURL || '';
+              apiKey = config.env?.ANTHROPIC_AUTH_TOKEN || config.env?.ANTHROPIC_API_KEY || '';
+              model = config.env?.ANTHROPIC_MODEL || config.model || '';
+              apiType = apiUrl.includes('/v1/messages') ? 'claude' : 'openai';
+            } else if (appType === 'codex') {
+              apiUrl = config.env?.OPENAI_BASE_URL || config.baseURL || '';
+              apiKey = config.env?.OPENAI_API_KEY || config.env?.OPENAI_AUTH_TOKEN || '';
+              model = config.env?.OPENAI_MODEL || config.model || '';
+              apiType = 'openai';
+            } else if (appType === 'gemini') {
+              apiUrl = config.env?.GEMINI_BASE_URL || config.baseURL || config.env?.BASE_URL || '';
+              apiKey = config.env?.GEMINI_API_KEY || config.env?.API_KEY || '';
+              model = config.env?.GEMINI_MODEL || config.model || '';
+              apiType = 'openai';
+            }
+          }
+        } catch (parseError) {
+          console.error(`[getCurrentProvider] 解析 ${appType} settings_config 失败:`, parseError);
+        }
+
+        resolve({
+          id: row.id,
+          name: row.name || '未命名',
+          url: apiUrl,
+          apiKey: maskApiKey(apiKey),
+          model: model,
+          apiType: apiType,
+          app: appType,
+          exists: true,
+          configSource: 'global'
         });
+      }
+    } catch (dbError) {
+      console.error('[getCurrentProvider] 数据库读取失败:', dbError);
+      return resolve({
+        name: actualApiUrl ? '未知供应商' : '未配置',
+        url: actualApiUrl,
+        apiKey: maskApiKey(actualApiKey),
+        model: actualModel,
+        app: appType,
+        exists: !!actualApiUrl,
+        configSource: configSource
+      });
     }
   });
 }
 
 // 获取所有可用的供应商列表（用于自动切换）
 function getAllProviders(appType) {
-  return new Promise((resolve) => {
-    const ccSwitchDbPath = path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
+  const ccSwitchDbPath = path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
 
-    if (!existsSync(ccSwitchDbPath)) {
-      return resolve([]);
-    }
+  if (!existsSync(ccSwitchDbPath)) {
+    return [];
+  }
 
-    const db = new sqlite3.Database(ccSwitchDbPath, sqlite3.OPEN_READONLY);
-    db.all('SELECT * FROM providers WHERE app_type = ?', [appType], (err, rows) => {
-      db.close();
-      if (err || !rows) {
-        return resolve([]);
-      }
-      resolve(rows.map(row => ({
-        id: row.id,
-        name: row.name,
-        settingsConfig: row.settings_config
-      })));
-    });
-  });
+  try {
+    const db = new Database(ccSwitchDbPath, { readonly: true });
+    const rows = db.prepare('SELECT * FROM providers WHERE app_type = ?').all(appType);
+    db.close();
+
+    return rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      settingsConfig: row.settings_config
+    }));
+  } catch (err) {
+    console.error('[getAllProviders] 数据库读取失败:', err);
+    return [];
+  }
 }
 
 // Claude 供应商优先级列表（按优先级排序）
@@ -2548,16 +2556,8 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
 
     emitStatus('READING', '读取供应商配置...', 20);
 
-    const db = new sqlite3.Database(ccSwitchDbPath, sqlite3.OPEN_READONLY);
-
-    const getProviderById = () => new Promise((resolve, reject) => {
-      db.get('SELECT * FROM providers WHERE id = ? AND app_type = ?', [providerId, appType], (err, row) => {
-        if (err) reject(err);
-        else resolve(row || null);
-      });
-    });
-
-    const targetProviderRow = await getProviderById();
+    const db = new Database(ccSwitchDbPath, { readonly: true });
+    const targetProviderRow = db.prepare('SELECT * FROM providers WHERE id = ? AND app_type = ?').get(providerId, appType);
     db.close();
 
     if (!targetProviderRow) {

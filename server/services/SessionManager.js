@@ -4,7 +4,6 @@ import Database from 'better-sqlite3';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { execSync } from 'child_process';
-import sqlite3 from 'sqlite3';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
@@ -14,47 +13,41 @@ const __dirname = dirname(__filename);
 
 // 获取当前激活的 API 供应商信息
 function getCurrentApiProvider() {
-  return new Promise((resolve) => {
-    try {
-      const ccSwitchDbPath = path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
+  try {
+    const ccSwitchDbPath = path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
 
-      if (!fs.existsSync(ccSwitchDbPath)) {
-        return resolve({ name: '未配置', url: '' });
-      }
-
-      const db = new sqlite3.Database(ccSwitchDbPath, sqlite3.OPEN_READONLY);
-
-      db.get('SELECT * FROM providers WHERE app_type = ? AND is_current = 1',
-        ['claude'],
-        (err, row) => {
-          db.close();
-
-          if (err || !row) {
-            return resolve({ name: '未配置', url: '' });
-          }
-
-          let settingsConfig = {};
-          try {
-            if (row.settings_config) {
-              settingsConfig = JSON.parse(row.settings_config);
-            }
-          } catch (parseError) {
-            console.error('[Session] 解析 settings_config 失败:', parseError);
-          }
-
-          // 从 env.ANTHROPIC_BASE_URL 获取 API 地址
-          const url = settingsConfig.env?.ANTHROPIC_BASE_URL || settingsConfig.baseURL || '';
-
-          resolve({
-            name: row.name || '未命名',
-            url: url
-          });
-        });
-    } catch (error) {
-      console.error('[Session] 获取 API 供应商失败:', error);
-      resolve({ name: '未配置', url: '' });
+    if (!fs.existsSync(ccSwitchDbPath)) {
+      return { name: '未配置', url: '' };
     }
-  });
+
+    const db = new Database(ccSwitchDbPath, { readonly: true });
+    const row = db.prepare('SELECT * FROM providers WHERE app_type = ? AND is_current = 1').get('claude');
+    db.close();
+
+    if (!row) {
+      return { name: '未配置', url: '' };
+    }
+
+    let settingsConfig = {};
+    try {
+      if (row.settings_config) {
+        settingsConfig = JSON.parse(row.settings_config);
+      }
+    } catch (parseError) {
+      console.error('[Session] 解析 settings_config 失败:', parseError);
+    }
+
+    // 从 env.ANTHROPIC_BASE_URL 获取 API 地址
+    const url = settingsConfig.env?.ANTHROPIC_BASE_URL || settingsConfig.baseURL || '';
+
+    return {
+      name: row.name || '未命名',
+      url: url
+    };
+  } catch (error) {
+    console.error('[Session] 获取 API 供应商失败:', error);
+    return { name: '未配置', url: '' };
+  }
 }
 
 // 验证并清理 tmux 会话名称，防止命令注入
