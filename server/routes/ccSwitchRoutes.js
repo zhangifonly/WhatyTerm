@@ -1,14 +1,8 @@
 import express from 'express';
-import Database from 'better-sqlite3';
-import path from 'path';
-import os from 'os';
-import fs from 'fs';
 import { DEFAULT_MODEL } from '../config/constants.js';
+import builtinProviderDB from '../services/BuiltinProviderDB.js';
 
 const router = express.Router();
-
-// CC Switch 数据库路径
-const ccSwitchDbPath = path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
 
 // ==================== Providers API ====================
 
@@ -17,14 +11,7 @@ router.get('/providers', (req, res) => {
   try {
     const app = req.query.app || 'claude';
 
-    if (!fs.existsSync(ccSwitchDbPath)) {
-      return res.json({
-        success: true,
-        data: { providers: [] }
-      });
-    }
-
-    const db = new Database(ccSwitchDbPath, { readonly: true });
+    const db = builtinProviderDB.getDB(true);
     const rows = db.prepare('SELECT * FROM providers WHERE app_type = ? ORDER BY sort_index IS NULL, sort_index, created_at').all(app);
     db.close();
 
@@ -132,7 +119,8 @@ router.get('/providers', (req, res) => {
       success: true,
       data: {
         providers,
-        defaultModel: DEFAULT_MODEL  // 最便宜的默认模型
+        defaultModel: DEFAULT_MODEL,  // 最便宜的默认模型
+        isBuiltin: builtinProviderDB.isUsingBuiltin()  // 是否使用内置数据库
       }
     });
   } catch (error) {
@@ -148,14 +136,7 @@ router.get('/current', (req, res) => {
   try {
     const app = req.query.app || 'claude';
 
-    if (!fs.existsSync(ccSwitchDbPath)) {
-      return res.json({
-        success: true,
-        data: { current: null }
-      });
-    }
-
-    const db = new Database(ccSwitchDbPath, { readonly: true });
+    const db = builtinProviderDB.getDB(true);
     const row = db.prepare('SELECT id FROM providers WHERE app_type = ? AND is_current = 1').get(app);
     db.close();
 
@@ -186,14 +167,7 @@ router.post('/switch', (req, res) => {
       });
     }
 
-    if (!fs.existsSync(ccSwitchDbPath)) {
-      return res.status(404).json({
-        success: false,
-        error: 'CC Switch database not found'
-      });
-    }
-
-    const db = new Database(ccSwitchDbPath);
+    const db = builtinProviderDB.getDB(false);
 
     // 先取消该 app 下所有供应商的 is_current 标记
     db.prepare('UPDATE providers SET is_current = 0 WHERE app_type = ?').run(app);
@@ -229,14 +203,7 @@ router.post('/add', (req, res) => {
       });
     }
 
-    if (!fs.existsSync(ccSwitchDbPath)) {
-      return res.status(404).json({
-        success: false,
-        error: 'CC Switch database not found'
-      });
-    }
-
-    const db = new Database(ccSwitchDbPath);
+    const db = builtinProviderDB.getDB(false);
 
     const stmt = db.prepare(`INSERT INTO providers
       (id, app_type, name, settings_config, website_url, category, created_at, sort_index, notes, icon, icon_color, meta, is_current)
@@ -287,14 +254,7 @@ router.put('/update/:id', (req, res) => {
       });
     }
 
-    if (!fs.existsSync(ccSwitchDbPath)) {
-      return res.status(404).json({
-        success: false,
-        error: 'CC Switch database not found'
-      });
-    }
-
-    const db = new Database(ccSwitchDbPath);
+    const db = builtinProviderDB.getDB(false);
 
     const stmt = db.prepare(`UPDATE providers SET
       name = ?,
@@ -357,14 +317,7 @@ router.delete('/delete/:id', (req, res) => {
       });
     }
 
-    if (!fs.existsSync(ccSwitchDbPath)) {
-      return res.status(404).json({
-        success: false,
-        error: 'CC Switch database not found'
-      });
-    }
-
-    const db = new Database(ccSwitchDbPath);
+    const db = builtinProviderDB.getDB(false);
 
     const result = db.prepare('DELETE FROM providers WHERE id = ? AND app_type = ?').run(id, app);
 
@@ -383,6 +336,47 @@ router.delete('/delete/:id', (req, res) => {
     });
   } catch (error) {
     console.error('[CC Switch] 删除供应商失败:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// GET /api/cc-switch/status - 获取数据库状态
+router.get('/status', (req, res) => {
+  try {
+    res.json({
+      success: true,
+      data: {
+        isBuiltin: builtinProviderDB.isUsingBuiltin(),
+        dbPath: builtinProviderDB.getDbPath(),
+        isAvailable: builtinProviderDB.isAvailable()
+      }
+    });
+  } catch (error) {
+    console.error('[CC Switch] 获取状态失败:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// POST /api/cc-switch/refresh - 刷新数据库（检测 CC-Switch 安装）
+router.post('/refresh', (req, res) => {
+  try {
+    builtinProviderDB.refresh();
+    res.json({
+      success: true,
+      message: 'Database refreshed',
+      data: {
+        isBuiltin: builtinProviderDB.isUsingBuiltin(),
+        dbPath: builtinProviderDB.getDbPath()
+      }
+    });
+  } catch (error) {
+    console.error('[CC Switch] 刷新数据库失败:', error);
     res.status(500).json({
       success: false,
       error: error.message

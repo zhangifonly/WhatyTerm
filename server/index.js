@@ -40,9 +40,13 @@ import { getTerminalRecorder } from './services/TerminalRecorder.js';
 import cliRegistry from './services/CliRegistry.js';
 import cliLearner from './services/CliLearner.js';
 import tokenStatsService from './services/TokenStatsService.js';
+import builtinProviderDB from './services/BuiltinProviderDB.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// 初始化内置供应商数据库（优先使用 CC-Switch，不存在则创建内置数据库）
+builtinProviderDB.init();
 
 // API 密钥脱敏函数，防止敏感信息泄露
 function maskApiKey(key) {
