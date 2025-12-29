@@ -647,19 +647,17 @@ function waitForServer(url, timeout) {
       attemptCount++;
       const http = require('http');
       // Windows 上使用 127.0.0.1 代替 localhost，避免 DNS 解析问题
-      const checkUrl = url.replace('localhost', '127.0.0.1');
+      // 检查 /api/sessions 端点，这是一个总是返回 200 的 API
+      const checkUrl = url.replace('localhost', '127.0.0.1') + '/api/sessions';
 
       if (attemptCount % 10 === 1) {
         writeLog(`[Electron] 检测服务器 (第 ${attemptCount} 次): ${checkUrl}`);
       }
 
       const req = http.get(checkUrl, (res) => {
+        // 任何 HTTP 响应都说明服务器已启动（包括 200、404 等）
         writeLog(`[Electron] 服务器响应: ${res.statusCode}`);
-        if (res.statusCode === 200) {
-          resolve();
-        } else {
-          retry();
-        }
+        resolve();
       });
 
       req.on('error', (err) => {
@@ -670,7 +668,9 @@ function waitForServer(url, timeout) {
       });
 
       req.setTimeout(2000, () => {
-        writeLog(`[Electron] 连接超时 (第 ${attemptCount} 次)`);
+        if (attemptCount % 10 === 1) {
+          writeLog(`[Electron] 连接超时 (第 ${attemptCount} 次)`);
+        }
         req.destroy();
         retry();
       });
