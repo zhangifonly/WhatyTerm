@@ -11,6 +11,26 @@ import fs from 'fs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// Windows/WSL 兼容层
+const isWindows = process.platform === 'win32';
+const useWSL = isWindows && process.env.WEBTMUX_USE_WSL === 'true';
+
+// 执行 tmux 命令（在 Windows 上通过 WSL）
+function execTmux(command, options = {}) {
+  const fullCommand = useWSL ? `wsl ${command}` : command;
+  return execSync(fullCommand, {
+    encoding: 'utf-8',
+    stdio: options.stdio || 'pipe',
+    timeout: options.timeout || 5000,
+    ...options
+  });
+}
+
+// 获取 tmux 命令前缀
+function getTmuxPrefix() {
+  return useWSL ? 'wsl tmux' : 'tmux';
+}
+
 // 获取当前激活的 API 供应商信息
 function getCurrentApiProvider() {
   try {
@@ -106,20 +126,23 @@ export class Session {
   }
 
   _ensureTmuxSession(isNew = true) {
+    const tmuxCmd = getTmuxPrefix();
     try {
       if (isNew) {
         // 创建新的 tmux 会话
-        execSync(`tmux new-session -d -s "${this.tmuxSessionName}" -x 80 -y 24`, {
+        execSync(`${tmuxCmd} new-session -d -s "${this.tmuxSessionName}" -x 80 -y 24`, {
           stdio: 'ignore'
         });
         console.log(`创建 tmux 会话: ${this.tmuxSessionName}`);
         this._attachToTmux();
       } else {
         try {
-          execSync(`tmux has-session -t "${this.tmuxSessionName}" 2>/dev/null`);
+          execSync(`${tmuxCmd} has-session -t "${this.tmuxSessionName}"`, {
+            stdio: 'pipe'
+          });
           console.log(`tmux 会话已存在: ${this.tmuxSessionName}`);
         } catch {
-          execSync(`tmux new-session -d -s "${this.tmuxSessionName}" -x 80 -y 24`, {
+          execSync(`${tmuxCmd} new-session -d -s "${this.tmuxSessionName}" -x 80 -y 24`, {
             stdio: 'ignore'
           });
           console.log(`重新创建 tmux 会话: ${this.tmuxSessionName}`);
@@ -134,13 +157,14 @@ export class Session {
 
   // 配置 tmux 会话选项
   _configureTmuxSession() {
+    const tmuxCmd = getTmuxPrefix();
     try {
       // 设置 history-limit 为 10000 行
-      execSync(`tmux set-option -t "${this.tmuxSessionName}" history-limit 10000`, {
+      execSync(`${tmuxCmd} set-option -t "${this.tmuxSessionName}" history-limit 10000`, {
         stdio: 'ignore'
       });
       // 启用鼠标模式，支持鼠标滚轮滚动
-      execSync(`tmux set-option -t "${this.tmuxSessionName}" mouse on`, {
+      execSync(`${tmuxCmd} set-option -t "${this.tmuxSessionName}" mouse on`, {
         stdio: 'ignore'
       });
     } catch (err) {
@@ -164,11 +188,17 @@ export class Session {
   _attachToTmux() {
     if (this.pty) return;
 
-    this.pty = pty.spawn('tmux', ['attach-session', '-t', this.tmuxSessionName], {
+    // Windows 上通过 WSL 运行 tmux
+    const shell = useWSL ? 'wsl' : 'tmux';
+    const args = useWSL
+      ? ['tmux', 'attach-session', '-t', this.tmuxSessionName]
+      : ['attach-session', '-t', this.tmuxSessionName];
+
+    this.pty = pty.spawn(shell, args, {
       name: 'xterm-256color',
       cols: 80,
       rows: 24,
-      cwd: process.env.HOME,
+      cwd: isWindows ? undefined : process.env.HOME,
       env: {
         ...process.env,
         TERM: 'xterm-256color'
@@ -195,12 +225,12 @@ export class Session {
       // 检查 tmux 会话是否还存在，如果不存在则重新创建
       if (this.attachCount > 0) {
         try {
-          execSync(`tmux has-session -t "${this.tmuxSessionName}" 2>/dev/null`);
+          execSync(`${getTmuxPrefix()} has-session -t "${this.tmuxSessionName}"`, { stdio: 'pipe' });
         } catch {
           // tmux 会话已退出，重新创建
           console.log(`重新创建 tmux 会话: ${this.tmuxSessionName}`);
           try {
-            execSync(`tmux new-session -d -s "${this.tmuxSessionName}" -x 80 -y 24`, {
+            execSync(`${getTmuxPrefix()} new-session -d -s "${this.tmuxSessionName}" -x 80 -y 24`, {
               stdio: 'ignore'
             });
             // 通知客户端会话已重启
@@ -230,7 +260,7 @@ export class Session {
     }
     // 同时调整 tmux 窗口大小
     try {
-      execSync(`tmux resize-window -t "${this.tmuxSessionName}" -x ${cols} -y ${rows} 2>/dev/null`, {
+      execSync(`${getTmuxPrefix()} resize-window -t "${this.tmuxSessionName}" -x ${cols} -y ${rows}`, {
         stdio: 'ignore'
       });
     } catch {}
@@ -342,7 +372,7 @@ export class Session {
   refreshScreen() {
     // 发送 tmux 刷新命令，让 tmux 重新绘制整个屏幕
     try {
-      execSync(`tmux refresh-client -t "${this.tmuxSessionName}" 2>/dev/null`, {
+      execSync(`${getTmuxPrefix()} refresh-client -t "${this.tmuxSessionName}"`, {
         stdio: 'ignore'
       });
     } catch {}
@@ -388,7 +418,7 @@ export class Session {
 
   killTmuxSession() {
     try {
-      execSync(`tmux kill-session -t "${this.tmuxSessionName}" 2>/dev/null`, {
+      execSync(`${getTmuxPrefix()} kill-session -t "${this.tmuxSessionName}"`, {
         stdio: 'ignore'
       });
     } catch {}
@@ -765,7 +795,7 @@ export class SessionManager {
       // 检查 tmux 会话是否还存在
       let tmuxExists = false;
       try {
-        execSync(`tmux has-session -t ${closedSession.tmuxSessionName} 2>/dev/null`);
+        execSync(`${getTmuxPrefix()} has-session -t ${closedSession.tmuxSessionName}`, { stdio: 'pipe' });
         tmuxExists = true;
       } catch {
         tmuxExists = false;
@@ -835,7 +865,7 @@ export class SessionManager {
       for (const row of rows) {
         let tmuxExists = false;
         try {
-          execSync(`tmux has-session -t ${row.tmux_session_name} 2>/dev/null`);
+          execSync(`${getTmuxPrefix()} has-session -t ${row.tmux_session_name}`, { stdio: 'pipe' });
           tmuxExists = true;
         } catch {
           tmuxExists = false;
@@ -878,7 +908,7 @@ export class SessionManager {
 
       // 尝试杀掉 tmux 会话
       try {
-        execSync(`tmux kill-session -t ${closedSession.tmuxSessionName} 2>/dev/null`);
+        execSync(`${getTmuxPrefix()} kill-session -t ${closedSession.tmuxSessionName}`, { stdio: 'pipe' });
       } catch {
         // tmux 会话可能已经不存在，忽略错误
       }
