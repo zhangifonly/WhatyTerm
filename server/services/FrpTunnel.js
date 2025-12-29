@@ -242,7 +242,13 @@ subdomain = "${this.subdomain}"
     const installed = await this.checkInstalled();
     if (!installed) {
       console.log('[FrpTunnel] frpc 未安装，跳过隧道启动');
-      console.log('[FrpTunnel] 安装方法: brew install frp');
+      if (process.platform === 'win32') {
+        console.log('[FrpTunnel] Windows 安装方法: 从 https://github.com/fatedier/frp/releases 下载 frp，解压后将 frpc.exe 放入 PATH');
+      } else if (process.platform === 'darwin') {
+        console.log('[FrpTunnel] macOS 安装方法: brew install frp');
+      } else {
+        console.log('[FrpTunnel] Linux 安装方法: sudo apt install frpc 或从 https://github.com/fatedier/frp/releases 下载');
+      }
       return null;
     }
 

@@ -8,6 +8,15 @@
 import { execSync } from 'child_process';
 import cliRegistry from './CliRegistry.js';
 
+// Windows/WSL 兼容层
+const isWindows = process.platform === 'win32';
+const useWSL = isWindows && process.env.WEBTMUX_USE_WSL === 'true';
+
+// 获取命令前缀（Windows 上通过 WSL 执行 Unix 命令）
+function getUnixCmdPrefix() {
+  return useWSL ? 'wsl ' : '';
+}
+
 class ProcessDetector {
   constructor() {
     // 未知进程的学习记录
@@ -35,11 +44,13 @@ class ProcessDetector {
       return { detected: false, cli: null, processName: null, pid: null };
     }
 
+    const cmdPrefix = getUnixCmdPrefix();
+
     try {
       // 获取 tmux pane 的 PID
       const panePid = execSync(
-        `tmux list-panes -t "${tmuxSession}" -F "#{pane_pid}" 2>/dev/null`,
-        { encoding: 'utf-8', timeout: 5000 }
+        `${cmdPrefix}tmux list-panes -t "${tmuxSession}" -F "#{pane_pid}"`,
+        { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }
       ).trim();
 
       if (!panePid) {
@@ -48,8 +59,8 @@ class ProcessDetector {
 
       // 获取所有子进程
       const childPids = execSync(
-        `pgrep -P ${panePid} 2>/dev/null || true`,
-        { encoding: 'utf-8', timeout: 5000 }
+        `${cmdPrefix}pgrep -P ${panePid} || true`,
+        { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }
       ).trim();
 
       if (!childPids) {
@@ -59,8 +70,8 @@ class ProcessDetector {
       // 获取子进程的名称
       const pidList = childPids.split('\n').filter(p => p).join(',');
       const processInfo = execSync(
-        `ps -o pid=,comm= -p ${pidList} 2>/dev/null || true`,
-        { encoding: 'utf-8', timeout: 5000 }
+        `${cmdPrefix}ps -o pid=,comm= -p ${pidList} || true`,
+        { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }
       ).trim();
 
       if (!processInfo) {
@@ -123,11 +134,13 @@ class ProcessDetector {
       return { command: null, pid: null };
     }
 
+    const cmdPrefix = getUnixCmdPrefix();
+
     try {
       // 使用 tmux 获取当前 pane 的命令
       const result = execSync(
-        `tmux display-message -t "${tmuxSession}" -p "#{pane_current_command}" 2>/dev/null`,
-        { encoding: 'utf-8', timeout: 5000 }
+        `${cmdPrefix}tmux display-message -t "${tmuxSession}" -p "#{pane_current_command}"`,
+        { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }
       ).trim();
 
       if (result) {

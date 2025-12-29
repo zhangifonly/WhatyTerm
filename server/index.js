@@ -10,6 +10,15 @@ import { execSync } from 'child_process';
 import Database from 'better-sqlite3';
 import os from 'os';
 import path from 'path';
+
+// Windows/WSL 兼容层
+const isWindows = process.platform === 'win32';
+const useWSL = isWindows && process.env.WEBTMUX_USE_WSL === 'true';
+
+// 获取 tmux 命令前缀（Windows 上通过 WSL）
+function getTmuxPrefix() {
+  return useWSL ? 'wsl tmux' : 'tmux';
+}
 import { SessionManager } from './services/SessionManager.js';
 import { HistoryLogger } from './services/HistoryLogger.js';
 import { AIEngine } from './services/AIEngine.js';
@@ -1670,7 +1679,7 @@ async function updateAllSessionsProjectInfo() {
     // 从 tmux 获取当前工作目录
     let workingDir = '';
     try {
-      workingDir = execSync(`tmux display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
+      workingDir = execSync(`${getTmuxPrefix()} display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
     } catch { continue; }
 
     // 设置 workingDir（即使没有变化也要设置，确保刷新时可用）
@@ -1805,7 +1814,7 @@ async function runBackgroundAutoAction() {
       const tmuxSession = session.tmuxSessionName;
       let actualWorkingDir = session.workingDir;
       try {
-        actualWorkingDir = execSync(`tmux display-message -t "${tmuxSession}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
+        actualWorkingDir = execSync(`${getTmuxPrefix()} display-message -t "${tmuxSession}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
       } catch (e) {
         console.log(`[错误检测] 会话 ${session.name}: 无法从 tmux 获取工作目录，使用缓存值`);
       }
@@ -1828,10 +1837,10 @@ async function runBackgroundAutoAction() {
         // 步骤1: 发送 /quit 退出 Claude Code
         console.log(`[错误修复] 会话 ${session.name}: 步骤1 - 发送 /quit 退出 Claude Code`);
         try {
-          execSync(`tmux send-keys -t "${tmuxSession}" "/quit"`);
+          execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" "/quit"`);
           setTimeout(() => {
             try {
-              execSync(`tmux send-keys -t "${tmuxSession}" Enter`);
+              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" Enter`);
             } catch (e) {
               session.write('\r');
             }
@@ -1936,10 +1945,10 @@ async function runBackgroundAutoAction() {
         // 步骤3: 重启 Claude Code
         console.log(`[错误修复] 会话 ${session.name}: 步骤3 - 发送 claude -c 继续开发`);
         try {
-          execSync(`tmux send-keys -t "${ctx.tmuxSession}" "claude -c"`);
+          execSync(`${getTmuxPrefix()} send-keys -t "${ctx.tmuxSession}" "claude -c"`);
           setTimeout(() => {
             try {
-              execSync(`tmux send-keys -t "${ctx.tmuxSession}" Enter`);
+              execSync(`${getTmuxPrefix()} send-keys -t "${ctx.tmuxSession}" Enter`);
             } catch (e) {
               session.write('\r');
             }
@@ -1987,10 +1996,10 @@ async function runBackgroundAutoAction() {
       setTimeout(() => {
         try {
           // 使用分开发送的方式（模拟人工输入）
-          execSync(`tmux send-keys -t "${tmuxSession}" "继续"`);
+          execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" "继续"`);
           setTimeout(() => {
             try {
-              execSync(`tmux send-keys -t "${tmuxSession}" Enter`);
+              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" Enter`);
             } catch (e) {
               session.write('\r');
             }
@@ -2182,7 +2191,7 @@ async function runBackgroundAutoAction() {
             const tmuxSession = session.tmuxSessionName;
             console.log(`[后台自动操作] 会话 ${session.name}: 选项菜单选择第${action}项`);
             try {
-              execSync(`tmux send-keys -t "${tmuxSession}" "${action}"`);
+              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" "${action}"`);
             } catch (e) {
               session.write(action);
             }
@@ -2246,7 +2255,7 @@ async function runBackgroundAutoAction() {
       // 直接从 tmux 获取当前工作目录，比 AI 分析更准确
       let workingDir = '';
       try {
-        workingDir = execSync(`tmux display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
+        workingDir = execSync(`${getTmuxPrefix()} display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
       } catch {}
 
       if (workingDir && workingDir !== session.workingDir) {
@@ -2315,7 +2324,7 @@ async function runBackgroundAutoAction() {
           const tmuxSession = session.tmuxSessionName;
           console.log(`[后台自动操作] 会话 ${session.name}: 选项菜单选择第${action}项，通过 tmux 发送`);
           try {
-            execSync(`tmux send-keys -t "${tmuxSession}" "${action}"`);
+            execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" "${action}"`);
             console.log(`[后台自动操作] 会话 ${session.name}: tmux send-keys 执行成功`);
           } catch (e) {
             console.error(`[后台自动操作] 会话 ${session.name}: tmux send-keys 失败:`, e.message);
@@ -3137,7 +3146,7 @@ io.on('connection', (socket) => {
           // 先获取当前工作目录，以便正确检测本地配置
           let cliWorkingDir = session.workingDir;
           try {
-            cliWorkingDir = execSync(`tmux display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
+            cliWorkingDir = execSync(`${getTmuxPrefix()} display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
             if (cliWorkingDir) {
               session.workingDir = cliWorkingDir;
               session.projectName = cliWorkingDir.split('/').filter(Boolean).pop() || cliWorkingDir;
@@ -3449,10 +3458,10 @@ ${context.join('\n\n')}
     // 步骤1: 发送 /quit 退出 Claude Code
     console.log(`[错误修复] 会话 ${session.name}: 步骤1 - 发送 /quit 退出 Claude Code`);
     try {
-      execSync(`tmux send-keys -t "${ctx.tmuxSession}" "/quit"`);
+      execSync(`${getTmuxPrefix()} send-keys -t "${ctx.tmuxSession}" "/quit"`);
       setTimeout(() => {
         try {
-          execSync(`tmux send-keys -t "${ctx.tmuxSession}" Enter`);
+          execSync(`${getTmuxPrefix()} send-keys -t "${ctx.tmuxSession}" Enter`);
         } catch (e) {
           session.write('\r');
         }

@@ -62,7 +62,13 @@ class CloudflareTunnel {
     const installed = await this.checkInstalled();
     if (!installed) {
       console.log('[CloudflareTunnel] cloudflared 未安装，跳过隧道启动');
-      console.log('[CloudflareTunnel] 安装方法: brew install cloudflared');
+      if (process.platform === 'win32') {
+        console.log('[CloudflareTunnel] Windows 安装方法: winget install Cloudflare.cloudflared 或从 https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/ 下载');
+      } else if (process.platform === 'darwin') {
+        console.log('[CloudflareTunnel] macOS 安装方法: brew install cloudflared');
+      } else {
+        console.log('[CloudflareTunnel] Linux 安装方法: 参考 https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/');
+      }
       return null;
     }
 
