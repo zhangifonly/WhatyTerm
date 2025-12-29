@@ -380,6 +380,8 @@ async function showDependencyDialog() {
 // ==================== 窗口和服务器管理 ====================
 
 function createWindow() {
+  writeLog('[Electron] 开始创建窗口...');
+
   const windowOptions = {
     width: 1400,
     height: 900,
@@ -399,21 +401,56 @@ function createWindow() {
   }
 
   mainWindow = new BrowserWindow(windowOptions);
+  writeLog('[Electron] 窗口已创建');
+
+  // 监听窗口事件
+  mainWindow.webContents.on('did-start-loading', () => {
+    writeLog('[Electron] 页面开始加载');
+  });
+
+  mainWindow.webContents.on('did-finish-load', () => {
+    writeLog('[Electron] 页面加载完成');
+  });
+
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
+    writeLog(`[Electron] 页面加载失败: ${errorCode} - ${errorDescription} - ${validatedURL}`);
+  });
+
+  mainWindow.webContents.on('render-process-gone', (event, details) => {
+    writeLog(`[Electron] 渲染进程崩溃: ${details.reason} - exitCode: ${details.exitCode}`);
+  });
+
+  mainWindow.webContents.on('unresponsive', () => {
+    writeLog('[Electron] 窗口无响应');
+  });
+
+  mainWindow.webContents.on('crashed', (event, killed) => {
+    writeLog(`[Electron] 渲染进程崩溃: killed=${killed}`);
+  });
+
+  mainWindow.on('unresponsive', () => {
+    writeLog('[Electron] 窗口变为无响应状态');
+  });
 
   // 开发模式连接 Vite 开发服务器，生产模式加载本地服务器
   if (isDev) {
+    writeLog('[Electron] 开发模式，加载 http://localhost:5173');
     mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
   } else {
+    writeLog('[Electron] 生产模式，等待服务器启动...');
     waitForServer('http://localhost:3000', 30000).then(() => {
+      writeLog('[Electron] 服务器已就绪，加载 http://localhost:3000');
       mainWindow.loadURL('http://localhost:3000');
-    }).catch(() => {
+    }).catch((err) => {
+      writeLog(`[Electron] 服务器启动超时: ${err.message}`);
       dialog.showErrorBox('服务器启动失败', '无法连接到 WhatyTerm 服务器，请检查日志。');
       app.quit();
     });
   }
 
   mainWindow.on('closed', () => {
+    writeLog('[Electron] 窗口已关闭');
     mainWindow = null;
   });
 
@@ -548,6 +585,24 @@ function stopServer() {
 }
 
 // ==================== 应用生命周期 ====================
+
+// 全局错误捕获
+process.on('uncaughtException', (error) => {
+  writeLog(`[Electron] 未捕获的异常: ${error.message}`);
+  writeLog(`[Electron] 堆栈: ${error.stack}`);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  writeLog(`[Electron] 未处理的 Promise 拒绝: ${reason}`);
+});
+
+app.on('render-process-gone', (event, webContents, details) => {
+  writeLog(`[Electron] 渲染进程退出: ${details.reason}, exitCode: ${details.exitCode}`);
+});
+
+app.on('child-process-gone', (event, details) => {
+  writeLog(`[Electron] 子进程退出: ${details.type}, reason: ${details.reason}, exitCode: ${details.exitCode}`);
+});
 
 app.whenReady().then(async () => {
   // 初始化日志
