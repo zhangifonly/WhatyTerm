@@ -45,6 +45,8 @@ extraResources:
 
 asar: true
 # 原生模块配置
+# 注意：跨平台构建需要在目标平台上运行 electron-rebuild
+# 本地构建使用 npmRebuild: false，CI 构建前会先运行 electron-rebuild
 npmRebuild: false
 nodeGypRebuild: false
 
