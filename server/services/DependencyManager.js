@@ -4,6 +4,11 @@
  * 支持的依赖：
  * - frpc: FRP 内网穿透客户端
  * - cloudflared: Cloudflare Tunnel 客户端
+ *
+ * 支持的 CLI 工具（通过 npm 安装）：
+ * - claude: Claude Code CLI (@anthropic-ai/claude-code)
+ * - codex: Codex CLI (@openai/codex)
+ * - gemini: Gemini CLI (@anthropic-ai/claude-code 或 @google/gemini-cli)
  */
 
 import { execSync, spawn } from 'child_process';
@@ -28,7 +33,7 @@ class DependencyManager {
       fs.mkdirSync(this.binDir, { recursive: true });
     }
 
-    // 依赖配置
+    // 二进制依赖配置（直接下载）
     this.dependencies = {
       frpc: {
         name: 'frpc',
@@ -48,6 +53,49 @@ class DependencyManager {
         extract: null, // 直接是可执行文件
       }
     };
+
+    // CLI 工具配置（通过 npm 安装）
+    this.cliTools = {
+      claude: {
+        name: 'Claude Code',
+        description: 'Claude Code CLI - Anthropic 官方命令行工具',
+        npmPackage: '@anthropic-ai/claude-code',
+        command: 'claude',
+        checkVersion: () => this._getCliVersion('claude', '--version'),
+      },
+      codex: {
+        name: 'Codex CLI',
+        description: 'Codex CLI - OpenAI 官方命令行工具',
+        npmPackage: '@openai/codex',
+        command: 'codex',
+        checkVersion: () => this._getCliVersion('codex', '--version'),
+      },
+      gemini: {
+        name: 'Gemini CLI',
+        description: 'Gemini CLI - Google 官方命令行工具',
+        npmPackage: '@google/gemini-cli',
+        command: 'gemini',
+        checkVersion: () => this._getCliVersion('gemini', '--version'),
+      }
+    };
+  }
+
+  /**
+   * 获取 CLI 工具版本
+   */
+  _getCliVersion(command, versionArg) {
+    try {
+      const output = execSync(`${command} ${versionArg}`, {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 10000
+      }).trim();
+      // 提取版本号（通常是第一行或包含数字的部分）
+      const versionMatch = output.match(/(\d+\.\d+\.\d+)/);
+      return versionMatch ? versionMatch[1] : output.split('\n')[0];
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -307,6 +355,269 @@ class DependencyManager {
     }
 
     return status;
+  }
+
+  // ============================================
+  // CLI 工具管理方法
+  // ============================================
+
+  /**
+   * 检查 CLI 工具是否已安装
+   * @param {string} name - CLI 工具名称 (claude/codex/gemini)
+   */
+  isCliInstalled(name) {
+    const cli = this.cliTools[name];
+    if (!cli) return false;
+
+    try {
+      const cmd = this.isWindows ? 'where' : 'which';
+      execSync(`${cmd} ${cli.command}`, { stdio: 'pipe' });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 获取 CLI 工具状态
+   */
+  getCliStatus() {
+    const status = {};
+
+    for (const [name, cli] of Object.entries(this.cliTools)) {
+      const installed = this.isCliInstalled(name);
+      let version = null;
+      let path = null;
+
+      if (installed) {
+        version = cli.checkVersion();
+        try {
+          const cmd = this.isWindows ? 'where' : 'which';
+          path = execSync(`${cmd} ${cli.command}`, {
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe']
+          }).trim().split('\n')[0];
+        } catch {
+          // ignore
+        }
+      }
+
+      status[name] = {
+        name: cli.name,
+        description: cli.description,
+        npmPackage: cli.npmPackage,
+        command: cli.command,
+        installed,
+        version,
+        path
+      };
+    }
+
+    return status;
+  }
+
+  /**
+   * 安装 CLI 工具
+   * @param {string} name - CLI 工具名称 (claude/codex/gemini)
+   * @param {Function} progressCallback - 进度回调
+   */
+  async installCli(name, progressCallback = null) {
+    const cli = this.cliTools[name];
+    if (!cli) {
+      throw new Error(`未知的 CLI 工具: ${name}`);
+    }
+
+    if (this.isCliInstalled(name)) {
+      console.log(`[DependencyManager] ${cli.name} 已安装`);
+      return { success: true, alreadyInstalled: true };
+    }
+
+    // 检查 npm 是否可用
+    try {
+      execSync('npm --version', { stdio: 'pipe' });
+    } catch {
+      throw new Error('npm 未安装，请先安装 Node.js');
+    }
+
+    console.log(`[DependencyManager] 正在安装 ${cli.name} (${cli.npmPackage})...`);
+    if (progressCallback) progressCallback(`正在安装 ${cli.name}...`);
+
+    return new Promise((resolve, reject) => {
+      const npmCmd = this.isWindows ? 'npm.cmd' : 'npm';
+      const args = ['install', '-g', cli.npmPackage];
+
+      const proc = spawn(npmCmd, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: this.isWindows
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (data) => {
+        stdout += data.toString();
+        console.log(`[npm] ${data.toString().trim()}`);
+      });
+
+      proc.stderr.on('data', (data) => {
+        stderr += data.toString();
+        // npm 的进度信息通常输出到 stderr
+        const line = data.toString().trim();
+        if (line && progressCallback) {
+          progressCallback(line);
+        }
+      });
+
+      proc.on('close', (code) => {
+        if (code === 0) {
+          console.log(`[DependencyManager] ${cli.name} 安装成功`);
+          const version = cli.checkVersion();
+          resolve({ success: true, version });
+        } else {
+          console.error(`[DependencyManager] ${cli.name} 安装失败: ${stderr}`);
+          reject(new Error(`安装失败 (exit code: ${code}): ${stderr}`));
+        }
+      });
+
+      proc.on('error', (err) => {
+        reject(new Error(`启动 npm 失败: ${err.message}`));
+      });
+    });
+  }
+
+  /**
+   * 更新 CLI 工具到最新版本
+   * @param {string} name - CLI 工具名称
+   * @param {Function} progressCallback - 进度回调
+   */
+  async updateCli(name, progressCallback = null) {
+    const cli = this.cliTools[name];
+    if (!cli) {
+      throw new Error(`未知的 CLI 工具: ${name}`);
+    }
+
+    console.log(`[DependencyManager] 正在更新 ${cli.name}...`);
+    if (progressCallback) progressCallback(`正在更新 ${cli.name}...`);
+
+    return new Promise((resolve, reject) => {
+      const npmCmd = this.isWindows ? 'npm.cmd' : 'npm';
+      const args = ['update', '-g', cli.npmPackage];
+
+      const proc = spawn(npmCmd, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: this.isWindows
+      });
+
+      let stderr = '';
+
+      proc.stderr.on('data', (data) => {
+        stderr += data.toString();
+        const line = data.toString().trim();
+        if (line && progressCallback) {
+          progressCallback(line);
+        }
+      });
+
+      proc.on('close', (code) => {
+        if (code === 0) {
+          console.log(`[DependencyManager] ${cli.name} 更新成功`);
+          const version = cli.checkVersion();
+          resolve({ success: true, version });
+        } else {
+          reject(new Error(`更新失败 (exit code: ${code}): ${stderr}`));
+        }
+      });
+
+      proc.on('error', (err) => {
+        reject(new Error(`启动 npm 失败: ${err.message}`));
+      });
+    });
+  }
+
+  /**
+   * 安装所有 CLI 工具
+   * @param {Function} progressCallback - 进度回调
+   */
+  async installAllCli(progressCallback = null) {
+    const results = {};
+
+    for (const name of Object.keys(this.cliTools)) {
+      try {
+        const result = await this.installCli(name, progressCallback);
+        results[name] = { success: true, ...result };
+      } catch (err) {
+        results[name] = { success: false, error: err.message };
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * 获取 npm 包的最新版本号
+   * @param {string} packageName - npm 包名
+   */
+  async getLatestNpmVersion(packageName) {
+    return new Promise((resolve, reject) => {
+      const npmCmd = this.isWindows ? 'npm.cmd' : 'npm';
+
+      try {
+        const output = execSync(`${npmCmd} view ${packageName} version`, {
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 30000
+        }).trim();
+        resolve(output);
+      } catch (err) {
+        reject(new Error(`获取版本失败: ${err.message}`));
+      }
+    });
+  }
+
+  /**
+   * 检查 CLI 工具是否有更新
+   * @param {string} name - CLI 工具名称
+   */
+  async checkCliUpdate(name) {
+    const cli = this.cliTools[name];
+    if (!cli) {
+      throw new Error(`未知的 CLI 工具: ${name}`);
+    }
+
+    const currentVersion = cli.checkVersion();
+    if (!currentVersion) {
+      return { installed: false, hasUpdate: false };
+    }
+
+    try {
+      const latestVersion = await this.getLatestNpmVersion(cli.npmPackage);
+      const hasUpdate = currentVersion !== latestVersion;
+
+      return {
+        installed: true,
+        currentVersion,
+        latestVersion,
+        hasUpdate
+      };
+    } catch (err) {
+      return {
+        installed: true,
+        currentVersion,
+        latestVersion: null,
+        hasUpdate: false,
+        error: err.message
+      };
+    }
+  }
+
+  /**
+   * 获取所有状态（二进制依赖 + CLI 工具）
+   */
+  getAllStatus() {
+    return {
+      dependencies: this.getStatus(),
+      cliTools: this.getCliStatus()
+    };
   }
 }
 
