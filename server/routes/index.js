@@ -3,6 +3,7 @@ import ProviderHealthCheck from '../services/ProviderHealthCheck.js';
 import ConfigService from '../services/ConfigService.js';
 import { getTerminalRecorder } from '../services/TerminalRecorder.js';
 import presets from '../config/providerPresets.js';
+import dependencyManager from '../services/DependencyManager.js';
 import Database from 'better-sqlite3';
 import path from 'path';
 import os from 'os';
@@ -1283,6 +1284,94 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
       } else {
         res.status(400).json({ error: '未知类型' });
       }
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ============================================
+  // 依赖管理 API
+  // ============================================
+
+  /**
+   * 获取所有依赖状态
+   * GET /api/dependencies
+   */
+  app.get('/api/dependencies', (req, res) => {
+    try {
+      const status = dependencyManager.getStatus();
+      res.json(status);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 安装指定依赖
+   * POST /api/dependencies/:name/install
+   */
+  app.post('/api/dependencies/:name/install', async (req, res) => {
+    const { name } = req.params;
+
+    try {
+      // 通过 Socket.IO 推送安装进度
+      const progressCallback = (message) => {
+        if (io) {
+          io.emit('dependency:progress', { name, message });
+        }
+      };
+
+      await dependencyManager.install(name, progressCallback);
+
+      // 推送安装完成
+      if (io) {
+        io.emit('dependency:installed', { name, success: true });
+      }
+
+      res.json({ success: true, message: `${name} 安装成功` });
+    } catch (err) {
+      if (io) {
+        io.emit('dependency:installed', { name, success: false, error: err.message });
+      }
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 安装所有依赖
+   * POST /api/dependencies/install-all
+   */
+  app.post('/api/dependencies/install-all', async (req, res) => {
+    try {
+      const progressCallback = (message) => {
+        if (io) {
+          io.emit('dependency:progress', { name: 'all', message });
+        }
+      };
+
+      const results = await dependencyManager.installAll(progressCallback);
+
+      if (io) {
+        io.emit('dependency:install-all-complete', results);
+      }
+
+      res.json({ success: true, results });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 检查单个依赖是否已安装
+   * GET /api/dependencies/:name/check
+   */
+  app.get('/api/dependencies/:name/check', (req, res) => {
+    const { name } = req.params;
+
+    try {
+      const installed = dependencyManager.isInstalled(name);
+      const executable = dependencyManager.getExecutable(name);
+      res.json({ installed, executable });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

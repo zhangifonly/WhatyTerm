@@ -1,0 +1,315 @@
+/**
+ * DependencyManager - 管理第三方依赖的下载和安装
+ *
+ * 支持的依赖：
+ * - frpc: FRP 内网穿透客户端
+ * - cloudflared: Cloudflare Tunnel 客户端
+ */
+
+import { execSync, spawn } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import https from 'https';
+import { createWriteStream, createReadStream } from 'fs';
+import { pipeline } from 'stream/promises';
+import { createGunzip } from 'zlib';
+
+class DependencyManager {
+  constructor() {
+    // 依赖存放目录
+    this.binDir = path.join(os.homedir(), '.webtmux', 'bin');
+    this.isWindows = process.platform === 'win32';
+    this.isMac = process.platform === 'darwin';
+    this.arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
+
+    // 确保目录存在
+    if (!fs.existsSync(this.binDir)) {
+      fs.mkdirSync(this.binDir, { recursive: true });
+    }
+
+    // 依赖配置
+    this.dependencies = {
+      frpc: {
+        name: 'frpc',
+        description: 'FRP 内网穿透客户端',
+        version: '0.52.3',
+        getUrl: () => this._getFrpcUrl(),
+        getExecutable: () => this.isWindows ? 'frpc.exe' : 'frpc',
+        extract: 'tar.gz', // Windows 也是 tar.gz
+        stripComponents: 1, // 解压时去掉顶层目录
+      },
+      cloudflared: {
+        name: 'cloudflared',
+        description: 'Cloudflare Tunnel 客户端',
+        version: '2024.1.5',
+        getUrl: () => this._getCloudflaredUrl(),
+        getExecutable: () => this.isWindows ? 'cloudflared.exe' : 'cloudflared',
+        extract: null, // 直接是可执行文件
+      }
+    };
+  }
+
+  /**
+   * 获取 frpc 下载 URL
+   */
+  _getFrpcUrl() {
+    const version = this.dependencies.frpc.version;
+    let platform, arch;
+
+    if (this.isWindows) {
+      platform = 'windows';
+      arch = this.arch === 'arm64' ? 'arm64' : 'amd64';
+    } else if (this.isMac) {
+      platform = 'darwin';
+      arch = this.arch === 'arm64' ? 'arm64' : 'amd64';
+    } else {
+      platform = 'linux';
+      arch = this.arch === 'arm64' ? 'arm64' : 'amd64';
+    }
+
+    return `https://github.com/fatedier/frp/releases/download/v${version}/frp_${version}_${platform}_${arch}.tar.gz`;
+  }
+
+  /**
+   * 获取 cloudflared 下载 URL
+   */
+  _getCloudflaredUrl() {
+    let filename;
+
+    if (this.isWindows) {
+      filename = this.arch === 'arm64' ? 'cloudflared-windows-arm64.exe' : 'cloudflared-windows-amd64.exe';
+    } else if (this.isMac) {
+      filename = this.arch === 'arm64' ? 'cloudflared-darwin-arm64.tgz' : 'cloudflared-darwin-amd64.tgz';
+    } else {
+      filename = this.arch === 'arm64' ? 'cloudflared-linux-arm64' : 'cloudflared-linux-amd64';
+    }
+
+    return `https://github.com/cloudflare/cloudflared/releases/latest/download/${filename}`;
+  }
+
+  /**
+   * 获取可执行文件路径
+   */
+  getExecutablePath(name) {
+    const dep = this.dependencies[name];
+    if (!dep) return null;
+    return path.join(this.binDir, dep.getExecutable());
+  }
+
+  /**
+   * 检查依赖是否已安装
+   */
+  isInstalled(name) {
+    const execPath = this.getExecutablePath(name);
+    if (!execPath) return false;
+
+    // 检查本地安装
+    if (fs.existsSync(execPath)) {
+      return true;
+    }
+
+    // 检查系统 PATH
+    try {
+      const cmd = this.isWindows ? 'where' : 'which';
+      const executable = this.dependencies[name].getExecutable();
+      execSync(`${cmd} ${executable}`, { stdio: 'pipe' });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 获取可执行文件（优先本地，其次系统）
+   */
+  getExecutable(name) {
+    const localPath = this.getExecutablePath(name);
+    if (localPath && fs.existsSync(localPath)) {
+      return localPath;
+    }
+
+    // 返回系统命令名
+    return this.dependencies[name]?.getExecutable() || name;
+  }
+
+  /**
+   * 下载文件
+   */
+  async _download(url, destPath) {
+    return new Promise((resolve, reject) => {
+      console.log(`[DependencyManager] 下载: ${url}`);
+
+      const file = createWriteStream(destPath);
+
+      const request = (url) => {
+        https.get(url, {
+          headers: { 'User-Agent': 'WhatyTerm/1.0' }
+        }, (response) => {
+          // 处理重定向
+          if (response.statusCode === 301 || response.statusCode === 302) {
+            request(response.headers.location);
+            return;
+          }
+
+          if (response.statusCode !== 200) {
+            reject(new Error(`下载失败: HTTP ${response.statusCode}`));
+            return;
+          }
+
+          response.pipe(file);
+          file.on('finish', () => {
+            file.close();
+            resolve();
+          });
+        }).on('error', (err) => {
+          fs.unlink(destPath, () => {});
+          reject(err);
+        });
+      };
+
+      request(url);
+    });
+  }
+
+  /**
+   * 解压 tar.gz 文件
+   */
+  async _extractTarGz(archivePath, destDir, stripComponents = 0) {
+    return new Promise((resolve, reject) => {
+      // 使用系统 tar 命令（Windows 10+ 内置）
+      const stripArg = stripComponents > 0 ? `--strip-components=${stripComponents}` : '';
+      const cmd = `tar -xzf "${archivePath}" -C "${destDir}" ${stripArg}`;
+
+      try {
+        execSync(cmd, { stdio: 'pipe' });
+        resolve();
+      } catch (err) {
+        reject(new Error(`解压失败: ${err.message}`));
+      }
+    });
+  }
+
+  /**
+   * 安装依赖
+   */
+  async install(name, progressCallback = null) {
+    const dep = this.dependencies[name];
+    if (!dep) {
+      throw new Error(`未知的依赖: ${name}`);
+    }
+
+    if (this.isInstalled(name)) {
+      console.log(`[DependencyManager] ${name} 已安装`);
+      return true;
+    }
+
+    const url = dep.getUrl();
+    const executable = dep.getExecutable();
+    const execPath = path.join(this.binDir, executable);
+
+    try {
+      if (progressCallback) progressCallback(`正在下载 ${dep.description}...`);
+
+      if (dep.extract === 'tar.gz') {
+        // 下载压缩包
+        const archivePath = path.join(this.binDir, `${name}.tar.gz`);
+        await this._download(url, archivePath);
+
+        if (progressCallback) progressCallback(`正在解压 ${dep.description}...`);
+
+        // 解压
+        await this._extractTarGz(archivePath, this.binDir, dep.stripComponents || 0);
+
+        // 清理压缩包
+        fs.unlinkSync(archivePath);
+
+        // 设置执行权限（Unix）
+        if (!this.isWindows && fs.existsSync(execPath)) {
+          fs.chmodSync(execPath, 0o755);
+        }
+      } else if (url.endsWith('.tgz')) {
+        // macOS cloudflared 是 tgz
+        const archivePath = path.join(this.binDir, `${name}.tgz`);
+        await this._download(url, archivePath);
+        await this._extractTarGz(archivePath, this.binDir, 0);
+        fs.unlinkSync(archivePath);
+        if (!this.isWindows && fs.existsSync(execPath)) {
+          fs.chmodSync(execPath, 0o755);
+        }
+      } else {
+        // 直接下载可执行文件
+        await this._download(url, execPath);
+
+        // 设置执行权限（Unix）
+        if (!this.isWindows) {
+          fs.chmodSync(execPath, 0o755);
+        }
+      }
+
+      console.log(`[DependencyManager] ${name} 安装成功: ${execPath}`);
+      return true;
+    } catch (err) {
+      console.error(`[DependencyManager] ${name} 安装失败:`, err);
+      throw err;
+    }
+  }
+
+  /**
+   * 安装所有可选依赖
+   */
+  async installAll(progressCallback = null) {
+    const results = {};
+
+    for (const name of Object.keys(this.dependencies)) {
+      try {
+        await this.install(name, progressCallback);
+        results[name] = { success: true };
+      } catch (err) {
+        results[name] = { success: false, error: err.message };
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * 获取所有依赖的状态
+   */
+  getStatus() {
+    const status = {};
+
+    for (const [name, dep] of Object.entries(this.dependencies)) {
+      const localPath = this.getExecutablePath(name);
+      const isLocalInstalled = localPath && fs.existsSync(localPath);
+
+      let isSystemInstalled = false;
+      let systemPath = null;
+
+      try {
+        const cmd = this.isWindows ? 'where' : 'which';
+        const executable = dep.getExecutable();
+        systemPath = execSync(`${cmd} ${executable}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+        isSystemInstalled = true;
+      } catch {
+        // 系统未安装
+      }
+
+      status[name] = {
+        name: dep.name,
+        description: dep.description,
+        version: dep.version,
+        installed: isLocalInstalled || isSystemInstalled,
+        localPath: isLocalInstalled ? localPath : null,
+        systemPath: isSystemInstalled ? systemPath : null,
+        executable: this.getExecutable(name)
+      };
+    }
+
+    return status;
+  }
+}
+
+// 单例
+const dependencyManager = new DependencyManager();
+export default dependencyManager;

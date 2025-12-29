@@ -7,6 +7,7 @@ import os from 'os';
 import crypto from 'crypto';
 import net from 'net';
 import https from 'https';
+import dependencyManager from './DependencyManager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -105,11 +106,16 @@ class FrpTunnel {
   }
 
   /**
-   * 检查 frpc 是否已安装
+   * 检查 frpc 是否已安装（优先使用 DependencyManager）
    */
   async checkInstalled() {
+    // 优先检查 DependencyManager 管理的版本
+    if (dependencyManager.isInstalled('frpc')) {
+      return true;
+    }
+
+    // 回退：检查系统 PATH
     return new Promise((resolve) => {
-      // 跨平台检查命令：Windows 使用 where，其他系统使用 which
       const isWindows = process.platform === 'win32';
       const cmd = isWindows ? 'where' : 'which';
       const check = spawn(cmd, ['frpc'], { shell: isWindows });
@@ -120,6 +126,35 @@ class FrpTunnel {
         resolve(false);
       });
     });
+  }
+
+  /**
+   * 获取 frpc 可执行文件路径
+   */
+  getFrpcExecutable() {
+    return dependencyManager.getExecutable('frpc');
+  }
+
+  /**
+   * 自动安装 frpc（如果未安装）
+   * @param {Function} progressCallback - 进度回调
+   * @returns {Promise<boolean>}
+   */
+  async ensureInstalled(progressCallback = null) {
+    if (await this.checkInstalled()) {
+      return true;
+    }
+
+    console.log('[FrpTunnel] frpc 未安装，正在自动下载...');
+
+    try {
+      await dependencyManager.install('frpc', progressCallback);
+      console.log('[FrpTunnel] frpc 安装成功');
+      return true;
+    } catch (err) {
+      console.error('[FrpTunnel] frpc 自动安装失败:', err.message);
+      return false;
+    }
   }
 
   /**
@@ -232,23 +267,18 @@ subdomain = "${this.subdomain}"
   /**
    * 启动 FRP Tunnel
    * 自动选择最快的可用服务器
+   * @param {Function} progressCallback - 安装进度回调（可选）
    */
-  async start() {
+  async start(progressCallback = null) {
     if (!this.enabled) {
       console.log('[FrpTunnel] 服务已禁用');
       return null;
     }
 
-    const installed = await this.checkInstalled();
+    // 自动安装 frpc（如果未安装）
+    const installed = await this.ensureInstalled(progressCallback);
     if (!installed) {
-      console.log('[FrpTunnel] frpc 未安装，跳过隧道启动');
-      if (process.platform === 'win32') {
-        console.log('[FrpTunnel] Windows 安装方法: 从 https://github.com/fatedier/frp/releases 下载 frp，解压后将 frpc.exe 放入 PATH');
-      } else if (process.platform === 'darwin') {
-        console.log('[FrpTunnel] macOS 安装方法: brew install frp');
-      } else {
-        console.log('[FrpTunnel] Linux 安装方法: sudo apt install frpc 或从 https://github.com/fatedier/frp/releases 下载');
-      }
+      console.log('[FrpTunnel] frpc 安装失败，无法启动隧道');
       return null;
     }
 
@@ -268,7 +298,10 @@ subdomain = "${this.subdomain}"
     console.log(`[FrpTunnel] 启动 FRP 客户端 (${server.name}: ${server.addr}:${server.frpPort})...`);
 
     return new Promise((resolve) => {
-      this.frpProcess = spawn('frpc', ['-c', this.configPath], {
+      const frpcPath = this.getFrpcExecutable();
+      console.log(`[FrpTunnel] 使用 frpc: ${frpcPath}`);
+
+      this.frpProcess = spawn(frpcPath, ['-c', this.configPath], {
         stdio: ['ignore', 'pipe', 'pipe']
       });
 

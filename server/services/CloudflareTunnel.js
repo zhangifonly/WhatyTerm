@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import dependencyManager from './DependencyManager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -32,11 +33,16 @@ class CloudflareTunnel {
   }
 
   /**
-   * 检查 cloudflared 是否已安装
+   * 检查 cloudflared 是否已安装（优先使用 DependencyManager）
    */
   async checkInstalled() {
+    // 优先检查 DependencyManager 管理的版本
+    if (dependencyManager.isInstalled('cloudflared')) {
+      return true;
+    }
+
+    // 回退：检查系统 PATH
     return new Promise((resolve) => {
-      // 跨平台检查命令：Windows 使用 where，其他系统使用 which
       const isWindows = process.platform === 'win32';
       const cmd = isWindows ? 'where' : 'which';
       const check = spawn(cmd, ['cloudflared'], { shell: isWindows });
@@ -50,25 +56,48 @@ class CloudflareTunnel {
   }
 
   /**
-   * 启动 Cloudflare Tunnel
+   * 获取 cloudflared 可执行文件路径
    */
-  async start() {
+  getCloudflaredExecutable() {
+    return dependencyManager.getExecutable('cloudflared');
+  }
+
+  /**
+   * 自动安装 cloudflared（如果未安装）
+   * @param {Function} progressCallback - 进度回调
+   * @returns {Promise<boolean>}
+   */
+  async ensureInstalled(progressCallback = null) {
+    if (await this.checkInstalled()) {
+      return true;
+    }
+
+    console.log('[CloudflareTunnel] cloudflared 未安装，正在自动下载...');
+
+    try {
+      await dependencyManager.install('cloudflared', progressCallback);
+      console.log('[CloudflareTunnel] cloudflared 安装成功');
+      return true;
+    } catch (err) {
+      console.error('[CloudflareTunnel] cloudflared 自动安装失败:', err.message);
+      return false;
+    }
+  }
+
+  /**
+   * 启动 Cloudflare Tunnel
+   * @param {Function} progressCallback - 安装进度回调（可选）
+   */
+  async start(progressCallback = null) {
     if (!this.enabled) {
       console.log('[CloudflareTunnel] 服务已禁用');
       return null;
     }
 
-    // 检查是否已安装 cloudflared
-    const installed = await this.checkInstalled();
+    // 自动安装 cloudflared（如果未安装）
+    const installed = await this.ensureInstalled(progressCallback);
     if (!installed) {
-      console.log('[CloudflareTunnel] cloudflared 未安装，跳过隧道启动');
-      if (process.platform === 'win32') {
-        console.log('[CloudflareTunnel] Windows 安装方法: winget install Cloudflare.cloudflared 或从 https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/ 下载');
-      } else if (process.platform === 'darwin') {
-        console.log('[CloudflareTunnel] macOS 安装方法: brew install cloudflared');
-      } else {
-        console.log('[CloudflareTunnel] Linux 安装方法: 参考 https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/');
-      }
+      console.log('[CloudflareTunnel] cloudflared 安装失败，无法启动隧道');
       return null;
     }
 
@@ -77,10 +106,11 @@ class CloudflareTunnel {
       this.stop();
     }
 
-    console.log('[CloudflareTunnel] 启动 Quick Tunnel...');
+    const cloudflaredPath = this.getCloudflaredExecutable();
+    console.log(`[CloudflareTunnel] 启动 Quick Tunnel... (使用: ${cloudflaredPath})`);
 
     return new Promise((resolve) => {
-      this.process = spawn('cloudflared', ['tunnel', '--url', `http://localhost:${this.localPort}`], {
+      this.process = spawn(cloudflaredPath, ['tunnel', '--url', `http://localhost:${this.localPort}`], {
         stdio: ['ignore', 'pipe', 'pipe']
       });
 
