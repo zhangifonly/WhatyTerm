@@ -319,9 +319,47 @@ class DependencyManager {
   }
 
   /**
-   * 下载文件
+   * 下载文件（带重试机制）
+   * @param {string} url - 下载 URL
+   * @param {string} destPath - 目标路径
+   * @param {number} maxRetries - 最大重试次数
+   * @param {Function} progressCallback - 进度回调
    */
-  async _download(url, destPath) {
+  async _download(url, destPath, maxRetries = 3, progressCallback = null) {
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        await this._downloadOnce(url, destPath, progressCallback);
+        return; // 下载成功
+      } catch (err) {
+        lastError = err;
+        console.error(`[DependencyManager] 下载失败 (第 ${attempt}/${maxRetries} 次): ${err.message}`);
+
+        // 清理可能的残留文件
+        try {
+          if (fs.existsSync(destPath)) {
+            fs.unlinkSync(destPath);
+          }
+        } catch {}
+
+        // 最后一次尝试不需要等待
+        if (attempt < maxRetries) {
+          const delay = attempt * 2000; // 递增延迟
+          console.log(`[DependencyManager] ${delay / 1000} 秒后重试...`);
+          if (progressCallback) progressCallback(`下载失败，${delay / 1000} 秒后重试 (${attempt}/${maxRetries})...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
+
+    throw lastError || new Error('下载失败，已达最大重试次数');
+  }
+
+  /**
+   * 单次下载文件
+   */
+  async _downloadOnce(url, destPath, progressCallback = null) {
     return new Promise((resolve, reject) => {
       console.log(`[DependencyManager] 下载: ${url}`);
 
@@ -333,16 +371,18 @@ class DependencyManager {
         // 自动处理 http/https
         const httpModule = url.startsWith('https') ? https : http;
 
-        httpModule.get(url, {
+        const req = httpModule.get(url, {
           headers: {
             'User-Agent': 'WhatyTerm/1.0',
             'Accept': 'application/octet-stream'
-          }
+          },
+          timeout: 30000 // 30 秒连接超时
         }, (response) => {
           // 处理重定向
           if (response.statusCode === 301 || response.statusCode === 302 || response.statusCode === 307) {
             redirectCount++;
             if (redirectCount > maxRedirects) {
+              file.close();
               reject(new Error('重定向次数过多'));
               return;
             }
@@ -353,6 +393,7 @@ class DependencyManager {
           }
 
           if (response.statusCode !== 200) {
+            file.close();
             reject(new Error(`下载失败: HTTP ${response.statusCode}`));
             return;
           }
@@ -360,21 +401,58 @@ class DependencyManager {
           // 检查 Content-Type，确保不是 HTML
           const contentType = response.headers['content-type'] || '';
           if (contentType.includes('text/html')) {
+            file.close();
             reject(new Error('下载失败: 服务器返回 HTML 页面而非二进制文件'));
             return;
           }
 
-          const contentLength = response.headers['content-length'];
-          console.log(`[DependencyManager] 开始下载，大小: ${contentLength ? (parseInt(contentLength) / 1024 / 1024).toFixed(2) + ' MB' : '未知'}`);
+          const contentLength = parseInt(response.headers['content-length'] || '0');
+          const totalMB = (contentLength / 1024 / 1024).toFixed(2);
+          console.log(`[DependencyManager] 开始下载，大小: ${contentLength ? totalMB + ' MB' : '未知'}`);
+
+          let downloaded = 0;
+          let lastProgress = 0;
+
+          response.on('data', (chunk) => {
+            downloaded += chunk.length;
+            if (contentLength > 0) {
+              const progress = Math.floor((downloaded / contentLength) * 100);
+              // 每 10% 报告一次进度
+              if (progress >= lastProgress + 10) {
+                lastProgress = progress;
+                const downloadedMB = (downloaded / 1024 / 1024).toFixed(2);
+                console.log(`[DependencyManager] 下载进度: ${progress}% (${downloadedMB}/${totalMB} MB)`);
+                if (progressCallback) progressCallback(`下载中: ${progress}%`);
+              }
+            }
+          });
 
           response.pipe(file);
+
           file.on('finish', () => {
             file.close();
+            console.log(`[DependencyManager] 下载完成: ${destPath}`);
             resolve();
           });
-        }).on('error', (err) => {
+
+          file.on('error', (err) => {
+            file.close();
+            fs.unlink(destPath, () => {});
+            reject(err);
+          });
+        });
+
+        req.on('error', (err) => {
+          file.close();
           fs.unlink(destPath, () => {});
           reject(err);
+        });
+
+        req.on('timeout', () => {
+          req.destroy();
+          file.close();
+          fs.unlink(destPath, () => {});
+          reject(new Error('下载超时'));
         });
       };
 
@@ -424,7 +502,7 @@ class DependencyManager {
       if (dep.extract === 'tar.gz') {
         // 下载压缩包
         const archivePath = path.join(this.binDir, `${name}.tar.gz`);
-        await this._download(url, archivePath);
+        await this._download(url, archivePath, 3, progressCallback);
 
         if (progressCallback) progressCallback(`正在解压 ${dep.description}...`);
 
@@ -441,7 +519,7 @@ class DependencyManager {
       } else if (url.endsWith('.tgz')) {
         // macOS cloudflared 是 tgz
         const archivePath = path.join(this.binDir, `${name}.tgz`);
-        await this._download(url, archivePath);
+        await this._download(url, archivePath, 3, progressCallback);
         await this._extractTarGz(archivePath, this.binDir, 0);
         fs.unlinkSync(archivePath);
         if (!this.isWindows && fs.existsSync(execPath)) {
@@ -449,7 +527,7 @@ class DependencyManager {
         }
       } else {
         // 直接下载可执行文件
-        await this._download(url, execPath);
+        await this._download(url, execPath, 3, progressCallback);
 
         // 设置执行权限（Unix）
         if (!this.isWindows) {
