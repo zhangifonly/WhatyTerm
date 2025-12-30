@@ -1519,4 +1519,137 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
       res.status(500).json({ error: err.message });
     }
   });
+
+  // ============================================
+  // WSL 环境 API
+  // ============================================
+
+  /**
+   * 获取 WSL 环境状态
+   * GET /api/wsl/status
+   */
+  app.get('/api/wsl/status', (req, res) => {
+    try {
+      const isWindows = process.platform === 'win32';
+      const wslAvailable = isWindows && dependencyManager.isWSLAvailable();
+      const nodeInstalled = wslAvailable && dependencyManager.checkWSLNodeInstalled();
+      const nvmInstalled = wslAvailable && dependencyManager.checkWSLNvmInstalled();
+
+      res.json({
+        isWindows,
+        wslAvailable,
+        nodeInstalled,
+        nvmInstalled,
+        cliTools: wslAvailable ? dependencyManager.getAllCliStatusWithWSL() : null
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 获取 CLI 工具状态（包括 WSL）
+   * GET /api/wsl/cli-tools
+   */
+  app.get('/api/wsl/cli-tools', (req, res) => {
+    try {
+      const status = dependencyManager.getAllCliStatusWithWSL();
+      res.json(status);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 在 WSL 中安装 Node.js 环境
+   * POST /api/wsl/install-node
+   */
+  app.post('/api/wsl/install-node', async (req, res) => {
+    try {
+      const progressCallback = (message) => {
+        if (io) {
+          io.emit('wsl:progress', { type: 'node', message });
+        }
+      };
+
+      const result = await dependencyManager.installWSLNodeEnvironment(progressCallback);
+
+      if (io) {
+        io.emit('wsl:node-installed', { success: result });
+      }
+
+      res.json({ success: result });
+    } catch (err) {
+      if (io) {
+        io.emit('wsl:node-installed', { success: false, error: err.message });
+      }
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 在 WSL 中安装 CLI 工具
+   * POST /api/wsl/cli-tools/:name/install
+   */
+  app.post('/api/wsl/cli-tools/:name/install', async (req, res) => {
+    const { name } = req.params;
+
+    try {
+      const progressCallback = (message) => {
+        if (io) {
+          io.emit('wsl:progress', { type: 'cli', name, message });
+        }
+      };
+
+      await dependencyManager.installCliInWSL(name, progressCallback);
+
+      // 获取安装后的状态
+      const status = dependencyManager.getCliStatusWithWSL(name);
+
+      if (io) {
+        io.emit('wsl:cli-installed', { name, success: true, status });
+      }
+
+      res.json({ success: true, status });
+    } catch (err) {
+      if (io) {
+        io.emit('wsl:cli-installed', { name, success: false, error: err.message });
+      }
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 在 WSL 中安装所有 CLI 工具
+   * POST /api/wsl/cli-tools/install-all
+   */
+  app.post('/api/wsl/cli-tools/install-all', async (req, res) => {
+    const results = {};
+
+    try {
+      const progressCallback = (message) => {
+        if (io) {
+          io.emit('wsl:progress', { type: 'cli-all', message });
+        }
+      };
+
+      for (const name of ['claude', 'codex', 'gemini']) {
+        try {
+          progressCallback(`正在安装 ${name}...`);
+          await dependencyManager.installCliInWSL(name, progressCallback);
+          results[name] = { success: true, status: dependencyManager.getCliStatusWithWSL(name) };
+        } catch (err) {
+          results[name] = { success: false, error: err.message };
+        }
+      }
+
+      if (io) {
+        io.emit('wsl:cli-all-installed', { results });
+      }
+
+      res.json({ success: true, results });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
 }
