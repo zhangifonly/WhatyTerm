@@ -1652,4 +1652,109 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
       res.status(500).json({ error: err.message });
     }
   });
+
+  // ============================================
+  // 系统工具 API（Git 等）
+  // ============================================
+
+  /**
+   * 获取系统工具状态
+   * GET /api/system-tools
+   */
+  app.get('/api/system-tools', (req, res) => {
+    try {
+      const status = dependencyManager.getSystemToolsStatus();
+      res.json(status);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 检查单个系统工具状态
+   * GET /api/system-tools/:name
+   */
+  app.get('/api/system-tools/:name', (req, res) => {
+    const { name } = req.params;
+
+    try {
+      const allStatus = dependencyManager.getSystemToolsStatus();
+      const status = allStatus[name];
+
+      if (!status) {
+        return res.status(404).json({ error: `未知的系统工具: ${name}` });
+      }
+
+      res.json(status);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 安装 Git
+   * POST /api/system-tools/git/install
+   */
+  app.post('/api/system-tools/git/install', async (req, res) => {
+    try {
+      const progressCallback = (message) => {
+        if (io) {
+          io.emit('system-tool:progress', { name: 'git', message });
+        }
+      };
+
+      const result = await dependencyManager.installGit(progressCallback);
+
+      if (io) {
+        io.emit('system-tool:installed', { name: 'git', success: true, ...result });
+      }
+
+      res.json({ success: true, ...result });
+    } catch (err) {
+      if (io) {
+        io.emit('system-tool:installed', { name: 'git', success: false, error: err.message });
+      }
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 在 WSL 中安装 Git
+   * POST /api/wsl/system-tools/git/install
+   */
+  app.post('/api/wsl/system-tools/git/install', async (req, res) => {
+    try {
+      const progressCallback = (message) => {
+        if (io) {
+          io.emit('wsl:progress', { type: 'git', message });
+        }
+      };
+
+      const result = await dependencyManager.installGitInWSL(progressCallback);
+
+      if (io) {
+        io.emit('wsl:git-installed', { success: true, ...result });
+      }
+
+      res.json({ success: true, ...result });
+    } catch (err) {
+      if (io) {
+        io.emit('wsl:git-installed', { success: false, error: err.message });
+      }
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 检查 winget 是否可用
+   * GET /api/system-tools/winget/status
+   */
+  app.get('/api/system-tools/winget/status', (req, res) => {
+    try {
+      const available = dependencyManager.isWingetAvailable();
+      res.json({ available });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
 }

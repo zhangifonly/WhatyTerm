@@ -82,6 +82,37 @@ class DependencyManager {
       }
     };
 
+    // 系统工具配置（需要单独安装）
+    this.systemTools = {
+      git: {
+        name: 'Git',
+        description: 'Git 版本控制系统',
+        command: 'git',
+        checkVersion: () => this._getCliVersion('git', '--version'),
+        // Windows 安装方式
+        windowsInstaller: {
+          // Git for Windows 官方安装包
+          downloadUrl: 'https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.2/Git-2.47.1.2-64-bit.exe',
+          // winget 安装命令
+          wingetCommand: 'winget install --id Git.Git -e --source winget',
+          // 便携版（不需要管理员权限）
+          portableUrl: 'https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.2/PortableGit-2.47.1.2-64-bit.7z.exe',
+        },
+        // macOS 安装方式
+        macInstaller: {
+          brewCommand: 'brew install git',
+          // Xcode Command Line Tools
+          xcodeCommand: 'xcode-select --install',
+        },
+        // Linux 安装方式
+        linuxInstaller: {
+          aptCommand: 'sudo apt-get install -y git',
+          yumCommand: 'sudo yum install -y git',
+          dnfCommand: 'sudo dnf install -y git',
+        }
+      }
+    };
+
     // 检测 WSL 环境
     this.isWSL = this._detectWSL();
   }
@@ -1106,8 +1137,388 @@ class DependencyManager {
   getAllStatus() {
     return {
       dependencies: this.getStatus(),
-      cliTools: this.getCliStatus()
+      cliTools: this.getCliStatus(),
+      systemTools: this.getSystemToolsStatus()
     };
+  }
+
+  // ============================================
+  // 系统工具管理方法（Git 等）
+  // ============================================
+
+  /**
+   * 检查系统工具是否已安装
+   * @param {string} name - 工具名称 (git)
+   */
+  isSystemToolInstalled(name) {
+    const tool = this.systemTools[name];
+    if (!tool) return false;
+
+    try {
+      const cmd = this.isWindows ? 'where' : 'which';
+      execSync(`${cmd} ${tool.command}`, { stdio: 'pipe' });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 获取系统工具状态
+   */
+  getSystemToolsStatus() {
+    const status = {};
+
+    for (const [name, tool] of Object.entries(this.systemTools)) {
+      const installed = this.isSystemToolInstalled(name);
+      let version = null;
+      let path = null;
+
+      if (installed) {
+        version = tool.checkVersion();
+        try {
+          const cmd = this.isWindows ? 'where' : 'which';
+          path = execSync(`${cmd} ${tool.command}`, {
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe']
+          }).trim().split('\n')[0];
+        } catch {
+          // ignore
+        }
+      }
+
+      status[name] = {
+        name: tool.name,
+        description: tool.description,
+        command: tool.command,
+        installed,
+        version,
+        path,
+        // 提供安装指南
+        installGuide: this._getInstallGuide(name)
+      };
+    }
+
+    return status;
+  }
+
+  /**
+   * 获取系统工具安装指南
+   * @param {string} name - 工具名称
+   */
+  _getInstallGuide(name) {
+    const tool = this.systemTools[name];
+    if (!tool) return null;
+
+    if (this.isWindows) {
+      return {
+        platform: 'windows',
+        methods: [
+          {
+            name: 'winget（推荐）',
+            command: tool.windowsInstaller?.wingetCommand,
+            description: '使用 Windows 包管理器自动安装'
+          },
+          {
+            name: '官方安装包',
+            url: tool.windowsInstaller?.downloadUrl,
+            description: '下载官方安装程序'
+          },
+          {
+            name: '便携版',
+            url: tool.windowsInstaller?.portableUrl,
+            description: '无需管理员权限的便携版本'
+          }
+        ]
+      };
+    } else if (this.isMac) {
+      return {
+        platform: 'macos',
+        methods: [
+          {
+            name: 'Homebrew（推荐）',
+            command: tool.macInstaller?.brewCommand,
+            description: '使用 Homebrew 安装'
+          },
+          {
+            name: 'Xcode Command Line Tools',
+            command: tool.macInstaller?.xcodeCommand,
+            description: '安装 Xcode 命令行工具（包含 Git）'
+          }
+        ]
+      };
+    } else {
+      return {
+        platform: 'linux',
+        methods: [
+          {
+            name: 'apt（Debian/Ubuntu）',
+            command: tool.linuxInstaller?.aptCommand,
+            description: '使用 apt 包管理器安装'
+          },
+          {
+            name: 'yum（CentOS/RHEL）',
+            command: tool.linuxInstaller?.yumCommand,
+            description: '使用 yum 包管理器安装'
+          },
+          {
+            name: 'dnf（Fedora）',
+            command: tool.linuxInstaller?.dnfCommand,
+            description: '使用 dnf 包管理器安装'
+          }
+        ]
+      };
+    }
+  }
+
+  /**
+   * 检查 winget 是否可用（Windows）
+   */
+  isWingetAvailable() {
+    if (!this.isWindows) return false;
+
+    try {
+      execSync('winget --version', { stdio: 'pipe', timeout: 5000 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 使用 winget 安装系统工具（Windows）
+   * @param {string} name - 工具名称
+   * @param {Function} progressCallback - 进度回调
+   */
+  async installSystemToolWithWinget(name, progressCallback = null) {
+    const tool = this.systemTools[name];
+    if (!tool) {
+      throw new Error(`未知的系统工具: ${name}`);
+    }
+
+    if (!this.isWindows) {
+      throw new Error('winget 仅在 Windows 上可用');
+    }
+
+    if (!this.isWingetAvailable()) {
+      throw new Error('winget 未安装或不可用，请使用其他安装方式');
+    }
+
+    if (this.isSystemToolInstalled(name)) {
+      console.log(`[DependencyManager] ${tool.name} 已安装`);
+      return { success: true, alreadyInstalled: true };
+    }
+
+    const wingetCommand = tool.windowsInstaller?.wingetCommand;
+    if (!wingetCommand) {
+      throw new Error(`${tool.name} 不支持 winget 安装`);
+    }
+
+    console.log(`[DependencyManager] 使用 winget 安装 ${tool.name}...`);
+    if (progressCallback) progressCallback(`正在使用 winget 安装 ${tool.name}...`);
+
+    return new Promise((resolve, reject) => {
+      // 解析 winget 命令
+      const args = wingetCommand.split(' ').slice(1); // 去掉 'winget'
+
+      const proc = spawn('winget', args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: true
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      proc.stdout.on('data', (data) => {
+        stdout += data.toString();
+        const line = data.toString().trim();
+        console.log(`[winget] ${line}`);
+        if (line && progressCallback) {
+          progressCallback(line);
+        }
+      });
+
+      proc.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      proc.on('close', (code) => {
+        if (code === 0) {
+          console.log(`[DependencyManager] ${tool.name} 安装成功`);
+          const version = tool.checkVersion();
+          resolve({ success: true, version });
+        } else {
+          console.error(`[DependencyManager] ${tool.name} 安装失败: ${stderr}`);
+          reject(new Error(`安装失败 (exit code: ${code}): ${stderr || stdout}`));
+        }
+      });
+
+      proc.on('error', (err) => {
+        reject(new Error(`启动 winget 失败: ${err.message}`));
+      });
+    });
+  }
+
+  /**
+   * 下载 Git for Windows 安装包
+   * @param {Function} progressCallback - 进度回调
+   * @returns {Promise<string>} 下载的文件路径
+   */
+  async downloadGitInstaller(progressCallback = null) {
+    const tool = this.systemTools.git;
+    const downloadUrl = tool.windowsInstaller?.downloadUrl;
+
+    if (!downloadUrl) {
+      throw new Error('Git 下载 URL 未配置');
+    }
+
+    const installerPath = path.join(this.binDir, 'Git-installer.exe');
+
+    console.log(`[DependencyManager] 下载 Git for Windows...`);
+    if (progressCallback) progressCallback('正在下载 Git for Windows...');
+
+    await this._download(downloadUrl, installerPath, 3, progressCallback);
+
+    console.log(`[DependencyManager] Git 安装包已下载: ${installerPath}`);
+    return installerPath;
+  }
+
+  /**
+   * 运行 Git for Windows 安装程序（静默安装）
+   * @param {string} installerPath - 安装包路径
+   * @param {Function} progressCallback - 进度回调
+   */
+  async runGitInstaller(installerPath, progressCallback = null) {
+    if (!this.isWindows) {
+      throw new Error('此方法仅适用于 Windows');
+    }
+
+    if (!fs.existsSync(installerPath)) {
+      throw new Error(`安装包不存在: ${installerPath}`);
+    }
+
+    console.log(`[DependencyManager] 运行 Git 安装程序...`);
+    if (progressCallback) progressCallback('正在安装 Git（可能需要管理员权限）...');
+
+    return new Promise((resolve, reject) => {
+      // 静默安装参数
+      const args = [
+        '/VERYSILENT',           // 完全静默
+        '/NORESTART',            // 不重启
+        '/NOCANCEL',             // 不允许取消
+        '/SP-',                  // 不显示启动画面
+        '/CLOSEAPPLICATIONS',    // 关闭相关应用
+        '/RESTARTAPPLICATIONS',  // 安装后重启应用
+        '/COMPONENTS="icons,ext\\reg\\shellhere,assoc,assoc_sh"'  // 组件
+      ];
+
+      const proc = spawn(installerPath, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: true
+      });
+
+      proc.on('close', (code) => {
+        if (code === 0) {
+          console.log(`[DependencyManager] Git 安装成功`);
+
+          // 等待一下让 PATH 更新
+          setTimeout(() => {
+            const version = this.systemTools.git.checkVersion();
+            resolve({ success: true, version });
+          }, 2000);
+        } else {
+          reject(new Error(`Git 安装失败 (exit code: ${code})`));
+        }
+      });
+
+      proc.on('error', (err) => {
+        reject(new Error(`运行安装程序失败: ${err.message}`));
+      });
+    });
+  }
+
+  /**
+   * 自动安装 Git（Windows）
+   * 优先使用 winget，失败则下载安装包
+   * @param {Function} progressCallback - 进度回调
+   */
+  async installGit(progressCallback = null) {
+    if (this.isSystemToolInstalled('git')) {
+      const version = this.systemTools.git.checkVersion();
+      console.log(`[DependencyManager] Git 已安装: ${version}`);
+      return { success: true, alreadyInstalled: true, version };
+    }
+
+    if (this.isWindows) {
+      // Windows: 优先尝试 winget
+      if (this.isWingetAvailable()) {
+        try {
+          if (progressCallback) progressCallback('尝试使用 winget 安装 Git...');
+          return await this.installSystemToolWithWinget('git', progressCallback);
+        } catch (err) {
+          console.log(`[DependencyManager] winget 安装失败，尝试下载安装包: ${err.message}`);
+        }
+      }
+
+      // 下载并运行安装程序
+      try {
+        const installerPath = await this.downloadGitInstaller(progressCallback);
+        return await this.runGitInstaller(installerPath, progressCallback);
+      } catch (err) {
+        throw new Error(`Git 安装失败: ${err.message}`);
+      }
+    } else if (this.isMac) {
+      // macOS: 提示用户手动安装
+      throw new Error('请使用以下命令安装 Git:\n' +
+        '  brew install git\n' +
+        '或\n' +
+        '  xcode-select --install');
+    } else {
+      // Linux: 提示用户手动安装
+      throw new Error('请使用包管理器安装 Git:\n' +
+        '  Ubuntu/Debian: sudo apt-get install git\n' +
+        '  CentOS/RHEL: sudo yum install git\n' +
+        '  Fedora: sudo dnf install git');
+    }
+  }
+
+  /**
+   * 在 WSL 中安装 Git
+   * @param {Function} progressCallback - 进度回调
+   */
+  async installGitInWSL(progressCallback = null) {
+    if (!this.isWindows) {
+      throw new Error('此方法仅适用于 Windows WSL 环境');
+    }
+
+    if (!this.isWSLAvailable()) {
+      throw new Error('WSL 未安装或不可用');
+    }
+
+    try {
+      // 检查 WSL 中是否已安装 Git
+      const gitVersion = this._execInWSL('git --version');
+      console.log(`[DependencyManager] WSL Git 已安装: ${gitVersion.trim()}`);
+      return { success: true, alreadyInstalled: true, version: gitVersion.trim() };
+    } catch {
+      // 未安装，继续安装
+    }
+
+    console.log('[DependencyManager] 在 WSL 中安装 Git...');
+    if (progressCallback) progressCallback('正在 WSL 中安装 Git...');
+
+    try {
+      // 更新包列表并安装 Git
+      this._execInWSL('sudo apt-get update && sudo apt-get install -y git', {
+        timeout: 300000 // 5 分钟超时
+      });
+
+      const version = this._execInWSL('git --version').trim();
+      console.log(`[DependencyManager] WSL Git 安装成功: ${version}`);
+      return { success: true, version };
+    } catch (err) {
+      throw new Error(`WSL Git 安装失败: ${err.message}`);
+    }
   }
 }
 
