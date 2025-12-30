@@ -17,8 +17,8 @@ export default defineConfig({
       }
     },
     watch: {
-      // 忽略 server/db 目录的文件变化，避免数据文件更新触发页面刷新
-      ignored: ['**/server/db/**']
+      // 忽略这些目录的文件变化，避免触发页面刷新
+      ignored: ['**/server/db/**', '**/.claude/**', '**/node_modules/**']
     }
   }
 });

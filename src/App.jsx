@@ -145,6 +145,7 @@ export default function App() {
   const [showDebugPanel, setShowDebugPanel] = useState(false);
   const [pendingScreenContent, setPendingScreenContent] = useState(null);
   const [pendingCursorPosition, setPendingCursorPosition] = useState(null);
+  const [terminalReady, setTerminalReady] = useState(false); // 跟踪终端是否已初始化
   const [aiStatusCountdown, setAiStatusCountdown] = useState(30);
   const [nextAnalysisTime, setNextAnalysisTime] = useState(Date.now() + 30000);
   const [aiHealthStatus, setAiHealthStatus] = useState({
@@ -219,6 +220,7 @@ export default function App() {
 
     socket.on('session:attached', (data) => {
       // 使用完整内容（包含滚动历史），如果没有则使用当前屏幕内容
+      console.log('[session:attached] 收到内容长度:', data.fullContent?.length || 0, data.screenContent?.length || 0);
       setPendingScreenContent(data.fullContent || data.screenContent || '');
       setPendingCursorPosition(data.cursorPosition);
       setCurrentSession(data.session);
@@ -639,6 +641,7 @@ export default function App() {
     });
 
     terminalInstance.current = term;
+    setTerminalReady(true); // 标记终端已初始化
 
     const handleResize = () => {
       if (fitAddon.current && terminalInstance.current) {
@@ -677,49 +680,54 @@ export default function App() {
         terminalInstance.current.dispose();
         terminalInstance.current = null;
       }
+      setTerminalReady(false); // 标记终端已销毁
     };
   }, [currentSession?.id]); // 需要依赖 currentSession，因为终端容器是条件渲染的
 
   // 处理缓存的屏幕内容
   useEffect(() => {
-    if (pendingScreenContent !== null && terminalInstance.current) {
-      const term = terminalInstance.current;
+    console.log('[pendingScreenContent] useEffect 运行, pendingScreenContent:', pendingScreenContent?.length || 0, 'terminalReady:', terminalReady, 'terminalInstance:', !!terminalInstance.current);
+    // 只有当终端实例存在时才处理
+    if (pendingScreenContent === null || !terminalInstance.current) {
+      return;
+    }
 
-      // 只有当有实际内容时才重置终端，避免不必要的清空
-      if (pendingScreenContent.trim().length > 0) {
-        // 重置终端
-        term.reset();
+    const term = terminalInstance.current;
 
-        // 先调用 fit 确保尺寸正确
-        if (fitAddon.current) {
-          fitAddon.current.fit();
-          // 同步尺寸到服务器
-          const session = currentSessionRef.current;
-          if (session) {
-            socket.emit('terminal:resize', {
-              sessionId: session.id,
-              cols: term.cols,
-              rows: term.rows
-            });
-          }
+    // 只有当有实际内容时才重置终端，避免不必要的清空
+    if (pendingScreenContent.trim().length > 0) {
+      // 重置终端
+      term.reset();
+
+      // 先调用 fit 确保尺寸正确
+      if (fitAddon.current) {
+        fitAddon.current.fit();
+        // 同步尺寸到服务器
+        const session = currentSessionRef.current;
+        if (session) {
+          socket.emit('terminal:resize', {
+            sessionId: session.id,
+            cols: term.cols,
+            rows: term.rows
+          });
         }
-
-        // 写入当前可见区域内容
-        const content = pendingScreenContent.replace(/\r\n$/, '');
-        term.write(content);
-
-        // 设置光标位置
-        if (pendingCursorPosition) {
-          term.write(`\x1b[${pendingCursorPosition.y};${pendingCursorPosition.x}H`);
-        }
-      } else {
-        console.warn('[Terminal] 收到空的屏幕内容，跳过重置以避免清空终端');
       }
 
-      setPendingScreenContent(null);
-      setPendingCursorPosition(null);
+      // 写入当前可见区域内容
+      const content = pendingScreenContent.replace(/\r\n$/, '');
+      term.write(content);
+
+      // 设置光标位置
+      if (pendingCursorPosition) {
+        term.write(`\x1b[${pendingCursorPosition.y};${pendingCursorPosition.x}H`);
+      }
+    } else {
+      console.warn('[Terminal] 收到空的屏幕内容，跳过重置以避免清空终端');
     }
-  }, [pendingScreenContent, pendingCursorPosition]);
+
+    setPendingScreenContent(null);
+    setPendingCursorPosition(null);
+  }, [pendingScreenContent, pendingCursorPosition, terminalReady]);
 
   // 附加到会话
   const attachSession = useCallback((sessionId) => {
