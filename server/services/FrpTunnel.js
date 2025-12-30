@@ -136,25 +136,20 @@ class FrpTunnel {
   }
 
   /**
-   * 自动安装 frpc（如果未安装）
+   * 确保 frpc 可用（验证 + 自动修复）
    * @param {Function} progressCallback - 进度回调
    * @returns {Promise<boolean>}
    */
   async ensureInstalled(progressCallback = null) {
-    if (await this.checkInstalled()) {
+    // 使用 ensureValid 进行验证和自动修复
+    const valid = await dependencyManager.ensureValid('frpc', progressCallback);
+    if (valid) {
+      console.log('[FrpTunnel] frpc 已就绪');
       return true;
     }
 
-    console.log('[FrpTunnel] frpc 未安装，正在自动下载...');
-
-    try {
-      await dependencyManager.install('frpc', progressCallback);
-      console.log('[FrpTunnel] frpc 安装成功');
-      return true;
-    } catch (err) {
-      console.error('[FrpTunnel] frpc 自动安装失败:', err.message);
-      return false;
-    }
+    console.error('[FrpTunnel] frpc 不可用，无法自动修复');
+    return false;
   }
 
   /**

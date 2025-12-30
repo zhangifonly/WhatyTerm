@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { existsSync, readFileSync, writeFileSync, statSync, unlinkSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -63,25 +63,20 @@ class CloudflareTunnel {
   }
 
   /**
-   * 自动安装 cloudflared（如果未安装）
+   * 确保 cloudflared 可用（验证 + 自动修复）
    * @param {Function} progressCallback - 进度回调
    * @returns {Promise<boolean>}
    */
   async ensureInstalled(progressCallback = null) {
-    if (await this.checkInstalled()) {
+    // 使用 ensureValid 进行验证和自动修复
+    const valid = await dependencyManager.ensureValid('cloudflared', progressCallback);
+    if (valid) {
+      console.log('[CloudflareTunnel] cloudflared 已就绪');
       return true;
     }
 
-    console.log('[CloudflareTunnel] cloudflared 未安装，正在自动下载...');
-
-    try {
-      await dependencyManager.install('cloudflared', progressCallback);
-      console.log('[CloudflareTunnel] cloudflared 安装成功');
-      return true;
-    } catch (err) {
-      console.error('[CloudflareTunnel] cloudflared 自动安装失败:', err.message);
-      return false;
-    }
+    console.error('[CloudflareTunnel] cloudflared 不可用，无法自动修复');
+    return false;
   }
 
   /**
@@ -94,10 +89,10 @@ class CloudflareTunnel {
       return null;
     }
 
-    // 自动安装 cloudflared（如果未安装）
-    const installed = await this.ensureInstalled(progressCallback);
-    if (!installed) {
-      console.log('[CloudflareTunnel] cloudflared 安装失败，无法启动隧道');
+    // 验证并自动修复 cloudflared
+    const ready = await this.ensureInstalled(progressCallback);
+    if (!ready) {
+      console.log('[CloudflareTunnel] cloudflared 不可用，无法启动隧道');
       return null;
     }
 
@@ -107,27 +102,8 @@ class CloudflareTunnel {
     }
 
     const cloudflaredPath = this.getCloudflaredExecutable();
-    console.log(`[CloudflareTunnel] 启动 Quick Tunnel... (使用: ${cloudflaredPath})`);
-
-    // 检查可执行文件是否存在
-    if (!existsSync(cloudflaredPath)) {
-      console.error('[CloudflareTunnel] cloudflared 可执行文件不存在:', cloudflaredPath);
-      return null;
-    }
-
-    // Windows 上检查文件大小，确保不是损坏的文件
     const isWindows = process.platform === 'win32';
-    try {
-      const stats = statSync(cloudflaredPath);
-      if (stats.size < 1000000) { // cloudflared 至少有几 MB
-        console.error('[CloudflareTunnel] cloudflared 文件可能损坏，大小异常:', stats.size);
-        // 删除损坏的文件，下次会重新下载
-        unlinkSync(cloudflaredPath);
-        return null;
-      }
-    } catch (err) {
-      console.error('[CloudflareTunnel] 检查文件失败:', err.message);
-    }
+    console.log(`[CloudflareTunnel] 启动 Quick Tunnel... (使用: ${cloudflaredPath})`);
 
     return new Promise((resolve) => {
       // Windows 上使用 shell: true 来正确执行 .exe 文件
