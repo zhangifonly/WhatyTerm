@@ -113,6 +113,7 @@ export class AIEngine {
   constructor() {
     this.settings = this._loadSettings();
     this.failoverConfig = null;
+    this._failoverConfigLoaded = false;
     this._loadFailoverConfig();
   }
 
@@ -120,9 +121,18 @@ export class AIEngine {
     try {
       await configService.loadConfig();
       this.failoverConfig = configService.getFailoverConfig();
+      this._failoverConfigLoaded = true;
+      console.log('[AIEngine] 故障转移配置已加载:', this.failoverConfig?.enabled ? '已启用' : '未启用');
     } catch (err) {
       console.error('[AIEngine] 加载故障转移配置失败:', err);
       this.failoverConfig = { enabled: false };
+      this._failoverConfigLoaded = true;
+    }
+  }
+
+  async _ensureFailoverConfigLoaded() {
+    if (!this._failoverConfigLoaded) {
+      await this._loadFailoverConfig();
     }
   }
 
@@ -341,6 +351,9 @@ export class AIEngine {
   async _callApiWithFailover(prompt, options = {}) {
     const { sessionId, requestType = 'analyze' } = options;
 
+    // 确保故障转移配置已加载
+    await this._ensureFailoverConfigLoaded();
+
     // 如果未启用故障转移，直接调用
     if (!this.failoverConfig || !this.failoverConfig.enabled) {
       const response = await this._callApi(prompt);
@@ -357,11 +370,12 @@ export class AIEngine {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         // 尝试调用当前供应商
+        const currentProvider = this.getCurrentProviderInfo();
+        console.log(`[AIEngine] 尝试调用供应商 (${attempt + 1}/${maxRetries}): ${currentProvider?.name || 'unknown'}`);
         const response = await this._callApi(prompt);
 
         // 如果成功且不是第一次尝试，说明发生了故障转移
         if (attempt > 0) {
-          const currentProvider = this.getCurrentProviderInfo();
           console.log(`[AIEngine] 故障转移成功，切换到供应商: ${currentProvider?.name || 'unknown'}`);
         }
 
@@ -371,10 +385,12 @@ export class AIEngine {
         return response?.text ?? response;
       } catch (error) {
         lastError = error;
-        console.error(`[AIEngine] API 调用失败 (尝试 ${attempt + 1}/${maxRetries}):`, error.message);
+        const currentProvider = this.getCurrentProviderInfo();
+        console.error(`[AIEngine] API 调用失败 (尝试 ${attempt + 1}/${maxRetries}), 供应商: ${currentProvider?.name || 'unknown'}, 错误:`, error.message);
 
         // 如果还有重试机会，尝试切换供应商
         if (attempt < maxRetries - 1) {
+          console.log('[AIEngine] 尝试切换到下一个供应商...');
           const switched = await this._switchToNextProvider();
 
           if (!switched) {
@@ -384,6 +400,7 @@ export class AIEngine {
 
           // 等待一段时间后重试
           if (retryDelay > 0) {
+            console.log(`[AIEngine] 等待 ${retryDelay}ms 后重试...`);
             await new Promise(resolve => setTimeout(resolve, retryDelay));
           }
         }
@@ -427,14 +444,22 @@ export class AIEngine {
       const data = providerService.list('claude');
       const providers = Object.values(data.providers).sort((a, b) => a.sortIndex - b.sortIndex);
 
+      console.log(`[AIEngine] 供应商列表: ${providers.map(p => p.name).join(', ')} (共 ${providers.length} 个)`);
+
       if (providers.length === 0) {
         console.error('[AIEngine] 没有可用的供应商');
+        return false;
+      }
+
+      if (providers.length === 1) {
+        console.error('[AIEngine] 只有一个供应商，无法切换');
         return false;
       }
 
       // 获取当前供应商
       const currentId = data.current;
       const currentIndex = providers.findIndex(p => p.id === currentId);
+      console.log(`[AIEngine] 当前供应商: ${providers[currentIndex]?.name || 'unknown'} (索引: ${currentIndex})`);
 
       // 找到下一个供应商（循环）
       let nextProvider = null;
@@ -457,7 +482,7 @@ export class AIEngine {
       }
 
       // 切换供应商
-      console.log(`[AIEngine] 尝试切换到供应商: ${nextProvider.name}`);
+      console.log(`[AIEngine] 尝试切换到供应商: ${nextProvider.name} (ID: ${nextProvider.id})`);
       const result = await providerService.switch('claude', nextProvider.id);
 
       if (result.success) {

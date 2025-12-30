@@ -714,19 +714,46 @@ async function tryAutoSwitchProvider(session, sessionData, status) {
     return null;
   }
 
-  console.log(`[自动修复] 建议切换到: ${nextProvider.name} (${nextProvider.id})`);
+  console.log(`[自动修复] 正在切换到: ${nextProvider.name} (${nextProvider.id})`);
 
-  return {
-    success: true,
-    newProvider: nextProvider.name,
-    newProviderId: nextProvider.id,
-    allProviders: sortedProviders.map(p => ({
-      id: p.id,
-      name: p.name,
-      isCurrent: p.id === currentProvider?.id
-    })),
-    message: `建议切换到 ${nextProvider.name}`
-  };
+  // 实际执行供应商切换
+  try {
+    const switchResult = providerService.switch(aiType, nextProvider.id);
+    if (switchResult) {
+      console.log(`[自动修复] 供应商切换成功: ${nextProvider.name}`);
+
+      // 重新加载 AIEngine 配置
+      aiEngine.reloadSettings();
+      console.log(`[自动修复] AIEngine 配置已重新加载`);
+
+      // 更新会话的供应商信息
+      if (aiType === 'claude') {
+        session.claudeProvider = { id: nextProvider.id, name: nextProvider.name };
+      } else if (aiType === 'codex') {
+        session.codexProvider = { id: nextProvider.id, name: nextProvider.name };
+      } else if (aiType === 'gemini') {
+        session.geminiProvider = { id: nextProvider.id, name: nextProvider.name };
+      }
+
+      return {
+        success: true,
+        newProvider: nextProvider.name,
+        newProviderId: nextProvider.id,
+        allProviders: sortedProviders.map(p => ({
+          id: p.id,
+          name: p.name,
+          isCurrent: p.id === nextProvider.id
+        })),
+        message: `已切换到 ${nextProvider.name}`
+      };
+    } else {
+      console.error(`[自动修复] 供应商切换失败: ${nextProvider.name}`);
+      return null;
+    }
+  } catch (err) {
+    console.error(`[自动修复] 供应商切换出错:`, err);
+    return null;
+  }
 }
 
 // 认证中间件
@@ -2121,8 +2148,16 @@ async function runBackgroundAutoAction() {
             if (switched) {
               historyLogger.log(session.id, {
                 type: 'system',
-                content: `检测到 API 不可用，建议切换供应商: ${switched.newProvider}\n供应商列表: ${switched.allProviders.map(p => p.name + (p.isCurrent ? '(当前)' : '')).join(' → ')}`
+                content: `检测到 API 不可用，已切换供应商: ${switched.newProvider}\n供应商列表: ${switched.allProviders.map(p => p.name + (p.isCurrent ? '(当前)' : '')).join(' → ')}`
               });
+
+              // 向终端发送"继续"命令恢复工作
+              // 根据 CLAUDE.md 规范：必须分两次发送，先文本后回车
+              console.log(`[自动修复] 会话 ${session.name}: 供应商切换成功，发送"继续"命令恢复工作`);
+              session.write('继续');
+              setTimeout(() => {
+                session.write('\r');
+              }, 200);
             }
           } else if (status.autoFixAction === 'run_fixer') {
             // thinking 错误：启动 ClaudeSessionFixer 修复程序
@@ -3019,8 +3054,10 @@ io.on('connection', (socket) => {
 
   // 附加到会话
   socket.on('session:attach', (sessionId) => {
+    console.log(`[session:attach] 收到附加请求: ${sessionId}`);
     const session = sessionManager.getSession(sessionId);
     if (!session) {
+      console.log(`[session:attach] 会话不存在: ${sessionId}`);
       socket.emit('error', { message: '会话不存在' });
       return;
     }
@@ -3045,6 +3082,7 @@ io.on('connection', (socket) => {
     const paneContent = session.capturePane();
     const fullContent = session.captureFullPane(); // 包含滚动历史
     const cursorPos = session.getCursorPosition();
+    console.log(`[session:attach] paneContent长度: ${paneContent?.length || 0}, fullContent长度: ${fullContent?.length || 0}`);
 
     // 如果面板有内容且历史为空，记录初始状态
     const existingHistory = historyLogger.getHistory(sessionId, 1);
