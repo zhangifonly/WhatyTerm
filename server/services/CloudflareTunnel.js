@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, statSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -118,11 +118,11 @@ class CloudflareTunnel {
     // Windows 上检查文件大小，确保不是损坏的文件
     const isWindows = process.platform === 'win32';
     try {
-      const stats = require('fs').statSync(cloudflaredPath);
+      const stats = statSync(cloudflaredPath);
       if (stats.size < 1000000) { // cloudflared 至少有几 MB
         console.error('[CloudflareTunnel] cloudflared 文件可能损坏，大小异常:', stats.size);
         // 删除损坏的文件，下次会重新下载
-        require('fs').unlinkSync(cloudflaredPath);
+        unlinkSync(cloudflaredPath);
         return null;
       }
     } catch (err) {
