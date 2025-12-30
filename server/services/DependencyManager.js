@@ -29,6 +29,9 @@ class DependencyManager {
     this.isMac = process.platform === 'darwin';
     this.arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
 
+    // 内置二进制文件目录（打包在应用中）
+    this.bundledBinDir = this._getBundledBinDir();
+
     // 确保目录存在
     if (!fs.existsSync(this.binDir)) {
       fs.mkdirSync(this.binDir, { recursive: true });
@@ -130,6 +133,54 @@ class DependencyManager {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * 获取内置二进制文件目录
+   * 根据平台返回对应的目录路径
+   */
+  _getBundledBinDir() {
+    // 获取应用根目录
+    let appRoot;
+
+    // 检测是否在 Electron 打包环境中
+    if (process.resourcesPath) {
+      // Electron 打包后，资源在 resources 目录
+      appRoot = path.join(process.resourcesPath, 'app');
+    } else {
+      // 开发环境，使用当前文件的相对路径
+      appRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
+    }
+
+    // 根据平台选择目录
+    let platformDir;
+    if (this.isWindows) {
+      platformDir = 'windows';
+    } else if (this.isMac) {
+      platformDir = 'darwin';
+    } else {
+      platformDir = 'linux';
+    }
+
+    return path.join(appRoot, 'server', 'bin', platformDir);
+  }
+
+  /**
+   * 获取内置二进制文件路径
+   * @param {string} name - 依赖名称
+   * @returns {string|null} 内置文件路径，不存在则返回 null
+   */
+  getBundledExecutablePath(name) {
+    const dep = this.dependencies[name];
+    if (!dep) return null;
+
+    const executable = dep.getExecutable();
+    const bundledPath = path.join(this.bundledBinDir, executable);
+
+    if (fs.existsSync(bundledPath)) {
+      return bundledPath;
+    }
+    return null;
   }
 
   /**
@@ -443,18 +494,22 @@ class DependencyManager {
   }
 
   /**
-   * 检查依赖是否已安装
+   * 检查依赖是否已安装（优先检查内置文件）
    */
   isInstalled(name) {
-    const execPath = this.getExecutablePath(name);
-    if (!execPath) return false;
-
-    // 检查本地安装
-    if (fs.existsSync(execPath)) {
+    // 1. 检查内置文件
+    const bundledPath = this.getBundledExecutablePath(name);
+    if (bundledPath) {
       return true;
     }
 
-    // 检查系统 PATH
+    // 2. 检查本地下载的文件
+    const execPath = this.getExecutablePath(name);
+    if (execPath && fs.existsSync(execPath)) {
+      return true;
+    }
+
+    // 3. 检查系统 PATH
     try {
       const cmd = this.isWindows ? 'where' : 'which';
       const executable = this.dependencies[name].getExecutable();
@@ -473,6 +528,16 @@ class DependencyManager {
    */
   validateBinary(name) {
     const execPath = this.getExecutablePath(name);
+    return this.validateBinaryAt(execPath, name);
+  }
+
+  /**
+   * 验证指定路径的二进制文件是否有效
+   * @param {string} execPath - 可执行文件路径
+   * @param {string} name - 依赖名称（用于确定最小文件大小）
+   * @returns {{valid: boolean, reason: string}} 验证结果
+   */
+  validateBinaryAt(execPath, name) {
     if (!execPath || !fs.existsSync(execPath)) {
       return { valid: false, reason: '文件不存在' };
     }
@@ -535,6 +600,7 @@ class DependencyManager {
 
   /**
    * 确保依赖可用（验证 + 自动修复）
+   * 优先使用内置二进制文件，避免网络下载
    * @param {string} name - 依赖名称
    * @param {Function} progressCallback - 进度回调
    * @returns {Promise<boolean>} 是否可用
@@ -546,6 +612,18 @@ class DependencyManager {
       return false;
     }
 
+    // 1. 优先检查内置二进制文件
+    const bundledPath = this.getBundledExecutablePath(name);
+    if (bundledPath) {
+      const validation = this.validateBinaryAt(bundledPath, name);
+      if (validation.valid) {
+        console.log(`[DependencyManager] ${name} 使用内置文件: ${bundledPath}`);
+        return true;
+      }
+      console.warn(`[DependencyManager] 内置 ${name} 验证失败: ${validation.reason}`);
+    }
+
+    // 2. 检查本地下载的文件
     const execPath = this.getExecutablePath(name);
 
     // 如果文件存在，先验证
@@ -567,7 +645,7 @@ class DependencyManager {
       }
     }
 
-    // 下载安装
+    // 3. 下载安装
     try {
       await this.install(name, progressCallback);
 
@@ -587,15 +665,23 @@ class DependencyManager {
   }
 
   /**
-   * 获取可执行文件（优先本地，其次系统）
+   * 获取可执行文件（优先内置，其次本地下载，最后系统）
    */
   getExecutable(name) {
+    // 1. 优先使用内置的二进制文件
+    const bundledPath = this.getBundledExecutablePath(name);
+    if (bundledPath) {
+      console.log(`[DependencyManager] 使用内置 ${name}: ${bundledPath}`);
+      return bundledPath;
+    }
+
+    // 2. 其次使用本地下载的文件
     const localPath = this.getExecutablePath(name);
     if (localPath && fs.existsSync(localPath)) {
       return localPath;
     }
 
-    // 返回系统命令名
+    // 3. 返回系统命令名
     return this.dependencies[name]?.getExecutable() || name;
   }
 
