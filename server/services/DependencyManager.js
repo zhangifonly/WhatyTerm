@@ -185,6 +185,127 @@ class DependencyManager {
   }
 
   /**
+   * 验证二进制文件是否有效
+   * 检查文件大小、是否为 HTML、是否能执行等
+   * @param {string} name - 依赖名称
+   * @returns {{valid: boolean, reason: string}} 验证结果
+   */
+  validateBinary(name) {
+    const execPath = this.getExecutablePath(name);
+    if (!execPath || !fs.existsSync(execPath)) {
+      return { valid: false, reason: '文件不存在' };
+    }
+
+    try {
+      const stats = fs.statSync(execPath);
+
+      // 检查文件大小（cloudflared 和 frpc 都至少有几 MB）
+      const minSize = name === 'cloudflared' ? 10 * 1024 * 1024 : 5 * 1024 * 1024; // 10MB / 5MB
+      if (stats.size < minSize) {
+        return { valid: false, reason: `文件过小 (${(stats.size / 1024 / 1024).toFixed(2)} MB)，可能损坏` };
+      }
+
+      // 读取文件头部，检查是否为 HTML 或文本文件
+      const fd = fs.openSync(execPath, 'r');
+      const buffer = Buffer.alloc(256);
+      fs.readSync(fd, buffer, 0, 256, 0);
+      fs.closeSync(fd);
+
+      const header = buffer.toString('utf-8', 0, 100).toLowerCase();
+      if (header.includes('<!doctype') || header.includes('<html') || header.includes('not found')) {
+        return { valid: false, reason: '文件是 HTML 页面，非二进制文件' };
+      }
+
+      // Windows: 检查 PE 文件头 (MZ)
+      if (this.isWindows) {
+        if (buffer[0] !== 0x4D || buffer[1] !== 0x5A) { // 'MZ'
+          return { valid: false, reason: '无效的 Windows 可执行文件（缺少 MZ 头）' };
+        }
+      }
+
+      // macOS/Linux: 检查 ELF 或 Mach-O 文件头
+      if (!this.isWindows) {
+        const isELF = buffer[0] === 0x7F && buffer[1] === 0x45 && buffer[2] === 0x4C && buffer[3] === 0x46;
+        const isMachO = (buffer[0] === 0xFE && buffer[1] === 0xED && buffer[2] === 0xFA) ||
+                        (buffer[0] === 0xCF && buffer[1] === 0xFA && buffer[2] === 0xED);
+        if (!isELF && !isMachO) {
+          return { valid: false, reason: '无效的可执行文件格式' };
+        }
+      }
+
+      // 尝试执行 --version 验证
+      try {
+        execSync(`"${execPath}" --version`, { stdio: 'pipe', timeout: 5000 });
+      } catch (err) {
+        // 某些程序可能没有 --version，忽略这个错误
+        // 但如果是 "cannot execute" 类错误，则文件无效
+        const errMsg = err.message || '';
+        if (errMsg.includes('cannot execute') || errMsg.includes('not a valid') ||
+            errMsg.includes('无法运行') || errMsg.includes('不是有效的')) {
+          return { valid: false, reason: `无法执行: ${errMsg.slice(0, 100)}` };
+        }
+      }
+
+      return { valid: true, reason: '验证通过' };
+    } catch (err) {
+      return { valid: false, reason: `验证失败: ${err.message}` };
+    }
+  }
+
+  /**
+   * 确保依赖可用（验证 + 自动修复）
+   * @param {string} name - 依赖名称
+   * @param {Function} progressCallback - 进度回调
+   * @returns {Promise<boolean>} 是否可用
+   */
+  async ensureValid(name, progressCallback = null) {
+    const dep = this.dependencies[name];
+    if (!dep) {
+      console.error(`[DependencyManager] 未知的依赖: ${name}`);
+      return false;
+    }
+
+    const execPath = this.getExecutablePath(name);
+
+    // 如果文件存在，先验证
+    if (fs.existsSync(execPath)) {
+      const validation = this.validateBinary(name);
+      if (validation.valid) {
+        console.log(`[DependencyManager] ${name} 验证通过`);
+        return true;
+      }
+
+      // 验证失败，删除损坏的文件
+      console.warn(`[DependencyManager] ${name} 验证失败: ${validation.reason}，正在重新下载...`);
+      if (progressCallback) progressCallback(`${name} 文件损坏，正在修复...`);
+
+      try {
+        fs.unlinkSync(execPath);
+      } catch (err) {
+        console.error(`[DependencyManager] 删除损坏文件失败: ${err.message}`);
+      }
+    }
+
+    // 下载安装
+    try {
+      await this.install(name, progressCallback);
+
+      // 再次验证
+      const validation = this.validateBinary(name);
+      if (!validation.valid) {
+        console.error(`[DependencyManager] ${name} 安装后验证仍失败: ${validation.reason}`);
+        return false;
+      }
+
+      console.log(`[DependencyManager] ${name} 安装并验证成功`);
+      return true;
+    } catch (err) {
+      console.error(`[DependencyManager] ${name} 安装失败: ${err.message}`);
+      return false;
+    }
+  }
+
+  /**
    * 获取可执行文件（优先本地，其次系统）
    */
   getExecutable(name) {
