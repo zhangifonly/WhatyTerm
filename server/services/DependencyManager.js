@@ -63,6 +63,8 @@ class DependencyManager {
         npmPackage: '@anthropic-ai/claude-code',
         command: 'claude',
         checkVersion: () => this._getCliVersion('claude', '--version'),
+        // Claude Code 支持原生安装器
+        nativeInstaller: 'curl -fsSL https://claude.ai/install.sh | bash',
       },
       codex: {
         name: 'Codex CLI',
@@ -79,6 +81,254 @@ class DependencyManager {
         checkVersion: () => this._getCliVersion('gemini', '--version'),
       }
     };
+
+    // 检测 WSL 环境
+    this.isWSL = this._detectWSL();
+  }
+
+  /**
+   * 检测是否在 WSL 环境中运行
+   */
+  _detectWSL() {
+    if (this.isWindows) return false;
+
+    try {
+      // 检查 /proc/version 是否包含 Microsoft 或 WSL
+      const procVersion = fs.readFileSync('/proc/version', 'utf-8').toLowerCase();
+      return procVersion.includes('microsoft') || procVersion.includes('wsl');
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 检测 WSL 环境是否可用（Windows 上）
+   */
+  isWSLAvailable() {
+    if (!this.isWindows) return false;
+
+    try {
+      execSync('wsl --status', { stdio: 'pipe', timeout: 5000 });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 在 WSL 中执行命令
+   */
+  _execInWSL(command, options = {}) {
+    const wslCommand = `wsl bash -c "${command.replace(/"/g, '\\"')}"`;
+    return execSync(wslCommand, {
+      encoding: 'utf-8',
+      stdio: 'pipe',
+      timeout: 60000,
+      ...options
+    });
+  }
+
+  /**
+   * 检查 WSL 中是否安装了 Node.js
+   */
+  checkWSLNodeInstalled() {
+    if (!this.isWindows) return false;
+
+    try {
+      const output = this._execInWSL('node --version');
+      const version = output.trim();
+      console.log(`[DependencyManager] WSL Node.js 版本: ${version}`);
+      return version.startsWith('v');
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 检查 WSL 中是否安装了 nvm
+   */
+  checkWSLNvmInstalled() {
+    if (!this.isWindows) return false;
+
+    try {
+      this._execInWSL('source ~/.nvm/nvm.sh && nvm --version');
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 在 WSL 中安装 nvm 和 Node.js
+   */
+  async installWSLNodeEnvironment(progressCallback = null) {
+    if (!this.isWindows) {
+      throw new Error('此方法仅适用于 Windows WSL 环境');
+    }
+
+    try {
+      // 检查 nvm
+      if (!this.checkWSLNvmInstalled()) {
+        if (progressCallback) progressCallback('正在安装 nvm...');
+        console.log('[DependencyManager] 在 WSL 中安装 nvm...');
+
+        this._execInWSL('curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash', {
+          timeout: 120000
+        });
+      }
+
+      // 检查 Node.js
+      if (!this.checkWSLNodeInstalled()) {
+        if (progressCallback) progressCallback('正在安装 Node.js LTS...');
+        console.log('[DependencyManager] 在 WSL 中安装 Node.js LTS...');
+
+        this._execInWSL('source ~/.nvm/nvm.sh && nvm install --lts && nvm alias default node', {
+          timeout: 300000 // 5 分钟超时
+        });
+      }
+
+      console.log('[DependencyManager] WSL Node.js 环境安装完成');
+      return true;
+    } catch (err) {
+      console.error('[DependencyManager] WSL Node.js 环境安装失败:', err.message);
+      return false;
+    }
+  }
+
+  /**
+   * 检查 CLI 工具是否已安装（支持 WSL）
+   */
+  isCliInstalled(name) {
+    const cli = this.cliTools[name];
+    if (!cli) return false;
+
+    // 本地检查
+    try {
+      execSync(`${cli.command} --version`, { stdio: 'pipe', timeout: 10000 });
+      return true;
+    } catch {}
+
+    // Windows 上检查 WSL
+    if (this.isWindows && this.isWSLAvailable()) {
+      try {
+        this._execInWSL(`${cli.command} --version`);
+        return true;
+      } catch {}
+    }
+
+    return false;
+  }
+
+  /**
+   * 在 WSL 中安装 CLI 工具
+   */
+  async installCliInWSL(name, progressCallback = null) {
+    const cli = this.cliTools[name];
+    if (!cli) {
+      throw new Error(`未知的 CLI 工具: ${name}`);
+    }
+
+    if (!this.isWindows) {
+      throw new Error('此方法仅适用于 Windows WSL 环境');
+    }
+
+    if (!this.isWSLAvailable()) {
+      throw new Error('WSL 未安装或不可用');
+    }
+
+    try {
+      // 确保 Node.js 环境
+      if (!this.checkWSLNodeInstalled()) {
+        if (progressCallback) progressCallback('正在准备 Node.js 环境...');
+        await this.installWSLNodeEnvironment(progressCallback);
+      }
+
+      // 配置 npm 全局目录（避免权限问题）
+      if (progressCallback) progressCallback('正在配置 npm...');
+      try {
+        this._execInWSL('mkdir -p ~/.npm-global && npm config set prefix ~/.npm-global');
+      } catch {}
+
+      // 安装 CLI 工具
+      if (progressCallback) progressCallback(`正在安装 ${cli.name}...`);
+      console.log(`[DependencyManager] 在 WSL 中安装 ${cli.name}...`);
+
+      // Claude Code 优先使用原生安装器
+      if (name === 'claude' && cli.nativeInstaller) {
+        try {
+          this._execInWSL(cli.nativeInstaller, { timeout: 300000 });
+          console.log(`[DependencyManager] ${cli.name} 原生安装成功`);
+          return true;
+        } catch (err) {
+          console.log(`[DependencyManager] 原生安装失败，尝试 npm 安装: ${err.message}`);
+        }
+      }
+
+      // npm 安装
+      const npmInstallCmd = `source ~/.nvm/nvm.sh 2>/dev/null; export PATH=~/.npm-global/bin:$PATH; npm install -g ${cli.npmPackage}`;
+      this._execInWSL(npmInstallCmd, { timeout: 300000 });
+
+      console.log(`[DependencyManager] ${cli.name} 安装成功`);
+      return true;
+    } catch (err) {
+      console.error(`[DependencyManager] ${cli.name} 安装失败:`, err.message);
+      throw err;
+    }
+  }
+
+  /**
+   * 获取 CLI 工具安装状态（包括 WSL）
+   */
+  getCliStatusWithWSL(name) {
+    const cli = this.cliTools[name];
+    if (!cli) return null;
+
+    const status = {
+      name: cli.name,
+      command: cli.command,
+      npmPackage: cli.npmPackage,
+      installed: false,
+      version: null,
+      location: null, // 'local' | 'wsl' | null
+      wslAvailable: this.isWindows && this.isWSLAvailable(),
+    };
+
+    // 本地检查
+    try {
+      const version = cli.checkVersion();
+      if (version) {
+        status.installed = true;
+        status.version = version;
+        status.location = 'local';
+        return status;
+      }
+    } catch {}
+
+    // WSL 检查
+    if (this.isWindows && this.isWSLAvailable()) {
+      try {
+        const output = this._execInWSL(`${cli.command} --version`);
+        const versionMatch = output.match(/(\d+\.\d+\.\d+)/);
+        if (versionMatch) {
+          status.installed = true;
+          status.version = versionMatch[1];
+          status.location = 'wsl';
+        }
+      } catch {}
+    }
+
+    return status;
+  }
+
+  /**
+   * 获取所有 CLI 工具状态
+   */
+  getAllCliStatusWithWSL() {
+    const result = {};
+    for (const name of Object.keys(this.cliTools)) {
+      result[name] = this.getCliStatusWithWSL(name);
+    }
+    return result;
   }
 
   /**
