@@ -15,6 +15,7 @@ import { execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import http from 'http';
 import https from 'https';
 import { createWriteStream, createReadStream } from 'fs';
 import { pipeline } from 'stream/promises';
@@ -125,14 +126,29 @@ class DependencyManager {
   _getCloudflaredUrl() {
     let filename;
 
+    // 检测 Windows 上的实际架构
+    // process.arch 在 Electron 中可能返回错误的值
+    let arch = this.arch;
     if (this.isWindows) {
-      filename = this.arch === 'arm64' ? 'cloudflared-windows-arm64.exe' : 'cloudflared-windows-amd64.exe';
+      // Windows 上使用环境变量检测
+      const procArch = process.env.PROCESSOR_ARCHITECTURE;
+      const procArch64 = process.env.PROCESSOR_ARCHITEW6432;
+      if (procArch === 'ARM64' || procArch64 === 'ARM64') {
+        arch = 'arm64';
+      } else {
+        arch = 'amd64';
+      }
+    }
+
+    if (this.isWindows) {
+      filename = arch === 'arm64' ? 'cloudflared-windows-arm64.exe' : 'cloudflared-windows-amd64.exe';
     } else if (this.isMac) {
       filename = this.arch === 'arm64' ? 'cloudflared-darwin-arm64.tgz' : 'cloudflared-darwin-amd64.tgz';
     } else {
       filename = this.arch === 'arm64' ? 'cloudflared-linux-arm64' : 'cloudflared-linux-amd64';
     }
 
+    console.log(`[DependencyManager] cloudflared 下载配置: platform=${process.platform}, arch=${arch}, file=${filename}`);
     return `https://github.com/cloudflare/cloudflared/releases/latest/download/${filename}`;
   }
 
@@ -189,14 +205,29 @@ class DependencyManager {
       console.log(`[DependencyManager] 下载: ${url}`);
 
       const file = createWriteStream(destPath);
+      let redirectCount = 0;
+      const maxRedirects = 10;
 
       const request = (url) => {
-        https.get(url, {
-          headers: { 'User-Agent': 'WhatyTerm/1.0' }
+        // 自动处理 http/https
+        const httpModule = url.startsWith('https') ? https : http;
+
+        httpModule.get(url, {
+          headers: {
+            'User-Agent': 'WhatyTerm/1.0',
+            'Accept': 'application/octet-stream'
+          }
         }, (response) => {
           // 处理重定向
-          if (response.statusCode === 301 || response.statusCode === 302) {
-            request(response.headers.location);
+          if (response.statusCode === 301 || response.statusCode === 302 || response.statusCode === 307) {
+            redirectCount++;
+            if (redirectCount > maxRedirects) {
+              reject(new Error('重定向次数过多'));
+              return;
+            }
+            const redirectUrl = response.headers.location;
+            console.log(`[DependencyManager] 重定向到: ${redirectUrl}`);
+            request(redirectUrl);
             return;
           }
 
@@ -204,6 +235,16 @@ class DependencyManager {
             reject(new Error(`下载失败: HTTP ${response.statusCode}`));
             return;
           }
+
+          // 检查 Content-Type，确保不是 HTML
+          const contentType = response.headers['content-type'] || '';
+          if (contentType.includes('text/html')) {
+            reject(new Error('下载失败: 服务器返回 HTML 页面而非二进制文件'));
+            return;
+          }
+
+          const contentLength = response.headers['content-length'];
+          console.log(`[DependencyManager] 开始下载，大小: ${contentLength ? (parseInt(contentLength) / 1024 / 1024).toFixed(2) + ' MB' : '未知'}`);
 
           response.pipe(file);
           file.on('finish', () => {
