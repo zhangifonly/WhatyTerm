@@ -86,6 +86,7 @@ win:
     - target: nsis
       arch:
         - x64
+  signAndEditExecutable: false
 
 nsis:
   oneClick: false
@@ -96,6 +97,7 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: WhatyTerm
   include: build/installer.nsh
+  guid: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 
 linux:
   icon: build/icons

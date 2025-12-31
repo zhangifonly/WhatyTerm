@@ -292,15 +292,33 @@ subdomain = "${this.subdomain}"
 
     console.log(`[FrpTunnel] 启动 FRP 客户端 (${server.name}: ${server.addr}:${server.frpPort})...`);
 
-    return new Promise((resolve) => {
+    return new Promise(async (resolve) => {
       const frpcPath = this.getFrpcExecutable();
       console.log(`[FrpTunnel] 使用 frpc: ${frpcPath}`);
 
-      const isWindows = process.platform === 'win32';
-      this.frpProcess = spawn(frpcPath, ['-c', this.configPath], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        shell: isWindows  // Windows 上需要使用 shell
-      });
+      try {
+        this.frpProcess = spawn(frpcPath, ['-c', this.configPath], {
+          stdio: ['ignore', 'pipe', 'pipe']
+          // 不使用 shell，直接执行可执行文件，避免路径空格问题
+        });
+      } catch (err) {
+        // 捕获 spawn 同步异常（如 EPERM）
+        if (err.code === 'EPERM') {
+          console.log('[FrpTunnel] 检测到权限错误，尝试下载到用户目录...');
+          try {
+            await dependencyManager.install('frpc', null, true); // force=true 强制下载
+            console.log('[FrpTunnel] 下载完成，重新启动...');
+            const result = await this.start(server);
+            resolve(result);
+            return;
+          } catch (downloadErr) {
+            console.error('[FrpTunnel] 下载失败:', downloadErr.message);
+          }
+        }
+        console.error('[FrpTunnel] FRP 启动失败:', err.message);
+        resolve(null);
+        return;
+      }
 
       let connected = false;
 
@@ -329,8 +347,24 @@ subdomain = "${this.subdomain}"
       this.frpProcess.stdout.on('data', (data) => handleOutput(data.toString()));
       this.frpProcess.stderr.on('data', (data) => handleOutput(data.toString()));
 
-      this.frpProcess.on('error', (err) => {
+      this.frpProcess.on('error', async (err) => {
         console.error('[FrpTunnel] FRP 启动失败:', err.message);
+
+        // 如果是权限错误，尝试下载到用户目录并重试
+        if (err.code === 'EPERM') {
+          console.log('[FrpTunnel] 检测到权限错误，尝试下载到用户目录...');
+          try {
+            await dependencyManager.install('frpc', null, true); // force=true 强制下载
+            console.log('[FrpTunnel] 下载完成，重新启动...');
+            // 重新启动（递归调用）
+            const result = await this.start(server);
+            resolve(result);
+            return;
+          } catch (downloadErr) {
+            console.error('[FrpTunnel] 下载失败:', downloadErr.message);
+          }
+        }
+
         resolve(null);
       });
 

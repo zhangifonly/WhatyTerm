@@ -1,6 +1,6 @@
 {
   "name": "whatyterm",
-  "version": "1.0.34",
+  "version": "1.0.41",
   "description": "网梯终端 - AI 智能终端管理工具",
   "author": {
     "name": "WhatyTerm",
@@ -33,7 +33,7 @@
     "better-sqlite3": "^12.5.0",
     "express": "^4.21.1",
     "express-session": "^1.18.2",
-    "node-pty": "^1.0.0",
+    "node-pty": "^1.1.0",
     "qrcode": "^1.5.4",
     "socket.io": "^4.8.1",
     "undici": "^7.16.0",
