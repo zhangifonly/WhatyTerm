@@ -38,16 +38,20 @@ class DependencyManager {
     }
 
     // 二进制依赖配置（直接下载）
+    // Windows 上只使用 cloudflared（有签名，不会被 Windows Defender 阻止）
+    // 其他平台支持 frpc 和 cloudflared
     this.dependencies = {
-      frpc: {
-        name: 'frpc',
-        description: 'FRP 内网穿透客户端',
-        version: '0.65.0',
-        getUrl: () => this._getFrpcUrl(),
-        getExecutable: () => this.isWindows ? 'frpc.exe' : 'frpc',
-        extract: 'tar.gz', // Windows 也是 tar.gz
-        stripComponents: 1, // 解压时去掉顶层目录
-      },
+      ...(this.isWindows ? {} : {
+        frpc: {
+          name: 'frpc',
+          description: 'FRP 内网穿透客户端',
+          version: '0.65.0',
+          getUrl: () => this._getFrpcUrl(),
+          getExecutable: () => this.isWindows ? 'frpc.exe' : 'frpc',
+          extract: 'tar.gz', // Windows 也是 tar.gz
+          stripComponents: 1, // 解压时去掉顶层目录
+        }
+      }),
       cloudflared: {
         name: 'cloudflared',
         description: 'Cloudflare Tunnel 客户端',
