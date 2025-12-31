@@ -3944,33 +3944,41 @@ server.listen(PORT, HOST, async () => {
   });
   scheduleManager.startScheduler();
 
-  // 启动隧道服务（优先 FRP 测速选择，回退到 Cloudflare）
+  // 启动隧道服务（根据平台选择策略）
   try {
     let tunnelUrl = null;
 
-    // 优先使用 FRP：测试三台服务器，选最快可用的
-    frpTunnel.init(io, PORT);
-    const frpInstalled = await frpTunnel.checkInstalled();
-    if (frpInstalled) {
-      tunnelUrl = await frpTunnel.start();
-    }
-
-    // 如果 FRP 不可用，使用 Cloudflare Tunnel 作为备用
-    if (!tunnelUrl) {
-      console.log('[Server] FRP 隧道不可用，使用 Cloudflare Tunnel 备用');
+    // 根据平台选择隧道策略
+    if (process.platform === 'win32') {
+      // Windows 上只使用 Cloudflare Tunnel（frpc.exe 未签名，会被 Windows Defender 阻止）
+      console.log('[Server] Windows 平台，使用 Cloudflare Tunnel');
       cloudflareTunnel.init(io, PORT);
       tunnelUrl = await cloudflareTunnel.start();
+    } else {
+      // 其他平台优先尝试 FRP：测试三台服务器，选最快可用的
+      frpTunnel.init(io, PORT);
+      const frpInstalled = await frpTunnel.checkInstalled();
+      if (frpInstalled) {
+        tunnelUrl = await frpTunnel.start();
+      }
+
+      // 如果 FRP 不可用，使用 Cloudflare Tunnel 作为备用
+      if (!tunnelUrl) {
+        console.log('[Server] FRP 隧道不可用，使用 Cloudflare Tunnel 备用');
+        cloudflareTunnel.init(io, PORT);
+        tunnelUrl = await cloudflareTunnel.start();
+      }
+
+      // 启动 FRP 服务器定期健康检查（每60秒）
+      frpTunnel.startHealthCheck(60000);
+
+      // 启动隧道 URL 可用性检测（每30秒）
+      frpTunnel.startTunnelCheck(30000);
     }
 
     if (tunnelUrl) {
       console.log(`[Server] 外部访问地址: ${tunnelUrl}`);
     }
-
-    // 启动 FRP 服务器定期健康检查（每60秒）
-    frpTunnel.startHealthCheck(60000);
-
-    // 启动隧道 URL 可用性检测（每30秒）
-    frpTunnel.startTunnelCheck(30000);
   } catch (err) {
     console.error('[Server] 启动隧道服务失败:', err);
   }
