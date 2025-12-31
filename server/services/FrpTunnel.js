@@ -48,6 +48,10 @@ const FRP_SERVERS = [
  */
 class FrpTunnel {
   constructor() {
+    // Windows 上不支持 FRP（frpc.exe 未签名，会被 Windows Defender 阻止）
+    // 请使用 Cloudflare Tunnel（cloudflared 有官方签名）
+    this.isWindows = process.platform === 'win32';
+
     this.frpProcess = null;
     this.tunnelUrl = '';
     this.io = null;
@@ -109,6 +113,11 @@ class FrpTunnel {
    * 检查 frpc 是否已安装（优先使用 DependencyManager）
    */
   async checkInstalled() {
+    // Windows 上不支持 FRP
+    if (this.isWindows) {
+      return false;
+    }
+
     // 优先检查 DependencyManager 管理的版本
     if (dependencyManager.isInstalled('frpc')) {
       return true;
@@ -265,6 +274,20 @@ subdomain = "${this.subdomain}"
    * @param {Function} progressCallback - 安装进度回调（可选）
    */
   async start(progressCallback = null) {
+    // Windows 上不支持 FRP
+    if (this.isWindows) {
+      const error = 'FRP 隧道在 Windows 上不支持（frpc.exe 未签名，会被 Windows Defender 阻止）。请使用 Cloudflare 隧道。';
+      console.log(`[FrpTunnel] ${error}`);
+      if (this.io) {
+        this.io.emit('tunnel:error', {
+          type: 'frp',
+          error,
+          suggestion: '请切换到 Cloudflare 隧道'
+        });
+      }
+      return null;
+    }
+
     if (!this.enabled) {
       console.log('[FrpTunnel] 服务已禁用');
       return null;
