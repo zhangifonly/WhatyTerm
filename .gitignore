@@ -7,6 +7,7 @@ server/db/*.db
 release/
 *.dmg
 *.exe
+!server/bin/windows/*.exe
 *.zip
 *.AppImage
 *.deb

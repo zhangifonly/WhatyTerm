@@ -42,7 +42,7 @@ class DependencyManager {
       frpc: {
         name: 'frpc',
         description: 'FRP 内网穿透客户端',
-        version: '0.52.3',
+        version: '0.65.0',
         getUrl: () => this._getFrpcUrl(),
         getExecutable: () => this.isWindows ? 'frpc.exe' : 'frpc',
         extract: 'tar.gz', // Windows 也是 tar.gz
@@ -145,8 +145,8 @@ class DependencyManager {
 
     // 检测是否在 Electron 打包环境中
     if (process.resourcesPath) {
-      // Electron 打包后，资源在 resources 目录
-      appRoot = path.join(process.resourcesPath, 'app');
+      // Electron 打包后，server 目录在 resources 目录下（extraResources）
+      appRoot = process.resourcesPath;
     } else {
       // 开发环境，使用当前文件的相对路径
       appRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
@@ -177,9 +177,13 @@ class DependencyManager {
     const executable = dep.getExecutable();
     const bundledPath = path.join(this.bundledBinDir, executable);
 
+    console.log(`[DependencyManager] 检查内置 ${name}: ${bundledPath}`);
+
     if (fs.existsSync(bundledPath)) {
+      console.log(`[DependencyManager] 找到内置 ${name}: ${bundledPath}`);
       return bundledPath;
     }
+    console.log(`[DependencyManager] 内置 ${name} 不存在: ${bundledPath}`);
     return null;
   }
 
@@ -436,20 +440,23 @@ class DependencyManager {
    */
   _getFrpcUrl() {
     const version = this.dependencies.frpc.version;
-    let platform, arch;
+    let platform, arch, ext;
 
     if (this.isWindows) {
       platform = 'windows';
       arch = this.arch === 'arm64' ? 'arm64' : 'amd64';
+      ext = 'zip'; // Windows 使用 zip 格式
     } else if (this.isMac) {
       platform = 'darwin';
       arch = this.arch === 'arm64' ? 'arm64' : 'amd64';
+      ext = 'tar.gz';
     } else {
       platform = 'linux';
       arch = this.arch === 'arm64' ? 'arm64' : 'amd64';
+      ext = 'tar.gz';
     }
 
-    return `https://github.com/fatedier/frp/releases/download/v${version}/frp_${version}_${platform}_${arch}.tar.gz`;
+    return `https://github.com/fatedier/frp/releases/download/v${version}/frp_${version}_${platform}_${arch}.${ext}`;
   }
 
   /**
@@ -617,10 +624,23 @@ class DependencyManager {
     if (bundledPath) {
       const validation = this.validateBinaryAt(bundledPath, name);
       if (validation.valid) {
-        console.log(`[DependencyManager] ${name} 使用内置文件: ${bundledPath}`);
-        return true;
+        // 尝试实际执行，检测权限问题
+        try {
+          execSync(`"${bundledPath}" --version`, { stdio: 'pipe', timeout: 5000 });
+          console.log(`[DependencyManager] ${name} 使用内置文件: ${bundledPath}`);
+          return true;
+        } catch (err) {
+          if (err.code === 'EPERM' || err.message.includes('EPERM')) {
+            console.warn(`[DependencyManager] 内置 ${name} 权限被拒绝，尝试下载到用户目录`);
+            // 继续到下载逻辑
+          } else {
+            console.log(`[DependencyManager] ${name} 使用内置文件: ${bundledPath}`);
+            return true;
+          }
+        }
+      } else {
+        console.warn(`[DependencyManager] 内置 ${name} 验证失败: ${validation.reason}`);
       }
-      console.warn(`[DependencyManager] 内置 ${name} 验证失败: ${validation.reason}`);
     }
 
     // 2. 检查本地下载的文件
@@ -847,14 +867,17 @@ class DependencyManager {
 
   /**
    * 安装依赖
+   * @param {string} name - 依赖名称
+   * @param {Function} progressCallback - 进度回调
+   * @param {boolean} force - 强制下载，跳过已安装检查
    */
-  async install(name, progressCallback = null) {
+  async install(name, progressCallback = null, force = false) {
     const dep = this.dependencies[name];
     if (!dep) {
       throw new Error(`未知的依赖: ${name}`);
     }
 
-    if (this.isInstalled(name)) {
+    if (!force && this.isInstalled(name)) {
       console.log(`[DependencyManager] ${name} 已安装`);
       return true;
     }

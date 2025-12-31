@@ -105,12 +105,30 @@ class CloudflareTunnel {
     const isWindows = process.platform === 'win32';
     console.log(`[CloudflareTunnel] 启动 Quick Tunnel... (使用: ${cloudflaredPath})`);
 
-    return new Promise((resolve) => {
-      // Windows 上使用 shell: true 来正确执行 .exe 文件
-      this.process = spawn(cloudflaredPath, ['tunnel', '--url', `http://localhost:${this.localPort}`], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        shell: isWindows
-      });
+    return new Promise(async (resolve) => {
+      try {
+        // 直接执行可执行文件，不使用 shell，避免路径空格问题
+        this.process = spawn(cloudflaredPath, ['tunnel', '--url', `http://localhost:${this.localPort}`], {
+          stdio: ['ignore', 'pipe', 'pipe']
+        });
+      } catch (err) {
+        // 捕获 spawn 同步异常（如 EPERM）
+        if (err.code === 'EPERM') {
+          console.log('[CloudflareTunnel] 检测到权限错误，尝试下载到用户目录...');
+          try {
+            await dependencyManager.install('cloudflared', null, true); // force=true 强制下载
+            console.log('[CloudflareTunnel] 下载完成，重新启动...');
+            const result = await this.start();
+            resolve(result);
+            return;
+          } catch (downloadErr) {
+            console.error('[CloudflareTunnel] 下载失败:', downloadErr.message);
+          }
+        }
+        console.error('[CloudflareTunnel] 启动失败:', err.message);
+        resolve(null);
+        return;
+      }
 
       let urlFound = false;
       const urlRegex = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/;
@@ -140,8 +158,24 @@ class CloudflareTunnel {
         }
       });
 
-      this.process.on('error', (err) => {
+      this.process.on('error', async (err) => {
         console.error('[CloudflareTunnel] 启动失败:', err.message);
+
+        // 如果是权限错误，尝试下载到用户目录并重试
+        if (err.code === 'EPERM') {
+          console.log('[CloudflareTunnel] 检测到权限错误，尝试下载到用户目录...');
+          try {
+            await dependencyManager.install('cloudflared', null, true); // force=true 强制下载
+            console.log('[CloudflareTunnel] 下载完成，重新启动...');
+            // 重新启动（递归调用）
+            const result = await this.start();
+            resolve(result);
+            return;
+          } catch (downloadErr) {
+            console.error('[CloudflareTunnel] 下载失败:', downloadErr.message);
+          }
+        }
+
         resolve(null);
       });
 
