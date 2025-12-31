@@ -560,11 +560,23 @@ function startServer() {
   });
 
   serverProcess.stdout.on('data', (data) => {
-    writeLog(`[Server] ${data.toString().trim()}`);
+    const text = data.toString().trim();
+    // 如果输出已经有日志前缀（如 [Server], [FrpTunnel] 等），就不再添加
+    if (text.startsWith('[')) {
+      writeLog(text);
+    } else {
+      writeLog(`[Server] ${text}`);
+    }
   });
 
   serverProcess.stderr.on('data', (data) => {
-    writeLog(`[Server Error] ${data.toString().trim()}`);
+    const text = data.toString().trim();
+    // 如果输出已经有日志前缀，就不再添加
+    if (text.startsWith('[')) {
+      writeLog(text);
+    } else {
+      writeLog(`[Server Error] ${text}`);
+    }
   });
 
   serverProcess.on('close', (code) => {
