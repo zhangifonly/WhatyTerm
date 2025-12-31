@@ -866,6 +866,64 @@ class DependencyManager {
   }
 
   /**
+   * 解压 zip 文件
+   */
+  async _extractZip(archivePath, destDir, stripComponents = 0) {
+    return new Promise((resolve, reject) => {
+      try {
+        // Windows 10+ tar 命令支持 zip 格式
+        if (stripComponents > 0) {
+          // 先解压到临时目录
+          const tempDir = path.join(destDir, '_temp_extract');
+          if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir, { recursive: true });
+          }
+
+          // 解压
+          const cmd = `tar -xf "${archivePath}" -C "${tempDir}"`;
+          execSync(cmd, { stdio: 'pipe' });
+
+          // 找到顶层目录
+          const items = fs.readdirSync(tempDir);
+          if (items.length === 0) {
+            throw new Error('解压后的目录为空');
+          }
+
+          // 如果只有一个顶层目录，进入它
+          let sourceDir = tempDir;
+          for (let i = 0; i < stripComponents && items.length === 1; i++) {
+            const item = items[0];
+            const itemPath = path.join(sourceDir, item);
+            if (fs.statSync(itemPath).isDirectory()) {
+              sourceDir = itemPath;
+              items.length = 0;
+              items.push(...fs.readdirSync(sourceDir));
+            }
+          }
+
+          // 移动文件到目标目录
+          for (const item of fs.readdirSync(sourceDir)) {
+            const srcPath = path.join(sourceDir, item);
+            const destPath = path.join(destDir, item);
+            fs.renameSync(srcPath, destPath);
+          }
+
+          // 清理临时目录
+          fs.rmSync(tempDir, { recursive: true, force: true });
+        } else {
+          // 直接解压
+          const cmd = `tar -xf "${archivePath}" -C "${destDir}"`;
+          execSync(cmd, { stdio: 'pipe' });
+        }
+
+        resolve();
+      } catch (err) {
+        reject(new Error(`解压失败: ${err.message}`));
+      }
+    });
+  }
+
+  /**
    * 安装依赖
    * @param {string} name - 依赖名称
    * @param {Function} progressCallback - 进度回调
@@ -889,7 +947,20 @@ class DependencyManager {
     try {
       if (progressCallback) progressCallback(`正在下载 ${dep.description}...`);
 
-      if (dep.extract === 'tar.gz') {
+      // 根据 URL 判断文件类型
+      if (url.endsWith('.zip')) {
+        // Windows zip 文件
+        const archivePath = path.join(this.binDir, `${name}.zip`);
+        await this._download(url, archivePath, 3, progressCallback);
+
+        if (progressCallback) progressCallback(`正在解压 ${dep.description}...`);
+
+        // 解压 zip（Windows 10+ tar 命令支持 zip）
+        await this._extractZip(archivePath, this.binDir, dep.stripComponents || 0);
+
+        // 清理压缩包
+        fs.unlinkSync(archivePath);
+      } else if (dep.extract === 'tar.gz' || url.endsWith('.tar.gz')) {
         // 下载压缩包
         const archivePath = path.join(this.binDir, `${name}.tar.gz`);
         await this._download(url, archivePath, 3, progressCallback);
