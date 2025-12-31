@@ -98,7 +98,6 @@ nsis:
   shortcutName: WhatyTerm
   include: build/installer.nsh
   guid: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-  requestExecutionLevel: admin
 
 linux:
   icon: build/icons

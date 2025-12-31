@@ -1,4 +1,6 @@
 ; 自定义 NSIS 安装脚本 - 简化版，只终止进程，不检测旧版本
+; 请求管理员权限
+RequestExecutionLevel admin
 
 !macro customInit
   ; 终止所有相关进程，避免文件被锁定
