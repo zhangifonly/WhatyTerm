@@ -14,26 +14,27 @@ const __dirname = dirname(__filename);
 // Windows/WSL 兼容层
 const isWindows = process.platform === 'win32';
 
-// 检测 WSL 是否可用（验证能否真正执行命令）
+// Windows 平台：强制使用原生终端模式（不使用 WSL）
+// 原因：WSL 检测不可靠，即使检测通过后续命令仍可能失败
 let wslAvailable = false;
 if (isWindows) {
-  try {
-    // 测试 WSL 能否执行简单命令
-    const result = execSync('wsl echo test', { stdio: 'pipe', timeout: 3000, encoding: 'utf-8' });
-    if (result.trim() === 'test') {
-      // 进一步检测 tmux 是否可用
-      try {
-        execSync('wsl tmux -V', { stdio: 'pipe', timeout: 3000 });
-        wslAvailable = true;
-        console.log('[SessionManager] 检测到 WSL + tmux 可用');
-      } catch {
-        console.log('[SessionManager] WSL 可用但 tmux 未安装，将使用 Windows 原生终端');
-      }
-    }
-  } catch (err) {
-    console.log('[SessionManager] WSL 不可用，将使用 Windows 原生终端（无会话持久化）');
-    console.log(`[SessionManager] WSL 检测失败原因: ${err.message}`);
-  }
+  console.log('[SessionManager] Windows 平台，使用原生 PowerShell 终端（无会话持久化）');
+  // 注释掉 WSL 检测代码，强制使用 Windows 原生模式
+  // try {
+  //   const result = execSync('wsl echo test', { stdio: 'pipe', timeout: 3000, encoding: 'utf-8' });
+  //   if (result.trim() === 'test') {
+  //     try {
+  //       execSync('wsl tmux -V', { stdio: 'pipe', timeout: 3000 });
+  //       wslAvailable = true;
+  //       console.log('[SessionManager] 检测到 WSL + tmux 可用');
+  //     } catch {
+  //       console.log('[SessionManager] WSL 可用但 tmux 未安装，将使用 Windows 原生终端');
+  //     }
+  //   }
+  // } catch (err) {
+  //   console.log('[SessionManager] WSL 不可用，将使用 Windows 原生终端（无会话持久化）');
+  //   console.log(`[SessionManager] WSL 检测失败原因: ${err.message}`);
+  // }
 }
 
 const useWSL = isWindows && wslAvailable;
