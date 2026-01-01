@@ -8,17 +8,28 @@ import path from 'path';
 import os from 'os';
 import fs from 'fs';
 
+// 导入 Mux 模块桥接
+import { getMuxAdapter, isMuxAvailable } from './daemon-bridge.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Windows/WSL 兼容层
 const isWindows = process.platform === 'win32';
 
+// 尝试使用 Mux 模式（Windows 上优先使用 Mux 以支持会话持久化）
+let useMuxMode = false;
+if (isWindows && isMuxAvailable()) {
+  useMuxMode = true;
+  console.log('[SessionManager] Windows 平台，使用 Mux 模式（支持会话管理）');
+} else if (isWindows) {
+  console.log('[SessionManager] Windows 平台，Mux 模块不可用，使用原生 PowerShell 终端（无会话持久化）');
+}
+
 // Windows 平台：强制使用原生终端模式（不使用 WSL）
 // 原因：WSL 检测不可靠，即使检测通过后续命令仍可能失败
 let wslAvailable = false;
-if (isWindows) {
-  console.log('[SessionManager] Windows 平台，使用原生 PowerShell 终端（无会话持久化）');
+if (isWindows && !useMuxMode) {
   // 注释掉 WSL 检测代码，强制使用 Windows 原生模式
   // try {
   //   const result = execSync('wsl echo test', { stdio: 'pipe', timeout: 3000, encoding: 'utf-8' });
