@@ -73,7 +73,9 @@
       "Bash(\"release/WhatyTerm Setup 1.0.45.exe\" //S)",
       "Bash(start \"\" \"release/WhatyTerm Setup 1.0.46.exe\")",
       "Bash(npx asar list:*)",
-      "Bash(npx asar extract:*)"
+      "Bash(npx asar extract:*)",
+      "Bash(start \"\" \"release/WhatyTerm Setup 1.0.47.exe\")",
+      "Bash(timeout:*)"
     ]
   }
 }
