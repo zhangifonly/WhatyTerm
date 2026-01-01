@@ -3951,7 +3951,7 @@ server.listen(PORT, HOST, async () => {
     // 根据平台选择隧道策略
     if (process.platform === 'win32') {
       // Windows 上只使用 Cloudflare Tunnel（frpc.exe 未签名，会被 Windows Defender 阻止）
-      console.log('[Server] Windows 平台，使用 Cloudflare Tunnel');
+      console.log('Windows 平台，使用 Cloudflare Tunnel');
       cloudflareTunnel.init(io, PORT);
       tunnelUrl = await cloudflareTunnel.start();
     } else {
@@ -3977,7 +3977,7 @@ server.listen(PORT, HOST, async () => {
     }
 
     if (tunnelUrl) {
-      console.log(`[Server] 外部访问地址: ${tunnelUrl}`);
+      console.log(`外部访问地址: ${tunnelUrl}`);
     }
   } catch (err) {
     console.error('[Server] 启动隧道服务失败:', err);

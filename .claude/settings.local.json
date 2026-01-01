@@ -70,7 +70,10 @@
       "Bash(start \"\" \"release/WhatyTerm Setup 1.0.45.exe\")",
       "Bash(\"/d/Program Files/WhatyTerm/WhatyTerm.exe\":*)",
       "Bash(\"/d/Program Files/WhatyTerm/Uninstall WhatyTerm.exe\" //S)",
-      "Bash(\"release/WhatyTerm Setup 1.0.45.exe\" //S)"
+      "Bash(\"release/WhatyTerm Setup 1.0.45.exe\" //S)",
+      "Bash(start \"\" \"release/WhatyTerm Setup 1.0.46.exe\")",
+      "Bash(npx asar list:*)",
+      "Bash(npx asar extract:*)"
     ]
   }
 }
