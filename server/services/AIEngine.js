@@ -150,47 +150,76 @@ export class AIEngine {
       console.error('[AIEngine] 读取 ai-settings.json 失败:', err);
     }
 
-    // 2. 如果有保存的供应商 ID，从 CC Switch 数据库获取该供应商配置
-    if (savedProviderId && fs.existsSync(CC_SWITCH_DB_PATH)) {
+    // 2. 如果没有保存的供应商 ID，尝试从 ProviderService 获取当前供应商
+    if (!savedProviderId) {
+      try {
+        const currentProvider = providerService.getCurrentProvider('claude');
+        if (currentProvider) {
+          savedProviderId = `claude:${currentProvider.id}`;
+          console.log(`[AIEngine] 从 ProviderService 获取当前供应商: ${currentProvider.name}`);
+        }
+      } catch (err) {
+        console.error('[AIEngine] 从 ProviderService 获取当前供应商失败:', err);
+      }
+    }
+
+    // 3. 如果有供应商 ID，从 ProviderService 或 CC Switch 数据库获取配置
+    if (savedProviderId) {
       try {
         const [appType, providerId] = savedProviderId.split(':');
         if (appType && providerId) {
-          const db = new Database(CC_SWITCH_DB_PATH, { readonly: true });
-          const row = db.prepare(`
-            SELECT id, name, app_type, settings_config, website_url
-            FROM providers
-            WHERE id = ? AND app_type = ?
-            LIMIT 1
-          `).get(providerId, appType);
-          db.close();
-
-          if (row && row.settings_config) {
-            const result = this._parseProviderConfig(row);
+          // 优先从 ProviderService 获取（支持 providers.json）
+          const provider = providerService.getById(appType, providerId);
+          if (provider && provider.settingsConfig) {
+            const result = this._parseProviderConfigFromService(provider);
             if (result) {
-              console.log(`[AIEngine] 使用已保存的供应商: ${row.name}`);
-              // 保留 _providerId 和 _providerName，供前端使用
+              console.log(`[AIEngine] 使用 ProviderService 供应商: ${provider.name}`);
               result._providerId = savedProviderId;
-              result._providerName = savedSettings?._providerName || `${row.name} (${appType})`;
-              // 保留 ai-settings.json 中的其他设置（如 tunnelUrl）
+              result._providerName = savedSettings?._providerName || `${provider.name} (${appType})`;
               if (savedSettings?.tunnelUrl) {
                 result.tunnelUrl = savedSettings.tunnelUrl;
               }
               return result;
             }
           }
+
+          // 回退：从 CC Switch 数据库获取
+          if (fs.existsSync(CC_SWITCH_DB_PATH)) {
+            const db = new Database(CC_SWITCH_DB_PATH, { readonly: true });
+            const row = db.prepare(`
+              SELECT id, name, app_type, settings_config, website_url
+              FROM providers
+              WHERE id = ? AND app_type = ?
+              LIMIT 1
+            `).get(providerId, appType);
+            db.close();
+
+            if (row && row.settings_config) {
+              const result = this._parseProviderConfig(row);
+              if (result) {
+                console.log(`[AIEngine] 使用 CC Switch 供应商: ${row.name}`);
+                result._providerId = savedProviderId;
+                result._providerName = savedSettings?._providerName || `${row.name} (${appType})`;
+                if (savedSettings?.tunnelUrl) {
+                  result.tunnelUrl = savedSettings.tunnelUrl;
+                }
+                return result;
+              }
+            }
+          }
         }
       } catch (err) {
-        console.error('[AIEngine] 从 CC Switch 加载已保存供应商失败:', err);
+        console.error('[AIEngine] 加载供应商配置失败:', err);
       }
     }
 
-    // 3. 回退：使用 ai-settings.json 中的直接配置（旧格式）
+    // 4. 回退：使用 ai-settings.json 中的直接配置（旧格式）
     if (savedSettings && savedSettings.claude?.apiUrl) {
       console.log('[AIEngine] 使用 ai-settings.json 直接配置');
       return savedSettings;
     }
 
-    // 4. 无配置时返回空配置
+    // 5. 无配置时返回空配置
     console.warn('[AIEngine] 未找到 AI 监控供应商配置，请在设置中选择供应商');
     return {
       apiType: 'claude',
@@ -288,6 +317,96 @@ export class AIEngine {
       }
     } catch (err) {
       console.error('[AIEngine] 解析供应商配置失败:', err);
+      return null;
+    }
+  }
+
+  // 解析 ProviderService 供应商配置
+  _parseProviderConfigFromService(provider) {
+    try {
+      const settingsConfig = provider.settingsConfig;
+      const appType = provider.appType;
+
+      // 记录当前供应商信息
+      this._currentProvider = {
+        id: provider.id,
+        name: provider.name,
+        appType: appType
+      };
+
+      // 根据 app_type 解析不同格式的配置
+      if (appType === 'codex') {
+        // Codex 使用 auth.OPENAI_API_KEY 和 TOML 格式的 config
+        const apiKey = settingsConfig.auth?.OPENAI_API_KEY || settingsConfig.auth?.CODEX_API_KEY || '';
+        let apiUrl = '';
+        let model = '';
+
+        // 从 TOML config 中提取 base_url 和 model
+        if (settingsConfig.config) {
+          const baseUrlMatch = settingsConfig.config.match(/base_url\s*=\s*"([^"]+)"/);
+          if (baseUrlMatch) {
+            apiUrl = baseUrlMatch[1];
+          }
+          const modelMatch = settingsConfig.config.match(/^model\s*=\s*"([^"]+)"/m);
+          if (modelMatch) {
+            model = modelMatch[1];
+          }
+        }
+
+        if (!apiUrl || !apiKey) {
+          return null;
+        }
+
+        // 规范化 API URL：确保以 /responses 结尾
+        if (!apiUrl.endsWith('/responses')) {
+          apiUrl = apiUrl.replace(/\/+$/, '');
+          apiUrl = `${apiUrl}/responses`;
+        }
+
+        return {
+          apiType: 'codex',
+          codex: {
+            apiUrl: apiUrl,
+            apiKey: apiKey,
+            model: model || 'gpt-5-codex'
+          },
+          openai: { apiUrl: '', apiKey: '', model: 'gpt-4o' },
+          claude: { apiUrl: '', apiKey: '', model: DEFAULT_MODEL },
+          maxTokens: 500,
+          temperature: 0.7,
+          _currentProvider: this._currentProvider
+        };
+      } else {
+        // Claude 使用 env.ANTHROPIC_BASE_URL 和 ANTHROPIC_AUTH_TOKEN
+        const env = settingsConfig.env || {};
+        let apiUrl = env.ANTHROPIC_BASE_URL || '';
+        const apiKey = env.ANTHROPIC_AUTH_TOKEN || '';
+
+        if (!apiUrl || !apiKey) {
+          return null;
+        }
+
+        // 规范化 API URL：确保以 /v1/messages 结尾
+        if (!apiUrl.endsWith('/v1/messages')) {
+          apiUrl = apiUrl.replace(/\/+$/, '');
+          apiUrl = `${apiUrl}/v1/messages`;
+        }
+
+        return {
+          apiType: 'claude',
+          openai: { apiUrl: '', apiKey: '', model: DEFAULT_MODEL },
+          claude: {
+            apiUrl: apiUrl,
+            apiKey: apiKey,
+            model: DEFAULT_MODEL
+          },
+          maxTokens: 500,
+          temperature: 0.7,
+          _currentProvider: this._currentProvider
+        };
+      }
+    } catch (err) {
+      console.error('[AIEngine] 解析 ProviderService 供应商配置失败:', err);
       return null;
     }
   }
