@@ -13,10 +13,27 @@ const __dirname = dirname(__filename);
 
 // Windows/WSL 兼容层
 const isWindows = process.platform === 'win32';
-const useWSL = isWindows && process.env.WEBTMUX_USE_WSL === 'true';
+
+// 检测 WSL 是否可用
+let wslAvailable = false;
+if (isWindows) {
+  try {
+    execSync('wsl --status', { stdio: 'pipe', timeout: 3000 });
+    wslAvailable = true;
+    console.log('[SessionManager] 检测到 WSL 可用，将使用 WSL + tmux');
+  } catch {
+    console.log('[SessionManager] WSL 不可用，将使用 Windows 原生终端（无会话持久化）');
+  }
+}
+
+const useWSL = isWindows && wslAvailable;
+const useTmux = !isWindows || useWSL;  // 非 Windows 或 Windows+WSL 时使用 tmux
 
 // 执行 tmux 命令（在 Windows 上通过 WSL）
 function execTmux(command, options = {}) {
+  if (!useTmux) {
+    throw new Error('tmux 不可用（Windows 原生模式）');
+  }
   const fullCommand = useWSL ? `wsl ${command}` : command;
   return execSync(fullCommand, {
     encoding: 'utf-8',
@@ -126,6 +143,12 @@ export class Session {
   }
 
   _ensureTmuxSession(isNew = true) {
+    // Windows 原生模式：不使用 tmux，直接创建 PTY
+    if (!useTmux) {
+      console.log(`[Session] Windows 原生模式，跳过 tmux 初始化: ${this.tmuxSessionName}`);
+      return;
+    }
+
     const tmuxCmd = getTmuxPrefix();
     try {
       if (isNew) {
@@ -188,7 +211,56 @@ export class Session {
   _attachToTmux() {
     if (this.pty) return;
 
-    // Windows 上通过 WSL 运行 tmux
+    // Windows 原生模式：直接创建 PowerShell PTY
+    if (!useTmux) {
+      console.log(`[Session] Windows 原生模式，创建 PowerShell PTY: ${this.tmuxSessionName}`);
+
+      // 使用 PowerShell 作为默认 shell（比 cmd.exe 更现代）
+      const shell = 'powershell.exe';
+      const args = ['-NoLogo'];  // 不显示 PowerShell 启动 logo
+
+      this.pty = pty.spawn(shell, args, {
+        name: 'xterm-256color',
+        cols: 80,
+        rows: 24,
+        cwd: process.env.USERPROFILE || process.env.HOME,  // Windows 用户目录
+        env: {
+          ...process.env,
+          TERM: 'xterm-256color'
+        }
+      });
+
+      this.pty.onData((data) => {
+        this.outputBuffer += data;
+        if (this.outputBuffer.length > 100000) {
+          this.outputBuffer = this.outputBuffer.slice(-50000);
+        }
+        this.outputCallbacks.forEach(cb => cb(data));
+
+        // 检测 bell 字符（\x07）- Claude Code 需要用户输入时会发送
+        if (data.includes('\x07')) {
+          this.bellCallbacks.forEach(cb => cb());
+        }
+      });
+
+      this.pty.onExit(({ exitCode }) => {
+        console.log(`PTY 退出: ${this.tmuxSessionName}, code=${exitCode}`);
+        this.pty = null;
+
+        // Windows 原生模式：PTY 退出后重新创建
+        if (this.attachCount > 0) {
+          console.log(`重新创建 Windows PTY: ${this.tmuxSessionName}`);
+          this.outputCallbacks.forEach(cb => cb('\r\n\x1b[33m[终端已重启]\x1b[0m\r\n'));
+          setTimeout(() => {
+            this._attachToTmux();
+          }, 1000);
+        }
+      });
+
+      return;
+    }
+
+    // tmux 模式（Linux/macOS 或 Windows+WSL）
     const shell = useWSL ? 'wsl' : 'tmux';
     const args = useWSL
       ? ['tmux', 'attach-session', '-t', this.tmuxSessionName]
@@ -258,6 +330,12 @@ export class Session {
     if (this.pty) {
       this.pty.resize(cols, rows);
     }
+
+    // Windows 原生模式：只调整 PTY 大小，无需调整 tmux
+    if (!useTmux) {
+      return;
+    }
+
     // 同时调整 tmux 窗口大小
     try {
       execSync(`${getTmuxPrefix()} resize-window -t "${this.tmuxSessionName}" -x ${cols} -y ${rows}`, {
@@ -317,6 +395,11 @@ export class Session {
 
   // 获取 tmux 面板的当前可见内容
   capturePane() {
+    // Windows 原生模式：返回输出缓冲区内容
+    if (!useTmux) {
+      return this.getRecentOutput(50);
+    }
+
     try {
       const content = execSync(
         `tmux capture-pane -t "${this.tmuxSessionName}" -p -e`,
@@ -330,6 +413,11 @@ export class Session {
 
   // 获取 tmux 面板的完整内容（包含滚动历史）
   captureFullPane() {
+    // Windows 原生模式：返回完整输出缓冲区
+    if (!useTmux) {
+      return this.outputBuffer;
+    }
+
     try {
       const content = execSync(
         `tmux capture-pane -t "${this.tmuxSessionName}" -p -e -S -`,
@@ -343,6 +431,11 @@ export class Session {
 
   // 获取滚动历史行数
   getHistorySize() {
+    // Windows 原生模式：返回缓冲区行数
+    if (!useTmux) {
+      return this.outputBuffer.split('\n').length;
+    }
+
     try {
       const size = execSync(
         `tmux display-message -t "${this.tmuxSessionName}" -p "#{history_size}"`,
@@ -357,6 +450,11 @@ export class Session {
 
   // 获取光标位置
   getCursorPosition() {
+    // Windows 原生模式：无法获取光标位置
+    if (!useTmux) {
+      return null;
+    }
+
     try {
       const info = execSync(
         `tmux display-message -t "${this.tmuxSessionName}" -p "#{cursor_x},#{cursor_y}"`,
@@ -370,6 +468,11 @@ export class Session {
   }
 
   refreshScreen() {
+    // Windows 原生模式：无需刷新
+    if (!useTmux) {
+      return;
+    }
+
     // 发送 tmux 刷新命令，让 tmux 重新绘制整个屏幕
     try {
       execSync(`${getTmuxPrefix()} refresh-client -t "${this.tmuxSessionName}"`, {
@@ -417,6 +520,11 @@ export class Session {
   }
 
   killTmuxSession() {
+    // Windows 原生模式：无 tmux 会话需要杀掉
+    if (!useTmux) {
+      return;
+    }
+
     try {
       execSync(`${getTmuxPrefix()} kill-session -t "${this.tmuxSessionName}"`, {
         stdio: 'ignore'
@@ -792,7 +900,36 @@ export class SessionManager {
         return { success: false, error: '关闭的会话不存在' };
       }
 
-      // 检查 tmux 会话是否还存在
+      // Windows 原生模式：无需检查 tmux 会话，直接恢复
+      if (!useTmux) {
+        const session = new Session({
+          id: closedSession.id,
+          name: closedSession.name,
+          tmuxSessionName: closedSession.tmuxSessionName,
+          goal: closedSession.goal,
+          systemPrompt: closedSession.systemPrompt,
+          aiEnabled: closedSession.aiEnabled,
+          autoMode: closedSession.autoMode,
+          autoActionEnabled: closedSession.autoActionEnabled,
+          aiType: closedSession.aiType,
+          projectName: closedSession.projectName,
+          projectDesc: closedSession.projectDesc,
+          workDir: closedSession.workDir,
+          isNew: true,  // Windows 原生模式：创建新的 PTY
+          skipPty: false
+        });
+
+        this.sessions.set(session.id, session);
+        this._saveSession(session);
+
+        const deleteStmt = this.db.prepare('DELETE FROM closed_sessions WHERE id = ?');
+        deleteStmt.run(closedSessionId);
+
+        console.log(`[SessionManager] 会话已恢复（Windows 原生模式）: ${session.name}`);
+        return { success: true, session: session.toJSON() };
+      }
+
+      // tmux 模式：检查 tmux 会话是否还存在
       let tmuxExists = false;
       try {
         execSync(`${getTmuxPrefix()} has-session -t ${closedSession.tmuxSessionName}`, { stdio: 'pipe' });
@@ -860,7 +997,22 @@ export class SessionManager {
       `);
       const rows = stmt.all();
 
-      // 检查每个会话的 tmux 是否还存在
+      // Windows 原生模式：直接返回所有会话（无需检查 tmux）
+      if (!useTmux) {
+        return rows.map(row => ({
+          id: row.id,
+          name: row.name,
+          tmuxSessionName: row.tmux_session_name,
+          goal: row.goal,
+          aiType: row.ai_type,
+          projectName: row.project_name,
+          projectDesc: row.project_desc,
+          workDir: row.work_dir,
+          closedAt: row.closed_at
+        }));
+      }
+
+      // tmux 模式：检查每个会话的 tmux 是否还存在
       const validSessions = [];
       for (const row of rows) {
         let tmuxExists = false;
@@ -906,7 +1058,15 @@ export class SessionManager {
         return { success: false, error: '会话不存在' };
       }
 
-      // 尝试杀掉 tmux 会话
+      // Windows 原生模式：无需杀 tmux 会话
+      if (!useTmux) {
+        const stmt = this.db.prepare('DELETE FROM closed_sessions WHERE id = ?');
+        stmt.run(closedSessionId);
+        console.log(`[SessionManager] 已永久删除关闭的会话（Windows 原生模式）: ${closedSession.name}`);
+        return { success: true };
+      }
+
+      // tmux 模式：尝试杀掉 tmux 会话
       try {
         execSync(`${getTmuxPrefix()} kill-session -t ${closedSession.tmuxSessionName}`, { stdio: 'pipe' });
       } catch {
