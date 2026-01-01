@@ -14,15 +14,25 @@ const __dirname = dirname(__filename);
 // Windows/WSL 兼容层
 const isWindows = process.platform === 'win32';
 
-// 检测 WSL 是否可用
+// 检测 WSL 是否可用（验证能否真正执行命令）
 let wslAvailable = false;
 if (isWindows) {
   try {
-    execSync('wsl --status', { stdio: 'pipe', timeout: 3000 });
-    wslAvailable = true;
-    console.log('[SessionManager] 检测到 WSL 可用，将使用 WSL + tmux');
-  } catch {
+    // 测试 WSL 能否执行简单命令
+    const result = execSync('wsl echo test', { stdio: 'pipe', timeout: 3000, encoding: 'utf-8' });
+    if (result.trim() === 'test') {
+      // 进一步检测 tmux 是否可用
+      try {
+        execSync('wsl tmux -V', { stdio: 'pipe', timeout: 3000 });
+        wslAvailable = true;
+        console.log('[SessionManager] 检测到 WSL + tmux 可用');
+      } catch {
+        console.log('[SessionManager] WSL 可用但 tmux 未安装，将使用 Windows 原生终端');
+      }
+    }
+  } catch (err) {
     console.log('[SessionManager] WSL 不可用，将使用 Windows 原生终端（无会话持久化）');
+    console.log(`[SessionManager] WSL 检测失败原因: ${err.message}`);
   }
 }
 
