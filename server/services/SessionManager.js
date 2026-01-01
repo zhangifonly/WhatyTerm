@@ -216,8 +216,13 @@ export class Session {
       console.log(`[Session] Windows 原生模式，创建 PowerShell PTY: ${this.tmuxSessionName}`);
 
       // 使用 PowerShell 作为默认 shell（比 cmd.exe 更现代）
-      const shell = 'powershell.exe';
+      // 注意：必须使用完整路径或系统 PATH 中的命令
+      const shell = process.env.SystemRoot
+        ? `${process.env.SystemRoot}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+        : 'powershell.exe';
       const args = ['-NoLogo'];  // 不显示 PowerShell 启动 logo
+
+      console.log(`[Session] 使用 shell: ${shell}`);
 
       this.pty = pty.spawn(shell, args, {
         name: 'xterm-256color',
