@@ -30,6 +30,15 @@ const GEMINI_VERSION = getLocalVersion('gemini --version', '0.21.3');
 // 当 Anthropic 发布新版本时，只需修改这里
 export const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
 
+// Claude 模型降级列表（按优先级排序，从便宜到贵）
+// 当一个模型不可用时（503 model_not_found），自动尝试下一个
+export const CLAUDE_MODEL_FALLBACK_LIST = [
+  'claude-haiku-4-5-20251001',      // 最便宜，优先使用
+  'claude-3-5-haiku-20241022',      // 旧版 Haiku
+  'claude-sonnet-4-5-20250929',     // Sonnet 4.5
+  'claude-3-5-sonnet-20241022',     // 旧版 Sonnet
+];
+
 // Claude Code 伪装配置
 export const CLAUDE_CODE_FAKE = {
   userAgent: `claude-cli/${CLAUDE_VERSION} (external, cli)`,
