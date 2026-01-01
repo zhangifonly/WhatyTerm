@@ -16,7 +16,8 @@ const __dirname = dirname(__filename);
 const require = createRequire(import.meta.url);
 
 // 导入编译后的 daemon 模块
-const daemonPath = join(__dirname, '../dist/daemon');
+// 注意：daemon 模块编译输出在项目根目录的 dist/daemon/
+const daemonPath = join(__dirname, '../../dist/daemon');
 
 let muxSessionAdapter;
 let MuxSessionAdapter;

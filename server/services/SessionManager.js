@@ -815,6 +815,113 @@ export class SessionManager {
   }
 
   async createSession(options) {
+    // Mux 模式：使用 MuxSessionAdapter 创建会话
+    if (useMuxMode) {
+      const muxAdapter = getMuxAdapter();
+      if (muxAdapter) {
+        try {
+          // 初始化 Mux（如果尚未初始化）
+          if (!muxAdapter.isInitialized()) {
+            muxAdapter.initialize();
+          }
+
+          // 创建 Mux 会话
+          const muxSession = await muxAdapter.createSession({
+            name: options.name || `session-${Date.now()}`,
+            cols: 80,
+            rows: 24,
+            cwd: options.workingDir || process.env.USERPROFILE || process.env.HOME,
+          });
+
+          // 创建兼容的 Session 包装
+          const session = new Session({ ...options, isNew: true, skipPty: true });
+          session.muxSession = muxSession;
+          session._useMux = true;
+
+          // 重写 PTY 相关方法以使用 Mux
+          session._attachToTmux = function() {
+            // Mux 模式下不需要 attach
+          };
+
+          session.write = function(data) {
+            if (this.muxSession) {
+              this.muxSession.write(data);
+            }
+          };
+
+          session.resize = function(cols, rows) {
+            if (this.muxSession) {
+              this.muxSession.resize(cols, rows);
+            }
+          };
+
+          session.onOutput = function(callback) {
+            if (this.muxSession) {
+              return this.muxSession.onOutput(callback);
+            }
+            return callback;
+          };
+
+          session.offOutput = function(callback) {
+            if (this.muxSession) {
+              this.muxSession.offOutput(callback);
+            }
+          };
+
+          session.onBell = function(callback) {
+            if (this.muxSession) {
+              return this.muxSession.onBell(callback);
+            }
+            return callback;
+          };
+
+          session.offBell = function(callback) {
+            if (this.muxSession) {
+              this.muxSession.offBell(callback);
+            }
+          };
+
+          session.getRecentOutput = function(lines = 50) {
+            if (this.muxSession) {
+              return this.muxSession.getRecentOutput(lines);
+            }
+            return '';
+          };
+
+          session.capturePane = function() {
+            if (this.muxSession) {
+              return this.muxSession.getRecentOutput(50);
+            }
+            return '';
+          };
+
+          session.captureFullPane = function() {
+            if (this.muxSession) {
+              return this.muxSession.getOutputBuffer();
+            }
+            return '';
+          };
+
+          session.destroy = function() {
+            if (this.muxSession) {
+              this.muxSession.destroy();
+              this.muxSession = null;
+            }
+            this.outputCallbacks = [];
+            this.bellCallbacks = [];
+          };
+
+          this.sessions.set(session.id, session);
+          this._saveSession(session);
+          console.log(`[SessionManager] 创建 Mux 会话: ${session.id}`);
+          return session;
+        } catch (error) {
+          console.error('[SessionManager] Mux 会话创建失败，回退到传统模式:', error.message);
+        }
+      }
+    }
+
+    // 传统模式
     const session = new Session({ ...options, isNew: true });
     this.sessions.set(session.id, session);
     this._saveSession(session);
