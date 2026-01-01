@@ -3,6 +3,7 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import Database from 'better-sqlite3';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -25,6 +26,9 @@ export class ProviderService {
 
     // 确保数据库目录存在
     this._ensureDbDir(dbDir);
+
+    // 如果 providers.json 为空，尝试从 CC-Switch 同步
+    this._syncFromCCSwitch();
   }
 
   /**
@@ -101,6 +105,94 @@ export class ProviderService {
     if (!fs.existsSync(dbDir)) {
       fs.mkdirSync(dbDir, { recursive: true });
       console.log(`[ProviderService] 创建数据库目录: ${dbDir}`);
+    }
+  }
+
+  /**
+   * 从 CC-Switch 数据库同步供应商
+   * 如果 providers.json 为空且 CC-Switch 数据库存在，则同步
+   */
+  _syncFromCCSwitch() {
+    try {
+      // 检查 providers.json 是否为空
+      const data = this._readProviders();
+      const hasProviders = Object.values(data).some(appData =>
+        Object.keys(appData.providers || {}).length > 0
+      );
+
+      if (hasProviders) {
+        // 已有供应商，不需要同步
+        return;
+      }
+
+      // 检查 CC-Switch 数据库是否存在
+      const ccSwitchDbPath = path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
+      if (!fs.existsSync(ccSwitchDbPath)) {
+        console.log('[ProviderService] CC-Switch 数据库不存在，跳过同步');
+        return;
+      }
+
+      console.log('[ProviderService] 从 CC-Switch 同步供应商...');
+
+      // 打开 CC-Switch 数据库
+      const db = new Database(ccSwitchDbPath, { readonly: true });
+
+      // 读取所有供应商
+      const rows = db.prepare('SELECT * FROM providers WHERE app_type IN (?, ?, ?)').all('claude', 'codex', 'gemini');
+      db.close();
+
+      if (rows.length === 0) {
+        console.log('[ProviderService] CC-Switch 数据库中没有供应商');
+        return;
+      }
+
+      // 转换并添加供应商
+      let syncedCount = 0;
+      for (const row of rows) {
+        try {
+          const appType = row.app_type;
+          const settingsConfig = row.settings_config ? JSON.parse(row.settings_config) : {};
+
+          const provider = {
+            id: row.id,
+            name: row.name,
+            appType: appType,
+            settingsConfig: settingsConfig,
+            websiteUrl: row.website_url || '',
+            category: row.category || 'custom',
+            createdAt: row.created_at || Date.now(),
+            sortIndex: row.sort_index || 0,
+            notes: row.notes || '',
+            icon: row.icon || 'generic',
+            iconColor: row.icon_color || '#6366F1',
+            meta: row.meta ? JSON.parse(row.meta) : {}
+          };
+
+          // 添加到对应的 appType
+          if (!data[appType]) {
+            data[appType] = { current: null, providers: {} };
+          }
+
+          data[appType].providers[provider.id] = provider;
+
+          // 如果是当前供应商，设置为 current
+          if (row.is_current === 1) {
+            data[appType].current = provider.id;
+          }
+
+          syncedCount++;
+        } catch (err) {
+          console.error(`[ProviderService] 同步供应商失败: ${row.name}`, err);
+        }
+      }
+
+      // 写入文件
+      if (syncedCount > 0) {
+        this._writeProviders(data);
+        console.log(`[ProviderService] 从 CC-Switch 同步了 ${syncedCount} 个供应商`);
+      }
+    } catch (error) {
+      console.error('[ProviderService] 从 CC-Switch 同步失败:', error);
     }
   }
 
