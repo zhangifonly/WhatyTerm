@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "outDir": "../../dist/daemon",
+    "rootDir": ".",
+    "strict": false,
+    "declaration": true
+  },
+  "include": ["*.ts"],
+  "exclude": ["node_modules"]
+}
