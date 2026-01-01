@@ -8,7 +8,6 @@ directories:
 
 files:
   - electron/**/*
-  - dist/**/*
   - package.json
   - "!**/node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}"
   - "!**/node_modules/*/{test,__tests__,tests,powered-test,example,examples}"
@@ -19,12 +18,16 @@ files:
   - "!**/._*"
   - "!**/{.DS_Store,.git,.hg,.svn,CVS,RCS,SCCS,.gitignore,.gitattributes}"
   - "!server/**/*"
+  - "!dist/**/*"
 
 # 服务端作为额外资源，不打入 asar
 extraResources:
   # 服务器代码
   - from: server
     to: server
+  # 前端构建产物（Express 需要直接访问文件系统）
+  - from: dist
+    to: dist
   # 完整打包 node_modules（排除开发工具和缓存）
   - from: node_modules
     to: node_modules
