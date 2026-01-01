@@ -9,7 +9,7 @@ import ProviderService from './ProviderService.js';
 import ConfigService from './ConfigService.js';
 import processDetector from './ProcessDetector.js';
 import tokenStatsService from './TokenStatsService.js';
-import { DEFAULT_MODEL, CLAUDE_CODE_FAKE, CODEX_FAKE } from '../config/constants.js';
+import { DEFAULT_MODEL, CLAUDE_CODE_FAKE, CODEX_FAKE, CLAUDE_MODEL_FALLBACK_LIST } from '../config/constants.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -669,6 +669,70 @@ export class AIEngine {
     // Claude 列表里的服务器统一使用伪装模式
     console.log('[AIEngine] 使用 Claude Code 伪装模式');
 
+    // 获取要尝试的模型列表
+    const modelsToTry = this._getModelsToTry(config.model);
+    let lastError = null;
+
+    for (const model of modelsToTry) {
+      try {
+        const result = await this._callClaudeApiWithModel(prompt, config, model);
+        // 成功后更新当前使用的模型（用于下次优先使用）
+        if (model !== modelsToTry[0]) {
+          console.log(`[AIEngine] 模型降级成功: ${modelsToTry[0]} -> ${model}`);
+          this._lastWorkingModel = model;
+        }
+        return result;
+      } catch (error) {
+        lastError = error;
+        // 检查是否是模型不可用错误
+        if (this._isModelNotFoundError(error)) {
+          console.log(`[AIEngine] 模型 ${model} 不可用，尝试下一个模型...`);
+          continue;
+        }
+        // 其他错误直接抛出
+        throw error;
+      }
+    }
+
+    // 所有模型都失败
+    throw lastError || new Error('所有模型都不可用');
+  }
+
+  // 获取要尝试的模型列表
+  _getModelsToTry(configModel) {
+    // 如果有上次成功的模型，优先使用
+    if (this._lastWorkingModel && this._lastWorkingModel !== configModel) {
+      const models = [this._lastWorkingModel];
+      // 添加其他模型作为备选
+      for (const m of CLAUDE_MODEL_FALLBACK_LIST) {
+        if (!models.includes(m)) {
+          models.push(m);
+        }
+      }
+      return models;
+    }
+
+    // 使用配置的模型作为首选，然后是降级列表
+    const models = [configModel || DEFAULT_MODEL];
+    for (const m of CLAUDE_MODEL_FALLBACK_LIST) {
+      if (!models.includes(m)) {
+        models.push(m);
+      }
+    }
+    return models;
+  }
+
+  // 检查是否是模型不可用错误
+  _isModelNotFoundError(error) {
+    const msg = error.message || '';
+    return msg.includes('model_not_found') ||
+           msg.includes('无可用渠道') ||
+           msg.includes('model not found') ||
+           (msg.includes('503') && msg.includes('model'));
+  }
+
+  // 使用指定模型调用 Claude API
+  async _callClaudeApiWithModel(prompt, config, model) {
     // 构建请求头（伪装 Claude Code）
     const headers = {
       'Content-Type': 'application/json',
@@ -681,7 +745,7 @@ export class AIEngine {
 
     // 构建请求体（伪装 Claude Code）
     const requestBody = {
-      model: config.model || DEFAULT_MODEL,
+      model: model,
       max_tokens: this.settings.maxTokens || 500,
       messages: [{ role: 'user', content: prompt }],
       system: [{ type: 'text', text: CLAUDE_CODE_FAKE.systemPrompt }],
@@ -697,6 +761,7 @@ export class AIEngine {
     // 设置 dispatcher：优先使用代理，否则使用忽略 SSL 验证的 Agent
     fetchOptions.dispatcher = proxyAgent || insecureAgent;
 
+    console.log(`[AIEngine] 调用 Claude API，模型: ${model}`);
     const response = await fetch(config.apiUrl, fetchOptions);
 
     if (!response.ok) {
@@ -709,7 +774,7 @@ export class AIEngine {
     return {
       text: data.content?.[0]?.text || null,
       usage: data.usage || null,
-      model: data.model || config.model || 'unknown'
+      model: data.model || model
     };
   }
 
