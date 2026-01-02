@@ -981,14 +981,15 @@ export class SessionManager {
           // 设置输出回调
           this._setupMuxSessionHandlers(session);
 
-          // 获取历史输出
+          // 附加到 mux-server 会话以接收实时输出
           try {
-            const history = await muxClient.getHistory(muxSession.id);
-            if (history) {
-              session.outputBuffer = history;
+            const attachResult = await muxClient.attachSession(muxSession.id);
+            if (attachResult.history) {
+              session.outputBuffer = attachResult.history;
             }
+            console.log(`[SessionManager] 已附加到 mux-server 会话: ${muxSession.id}`);
           } catch (e) {
-            console.error(`[SessionManager] 获取会话 ${session.name} 历史失败:`, e.message);
+            console.error(`[SessionManager] 附加会话 ${session.name} 失败:`, e.message);
           }
 
           this.sessions.set(session.id, session);
