@@ -8,6 +8,7 @@ import crypto from 'crypto';
 import net from 'net';
 import https from 'https';
 import dependencyManager from './DependencyManager.js';
+import NativeFrpClient from './frp/NativeFrpClient.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -45,21 +46,23 @@ const FRP_SERVERS = [
  * FRP Tunnel 服务
  * 自动测试多台服务器，选择最快可用的
  * 使用 TLS 加密绕过 DPI 阻断
+ *
+ * Windows 平台使用 NativeFrpClient（纯 Node.js 实现）
+ * 其他平台使用 frpc 可执行文件
  */
 class FrpTunnel {
   constructor() {
-    // Windows 上不支持 FRP（frpc.exe 未签名，会被 Windows Defender 阻止）
-    // 请使用 Cloudflare Tunnel（cloudflared 有官方签名）
     this.isWindows = process.platform === 'win32';
 
-    this.frpProcess = null;
+    this.frpProcess = null;       // frpc 子进程（非 Windows）
+    this.nativeClient = null;     // NativeFrpClient 实例（Windows）
     this.tunnelUrl = '';
     this.io = null;
     this.enabled = true;
     this.localPort = 3000;
     this.subdomain = '';
     this.configPath = '';
-    this.selectedServer = null;  // 当前选中的服务器
+    this.selectedServer = null;   // 当前选中的服务器
   }
 
   /**
@@ -111,11 +114,12 @@ class FrpTunnel {
 
   /**
    * 检查 frpc 是否已安装（优先使用 DependencyManager）
+   * Windows 上使用 NativeFrpClient，不需要外部依赖
    */
   async checkInstalled() {
-    // Windows 上不支持 FRP
+    // Windows 上使用 NativeFrpClient，始终可用
     if (this.isWindows) {
-      return false;
+      return true;
     }
 
     // 优先检查 DependencyManager 管理的版本
@@ -271,28 +275,133 @@ subdomain = "${this.subdomain}"
   /**
    * 启动 FRP Tunnel
    * 自动选择最快的可用服务器
+   * Windows 使用 NativeFrpClient，其他平台使用 frpc 可执行文件
    * @param {Function} progressCallback - 安装进度回调（可选）
    */
   async start(progressCallback = null) {
-    // Windows 上不支持 FRP
-    if (this.isWindows) {
-      const error = 'FRP 隧道在 Windows 上不支持（frpc.exe 未签名，会被 Windows Defender 阻止）。请使用 Cloudflare 隧道。';
-      console.log(`[FrpTunnel] ${error}`);
-      if (this.io) {
-        this.io.emit('tunnel:error', {
-          type: 'frp',
-          error,
-          suggestion: '请切换到 Cloudflare 隧道'
-        });
-      }
-      return null;
-    }
-
     if (!this.enabled) {
       console.log('[FrpTunnel] 服务已禁用');
       return null;
     }
 
+    // 选择最快的服务器
+    const server = await this._selectFastestServer();
+    if (!server) {
+      return null;
+    }
+
+    this.selectedServer = server;
+
+    // Windows 使用 NativeFrpClient
+    if (this.isWindows) {
+      return this._startNativeClient(server);
+    }
+
+    // 其他平台使用 frpc 可执行文件
+    return this._startFrpcProcess(server, progressCallback);
+  }
+
+  /**
+   * 使用 NativeFrpClient 启动隧道（Windows）
+   * @param {Object} server - 服务器配置
+   */
+  async _startNativeClient(server) {
+    if (this.nativeClient) {
+      this.stop();
+    }
+
+    console.log(`[FrpTunnel] 使用 NativeFrpClient 连接 ${server.name} (${server.addr}:${server.frpPort})...`);
+
+    this.nativeClient = new NativeFrpClient({
+      serverAddr: server.addr,
+      serverPort: server.frpPort,
+      token: server.token,
+      useTls: server.useTls,
+      localAddr: '127.0.0.1',
+      localPort: this.localPort,
+      heartbeatInterval: 30,
+      heartbeatTimeout: 90,
+    });
+
+    // 设置事件处理
+    this.nativeClient.on('connected', () => {
+      console.log('[FrpTunnel] NativeFrpClient 已连接');
+    });
+
+    this.nativeClient.on('login', ({ runId }) => {
+      console.log(`[FrpTunnel] 登录成功，runId: ${runId}`);
+    });
+
+    this.nativeClient.on('proxy', ({ proxyName, remoteAddr }) => {
+      console.log(`[FrpTunnel] 代理已注册: ${proxyName} -> ${remoteAddr}`);
+      this.tunnelUrl = `https://${this.subdomain}.${server.domain}`;
+      console.log(`[FrpTunnel] 隧道 URL: ${this.tunnelUrl}`);
+
+      this._saveTunnelUrl(this.tunnelUrl);
+
+      if (this.io) {
+        this.io.emit('tunnel:connected', {
+          url: this.tunnelUrl,
+          type: 'frp',
+          server: server.name
+        });
+      }
+    });
+
+    this.nativeClient.on('heartbeat', () => {
+      // 心跳正常，不需要日志
+    });
+
+    this.nativeClient.on('error', (err) => {
+      console.error('[FrpTunnel] NativeFrpClient 错误:', err.message);
+      if (this.io) {
+        this.io.emit('tunnel:error', {
+          type: 'frp',
+          error: err.message
+        });
+      }
+    });
+
+    this.nativeClient.on('close', () => {
+      console.log('[FrpTunnel] NativeFrpClient 连接已关闭');
+      this.nativeClient = null;
+      this.tunnelUrl = '';
+      this.selectedServer = null;
+
+      if (this.io) {
+        this.io.emit('tunnel:disconnected', { type: 'frp' });
+      }
+    });
+
+    try {
+      // 连接到服务器
+      await this.nativeClient.connect();
+
+      // 注册 HTTP 代理
+      const proxyName = `webtmux-${this.subdomain}`;
+      await this.nativeClient.registerHttpProxy({
+        proxyName,
+        subdomain: this.subdomain,
+      });
+
+      return this.tunnelUrl;
+
+    } catch (err) {
+      console.error('[FrpTunnel] NativeFrpClient 启动失败:', err.message);
+      if (this.nativeClient) {
+        this.nativeClient.close();
+        this.nativeClient = null;
+      }
+      return null;
+    }
+  }
+
+  /**
+   * 使用 frpc 可执行文件启动隧道（非 Windows）
+   * @param {Object} server - 服务器配置
+   * @param {Function} progressCallback - 安装进度回调
+   */
+  async _startFrpcProcess(server, progressCallback) {
     // 自动安装 frpc（如果未安装）
     const installed = await this.ensureInstalled(progressCallback);
     if (!installed) {
@@ -304,13 +413,6 @@ subdomain = "${this.subdomain}"
       this.stop();
     }
 
-    // 选择最快的服务器
-    const server = await this._selectFastestServer();
-    if (!server) {
-      return null;
-    }
-
-    this.selectedServer = server;
     this._createConfig(server);
 
     console.log(`[FrpTunnel] 启动 FRP 客户端 (${server.name}: ${server.addr}:${server.frpPort})...`);
@@ -417,6 +519,14 @@ subdomain = "${this.subdomain}"
    * 停止 FRP Tunnel
    */
   stop() {
+    // 停止 NativeFrpClient（Windows）
+    if (this.nativeClient) {
+      console.log('[FrpTunnel] 停止 NativeFrpClient...');
+      this.nativeClient.close();
+      this.nativeClient = null;
+    }
+
+    // 停止 frpc 进程（非 Windows）
     if (this.frpProcess) {
       console.log('[FrpTunnel] 停止 FRP 客户端...');
       this.frpProcess.kill('SIGTERM');
@@ -439,6 +549,11 @@ subdomain = "${this.subdomain}"
    * 检查隧道是否运行中
    */
   isRunning() {
+    // Windows 使用 NativeFrpClient
+    if (this.isWindows) {
+      return this.nativeClient !== null && this.nativeClient.isConnected() && this.tunnelUrl !== '';
+    }
+    // 其他平台使用 frpc 进程
     return this.frpProcess !== null && this.tunnelUrl !== '';
   }
 
@@ -627,12 +742,17 @@ subdomain = "${this.subdomain}"
    * 执行隧道 URL 检测
    */
   async _runTunnelCheck() {
-    // 如果进程不存在但应该运行，尝试重启
-    if (!this.frpProcess) {
-      console.log('[FrpTunnel] 检测到 FRP 进程不存在，尝试重新启动...');
+    // 检查连接是否存在
+    const isConnected = this.isWindows
+      ? (this.nativeClient && this.nativeClient.isConnected())
+      : (this.frpProcess !== null);
+
+    // 如果连接不存在但应该运行，尝试重启
+    if (!isConnected) {
+      console.log('[FrpTunnel] 检测到 FRP 连接不存在，尝试重新启动...');
       if (this.io) {
         this.io.emit('tunnel:reconnecting', {
-          reason: 'FRP 进程异常退出',
+          reason: 'FRP 连接异常断开',
           previousUrl: this.tunnelUrl
         });
       }
