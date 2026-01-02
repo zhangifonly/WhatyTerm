@@ -72,15 +72,29 @@ export class RecentProjectsService {
 
   /**
    * 解码 Claude 项目目录名为实际路径
-   * Claude 编码规则: / -> -，但目录名中的 - 保持不变
+   * Claude 编码规则:
+   * - Unix: / -> -，路径 /Users/xxx 编码为 -Users-xxx
+   * - Windows: D:\path 编码为 D--path（盘符 + 双横线 + 路径）
    * 需要逐级验证路径是否存在
    */
   static _decodeClaudePath(encodedName) {
-    // 去掉开头的 -，然后按 - 分割
-    const parts = encodedName.replace(/^-/, '').split('-');
+    // 检测 Windows 路径格式：单字母开头 + 双横线（如 D--AI-WhatyTerm）
+    const windowsMatch = encodedName.match(/^([A-Za-z])--(.*)$/);
 
-    // 逐级构建路径，合并不存在的部分
-    let currentPath = '/';
+    let currentPath;
+    let parts;
+
+    if (windowsMatch) {
+      // Windows 路径：D--AI-WhatyTerm -> D:\AI\WhatyTerm
+      const driveLetter = windowsMatch[1].toUpperCase();
+      currentPath = `${driveLetter}:\\`;
+      parts = windowsMatch[2] ? windowsMatch[2].split('-') : [];
+    } else {
+      // Unix 路径：-Users-xxx -> /Users/xxx
+      parts = encodedName.replace(/^-/, '').split('-');
+      currentPath = '/';
+    }
+
     let i = 0;
 
     while (i < parts.length) {
@@ -140,7 +154,10 @@ export class RecentProjectsService {
 
         // 排除非项目目录（如 Documents、Desktop 等根目录）
         const pathParts = projectPath.split(path.sep).filter(Boolean);
-        if (pathParts.length <= 3) continue;  // 至少要 /Users/xxx/Documents/project
+        // Windows: D:\AI\project -> ['D:', 'AI', 'project'] (3 parts)
+        // Unix: /Users/xxx/project -> ['Users', 'xxx', 'project'] (3 parts)
+        // 至少需要 3 级目录深度
+        if (pathParts.length < 3) continue;
 
         const dirPath = path.join(projectsDir, entry.name);
         const stat = fs.statSync(dirPath);

@@ -8,8 +8,8 @@ import path from 'path';
 import os from 'os';
 import fs from 'fs';
 
-// 导入 Mux 模块桥接
-import { getMuxAdapter, isMuxAvailable } from './daemon-bridge.js';
+// 导入 Mux 模块桥接（新架构：mux-server 守护进程）
+import { getMuxAdapter, isMuxAvailable, initMuxServerMode, isMuxServerModeAvailable, getMuxClient } from './daemon-bridge.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -17,14 +17,49 @@ const __dirname = dirname(__filename);
 // Windows/WSL 兼容层
 const isWindows = process.platform === 'win32';
 
-// 尝试使用 Mux 模式（Windows 上优先使用 Mux 以支持会话持久化）
+// mux-server 模式（新架构，支持会话持久化）
+let useMuxServerMode = false;
+let muxClient = null;
+
+// 旧版 Mux 模式（已弃用）
 let useMuxMode = false;
-if (isWindows && isMuxAvailable()) {
-  useMuxMode = true;
-  console.log('[SessionManager] Windows 平台，使用 Mux 模式（支持会话管理）');
-} else if (isWindows) {
-  console.log('[SessionManager] Windows 平台，Mux 模块不可用，使用原生 PowerShell 终端（无会话持久化）');
+
+// 异步初始化 mux-server 模式
+async function initMuxMode() {
+  if (!isWindows) {
+    return;
+  }
+
+  // 优先尝试新架构（mux-server 守护进程）
+  if (await isMuxServerModeAvailable()) {
+    try {
+      muxClient = await initMuxServerMode();
+      if (muxClient) {
+        useMuxServerMode = true;
+        console.log('[SessionManager] Windows 平台，使用 mux-server 模式（支持会话持久化）');
+        return;
+      }
+    } catch (err) {
+      console.error('[SessionManager] mux-server 初始化失败:', err.message);
+    }
+  }
+
+  // 回退到旧版 Mux 模式
+  if (isMuxAvailable()) {
+    useMuxMode = true;
+    console.log('[SessionManager] Windows 平台，使用旧版 Mux 模式（不支持持久化）');
+  } else {
+    console.log('[SessionManager] Windows 平台，使用原生 PowerShell 终端（无会话持久化）');
+  }
 }
+
+// 启动时初始化（异步）- 移到 SessionManager.create() 中处理
+// 不再在模块加载时自动初始化，避免时序问题
+// if (isWindows) {
+//   initMuxMode().catch(err => {
+//     console.error('[SessionManager] Mux 模式初始化失败:', err);
+//   });
+// }
 
 // Windows 平台：强制使用原生终端模式（不使用 WSL）
 // 原因：WSL 检测不可靠，即使检测通过后续命令仍可能失败
@@ -592,7 +627,38 @@ export class SessionManager {
   constructor() {
     this.sessions = new Map();
     this._initDb();
-    this._loadSessions();
+    // 注意：不在构造函数中调用 _loadSessions()
+    // 改为在 init() 方法中异步调用，确保 mux-server 初始化完成
+  }
+
+  /**
+   * 静态工厂方法：创建并初始化 SessionManager
+   * 确保 mux-server 模式在加载会话之前完成初始化
+   */
+  static async create() {
+    const manager = new SessionManager();
+    await manager.init();
+    return manager;
+  }
+
+  /**
+   * 异步初始化方法
+   * 1. 初始化 mux-server 模式（如果在 Windows 上）
+   * 2. 加载已有会话
+   */
+  async init() {
+    // Windows 平台：先初始化 mux-server 模式
+    if (isWindows) {
+      try {
+        await initMuxMode();
+        console.log(`[SessionManager] 初始化完成，useMuxServerMode=${useMuxServerMode}, muxClient=${muxClient ? 'connected' : 'null'}`);
+      } catch (err) {
+        console.error('[SessionManager] Mux 模式初始化失败:', err);
+      }
+    }
+
+    // 然后加载会话
+    await this._loadSessions();
   }
 
   /**
@@ -726,6 +792,17 @@ export class SessionManager {
     try {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN original_goal TEXT`);
     } catch {}
+    // 添加工作目录字段
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN working_dir TEXT`);
+    } catch {}
+    // 添加项目名称和描述字段
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN project_name TEXT`);
+    } catch {}
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN project_desc TEXT`);
+    } catch {}
     // 修复旧数据：如果 original_goal 为空但 goal 有值，则复制 goal 到 original_goal
     try {
       this.db.exec(`UPDATE sessions SET original_goal = goal WHERE original_goal IS NULL AND goal IS NOT NULL AND goal <> ''`);
@@ -734,6 +811,54 @@ export class SessionManager {
 
   _loadSessions() {
     const rows = this.db.prepare('SELECT * FROM sessions WHERE status = ?').all('running');
+
+    // mux-server 模式：尝试从守护进程恢复会话
+    if (useMuxServerMode && muxClient && rows.length > 0) {
+      console.log(`[SessionManager] mux-server 模式：尝试恢复 ${rows.length} 个会话`);
+      this._loadMuxServerSessions(rows);
+      return;
+    }
+
+    // Windows 原生模式：旧会话无法恢复，移动到 closed_sessions
+    if (!useTmux && !useMuxServerMode && rows.length > 0) {
+      console.log(`[SessionManager] Windows 原生模式：检测到 ${rows.length} 个旧会话，无法恢复进程状态`);
+      console.log(`[SessionManager] 将旧会话移动到"已关闭"列表，用户可以选择重新启动`);
+
+      for (const row of rows) {
+        // 保存到 closed_sessions 表
+        try {
+          const stmt = this.db.prepare(`
+            INSERT OR REPLACE INTO closed_sessions
+            (id, name, tmux_session_name, goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, ai_type, project_name, project_desc, work_dir, closed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          stmt.run(
+            row.id,
+            row.name,
+            row.tmux_session_name,
+            row.goal || '',
+            row.system_prompt || '',
+            row.ai_enabled,
+            row.auto_mode,
+            row.auto_action_enabled,
+            row.ai_type || 'claude',
+            '', // project_name
+            '', // project_desc
+            '', // work_dir
+            Date.now()
+          );
+        } catch (e) {
+          console.error(`[SessionManager] 移动会话 ${row.name} 到已关闭列表失败:`, e.message);
+        }
+
+        // 从 sessions 表中删除
+        this.db.prepare('DELETE FROM sessions WHERE id = ?').run(row.id);
+        console.log(`[SessionManager] 会话 "${row.name}" 已移动到已关闭列表`);
+      }
+      return;
+    }
+
+    // tmux 模式：正常恢复会话
     for (const row of rows) {
       const session = new Session({
         id: row.id,
@@ -777,17 +902,258 @@ export class SessionManager {
         preAnalyzed: row.stats_pre_analyzed || 0
       };
 
+      // 恢复工作目录和项目信息
+      session.workingDir = row.working_dir || '';
+      session.projectName = row.project_name || '';
+      session.projectDesc = row.project_desc || '';
+
       this.sessions.set(session.id, session);
-      console.log(`恢复会话: ${session.name} (tmux: ${session.tmuxSessionName}, AI: ${session.aiType}, 自动操作: ${session.autoActionEnabled ? '开' : '关'})`);
+      console.log(`恢复会话: ${session.name} (tmux: ${session.tmuxSessionName}, AI: ${session.aiType}, 自动操作: ${session.autoActionEnabled ? '开' : '关'}, 工作目录: ${session.workingDir || '未知'})`);
     }
+  }
+
+  /**
+   * 从 mux-server 恢复会话
+   * @param {Array} rows - 数据库中的会话记录
+   */
+  async _loadMuxServerSessions(rows) {
+    try {
+      // 获取 mux-server 中的所有会话
+      const muxSessions = await muxClient.listSessions();
+      const muxSessionMap = new Map(muxSessions.map(s => [s.name, s]));
+
+      for (const row of rows) {
+        // 尝试在 mux-server 中找到对应的会话
+        const muxSession = muxSessionMap.get(row.name);
+
+        if (muxSession && muxSession.isAlive) {
+          // 会话仍在运行，恢复连接
+          const session = new Session({
+            id: row.id,
+            name: row.name,
+            tmuxSessionName: row.tmux_session_name,
+            goal: row.goal,
+            originalGoal: row.original_goal || row.goal,
+            systemPrompt: row.system_prompt,
+            aiEnabled: !!row.ai_enabled,
+            autoMode: !!row.auto_mode,
+            autoActionEnabled: !!row.auto_action_enabled,
+            createdAt: new Date(row.created_at),
+            skipPty: true,
+            isNew: false
+          });
+
+          session.muxSessionId = muxSession.id;
+          session._useMuxServer = true;
+
+          // 恢复 AI 类型和供应商信息
+          session.aiType = row.ai_type || 'claude';
+          try {
+            session.claudeProvider = row.claude_provider ? JSON.parse(row.claude_provider) : null;
+          } catch (e) {
+            session.claudeProvider = null;
+          }
+          try {
+            session.codexProvider = row.codex_provider ? JSON.parse(row.codex_provider) : null;
+          } catch (e) {
+            session.codexProvider = null;
+          }
+          try {
+            session.geminiProvider = row.gemini_provider ? JSON.parse(row.gemini_provider) : null;
+          } catch (e) {
+            session.geminiProvider = null;
+          }
+
+          // 恢复操作统计
+          session.stats = {
+            total: row.stats_total || 0,
+            success: row.stats_success || 0,
+            failed: row.stats_failed || 0,
+            aiAnalyzed: row.stats_ai_analyzed || 0,
+            preAnalyzed: row.stats_pre_analyzed || 0
+          };
+
+          // 恢复工作目录和项目信息
+          session.workingDir = row.working_dir || '';
+          session.projectName = row.project_name || '';
+          session.projectDesc = row.project_desc || '';
+
+          // 设置输出回调
+          this._setupMuxSessionHandlers(session);
+
+          // 获取历史输出
+          try {
+            const history = await muxClient.getHistory(muxSession.id);
+            if (history) {
+              session.outputBuffer = history;
+            }
+          } catch (e) {
+            console.error(`[SessionManager] 获取会话 ${session.name} 历史失败:`, e.message);
+          }
+
+          this.sessions.set(session.id, session);
+          console.log(`[SessionManager] 恢复 mux-server 会话: ${session.name} -> ${muxSession.id}`);
+        } else {
+          // 会话已不存在，移动到已关闭列表
+          console.log(`[SessionManager] mux-server 会话 ${row.name} 已不存在，移动到已关闭列表`);
+          try {
+            const stmt = this.db.prepare(`
+              INSERT OR REPLACE INTO closed_sessions
+              (id, name, tmux_session_name, goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, ai_type, project_name, project_desc, work_dir, closed_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `);
+            stmt.run(
+              row.id,
+              row.name,
+              row.tmux_session_name,
+              row.goal || '',
+              row.system_prompt || '',
+              row.ai_enabled,
+              row.auto_mode,
+              row.auto_action_enabled,
+              row.ai_type || 'claude',
+              '', '', '',
+              Date.now()
+            );
+            this.db.prepare('DELETE FROM sessions WHERE id = ?').run(row.id);
+          } catch (e) {
+            console.error(`[SessionManager] 移动会话 ${row.name} 失败:`, e.message);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('[SessionManager] 从 mux-server 恢复会话失败:', error.message);
+      // 回退：将所有会话移动到已关闭列表
+      for (const row of rows) {
+        try {
+          const stmt = this.db.prepare(`
+            INSERT OR REPLACE INTO closed_sessions
+            (id, name, tmux_session_name, goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, ai_type, project_name, project_desc, work_dir, closed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          stmt.run(
+            row.id, row.name, row.tmux_session_name, row.goal || '', row.system_prompt || '',
+            row.ai_enabled, row.auto_mode, row.auto_action_enabled, row.ai_type || 'claude',
+            '', '', '', Date.now()
+          );
+          this.db.prepare('DELETE FROM sessions WHERE id = ?').run(row.id);
+        } catch (e) {
+          console.error(`[SessionManager] 移动会话 ${row.name} 失败:`, e.message);
+        }
+      }
+    }
+  }
+
+  /**
+   * 为 mux-server 会话设置事件处理器
+   */
+  _setupMuxSessionHandlers(session) {
+    const outputHandler = (sessionId, data) => {
+      if (sessionId === session.muxSessionId) {
+        session.outputBuffer += data;
+        if (session.outputBuffer.length > 100000) {
+          session.outputBuffer = session.outputBuffer.slice(-50000);
+        }
+        session.outputCallbacks.forEach(cb => cb(data));
+
+        if (data.includes('\x07')) {
+          session.bellCallbacks.forEach(cb => cb());
+        }
+      }
+    };
+
+    const bellHandler = (sessionId) => {
+      if (sessionId === session.muxSessionId) {
+        session.bellCallbacks.forEach(cb => cb());
+      }
+    };
+
+    const exitHandler = (sessionId, exitCode) => {
+      if (sessionId === session.muxSessionId) {
+        console.log(`[SessionManager] mux-server 会话退出: ${sessionId}, code=${exitCode}`);
+        session.outputCallbacks.forEach(cb => cb('\r\n\x1b[33m[会话已结束]\x1b[0m\r\n'));
+      }
+    };
+
+    muxClient.on('output', outputHandler);
+    muxClient.on('bell', bellHandler);
+    muxClient.on('exit', exitHandler);
+
+    session._muxHandlers = { outputHandler, bellHandler, exitHandler };
+
+    // 重写方法
+    session._attachToTmux = function() {};
+
+    session.write = async function(data) {
+      if (!this.muxSessionId) {
+        console.error('[SessionManager] 写入失败: muxSessionId 未设置');
+        return;
+      }
+      if (!muxClient) {
+        console.error('[SessionManager] 写入失败: muxClient 未初始化');
+        return;
+      }
+      if (!muxClient.isConnected()) {
+        console.error('[SessionManager] 写入失败: muxClient 未连接');
+        return;
+      }
+      try {
+        await muxClient.writeInput(this.muxSessionId, data);
+      } catch (err) {
+        console.error('[SessionManager] 写入 mux-server 失败:', err.message);
+      }
+    };
+
+    session.resize = async function(cols, rows) {
+      if (this.muxSessionId && muxClient.isConnected()) {
+        try {
+          await muxClient.resize(this.muxSessionId, cols, rows);
+        } catch (err) {
+          console.error('[SessionManager] 调整大小失败:', err.message);
+        }
+      }
+    };
+
+    session.getRecentOutput = function(lines = 50) {
+      const allLines = this.outputBuffer.split('\n');
+      return allLines.slice(-lines).join('\n');
+    };
+
+    session.capturePane = function() {
+      return this.getRecentOutput(50);
+    };
+
+    session.captureFullPane = function() {
+      return this.outputBuffer;
+    };
+
+    session.destroy = function() {
+      if (this._muxHandlers && muxClient) {
+        muxClient.off('output', this._muxHandlers.outputHandler);
+        muxClient.off('bell', this._muxHandlers.bellHandler);
+        muxClient.off('exit', this._muxHandlers.exitHandler);
+      }
+      this.outputCallbacks = [];
+      this.bellCallbacks = [];
+    };
+
+    session.killTmuxSession = async function() {
+      if (this.muxSessionId && muxClient.isConnected()) {
+        try {
+          await muxClient.killSession(this.muxSessionId);
+        } catch (err) {
+          console.error('[SessionManager] 终止 mux-server 会话失败:', err.message);
+        }
+      }
+    };
   }
 
   _saveSession(session) {
     const stats = session.stats || { total: 0, success: 0, failed: 0, aiAnalyzed: 0, preAnalyzed: 0 };
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO sessions
-      (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, status, created_at, updated_at, ai_type, claude_provider, codex_provider, gemini_provider, stats_total, stats_success, stats_failed, stats_ai_analyzed, stats_pre_analyzed)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, status, created_at, updated_at, ai_type, claude_provider, codex_provider, gemini_provider, stats_total, stats_success, stats_failed, stats_ai_analyzed, stats_pre_analyzed, working_dir, project_name, project_desc)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       session.id,
@@ -810,12 +1176,148 @@ export class SessionManager {
       stats.success,
       stats.failed,
       stats.aiAnalyzed,
-      stats.preAnalyzed
+      stats.preAnalyzed,
+      session.workingDir || '',
+      session.projectName || '',
+      session.projectDesc || ''
     );
   }
 
   async createSession(options) {
-    // Mux 模式：使用 MuxSessionAdapter 创建会话
+    // 新架构：mux-server 守护进程模式（支持会话持久化）
+    if (useMuxServerMode && muxClient) {
+      try {
+        // 通过 IPC 创建会话
+        const muxSessionInfo = await muxClient.createSession({
+          name: options.name || `session-${Date.now()}`,
+          cols: 80,
+          rows: 24,
+          cwd: options.workingDir || process.env.USERPROFILE || process.env.HOME,
+        });
+
+        // 创建兼容的 Session 包装
+        const session = new Session({ ...options, isNew: true, skipPty: true });
+        session.muxSessionId = muxSessionInfo.id;
+        session._useMuxServer = true;
+
+        // 设置输出回调
+        const outputHandler = (sessionId, data) => {
+          if (sessionId === session.muxSessionId) {
+            session.outputBuffer += data;
+            if (session.outputBuffer.length > 100000) {
+              session.outputBuffer = session.outputBuffer.slice(-50000);
+            }
+            session.outputCallbacks.forEach(cb => cb(data));
+
+            // 检测 bell 字符
+            if (data.includes('\x07')) {
+              session.bellCallbacks.forEach(cb => cb());
+            }
+          }
+        };
+
+        const bellHandler = (sessionId) => {
+          if (sessionId === session.muxSessionId) {
+            session.bellCallbacks.forEach(cb => cb());
+          }
+        };
+
+        const exitHandler = (sessionId, exitCode) => {
+          if (sessionId === session.muxSessionId) {
+            console.log(`[SessionManager] mux-server 会话退出: ${sessionId}, code=${exitCode}`);
+            session.outputCallbacks.forEach(cb => cb('\r\n\x1b[33m[会话已结束]\x1b[0m\r\n'));
+          }
+        };
+
+        muxClient.on('output', outputHandler);
+        muxClient.on('bell', bellHandler);
+        muxClient.on('exit', exitHandler);
+
+        // 保存处理器引用以便清理
+        session._muxHandlers = { outputHandler, bellHandler, exitHandler };
+
+        // 重写 PTY 相关方法以使用 MuxClient
+        session._attachToTmux = function() {
+          // mux-server 模式下不需要 attach
+        };
+
+        session.write = async function(data) {
+          if (!this.muxSessionId) {
+            console.error('[SessionManager] 写入失败: muxSessionId 未设置');
+            return;
+          }
+          if (!muxClient) {
+            console.error('[SessionManager] 写入失败: muxClient 未初始化');
+            return;
+          }
+          if (!muxClient.isConnected()) {
+            console.error('[SessionManager] 写入失败: muxClient 未连接');
+            return;
+          }
+          try {
+            await muxClient.writeInput(this.muxSessionId, data);
+          } catch (err) {
+            console.error('[SessionManager] 写入 mux-server 失败:', err.message);
+          }
+        };
+
+        session.resize = async function(cols, rows) {
+          if (this.muxSessionId && muxClient.isConnected()) {
+            try {
+              await muxClient.resize(this.muxSessionId, cols, rows);
+            } catch (err) {
+              console.error('[SessionManager] 调整大小失败:', err.message);
+            }
+          }
+        };
+
+        session.getRecentOutput = function(lines = 50) {
+          const allLines = this.outputBuffer.split('\n');
+          return allLines.slice(-lines).join('\n');
+        };
+
+        session.capturePane = function() {
+          return this.getRecentOutput(50);
+        };
+
+        session.captureFullPane = function() {
+          return this.outputBuffer;
+        };
+
+        session.destroy = function() {
+          // 移除事件监听器
+          if (this._muxHandlers && muxClient) {
+            muxClient.off('output', this._muxHandlers.outputHandler);
+            muxClient.off('bell', this._muxHandlers.bellHandler);
+            muxClient.off('exit', this._muxHandlers.exitHandler);
+          }
+          this.outputCallbacks = [];
+          this.bellCallbacks = [];
+          // 注意：不终止 mux-server 中的会话，保持持久化
+        };
+
+        session.killTmuxSession = async function() {
+          // 终止 mux-server 中的会话
+          if (this.muxSessionId && muxClient.isConnected()) {
+            try {
+              await muxClient.killSession(this.muxSessionId);
+            } catch (err) {
+              console.error('[SessionManager] 终止 mux-server 会话失败:', err.message);
+            }
+          }
+        };
+
+        this.sessions.set(session.id, session);
+        this._saveSession(session);
+        console.log(`[SessionManager] 创建 mux-server 会话: ${session.id} -> ${muxSessionInfo.id}`);
+        return session;
+      } catch (error) {
+        console.error('[SessionManager] mux-server 会话创建失败，回退到传统模式:', error.message);
+        // 回退到传统模式
+      }
+    }
+
+    // 旧版 Mux 模式：使用 MuxSessionAdapter 创建会话（已弃用）
     if (useMuxMode) {
       const muxAdapter = getMuxAdapter();
       if (muxAdapter) {

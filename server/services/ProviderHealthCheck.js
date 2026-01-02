@@ -3,7 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import crypto from 'crypto';
-import { HEALTH_CHECK_MODELS, CLAUDE_CODE_FAKE, CODEX_FAKE, GEMINI_FAKE } from '../config/constants.js';
+import { HEALTH_CHECK_MODELS, CLAUDE_CODE_FAKE, CODEX_FAKE, GEMINI_FAKE, CLAUDE_MODEL_FALLBACK_LIST } from '../config/constants.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -175,14 +175,28 @@ export class ProviderHealthCheck {
    * Claude 流式检查（统一使用 Claude Code 伪装模式）
    */
   async _checkClaudeStream(provider, model) {
-    const config = provider.settingsConfig.claude;
+    // 兼容两种配置格式：
+    // 1. settingsConfig.claude.apiUrl / apiKey（旧格式）
+    // 2. settingsConfig.env.ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY（CC-Switch 格式）
+    let apiUrl, apiKey;
 
-    if (!config || !config.apiUrl || !config.apiKey) {
-      throw new Error('Claude 配置不完整');
+    const claudeConfig = provider.settingsConfig?.claude;
+    const envConfig = provider.settingsConfig?.env;
+
+    if (claudeConfig?.apiUrl && claudeConfig?.apiKey) {
+      // 旧格式
+      apiUrl = claudeConfig.apiUrl;
+      apiKey = claudeConfig.apiKey;
+    } else if (envConfig?.ANTHROPIC_BASE_URL && (envConfig?.ANTHROPIC_API_KEY || envConfig?.ANTHROPIC_AUTH_TOKEN)) {
+      // CC-Switch 格式（支持 ANTHROPIC_API_KEY 或 ANTHROPIC_AUTH_TOKEN）
+      apiUrl = envConfig.ANTHROPIC_BASE_URL;
+      apiKey = envConfig.ANTHROPIC_API_KEY || envConfig.ANTHROPIC_AUTH_TOKEN;
+    } else {
+      throw new Error('Claude 配置不完整（需要 apiUrl/apiKey 或 ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN）');
     }
 
     // 规范化 API URL：确保以 /v1/messages 结尾
-    let apiUrl = config.apiUrl;
+    let normalizedUrl = apiUrl;
     if (!apiUrl.endsWith('/v1/messages')) {
       apiUrl = apiUrl.replace(/\/+$/, '');
       if (!apiUrl.endsWith('/v1')) {
@@ -213,7 +227,7 @@ export class ProviderHealthCheck {
           'x-app': CLAUDE_CODE_FAKE.headers['x-app'],
           'anthropic-beta': CLAUDE_CODE_FAKE.headers['anthropic-beta'],
           'anthropic-version': CLAUDE_CODE_FAKE.headers['anthropic-version'],
-          'Authorization': `Bearer ${config.apiKey}`
+          'Authorization': `Bearer ${apiKey}`
         },
         body: JSON.stringify({
           model: model,
@@ -581,8 +595,13 @@ export class ProviderHealthCheck {
 
       if (apiType === 'openai' && testProvider.settingsConfig?.openai) {
         testProvider.settingsConfig.openai.apiUrl = endpointUrl;
-      } else if (apiType === 'claude' && testProvider.settingsConfig?.claude) {
-        testProvider.settingsConfig.claude.apiUrl = endpointUrl;
+      } else if (apiType === 'claude') {
+        // 兼容两种格式
+        if (testProvider.settingsConfig?.claude) {
+          testProvider.settingsConfig.claude.apiUrl = endpointUrl;
+        } else if (testProvider.settingsConfig?.env) {
+          testProvider.settingsConfig.env.ANTHROPIC_BASE_URL = endpointUrl;
+        }
       }
 
       // 执行健康检查
@@ -624,6 +643,120 @@ export class ProviderHealthCheck {
     const fastest = results.find(r => r.success);
 
     return fastest || null;
+  }
+
+  // ============================================
+  // 多模型测试
+  // ============================================
+
+  /**
+   * 测试多个模型，返回可用模型列表
+   * @param {string} appType - 应用类型 ('claude' | 'codex' | 'gemini')
+   * @param {Object} provider - 供应商配置
+   * @param {Array} models - 要测试的模型列表（可选，默认使用 CLAUDE_MODEL_FALLBACK_LIST）
+   * @returns {Promise<Object>} - { availableModels: [], failedModels: [], firstAvailable: string|null }
+   */
+  async testMultipleModels(appType, provider, models = null) {
+    // 根据 appType 获取默认模型列表
+    let modelsToTest = models;
+    if (!modelsToTest) {
+      if (appType === 'claude') {
+        modelsToTest = CLAUDE_MODEL_FALLBACK_LIST;
+      } else {
+        // 其他类型暂时只测试配置的模型
+        modelsToTest = [this.config.testModels[appType]];
+      }
+    }
+
+    const availableModels = [];
+    const failedModels = [];
+    let firstAvailable = null;
+
+    console.log(`[ProviderHealthCheck] 开始测试 ${modelsToTest.length} 个模型...`);
+
+    for (const model of modelsToTest) {
+      try {
+        console.log(`[ProviderHealthCheck] 测试模型: ${model}`);
+        const result = await this._testSingleModel(appType, provider, model);
+
+        if (result.success) {
+          availableModels.push({
+            model,
+            responseTimeMs: result.responseTimeMs,
+            status: result.status
+          });
+          if (!firstAvailable) {
+            firstAvailable = model;
+          }
+          console.log(`[ProviderHealthCheck] 模型 ${model} 可用 (${result.responseTimeMs}ms)`);
+        } else {
+          failedModels.push({
+            model,
+            error: result.message
+          });
+          console.log(`[ProviderHealthCheck] 模型 ${model} 不可用: ${result.message}`);
+        }
+      } catch (error) {
+        failedModels.push({
+          model,
+          error: error.message
+        });
+        console.log(`[ProviderHealthCheck] 模型 ${model} 测试异常: ${error.message}`);
+      }
+    }
+
+    return {
+      availableModels,
+      failedModels,
+      firstAvailable,
+      testedAt: Date.now()
+    };
+  }
+
+  /**
+   * 测试单个模型
+   * @param {string} appType
+   * @param {Object} provider
+   * @param {string} model
+   * @returns {Promise<Object>}
+   */
+  async _testSingleModel(appType, provider, model) {
+    const startTime = Date.now();
+
+    try {
+      let result;
+
+      switch (appType) {
+        case 'claude':
+          result = await this._checkClaudeStream(provider, model);
+          break;
+        case 'codex':
+          result = await this._checkCodexStream(provider, model);
+          break;
+        case 'gemini':
+          result = await this._checkGeminiStream(provider, model);
+          break;
+        default:
+          throw new Error(`不支持的应用类型: ${appType}`);
+      }
+
+      const responseTime = Date.now() - startTime;
+      const status = this._determineStatus(responseTime);
+
+      return {
+        success: true,
+        message: '测试成功',
+        responseTimeMs: responseTime,
+        httpStatus: result.statusCode,
+        status
+      };
+    } catch (error) {
+      return {
+        success: false,
+        message: error.message,
+        responseTimeMs: Date.now() - startTime
+      };
+    }
   }
 }
 

@@ -3,6 +3,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+// Trigger restart
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, watch } from 'fs';
 import session from 'express-session';
 import crypto from 'crypto';
@@ -14,10 +15,34 @@ import path from 'path';
 // Windows/WSL 兼容层
 const isWindows = process.platform === 'win32';
 const useWSL = isWindows && process.env.WEBTMUX_USE_WSL === 'true';
+const useTmux = !isWindows || useWSL;  // 非 Windows 或 Windows+WSL 时使用 tmux
 
 // 获取 tmux 命令前缀（Windows 上通过 WSL）
 function getTmuxPrefix() {
   return useWSL ? 'wsl tmux' : 'tmux';
+}
+
+// 从 PowerShell 终端输出中解析工作目录
+// PowerShell 提示符格式: PS D:\AI\WhatyTerm>
+// Claude Code 格式: Working directory: D:\AI\WhatyTerm
+function parseWorkingDirFromOutput(output) {
+  if (!output) return null;
+  // 匹配 Claude Code 的 Working directory 输出
+  const claudeMatch = output.match(/Working directory:\s*([A-Za-z]:\\[^\r\n]+)/);
+  if (claudeMatch) {
+    return claudeMatch[1].trim();
+  }
+  // 匹配 PowerShell 提示符: PS C:\path\to\dir> 或 PS D:\path>
+  const psMatch = output.match(/PS\s+([A-Za-z]:\\[^\r\n>]*?)>/);
+  if (psMatch) {
+    return psMatch[1].trim();
+  }
+  // 匹配 cmd 提示符: C:\path\to\dir>
+  const cmdMatch = output.match(/^([A-Za-z]:\\[^\r\n>]*?)>/m);
+  if (cmdMatch) {
+    return cmdMatch[1].trim();
+  }
+  return null;
 }
 import { SessionManager } from './services/SessionManager.js';
 import { HistoryLogger } from './services/HistoryLogger.js';
@@ -245,7 +270,8 @@ const sessionMiddleware = session({
 app.use(express.json());
 app.use(sessionMiddleware);
 
-const sessionManager = new SessionManager();
+// SessionManager 需要异步初始化（等待 mux-server 连接）
+let sessionManager = null;
 const historyLogger = new HistoryLogger();
 const terminalRecorder = getTerminalRecorder();
 const aiEngine = new AIEngine();
@@ -253,6 +279,54 @@ const authService = new AuthService();
 const providerService = new ProviderService(io);
 const healthCheckScheduler = new HealthCheckScheduler(io);
 const scheduleManager = new ScheduleManager();
+
+// 异步初始化 SessionManager
+let sessionManagerReady = false;
+(async () => {
+  try {
+    sessionManager = await SessionManager.create();
+    sessionManagerReady = true;
+    console.log('[Server] SessionManager 初始化完成');
+  } catch (err) {
+    console.error('[Server] SessionManager 初始化失败:', err);
+    // 回退到同步创建（不使用 mux-server 模式）
+    sessionManager = new SessionManager();
+    await sessionManager.init().catch(e => console.error('[Server] SessionManager.init() 失败:', e));
+    sessionManagerReady = true;
+  }
+})();
+
+// 等待 SessionManager 初始化的辅助函数
+async function waitForSessionManager(maxWait = 10000) {
+  const start = Date.now();
+  while (!sessionManagerReady && Date.now() - start < maxWait) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  if (!sessionManagerReady) {
+    throw new Error('SessionManager 初始化超时');
+  }
+  return sessionManager;
+}
+
+// 安全获取 SessionManager 的函数（同步版本，用于非关键路径）
+function getSessionManager() {
+  if (!sessionManagerReady || !sessionManager) {
+    return null;
+  }
+  return sessionManager;
+}
+
+// 安全获取会话列表（在 SessionManager 未就绪时返回空数组）
+function safeListSessions() {
+  const sm = getSessionManager();
+  return sm ? sm.listSessions() : [];
+}
+
+// 安全获取会话（在 SessionManager 未就绪时返回 null）
+function safeGetSession(id) {
+  const sm = getSessionManager();
+  return sm ? sm.getSession(id) : null;
+}
 
 // 启动时执行数据库维护
 (async () => {
@@ -1701,17 +1775,31 @@ function updateCheckState(sessionId, hadAction, status) {
 
 // 更新所有会话的项目信息（工作目录、项目名称、项目说明）
 async function updateAllSessionsProjectInfo() {
+  // 等待 SessionManager 初始化完成
+  if (!sessionManagerReady || !sessionManager) {
+    return;
+  }
+
   const sessions = sessionManager.listSessions();
 
   for (const sessionData of sessions) {
     const session = sessionManager.getSession(sessionData.id);
     if (!session || !session.tmuxSessionName) continue;
 
-    // 从 tmux 获取当前工作目录
+    // 获取当前工作目录
     let workingDir = '';
-    try {
-      workingDir = execSync(`${getTmuxPrefix()} display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
-    } catch { continue; }
+
+    if (useTmux) {
+      // tmux 模式：从 tmux 获取当前工作目录
+      try {
+        workingDir = execSync(`${getTmuxPrefix()} display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
+      } catch { continue; }
+    } else {
+      // Windows 原生模式：从终端输出解析工作目录
+      const terminalOutput = session.getRecentOutput ? session.getRecentOutput(20) : '';
+      workingDir = parseWorkingDirFromOutput(terminalOutput);
+      if (!workingDir) continue;
+    }
 
     // 设置 workingDir（即使没有变化也要设置，确保刷新时可用）
     const workingDirChanged = workingDir && workingDir !== session.workingDir;
@@ -1735,7 +1823,8 @@ async function updateAllSessionsProjectInfo() {
 
     if (!workingDirChanged) continue;
 
-    const projectName = workingDir.split('/').filter(Boolean).pop() || workingDir;
+    // 提取项目名称（支持 Windows 和 Unix 路径）
+    const projectName = path.basename(workingDir) || workingDir;
 
     if (session.projectName === projectName) continue;
 
@@ -1756,6 +1845,9 @@ async function updateAllSessionsProjectInfo() {
 
     console.log(`[会话信息] ${session.name}: 项目=${projectName}, 说明=${session.projectDesc || '无'}`);
 
+    // 保存会话到数据库（确保 workingDir 被持久化）
+    sessionManager.updateSession(session);
+
     // 通知前端更新
     io.emit('session:updated', {
       id: session.id,
@@ -1774,6 +1866,11 @@ setTimeout(updateAllSessionsProjectInfo, 3000);
 
 // 后台自动操作：定时检查所有启用了自动操作的会话
 async function runBackgroundAutoAction() {
+  // 等待 SessionManager 初始化完成
+  if (!sessionManagerReady || !sessionManager) {
+    return;
+  }
+
   const sessions = sessionManager.listSessions();
   const now = Date.now();
 
@@ -1844,10 +1941,19 @@ async function runBackgroundAutoAction() {
       // 获取 tmux 会话名和工作目录
       const tmuxSession = session.tmuxSessionName;
       let actualWorkingDir = session.workingDir;
-      try {
-        actualWorkingDir = execSync(`${getTmuxPrefix()} display-message -t "${tmuxSession}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
-      } catch (e) {
-        console.log(`[错误检测] 会话 ${session.name}: 无法从 tmux 获取工作目录，使用缓存值`);
+      if (useTmux) {
+        try {
+          actualWorkingDir = execSync(`${getTmuxPrefix()} display-message -t "${tmuxSession}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
+        } catch (e) {
+          console.log(`[错误检测] 会话 ${session.name}: 无法从 tmux 获取工作目录，使用缓存值`);
+        }
+      } else {
+        // Windows 原生模式：从终端输出解析工作目录
+        const terminalOutput = session.getRecentOutput ? session.getRecentOutput(20) : '';
+        const parsedDir = parseWorkingDirFromOutput(terminalOutput);
+        if (parsedDir) {
+          actualWorkingDir = parsedDir;
+        }
       }
 
       // 自动模式开启时，直接执行修复；否则发送建议等待用户确认
@@ -2137,6 +2243,20 @@ async function runBackgroundAutoAction() {
           }
         }
 
+        // 检查是否需要会话文件修复（thinking block 相关错误）
+        // 这种情况不需要 AI 分析，直接触发修复
+        if (status.needsSessionFix) {
+          console.log(`[后台自动操作] 会话 ${session.name}: 检测到 thinking block 错误，直接触发修复`);
+          status = {
+            ...status,
+            shouldAutoFix: true,
+            autoFixAction: 'run_fixer',
+            needsAction: true,
+            actionType: 'auto_fix',
+            actionReason: 'thinking block 签名错误，需要修复会话历史'
+          };
+        }
+
         // 检查是否需要自动修复（连续错误等情况）- 不再关闭自动开关
         if (status.shouldAutoFix) {
           console.log(`[后台自动操作] 会话 ${session.name}: 检测到连续错误，启动自动修复 (${status.autoFixAction})`);
@@ -2162,20 +2282,45 @@ async function runBackgroundAutoAction() {
           } else if (status.autoFixAction === 'run_fixer') {
             // thinking 错误：启动 ClaudeSessionFixer 修复程序
             console.log(`[后台自动操作] 会话 ${session.name}: thinking 错误，启动修复程序`);
-            const tmuxSession = session.tmuxSessionName;
-            const workingDir = session.workingDir;
+            // 获取工作目录：优先使用 session.workingDir，否则从终端内容解析
+            let workingDir = session.workingDir;
+            if (!workingDir) {
+              // 尝试从终端内容解析工作目录
+              workingDir = parseWorkingDirFromOutput(terminalContent);
+              if (workingDir) {
+                console.log(`[后台自动操作] 从终端内容解析到工作目录: ${workingDir}`);
+                session.workingDir = workingDir;
+              } else {
+                // 即使没有工作目录，也尝试修复（ClaudeSessionFixer 有备用方案）
+                console.log(`[后台自动操作] 无法获取工作目录，将使用备用方案查找最近的会话文件`);
+              }
+            }
 
             // 标记正在修复
             session.isFixingClaudeError = true;
             session.fixAttempts = (session.fixAttempts || 0) + 1;
 
-            // 调用 ClaudeSessionFixer
-            const fixResult = await claudeSessionFixer.fix(tmuxSession, workingDir);
+            // 调用 ClaudeSessionFixer（使用 autoFixIfNeeded 方法）
+            const fixResult = await claudeSessionFixer.autoFixIfNeeded(terminalContent, workingDir);
 
-            historyLogger.log(session.id, {
-              type: 'system',
-              content: `thinking 错误，启动修复程序 (第${session.fixAttempts}次): ${fixResult.success ? '成功' : fixResult.error}`
-            });
+            if (fixResult.success) {
+              console.log(`[后台自动操作] 会话 ${session.name}: 修复成功，移除了 ${fixResult.removedCount} 个 thinking blocks`);
+
+              // 修复成功后重启 Claude Code
+              console.log(`[后台自动操作] 会话 ${session.name}: 发送 claude -c 继续开发`);
+              session.write('claude -c');
+              setTimeout(() => session.write('\r'), 100);
+
+              historyLogger.log(session.id, {
+                type: 'system',
+                content: `thinking 错误修复成功 (第${session.fixAttempts}次): 移除了 ${fixResult.removedCount} 个 thinking blocks，正在重启 Claude Code...`
+              });
+            } else {
+              historyLogger.log(session.id, {
+                type: 'system',
+                content: `thinking 错误修复 (第${session.fixAttempts}次): ${fixResult.error || '未检测到需要修复'}`
+              });
+            }
 
             session.isFixingClaudeError = false;
             session.lastClaudeFixTime = Date.now();
@@ -2291,14 +2436,20 @@ async function runBackgroundAutoAction() {
       updateAiHealthState(true, null, status?.preAnalyzed || false, sessionData.id);
 
       // 更新会话信息（工作目录、名称、项目说明）
-      // 直接从 tmux 获取当前工作目录，比 AI 分析更准确
+      // 获取当前工作目录
       let workingDir = '';
-      try {
-        workingDir = execSync(`${getTmuxPrefix()} display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
-      } catch {}
+      if (useTmux) {
+        try {
+          workingDir = execSync(`${getTmuxPrefix()} display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
+        } catch {}
+      } else {
+        // Windows 原生模式：从终端输出解析工作目录
+        const terminalOutput = session.getRecentOutput ? session.getRecentOutput(20) : '';
+        workingDir = parseWorkingDirFromOutput(terminalOutput);
+      }
 
       if (workingDir && workingDir !== session.workingDir) {
-        const projectName = workingDir.split('/').filter(Boolean).pop() || workingDir;
+        const projectName = path.basename(workingDir) || workingDir;
 
         // 只在名称变化时更新
         if (session.projectName !== projectName) {
@@ -2450,6 +2601,11 @@ async function runBackgroundStatusAnalysis() {
   nextAiAnalysisTime = Date.now() + AI_ANALYSIS_INTERVAL;
   if (io) {
     io.emit('ai:nextAnalysisTime', { nextTime: nextAiAnalysisTime });
+  }
+
+  // 等待 SessionManager 初始化完成
+  if (!sessionManagerReady || !sessionManager) {
+    return;
   }
 
   // 检查 AI 服务健康状态
@@ -2836,6 +2992,15 @@ io.on('connection', (socket) => {
 
   // 获取会话列表
   socket.on('sessions:list', async () => {
+    // 等待 SessionManager 初始化完成
+    try {
+      await waitForSessionManager();
+    } catch (err) {
+      console.error('[sessions:list] SessionManager 未就绪:', err.message);
+      socket.emit('sessions:list', []);
+      return;
+    }
+
     const startTime = Date.now();
     const sessions = sessionManager.listSessions();
 
@@ -2851,6 +3016,9 @@ io.on('connection', (socket) => {
   // 创建新会话
   socket.on('session:create', async (data) => {
     try {
+      // 等待 SessionManager 初始化完成
+      await waitForSessionManager();
+
       const session = await sessionManager.createSession({
         name: data.name,
         goal: data.goal || '',
@@ -3053,8 +3221,18 @@ io.on('connection', (socket) => {
   });
 
   // 附加到会话
-  socket.on('session:attach', (sessionId) => {
+  socket.on('session:attach', async (sessionId) => {
     console.log(`[session:attach] 收到附加请求: ${sessionId}`);
+
+    // 等待 SessionManager 初始化完成
+    try {
+      await waitForSessionManager();
+    } catch (err) {
+      console.error('[session:attach] SessionManager 未就绪:', err.message);
+      socket.emit('error', { message: 'SessionManager 未就绪' });
+      return;
+    }
+
     const session = sessionManager.getSession(sessionId);
     if (!session) {
       console.log(`[session:attach] 会话不存在: ${sessionId}`);
@@ -3158,6 +3336,12 @@ io.on('connection', (socket) => {
 
   // 终端输入
   socket.on('terminal:input', async (data) => {
+    // 等待 SessionManager 初始化完成
+    if (!sessionManagerReady || !sessionManager) {
+      console.error('[terminal:input] SessionManager 未就绪');
+      return;
+    }
+
     const session = sessionManager.getSession(data.sessionId);
     if (session) {
       // 调试：打印收到的输入（显示特殊字符）
@@ -3187,15 +3371,27 @@ io.on('connection', (socket) => {
 
           // 先获取当前工作目录，以便正确检测本地配置
           let cliWorkingDir = session.workingDir;
-          try {
-            cliWorkingDir = execSync(`${getTmuxPrefix()} display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
-            if (cliWorkingDir) {
-              session.workingDir = cliWorkingDir;
-              session.projectName = cliWorkingDir.split('/').filter(Boolean).pop() || cliWorkingDir;
-              console.log(`[CLI检测] 工作目录: ${cliWorkingDir}`);
+          if (useTmux) {
+            try {
+              cliWorkingDir = execSync(`${getTmuxPrefix()} display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
+              if (cliWorkingDir) {
+                session.workingDir = cliWorkingDir;
+                session.projectName = path.basename(cliWorkingDir) || cliWorkingDir;
+                console.log(`[CLI检测] 工作目录: ${cliWorkingDir}`);
+              }
+            } catch (e) {
+              console.error(`[CLI检测] 获取工作目录失败:`, e.message);
             }
-          } catch (e) {
-            console.error(`[CLI检测] 获取工作目录失败:`, e.message);
+          } else {
+            // Windows 原生模式：从终端输出解析工作目录
+            const terminalOutput = session.getRecentOutput ? session.getRecentOutput(20) : '';
+            const parsedDir = parseWorkingDirFromOutput(terminalOutput);
+            if (parsedDir) {
+              cliWorkingDir = parsedDir;
+              session.workingDir = cliWorkingDir;
+              session.projectName = path.basename(cliWorkingDir) || cliWorkingDir;
+              console.log(`[CLI检测] 工作目录 (Windows): ${cliWorkingDir}`);
+            }
           }
 
           // 传递 workingDir 以正确检测本地配置
@@ -3252,7 +3448,12 @@ io.on('connection', (socket) => {
         session._inputBuffer += data.input;
       }
 
-      session.write(data.input);
+      // mux-server 模式下 session.write() 是异步的，需要 await
+      try {
+        await session.write(data.input);
+      } catch (err) {
+        console.error(`[终端输入] 写入失败:`, err.message);
+      }
 
       // 录制终端输入
       terminalRecorder.recordInput(data.sessionId, data.input);
@@ -3908,178 +4109,241 @@ ${context.join('\n\n')}
   }
 });
 
-const PORT = process.env.PORT || 3000;
+const DEFAULT_PORT = 3000;
 const HOST = process.env.HOST || '127.0.0.1';
-server.listen(PORT, HOST, async () => {
-  console.log(`WebTmux 服务器运行在 http://${HOST}:${PORT}`);
+let currentPort = parseInt(process.env.PORT) || DEFAULT_PORT;
 
-  // 注意：项目元数据（projectDesc、goal）的刷新已集成到 updateAllSessionsProjectInfo() 中
-  // 该函数会在启动后 3 秒执行，并每 30 秒定期刷新
-
-  // 启动定时健康检查调度器
-  try {
-    await healthCheckScheduler.start();
-  } catch (err) {
-    console.error('[Server] 启动健康检查调度器失败:', err);
-  }
-
-  // 启动预约调度器
-  scheduleManager.onScheduleTrigger((schedule) => {
-    console.log(`[预约] 触发预约: ${schedule.id}, 会话: ${schedule.sessionId}, 动作: ${schedule.action}`);
-
-    const session = sessionManager.getSession(schedule.sessionId);
-    if (session) {
-      const enabled = schedule.action === 'enable';
-      session.updateSettings({ autoActionEnabled: enabled });
-      sessionManager.updateSession(session);
-
-      io.to(`session:${schedule.sessionId}`).emit('session:updated', session.toJSON());
-      io.emit('sessions:updated', sessionManager.listSessions());
-
-      historyLogger.log(schedule.sessionId, {
-        type: 'system',
-        content: `预约触发: ${enabled ? '开启' : '关闭'}AI监控`
-      });
-    }
-  });
-  scheduleManager.startScheduler();
-
-  // 启动隧道服务（根据平台选择策略）
-  try {
-    let tunnelUrl = null;
-
-    // 根据平台选择隧道策略
-    if (process.platform === 'win32') {
-      // Windows 上只使用 Cloudflare Tunnel（frpc.exe 未签名，会被 Windows Defender 阻止）
-      console.log('Windows 平台，使用 Cloudflare Tunnel');
-      cloudflareTunnel.init(io, PORT);
-      tunnelUrl = await cloudflareTunnel.start();
-    } else {
-      // 其他平台优先尝试 FRP：测试三台服务器，选最快可用的
-      frpTunnel.init(io, PORT);
-      const frpInstalled = await frpTunnel.checkInstalled();
-      if (frpInstalled) {
-        tunnelUrl = await frpTunnel.start();
-      }
-
-      // 如果 FRP 不可用，使用 Cloudflare Tunnel 作为备用
-      if (!tunnelUrl) {
-        console.log('[Server] FRP 隧道不可用，使用 Cloudflare Tunnel 备用');
-        cloudflareTunnel.init(io, PORT);
-        tunnelUrl = await cloudflareTunnel.start();
-      }
-
-      // 启动 FRP 服务器定期健康检查（每60秒）
-      frpTunnel.startHealthCheck(60000);
-
-      // 启动隧道 URL 可用性检测（每30秒）
-      frpTunnel.startTunnelCheck(30000);
-    }
-
-    if (tunnelUrl) {
-      console.log(`外部访问地址: ${tunnelUrl}`);
-    }
-  } catch (err) {
-    console.error('[Server] 启动隧道服务失败:', err);
-  }
-
-  // 对所有恢复的 session 进行初始 CLI 工具检测和供应商信息补充
-  // 使用并行处理加速启动
-  console.log(`[启动检测] 开始检测 ${sessionManager.sessions.size} 个会话的 CLI 工具`);
-
-  // 先同步注册 bell 回调和检测 CLI（这些是快速操作）
-  for (const session of sessionManager.sessions.values()) {
-    registerBellCallback(session);
-    try {
-      const terminalContent = session.getScreenContent();
-      const detectedCLI = aiEngine.detectRunningCLI(terminalContent, session.tmuxSessionName);
-      if (detectedCLI && detectedCLI !== session.aiType) {
-        console.log(`[启动检测] Session ${session.name}: CLI 切换 ${session.aiType} -> ${detectedCLI}`);
-        session.aiType = detectedCLI;
-      }
-    } catch (err) {
-      console.error(`[启动检测] Session ${session.name} CLI检测失败:`, err.message);
-    }
-  }
-
-  // 异步并行获取供应商信息（不阻塞启动）
-  (async () => {
-    const tasks = Array.from(sessionManager.sessions.values()).map(async (session) => {
-      try {
-        let needsUpdate = false;
-
-        if (!session.claudeProvider) {
-          const claudeProvider = await getCurrentProvider('claude', session.workingDir);
-          if (claudeProvider.exists) {
-            session.claudeProvider = claudeProvider;
-            needsUpdate = true;
-          }
-        }
-
-        if (!session.codexProvider) {
-          const codexProvider = await getCurrentProvider('codex');
-          if (codexProvider.exists) {
-            session.codexProvider = codexProvider;
-            needsUpdate = true;
-          }
-        }
-
-        if (needsUpdate) {
-          sessionManager.updateSession(session);
-        }
-      } catch (err) {
-        console.error(`[启动检测] Session ${session.name} 供应商获取失败:`, err.message);
+/**
+ * 检查端口是否被占用
+ */
+function isPortInUse(port) {
+  return new Promise((resolve) => {
+    const testServer = createServer();
+    testServer.once('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        resolve(true);
+      } else {
+        resolve(false);
       }
     });
+    testServer.once('listening', () => {
+      testServer.close();
+      resolve(false);
+    });
+    testServer.listen(port, HOST);
+  });
+}
 
-    await Promise.all(tasks);
-    console.log(`[启动检测] 供应商信息补充完成`);
-    // 通知前端更新会话列表
-    io.emit('sessions:updated', sessionManager.listSessions());
-  })();
-
-  console.log(`[启动检测] 完成（供应商信息后台加载中）`);
-
-  // 监听全局 Claude 配置文件变化，自动刷新所有会话的供应商信息
-  const claudeSettingsPath = path.join(os.homedir(), '.claude', 'settings.json');
-  let configWatchDebounce = null;
-
-  const refreshAllProviders = async () => {
-    console.log('[配置监听] 检测到全局配置变化，刷新所有会话的供应商信息');
-    const sessions = Array.from(sessionManager.sessions.values());
-
-    for (const session of sessions) {
-      try {
-        const claudeProvider = await getCurrentProvider('claude', session.workingDir);
-        if (claudeProvider.exists) {
-          session.claudeProvider = claudeProvider;
-          sessionManager.updateSession(session);
-        }
-      } catch (err) {
-        console.error(`[配置监听] 刷新会话 ${session.name} 供应商失败:`, err.message);
-      }
+/**
+ * 查找可用端口
+ */
+async function findAvailablePort(startPort, maxAttempts = 100) {
+  for (let i = 0; i < maxAttempts; i++) {
+    const port = startPort + i;
+    const inUse = await isPortInUse(port);
+    if (!inUse) {
+      return port;
     }
+    console.log(`[Server] 端口 ${port} 被占用，尝试下一个...`);
+  }
+  throw new Error(`无法找到可用端口 (尝试了 ${startPort} - ${startPort + maxAttempts - 1})`);
+}
 
-    io.emit('sessions:updated', sessionManager.listSessions());
-    console.log(`[配置监听] 已刷新 ${sessions.length} 个会话的供应商信息`);
-  };
+/**
+ * 启动服务器
+ */
+async function startServer() {
+  try {
+    // 查找可用端口
+    currentPort = await findAvailablePort(DEFAULT_PORT);
 
-  if (existsSync(claudeSettingsPath)) {
-    try {
-      watch(claudeSettingsPath, (eventType) => {
-        if (eventType === 'change') {
-          // 防抖：500ms 内多次变化只触发一次刷新
-          if (configWatchDebounce) {
-            clearTimeout(configWatchDebounce);
-          }
-          configWatchDebounce = setTimeout(refreshAllProviders, 500);
+    server.listen(currentPort, HOST, async () => {
+      console.log(`WebTmux 服务器运行在 http://${HOST}:${currentPort}`);
+
+      // 等待 SessionManager 初始化完成
+      try {
+        await waitForSessionManager();
+        console.log('[Server] SessionManager 已就绪');
+      } catch (err) {
+        console.error('[Server] 等待 SessionManager 失败:', err);
+      }
+
+      // 注意：项目元数据（projectDesc、goal）的刷新已集成到 updateAllSessionsProjectInfo() 中
+      // 该函数会在启动后 3 秒执行，并每 30 秒定期刷新
+
+      // 启动定时健康检查调度器
+      try {
+        await healthCheckScheduler.start();
+      } catch (err) {
+        console.error('[Server] 启动健康检查调度器失败:', err);
+      }
+
+      // 启动预约调度器
+      scheduleManager.onScheduleTrigger((schedule) => {
+        console.log(`[预约] 触发预约: ${schedule.id}, 会话: ${schedule.sessionId}, 动作: ${schedule.action}`);
+
+        const session = sessionManager.getSession(schedule.sessionId);
+        if (session) {
+          const enabled = schedule.action === 'enable';
+          session.updateSettings({ autoActionEnabled: enabled });
+          sessionManager.updateSession(session);
+
+          io.to(`session:${schedule.sessionId}`).emit('session:updated', session.toJSON());
+          io.emit('sessions:updated', sessionManager.listSessions());
+
+          historyLogger.log(schedule.sessionId, {
+            type: 'system',
+            content: `预约触发: ${enabled ? '开启' : '关闭'}AI监控`
+          });
         }
       });
-      console.log(`[配置监听] 已启动全局配置文件监听: ${claudeSettingsPath}`);
-    } catch (err) {
-      console.error('[配置监听] 启动文件监听失败:', err.message);
-    }
-  } else {
-    console.log('[配置监听] 全局配置文件不存在，跳过监听');
+      scheduleManager.startScheduler();
+
+      // 启动隧道服务（根据平台选择策略）
+      try {
+        let tunnelUrl = null;
+
+        // 根据平台选择隧道策略
+        if (process.platform === 'win32') {
+          // Windows 上只使用 Cloudflare Tunnel（frpc.exe 未签名，会被 Windows Defender 阻止）
+          console.log('Windows 平台，使用 Cloudflare Tunnel');
+          cloudflareTunnel.init(io, currentPort);
+          tunnelUrl = await cloudflareTunnel.start();
+        } else {
+          // 其他平台优先尝试 FRP：测试三台服务器，选最快可用的
+          frpTunnel.init(io, currentPort);
+          const frpInstalled = await frpTunnel.checkInstalled();
+          if (frpInstalled) {
+            tunnelUrl = await frpTunnel.start();
+          }
+
+          // 如果 FRP 不可用，使用 Cloudflare Tunnel 作为备用
+          if (!tunnelUrl) {
+            console.log('[Server] FRP 隧道不可用，使用 Cloudflare Tunnel 备用');
+            cloudflareTunnel.init(io, currentPort);
+            tunnelUrl = await cloudflareTunnel.start();
+          }
+
+          // 启动 FRP 服务器定期健康检查（每60秒）
+          frpTunnel.startHealthCheck(60000);
+
+          // 启动隧道 URL 可用性检测（每30秒）
+          frpTunnel.startTunnelCheck(30000);
+        }
+
+        if (tunnelUrl) {
+          console.log(`外部访问地址: ${tunnelUrl}`);
+        }
+      } catch (err) {
+        console.error('[Server] 启动隧道服务失败:', err);
+      }
+
+      // 对所有恢复的 session 进行初始 CLI 工具检测和供应商信息补充
+      // 使用并行处理加速启动
+      console.log(`[启动检测] 开始检测 ${sessionManager.sessions.size} 个会话的 CLI 工具`);
+
+      // 先同步注册 bell 回调和检测 CLI（这些是快速操作）
+      for (const session of sessionManager.sessions.values()) {
+        registerBellCallback(session);
+        try {
+          const terminalContent = session.getScreenContent();
+          const detectedCLI = aiEngine.detectRunningCLI(terminalContent, session.tmuxSessionName);
+          if (detectedCLI && detectedCLI !== session.aiType) {
+            console.log(`[启动检测] Session ${session.name}: CLI 切换 ${session.aiType} -> ${detectedCLI}`);
+            session.aiType = detectedCLI;
+          }
+        } catch (err) {
+          console.error(`[启动检测] Session ${session.name} CLI检测失败:`, err.message);
+        }
+      }
+
+      // 异步并行获取供应商信息（不阻塞启动）
+      (async () => {
+        const tasks = Array.from(sessionManager.sessions.values()).map(async (session) => {
+          try {
+            let needsUpdate = false;
+
+            if (!session.claudeProvider) {
+              const claudeProvider = await getCurrentProvider('claude', session.workingDir);
+              if (claudeProvider.exists) {
+                session.claudeProvider = claudeProvider;
+                needsUpdate = true;
+              }
+            }
+
+            if (!session.codexProvider) {
+              const codexProvider = await getCurrentProvider('codex');
+              if (codexProvider.exists) {
+                session.codexProvider = codexProvider;
+                needsUpdate = true;
+              }
+            }
+
+            if (needsUpdate) {
+              sessionManager.updateSession(session);
+            }
+          } catch (err) {
+            console.error(`[启动检测] Session ${session.name} 供应商获取失败:`, err.message);
+          }
+        });
+
+        await Promise.all(tasks);
+        console.log(`[启动检测] 供应商信息补充完成`);
+        // 通知前端更新会话列表
+        io.emit('sessions:updated', sessionManager.listSessions());
+      })();
+
+      console.log(`[启动检测] 完成（供应商信息后台加载中）`);
+
+      // 监听全局 Claude 配置文件变化，自动刷新所有会话的供应商信息
+      const claudeSettingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+      let configWatchDebounce = null;
+
+      const refreshAllProviders = async () => {
+        console.log('[配置监听] 检测到全局配置变化，刷新所有会话的供应商信息');
+        const sessions = Array.from(sessionManager.sessions.values());
+
+        for (const session of sessions) {
+          try {
+            const claudeProvider = await getCurrentProvider('claude', session.workingDir);
+            if (claudeProvider.exists) {
+              session.claudeProvider = claudeProvider;
+              sessionManager.updateSession(session);
+            }
+          } catch (err) {
+            console.error(`[配置监听] 刷新会话 ${session.name} 供应商失败:`, err.message);
+          }
+        }
+
+        io.emit('sessions:updated', sessionManager.listSessions());
+        console.log(`[配置监听] 已刷新 ${sessions.length} 个会话的供应商信息`);
+      };
+
+      if (existsSync(claudeSettingsPath)) {
+        try {
+          watch(claudeSettingsPath, (eventType) => {
+            if (eventType === 'change') {
+              // 防抖：500ms 内多次变化只触发一次刷新
+              if (configWatchDebounce) {
+                clearTimeout(configWatchDebounce);
+              }
+              configWatchDebounce = setTimeout(refreshAllProviders, 500);
+            }
+          });
+          console.log(`[配置监听] 已启动全局配置文件监听: ${claudeSettingsPath}`);
+        } catch (err) {
+          console.error('[配置监听] 启动文件监听失败:', err.message);
+        }
+      } else {
+        console.log('[配置监听] 全局配置文件不存在，跳过监听');
+      }
+    });
+  } catch (err) {
+    console.error('[Server] 启动服务器失败:', err);
+    process.exit(1);
   }
-});
+}
+
+// 启动服务器
+startServer();
+// Trigger restart 2026年01月 2日 12:34:35

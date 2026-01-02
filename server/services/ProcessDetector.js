@@ -11,6 +11,8 @@ import cliRegistry from './CliRegistry.js';
 // Windows/WSL 兼容层
 const isWindows = process.platform === 'win32';
 const useWSL = isWindows && process.env.WEBTMUX_USE_WSL === 'true';
+// Windows 原生模式：不使用 tmux，无法进行进程检测
+const useWindowsNative = isWindows && !useWSL;
 
 // 获取命令前缀（Windows 上通过 WSL 执行 Unix 命令）
 function getUnixCmdPrefix() {
@@ -40,6 +42,11 @@ class ProcessDetector {
    * @returns {object} { detected: boolean, cli: string|null, processName: string|null, pid: number|null }
    */
   detectCLI(tmuxSession) {
+    // Windows 原生模式：无法进行进程检测，直接返回
+    if (useWindowsNative) {
+      return { detected: false, cli: null, processName: null, pid: null, reason: 'windows_native' };
+    }
+
     if (!tmuxSession) {
       return { detected: false, cli: null, processName: null, pid: null };
     }
@@ -130,6 +137,11 @@ class ProcessDetector {
    * @returns {object} { command: string|null, pid: number|null }
    */
   getForegroundProcess(tmuxSession) {
+    // Windows 原生模式：无法进行进程检测
+    if (useWindowsNative) {
+      return { command: null, pid: null, reason: 'windows_native' };
+    }
+
     if (!tmuxSession) {
       return { command: null, pid: null };
     }

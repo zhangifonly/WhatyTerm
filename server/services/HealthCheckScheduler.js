@@ -1,6 +1,6 @@
-import ProviderService from './ProviderService.js';
 import ProviderHealthCheck from './ProviderHealthCheck.js';
 import ConfigService from './ConfigService.js';
+import BuiltinProviderDB from './BuiltinProviderDB.js';
 
 /**
  * 定时健康检查调度器
@@ -8,13 +8,62 @@ import ConfigService from './ConfigService.js';
  */
 class HealthCheckScheduler {
   constructor(io = null) {
-    this.providerService = new ProviderService(io);
     this.healthCheck = new ProviderHealthCheck();
     this.configService = new ConfigService();
     this.io = io;
     this.timer = null;
     this.config = null;
     this.isRunning = false;
+  }
+
+  /**
+   * 从 CC-Switch 数据库获取指定类型的供应商列表
+   * @param {string} appType - 应用类型 (claude, codex, gemini)
+   * @returns {Array} 供应商列表
+   */
+  _getProvidersByAppType(appType) {
+    try {
+      const db = BuiltinProviderDB.getDB(true);
+      const rows = db.prepare('SELECT * FROM providers WHERE app_type = ?').all(appType);
+      return rows.map(row => ({
+        id: row.id,
+        name: row.name,
+        appType: row.app_type,
+        settingsConfig: row.settings_config ? JSON.parse(row.settings_config) : {},
+        websiteUrl: row.website_url,
+        category: row.category,
+        isCurrent: row.is_current === 1
+      }));
+    } catch (error) {
+      console.error(`[HealthCheckScheduler] 获取 ${appType} 供应商列表失败:`, error);
+      return [];
+    }
+  }
+
+  /**
+   * 从 CC-Switch 数据库获取指定供应商
+   * @param {string} appType - 应用类型
+   * @param {string} providerId - 供应商 ID
+   * @returns {Object|null} 供应商对象
+   */
+  _getProviderById(appType, providerId) {
+    try {
+      const db = BuiltinProviderDB.getDB(true);
+      const row = db.prepare('SELECT * FROM providers WHERE app_type = ? AND id = ?').get(appType, providerId);
+      if (!row) return null;
+      return {
+        id: row.id,
+        name: row.name,
+        appType: row.app_type,
+        settingsConfig: row.settings_config ? JSON.parse(row.settings_config) : {},
+        websiteUrl: row.website_url,
+        category: row.category,
+        isCurrent: row.is_current === 1
+      };
+    } catch (error) {
+      console.error(`[HealthCheckScheduler] 获取供应商 ${providerId} 失败:`, error);
+      return null;
+    }
   }
 
   /**
@@ -116,8 +165,7 @@ class HealthCheckScheduler {
 
     for (const appType of appTypes) {
       try {
-        const data = this.providerService.list(appType);
-        const providers = Object.values(data.providers);
+        const providers = this._getProvidersByAppType(appType);
 
         if (providers.length === 0) {
           continue;
@@ -226,7 +274,7 @@ class HealthCheckScheduler {
    */
   async checkSingleProvider(appType, providerId) {
     try {
-      const provider = this.providerService.getById(appType, providerId);
+      const provider = this._getProviderById(appType, providerId);
       if (!provider) {
         return {
           status: 'failed',

@@ -1126,7 +1126,45 @@ ${historyText || '(空)'}
     // 先清理 ANSI 转义序列，确保正则能正确匹配
     const cleanContent = terminalContent.replace(/\x1b\[[0-9;]*m/g, '');
 
-    // 0. 最高优先级：检测程序运行中（必须在确认界面之前）
+    // 0. 最高优先级：检测 API 错误（必须在"运行中"检测之前）
+    // 因为即使终端历史中有 "esc to interrupt"，如果有 API 错误也应该触发修复
+    const hasInputPromptForError = /^>\s*$/m.test(cleanContent) || /\n>\s*$/m.test(cleanContent);
+
+    // 需要完整修复的错误（thinking block 相关）- 交给 ClaudeSessionFixer 处理
+    const needsSessionFix = /invalid.*signature.*in.*thinking/i.test(cleanContent) ||
+                            /thinking.*block.*not.*allowed/i.test(cleanContent) ||
+                            /invalid.*thinking.*block/i.test(cleanContent) ||
+                            /thinking\.signature.*Field required/i.test(cleanContent) ||
+                            /signature.*Field required/i.test(cleanContent) ||
+                            /tool_use_id/i.test(cleanContent) && /API Error/i.test(cleanContent);
+
+    // 调试日志
+    if (needsSessionFix || hasInputPromptForError) {
+      console.log(`[AIEngine] API错误检测: needsSessionFix=${needsSessionFix}, hasInputPromptForError=${hasInputPromptForError}`);
+    }
+
+    // 如果检测到需要修复的错误，直接返回修复状态
+    // 注意：即使没有 > 提示符，也应该触发修复，因为错误已经发生
+    if (needsSessionFix) {
+      // 不自动操作，让 server/index.js 的 ClaudeSessionFixer 来处理
+      console.log('[AIEngine] 检测到需要修复的 API 错误（thinking block/tool_use_id），交给修复流程处理');
+      return {
+        currentState: 'API错误需要修复',
+        workingDir: '未显示',
+        recentAction: 'API调用失败',
+        needsAction: false,  // 不自动操作
+        actionType: 'none',
+        suggestedAction: null,
+        actionReason: '检测到 thinking block 签名错误，需要修复会话历史',
+        suggestion: '等待自动修复流程执行',
+        updatedAt: new Date().toISOString(),
+        preAnalyzed: true,
+        detectedCLI,
+        needsSessionFix: true  // 标记需要修复
+      };
+    }
+
+    // 1. 检测程序运行中（在 API 错误检测之后）
     // 如果程序正在运行，即使历史中有确认界面内容，也应该返回"运行中"
     // 但要排除确认界面的情况（确认界面显示时程序实际上已暂停）
     let isRunning = false;
@@ -1219,40 +1257,8 @@ ${historyText || '(空)'}
       };
     }
 
-    // 2. 检测 API 错误
-    // 区分两种情况：
-    // - thinking block 相关错误：需要完整修复流程（ClaudeSessionFixer），不在这里处理
-    // - 其他可重试错误（rate_limit 等）：可以简单发送"继续"重试
-    const hasInputPromptForError = /^>\s*$/m.test(cleanContent) || /\n>\s*$/m.test(cleanContent);
-
-    // 需要完整修复的错误（thinking block 相关）- 交给 ClaudeSessionFixer 处理
-    const needsSessionFix = /invalid.*signature.*in.*thinking/i.test(cleanContent) ||
-                            /thinking.*block.*not.*allowed/i.test(cleanContent) ||
-                            /invalid.*thinking.*block/i.test(cleanContent) ||
-                            /thinking\.signature.*Field required/i.test(cleanContent) ||  // 新增
-                            /signature.*Field required/i.test(cleanContent) ||  // 新增
-                            /tool_use_id/i.test(cleanContent) && /API Error/i.test(cleanContent);
-
-    if (needsSessionFix && hasInputPromptForError) {
-      // 不自动操作，让 server/index.js 的 ClaudeSessionFixer 来处理
-      console.log('[AIEngine] 检测到需要修复的 API 错误（thinking block/tool_use_id），交给修复流程处理');
-      return {
-        currentState: 'API错误需要修复',
-        workingDir: '未显示',
-        recentAction: 'API调用失败',
-        needsAction: false,  // 不自动操作
-        actionType: 'none',
-        suggestedAction: null,
-        actionReason: '检测到 thinking block 签名错误，需要修复会话历史',
-        suggestion: '等待自动修复流程执行',
-        updatedAt: new Date().toISOString(),
-        preAnalyzed: true,
-        detectedCLI,
-        needsSessionFix: true  // 标记需要修复
-      };
-    }
-
-    // 可重试的 API 错误（如 rate_limit）
+    // 2. 检测可重试的 API 错误（如 rate_limit）
+    // 注意：thinking block 相关错误已在上面（最高优先级）处理
     const hasRetryableError = /API Error.*rate_limit/i.test(cleanContent) ||
                               /API Error.*overloaded/i.test(cleanContent) ||
                               /API Error.*5\d{2}/i.test(cleanContent);  // 5xx 服务器错误
