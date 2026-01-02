@@ -1131,16 +1131,38 @@ ${historyText || '(空)'}
     const hasInputPromptForError = /^>\s*$/m.test(cleanContent) || /\n>\s*$/m.test(cleanContent);
 
     // 需要完整修复的错误（thinking block 相关）- 交给 ClaudeSessionFixer 处理
-    const needsSessionFix = /invalid.*signature.*in.*thinking/i.test(cleanContent) ||
-                            /thinking.*block.*not.*allowed/i.test(cleanContent) ||
-                            /invalid.*thinking.*block/i.test(cleanContent) ||
-                            /thinking\.signature.*Field required/i.test(cleanContent) ||
-                            /signature.*Field required/i.test(cleanContent) ||
-                            /tool_use_id/i.test(cleanContent) && /API Error/i.test(cleanContent);
+    // 注意：只检测最近的输出（最后 2000 字符），避免历史错误信息导致重复检测
+    const recentContent = cleanContent.slice(-2000);
+    // 移除换行符和多余空格以处理跨行的错误信息（如 "th\ninking.signature"）
+    const recentContentNoNewlines = recentContent.replace(/\r?\n\s*/g, '');
+    const needsSessionFix = /invalid.*signature.*in.*thinking/i.test(recentContentNoNewlines) ||
+                            /thinking.*block.*not.*allowed/i.test(recentContentNoNewlines) ||
+                            /invalid.*thinking.*block/i.test(recentContentNoNewlines) ||
+                            /thinking\.signature.*Field required/i.test(recentContentNoNewlines) ||
+                            /thinking\.signature:\s*Field required/i.test(recentContentNoNewlines) ||
+                            /"signature":\s*"Field required"/i.test(recentContentNoNewlines) ||
+                            /tool_use_id/i.test(recentContentNoNewlines) && /API Error/i.test(recentContentNoNewlines);
 
     // 调试日志
     if (needsSessionFix || hasInputPromptForError) {
       console.log(`[AIEngine] API错误检测: needsSessionFix=${needsSessionFix}, hasInputPromptForError=${hasInputPromptForError}`);
+      if (needsSessionFix) {
+        // 输出匹配到的具体模式
+        const patterns = [
+          { name: 'invalid signature in thinking', regex: /invalid.*signature.*in.*thinking/i },
+          { name: 'thinking block not allowed', regex: /thinking.*block.*not.*allowed/i },
+          { name: 'invalid thinking block', regex: /invalid.*thinking.*block/i },
+          { name: 'thinking.signature Field required', regex: /thinking\.signature.*Field required/i },
+          { name: 'thinking.signature: Field required (JSON)', regex: /thinking\.signature:\s*Field required/i },
+          { name: 'JSON signature Field required', regex: /"signature":\s*"Field required"/i },
+          { name: 'tool_use_id + API Error', regex: /tool_use_id/i }
+        ];
+        for (const p of patterns) {
+          if (p.regex.test(recentContentNoNewlines)) {
+            console.log(`[AIEngine] 匹配到错误模式: ${p.name}`);
+          }
+        }
+      }
     }
 
     // 如果检测到需要修复的错误，直接返回修复状态
@@ -1529,16 +1551,19 @@ ${historyText || '(空)'}
       /我遇到了工具调用问题/g,
     ];
     let totalErrors = 0;
+    let matchedPatterns = [];
     for (const pattern of errorPatterns) {
       const matches = recentLines.match(pattern);
       if (matches) {
         totalErrors += matches.length;
+        matchedPatterns.push(`${pattern.source}(${matches.length}次)`);
       }
     }
 
     // 如果检测到错误，返回特殊标记，让调用方进行 AI 错误分析
     if (totalErrors >= 1) {
-      console.log(`[AIEngine] 检测到 API 错误 (${totalErrors}次)，需要 AI 分析错误类型`);
+      console.log(`[AIEngine] 检测到 API 错误 (${totalErrors}次)，匹配模式: ${matchedPatterns.join(', ')}`);
+      console.log(`[AIEngine] 最近30行内容预览: ${recentLines.slice(0, 500)}...`);
       return {
         currentState: 'API错误待分析',
         workingDir: '未显示',

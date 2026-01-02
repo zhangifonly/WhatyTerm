@@ -2718,6 +2718,99 @@ async function runBackgroundStatusAnalysis() {
         });
 
         console.log(`[后台AI分析] 会话 ${session.name}: 分析完成`);
+
+        // 检查是否需要会话文件修复（thinking block 相关错误）
+        // 即使没有开启自动操作，也应该自动修复这类错误
+        if (status.needsSessionFix) {
+          // 检查是否正在修复中或最近刚修复过（5分钟冷却）
+          const now = Date.now();
+          const lastFixTime = session.lastThinkingFixTime || 0;
+          const fixCooldown = 5 * 60 * 1000; // 5分钟冷却
+
+          if (session.isFixingThinkingError) {
+            console.log(`[后台AI分析] 会话 ${session.name}: 正在修复中，跳过`);
+          } else if (now - lastFixTime < fixCooldown) {
+            console.log(`[后台AI分析] 会话 ${session.name}: 最近已修复过，冷却中 (剩余 ${Math.ceil((fixCooldown - (now - lastFixTime)) / 1000)} 秒)`);
+          } else {
+            console.log(`[后台AI分析] 会话 ${session.name}: 检测到 thinking block 错误，触发自动修复`);
+
+            // 标记正在修复
+            session.isFixingThinkingError = true;
+
+          // 获取工作目录
+          let workingDir = session.workingDir;
+          if (!workingDir) {
+            // 尝试从终端内容解析工作目录
+            workingDir = parseWorkingDirFromOutput(terminalContent);
+            if (workingDir) {
+              console.log(`[后台AI分析] 从终端内容解析到工作目录: ${workingDir}`);
+              session.workingDir = workingDir;
+            }
+          }
+
+          // 直接调用修复方法，不再重复检测错误
+          // （AIEngine.preAnalyzeStatus 已经确认需要修复）
+          const sessionFile = await claudeSessionFixer.findSessionFile(workingDir);
+
+          if (!sessionFile) {
+            console.log(`[后台AI分析] 会话 ${session.name}: 未找到 Claude Code 会话文件`);
+            historyLogger.log(sessionData.id, {
+              type: 'system',
+              content: `thinking 错误修复失败: 未找到 Claude Code 会话文件`
+            });
+
+            // 清除修复标记，设置冷却时间
+            session.isFixingThinkingError = false;
+            session.lastThinkingFixTime = Date.now();
+          } else {
+            console.log(`[后台AI分析] 会话 ${session.name}: 找到会话文件 ${sessionFile}，开始修复`);
+            const fixResult = await claudeSessionFixer.fixSessionFile(sessionFile);
+
+            if (fixResult.success) {
+              console.log(`[后台AI分析] 会话 ${session.name}: 修复成功，移除了 ${fixResult.removedCount} 个 thinking blocks`);
+
+              // 修复成功后，先退出当前的 Claude Code，再重启
+              // 步骤1: 发送 /quit 退出
+              console.log(`[后台AI分析] 会话 ${session.name}: 发送 /quit 退出当前 Claude Code`);
+              session.write('/quit');
+              setTimeout(() => session.write('\r'), 100);
+
+              // 步骤2: 等待 2 秒后发送 claude -c 重启
+              setTimeout(() => {
+                console.log(`[后台AI分析] 会话 ${session.name}: 发送 claude -c 继续开发`);
+                session.write('claude -c');
+                setTimeout(() => session.write('\r'), 100);
+
+                // 清除修复标记
+                session.isFixingThinkingError = false;
+                session.lastThinkingFixTime = Date.now();
+              }, 2000);
+
+              historyLogger.log(sessionData.id, {
+                type: 'system',
+                content: `thinking 错误自动修复成功: 移除了 ${fixResult.removedCount} 个 thinking blocks，正在重启 Claude Code...`
+              });
+
+              // 通知前端
+              io.emit('claude:sessionFixed', {
+                sessionId: sessionData.id,
+                success: true,
+                message: `已修复 ${fixResult.removedCount} 个 thinking blocks，正在重启...`
+              });
+            } else {
+              console.log(`[后台AI分析] 会话 ${session.name}: 修复失败 - ${fixResult.error}`);
+              historyLogger.log(sessionData.id, {
+                type: 'system',
+                content: `thinking 错误修复失败: ${fixResult.error}`
+              });
+
+              // 清除修复标记，设置冷却时间
+              session.isFixingThinkingError = false;
+              session.lastThinkingFixTime = Date.now();
+            }
+          }
+          }
+        }
       }
 
       // 会话之间延迟 2 秒，避免并发请求
