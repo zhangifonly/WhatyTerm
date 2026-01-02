@@ -22,6 +22,13 @@ class ClaudeSessionFixer {
   detectApiError(terminalContent) {
     if (!terminalContent) return false;
 
+    // 移除换行符和多余空格以处理跨行的错误信息（如 "th\ninking.signature"）
+    const cleanContent = terminalContent.replace(/\r?\n\s*/g, '');
+
+    // 调试：输出清理后的内容片段
+    const last500 = cleanContent.slice(-500);
+    console.log(`[ClaudeSessionFixer] 检测内容片段: ${last500.substring(0, 200)}...`);
+
     // 检测各类 API 错误
     const errorPatterns = [
       // tool_use_id 相关错误
@@ -36,14 +43,23 @@ class ClaudeSessionFixer {
       /API Error:\s*400.*thinking/i,
       /invalid.*thinking.*block/i,
       /invalid.*signature.*in.*thinking/i,  // thinking block 签名错误
-      /thinking\.signature.*Field required/i,  // 新增：thinking.signature: Field required
-      /signature.*Field required/i,  // 新增：通用签名字段缺失
+      /thinking\.signature.*Field required/i,  // thinking.signature: Field required
+      /thinking\.signature:\s*Field required/i,  // JSON 格式的签名字段缺失
+      /"signature":\s*"Field required"/i,  // JSON 格式的签名字段缺失错误
       // 通用会话污染错误
       /unexpected.*content.*type/i,
       /invalid.*message.*format/i
     ];
 
-    return errorPatterns.some(pattern => pattern.test(terminalContent));
+    // 调试：检查每个模式
+    for (const pattern of errorPatterns) {
+      if (pattern.test(cleanContent)) {
+        console.log(`[ClaudeSessionFixer] 匹配到错误模式: ${pattern.source}`);
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /**
@@ -128,9 +144,14 @@ class ClaudeSessionFixer {
 
       // 将工作目录路径转换为 Claude Code 项目目录格式
       // 例如: /Users/xxx/Documents/ClaudeCode/WebTmux -> -Users-xxx-Documents-ClaudeCode-WebTmux
-      // 注意：保留开头的 -，这是 Claude Code 的目录命名规则
-      const projectDirName = workingDir.replace(/\//g, '-');
+      // Windows: D:\AI\ClaudeCode\test -> D--AI-ClaudeCode-test
+      // 注意：Claude Code 把所有路径分隔符和冒号都替换为 -
+      const projectDirName = workingDir
+        .replace(/:/g, '-')   // 替换冒号为 -（Windows 盘符）
+        .replace(/\\/g, '-')  // 替换反斜杠（Windows）
+        .replace(/\//g, '-'); // 替换正斜杠（Unix）
       const projectPath = path.join(this.claudeDir, projectDirName);
+      console.log(`[ClaudeSessionFixer] 查找会话文件: workingDir=${workingDir}, projectDirName=${projectDirName}, projectPath=${projectPath}`);
 
       // 验证路径安全性，防止路径遍历攻击
       if (!isPathSafe(projectPath, this.claudeDir)) {
@@ -300,7 +321,9 @@ class ClaudeSessionFixer {
    */
   async autoFixIfNeeded(terminalContent, workingDir) {
     // 1. 检测是否有 API 错误
-    if (!this.detectApiError(terminalContent)) {
+    const hasError = this.detectApiError(terminalContent);
+    console.log(`[ClaudeSessionFixer] detectApiError 结果: ${hasError}`);
+    if (!hasError) {
       return { needed: false };
     }
 
