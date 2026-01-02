@@ -11,7 +11,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { CLAUDE_CODE_FAKE } from '../config/constants.js';
 
-export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEngine = null, healthCheckScheduler = null) {
+export function setupRoutes(app, getSessionManager, historyLogger, io = null, aiEngine = null, healthCheckScheduler = null) {
   // 初始化服务
   const providerService = new ProviderService(io);
   const healthCheck = new ProviderHealthCheck();
@@ -27,12 +27,20 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
 
   // 获取会话列表
   app.get('/api/sessions', (req, res) => {
+    const sessionManager = typeof getSessionManager === 'function' ? getSessionManager() : getSessionManager;
+    if (!sessionManager) {
+      return res.json([]);
+    }
     const sessions = sessionManager.listSessions();
     res.json(sessions);
   });
 
   // 获取单个会话
   app.get('/api/sessions/:id', (req, res) => {
+    const sessionManager = typeof getSessionManager === 'function' ? getSessionManager() : getSessionManager;
+    if (!sessionManager) {
+      return res.status(503).json({ error: 'SessionManager 未就绪' });
+    }
     const session = sessionManager.getSession(req.params.id);
     if (!session) {
       return res.status(404).json({ error: '会话不存在' });
@@ -42,6 +50,10 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
 
   // 删除会话
   app.delete('/api/sessions/:id', (req, res) => {
+    const sessionManager = typeof getSessionManager === 'function' ? getSessionManager() : getSessionManager;
+    if (!sessionManager) {
+      return res.status(503).json({ error: 'SessionManager 未就绪' });
+    }
     const deleted = sessionManager.deleteSession(req.params.id);
     if (!deleted) {
       return res.status(404).json({ error: '会话不存在' });
@@ -270,8 +282,9 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
 
   // 导出历史
   app.get('/api/sessions/:id/export', (req, res) => {
+    const sessionManager = typeof getSessionManager === 'function' ? getSessionManager() : getSessionManager;
     const history = historyLogger.getHistory(req.params.id, 10000);
-    const session = sessionManager.getSession(req.params.id);
+    const session = sessionManager ? sessionManager.getSession(req.params.id) : null;
 
     const exportData = {
       session: session ? session.toJSON() : { id: req.params.id },
@@ -581,9 +594,13 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
   /**
    * 切换供应商
    * POST /api/providers/:appType/:id/switch
+   * Body (可选): { workingDir: string, sessionId: string }
+   * - 如果提供 workingDir，会写入项目本地配置文件
+   * - 如果提供 sessionId，会从会话中获取 workingDir
    */
-  app.post('/api/providers/:appType/:id/switch', (req, res) => {
+  app.post('/api/providers/:appType/:id/switch', async (req, res) => {
     const { appType, id } = req.params;
+    const { workingDir: requestWorkingDir, sessionId } = req.body || {};
 
     if (!['claude', 'codex', 'gemini'].includes(appType)) {
       return res.status(400).json({ error: '不支持的应用类型' });
@@ -598,6 +615,80 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
       if (aiEngine && appType === 'claude') {
         aiEngine.reloadSettings();
         console.log(`[Routes] 已通知 AIEngine 重新加载配置`);
+      }
+
+      // 如果提供了 workingDir 或 sessionId，写入项目本地配置文件
+      let workingDir = requestWorkingDir;
+      if (!workingDir && sessionId) {
+        const sessionManager = typeof getSessionManager === 'function' ? getSessionManager() : getSessionManager;
+        if (sessionManager) {
+          const session = sessionManager.getSession(sessionId);
+          if (session) {
+            workingDir = session.workingDir;
+          }
+        }
+      }
+
+      if (workingDir && provider) {
+        try {
+          // 从 CC Switch 数据库读取供应商的完整配置
+          const ccSwitchDbPath = path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
+          if (fs.existsSync(ccSwitchDbPath)) {
+            const db = new Database(ccSwitchDbPath, { readonly: true });
+            const providerRow = db.prepare('SELECT settings_config FROM providers WHERE id = ? AND app_type = ?').get(id, appType);
+            db.close();
+
+            if (providerRow && providerRow.settings_config) {
+              const settingsConfig = JSON.parse(providerRow.settings_config);
+
+              // 写入项目本地配置文件
+              const projectClaudeDir = path.join(workingDir, '.claude');
+              if (!fs.existsSync(projectClaudeDir)) {
+                fs.mkdirSync(projectClaudeDir, { recursive: true });
+              }
+              const localConfigPath = path.join(projectClaudeDir, 'settings.local.json');
+
+              // 读取现有本地配置
+              let localConfig = {};
+              if (fs.existsSync(localConfigPath)) {
+                try {
+                  localConfig = JSON.parse(fs.readFileSync(localConfigPath, 'utf-8'));
+                } catch (e) {
+                  console.error('[Routes] 读取本地配置失败:', e.message);
+                }
+              }
+
+              // 保留本地 permissions
+              const localPermissions = localConfig.permissions;
+
+              // 写入供应商配置
+              if (settingsConfig.env) {
+                localConfig.env = { ...settingsConfig.env };
+              }
+              if (settingsConfig.model) {
+                localConfig.model = settingsConfig.model;
+              }
+              if (settingsConfig.alwaysThinkingEnabled !== undefined) {
+                localConfig.alwaysThinkingEnabled = settingsConfig.alwaysThinkingEnabled;
+              }
+
+              // 恢复本地 permissions
+              if (localPermissions) {
+                localConfig.permissions = localPermissions;
+              }
+
+              fs.writeFileSync(localConfigPath, JSON.stringify(localConfig, null, 2), 'utf8');
+              console.log('[Routes] 本地配置已更新:', {
+                path: localConfigPath,
+                provider: provider.name,
+                url: localConfig.env?.ANTHROPIC_BASE_URL
+              });
+            }
+          }
+        } catch (err) {
+          console.error('[Routes] 写入本地配置失败:', err.message);
+          // 不影响主流程，继续返回成功
+        }
       }
 
       res.json({ success: true, provider });
@@ -1183,6 +1274,7 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
   // 获取按会话分组的录制统计（包含项目信息）
   app.get('/api/storage/recordings/by-session', (req, res) => {
     try {
+      const sessionManager = typeof getSessionManager === 'function' ? getSessionManager() : getSessionManager;
       const recorder = getTerminalRecorder();
       const recordings = recorder.getStatsBySession();
 
@@ -1190,7 +1282,7 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
       const savedInfo = recorder.getAllSessionInfo();
 
       // 获取当前活跃会话信息（作为补充）
-      const allSessions = sessionManager.listSessions();
+      const allSessions = sessionManager ? sessionManager.listSessions() : [];
       const activeMap = {};
       allSessions.forEach(s => {
         activeMap[s.id] = {

@@ -25,18 +25,29 @@ function getTmuxPrefix() {
 // 从 PowerShell 终端输出中解析工作目录
 // PowerShell 提示符格式: PS D:\AI\WhatyTerm>
 // Claude Code 格式: Working directory: D:\AI\WhatyTerm
+// Claude Code 状态栏格式: cwd: D:\AI\WhatyTerm
 function parseWorkingDirFromOutput(output) {
   if (!output) return null;
+
+  // 匹配 Claude Code 状态栏中的 cwd: 格式（优先级最高，因为这是 Claude Code 运行时的实际目录）
+  // 格式示例: cwd: D:\AI\WhatyTerm
+  const cwdMatch = output.match(/cwd:\s*([A-Za-z]:\\[^\r\n\x1b]+)/);
+  if (cwdMatch) {
+    return cwdMatch[1].trim();
+  }
+
   // 匹配 Claude Code 的 Working directory 输出
   const claudeMatch = output.match(/Working directory:\s*([A-Za-z]:\\[^\r\n]+)/);
   if (claudeMatch) {
     return claudeMatch[1].trim();
   }
+
   // 匹配 PowerShell 提示符: PS C:\path\to\dir> 或 PS D:\path>
   const psMatch = output.match(/PS\s+([A-Za-z]:\\[^\r\n>]*?)>/);
   if (psMatch) {
     return psMatch[1].trim();
   }
+
   // 匹配 cmd 提示符: C:\path\to\dir>
   const cmdMatch = output.match(/^([A-Za-z]:\\[^\r\n>]*?)>/m);
   if (cmdMatch) {
@@ -1465,7 +1476,7 @@ app.use(express.static(join(__dirname, '../dist')));
 app.use('/cc-switch', express.static(join(__dirname, '../public/cc-switch')));
 
 // 传递 io 实例以支持 Socket.IO 事件推送，传递 aiEngine 以支持供应商切换时重新加载配置
-setupRoutes(app, sessionManager, historyLogger, io, aiEngine, healthCheckScheduler);
+setupRoutes(app, getSessionManager, historyLogger, io, aiEngine, healthCheckScheduler);
 
 // 记录每个会话最后执行的操作和时间，用于防止重复执行
 const lastActionMap = new Map();
@@ -1773,6 +1784,16 @@ function updateCheckState(sessionId, hadAction, status) {
   return state;
 }
 
+// 判断目录是否是用户主目录（不是有效的项目目录）
+function isUserHomeDir(dir) {
+  if (!dir) return false;
+  const homeDir = process.env.USERPROFILE || process.env.HOME || '';
+  // 标准化路径比较
+  const normalizedDir = dir.replace(/\\/g, '/').toLowerCase();
+  const normalizedHome = homeDir.replace(/\\/g, '/').toLowerCase();
+  return normalizedDir === normalizedHome;
+}
+
 // 更新所有会话的项目信息（工作目录、项目名称、项目说明）
 async function updateAllSessionsProjectInfo() {
   // 等待 SessionManager 初始化完成
@@ -1784,21 +1805,51 @@ async function updateAllSessionsProjectInfo() {
 
   for (const sessionData of sessions) {
     const session = sessionManager.getSession(sessionData.id);
-    if (!session || !session.tmuxSessionName) continue;
+    if (!session) continue;
+
+    // mux-server 模式下可能没有 tmuxSessionName，但有 muxSessionId
+    const hasTmux = session.tmuxSessionName;
+    const hasMux = session.muxSessionId || session._useMuxServer;
+
+    if (!hasTmux && !hasMux) continue;
 
     // 获取当前工作目录
     let workingDir = '';
 
-    if (useTmux) {
+    if (useTmux && hasTmux) {
       // tmux 模式：从 tmux 获取当前工作目录
       try {
         workingDir = execSync(`${getTmuxPrefix()} display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
       } catch { continue; }
     } else {
-      // Windows 原生模式：从终端输出解析工作目录
-      const terminalOutput = session.getRecentOutput ? session.getRecentOutput(20) : '';
-      workingDir = parseWorkingDirFromOutput(terminalOutput);
-      if (!workingDir) continue;
+      // Windows 原生模式 / mux-server 模式：从终端输出解析工作目录
+      const terminalOutput = session.getRecentOutput ? session.getRecentOutput(50) : '';
+      const parsedDir = parseWorkingDirFromOutput(terminalOutput);
+
+      // 智能选择工作目录：
+      // 1. 如果解析到了有效目录（非用户主目录），使用解析到的
+      // 2. 如果解析到的是用户主目录，但已有的是项目目录，保留已有的
+      // 3. 如果都是用户主目录或都为空，使用解析到的或已有的
+      if (parsedDir && !isUserHomeDir(parsedDir)) {
+        // 解析到了有效的项目目录
+        workingDir = parsedDir;
+        console.log(`[updateAllSessionsProjectInfo] 会话 ${session.name}: 从终端解析到项目目录=${parsedDir}`);
+      } else if (session.workingDir && !isUserHomeDir(session.workingDir)) {
+        // 已有有效的项目目录，保留
+        workingDir = session.workingDir;
+        console.log(`[updateAllSessionsProjectInfo] 会话 ${session.name}: 保留已有项目目录=${session.workingDir}`);
+      } else if (parsedDir) {
+        // 解析到的是用户主目录，但没有更好的选择
+        workingDir = parsedDir;
+      } else if (session.workingDir) {
+        // 使用已有的（可能是用户主目录）
+        workingDir = session.workingDir;
+      }
+
+      if (!workingDir) {
+        console.log(`[updateAllSessionsProjectInfo] 会话 ${session.name}: 无法获取工作目录，跳过`);
+        continue;
+      }
     }
 
     // 设置 workingDir（即使没有变化也要设置，确保刷新时可用）
@@ -1818,6 +1869,18 @@ async function updateAllSessionsProjectInfo() {
           id: session.id,
           goal: session.goal
         });
+      }
+      // 如果 projectDesc 为空，尝试获取
+      if (!session.projectDesc && session.workingDir) {
+        const projectDesc = await extractProjectDesc(session.workingDir);
+        if (projectDesc) {
+          session.projectDesc = projectDesc;
+          sessionManager.updateSession(session);
+          io.emit('session:updated', {
+            id: session.id,
+            projectDesc: session.projectDesc
+          });
+        }
       }
     }
 
@@ -3123,6 +3186,27 @@ io.on('connection', (socket) => {
 
       // 保存 AI 类型
       session.aiType = data.aiType || 'claude';
+
+      // 异步获取项目描述和目标（如果有工作目录）
+      if (session.workingDir) {
+        try {
+          const [projectDesc, projectGoal] = await Promise.all([
+            extractProjectDesc(session.workingDir),
+            extractProjectGoal(session.workingDir)
+          ]);
+          if (projectDesc) {
+            session.projectDesc = projectDesc;
+          }
+          if (projectGoal && !session.goal) {
+            session.goal = projectGoal;
+            session.originalGoal = projectGoal;
+          }
+          // 更新数据库
+          sessionManager.updateSession(session);
+        } catch (err) {
+          console.error('[Session创建] 获取项目信息失败:', err.message);
+        }
+      }
 
       // 只获取当前会话使用的 AI 供应商信息
       // 传递 workingDir 以正确检测本地配置
