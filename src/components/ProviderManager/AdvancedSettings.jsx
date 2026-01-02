@@ -1,6 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { toast } from '../Toast';
 
+// Claude 模型降级列表（与后端保持一致）
+const CLAUDE_MODEL_FALLBACK_LIST = [
+  'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-5-20250929',
+];
+
 /**
  * 高级设置组件
  * 包含健康检查配置、自动故障转移、定时健康检查
@@ -32,6 +38,10 @@ export default function AdvancedSettings({ onClose }) {
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // 模型测试相关状态
+  const [testingModels, setTestingModels] = useState(false);
+  const [availableModels, setAvailableModels] = useState([]);
+  const [testProgress, setTestProgress] = useState('');
 
   // 加载所有配置
   useEffect(() => {
@@ -102,6 +112,73 @@ export default function AdvancedSettings({ onClose }) {
     }
   };
 
+  // 测试 Claude 模型
+  const handleTestClaudeModels = async () => {
+    setTestingModels(true);
+    setTestProgress('正在获取供应商配置...');
+    setAvailableModels([]);
+
+    try {
+      // 先获取当前 Claude 供应商配置
+      const providerRes = await fetch('/api/providers/claude');
+      const providerData = await providerRes.json();
+
+      if (!providerData.success || !providerData.providers) {
+        toast.error('未找到 Claude 供应商配置');
+        return;
+      }
+
+      // 获取第一个供应商（当前使用的）
+      const providers = Object.values(providerData.providers);
+      if (providers.length === 0) {
+        toast.error('未配置 Claude 供应商');
+        return;
+      }
+
+      const currentProvider = providers[0];
+      setTestProgress(`正在测试 ${CLAUDE_MODEL_FALLBACK_LIST.length} 个模型...`);
+
+      // 调用多模型测试接口
+      const testRes = await fetch('/api/providers/claude/test-models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          settingsConfig: currentProvider.settingsConfig,
+          models: CLAUDE_MODEL_FALLBACK_LIST
+        })
+      });
+
+      const testData = await testRes.json();
+
+      if (testData.success) {
+        setAvailableModels(testData.availableModels || []);
+
+        if (testData.availableModels?.length > 0) {
+          // 自动选择第一个可用模型
+          const firstModel = testData.availableModels[0].model;
+          setHealthCheckConfig(prev => ({
+            ...prev,
+            testModels: { ...prev.testModels, claude: firstModel }
+          }));
+          toast.success(`找到 ${testData.availableModels.length} 个可用模型`);
+        } else {
+          toast.error('没有可用的模型');
+        }
+
+        if (testData.failedModels?.length > 0) {
+          console.log('不可用的模型:', testData.failedModels);
+        }
+      } else {
+        toast.error(testData.error || '测试失败');
+      }
+    } catch (err) {
+      toast.error('测试失败: ' + err.message);
+    } finally {
+      setTestingModels(false);
+      setTestProgress('');
+    }
+  };
+
   // 渲染健康检查配置
   const renderHealthCheckTab = () => (
     <div className="space-y-4">
@@ -146,34 +223,91 @@ export default function AdvancedSettings({ onClose }) {
       </div>
 
       <div className="border-t border-gray-700 pt-4">
-        <h3 className="text-sm text-gray-300 mb-3">测试模型</h3>
-        <div className="space-y-3">
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">Claude</label>
-            <input
-              type="text"
-              value={healthCheckConfig.testModels?.claude || ''}
-              onChange={e => setHealthCheckConfig(prev => ({
-                ...prev,
-                testModels: { ...prev.testModels, claude: e.target.value }
-              }))}
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
-              placeholder="claude-haiku-4-5-20251001"
-            />
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm text-gray-300">Claude 监控模型</h3>
+          <button
+            onClick={handleTestClaudeModels}
+            disabled={testingModels}
+            className="px-3 py-1 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-700 disabled:cursor-not-allowed text-white text-xs rounded transition-colors"
+          >
+            {testingModels ? '测试中...' : '测试可用模型'}
+          </button>
+        </div>
+
+        {/* 测试进度 */}
+        {testProgress && (
+          <div className="mb-3 p-2 bg-blue-500/10 border border-blue-500/30 rounded text-xs text-blue-400">
+            {testProgress}
           </div>
-          <div>
-            <label className="block text-xs text-gray-500 mb-1">OpenAI</label>
-            <input
-              type="text"
-              value={healthCheckConfig.testModels?.codex || ''}
-              onChange={e => setHealthCheckConfig(prev => ({
-                ...prev,
-                testModels: { ...prev.testModels, codex: e.target.value }
-              }))}
-              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
-              placeholder="gpt-4o-mini"
-            />
+        )}
+
+        {/* 可用模型列表 */}
+        {availableModels.length > 0 && (
+          <div className="mb-3 p-2 bg-green-500/10 border border-green-500/30 rounded">
+            <div className="text-xs text-green-400 mb-2">可用模型（点击选择）：</div>
+            <div className="space-y-1">
+              {availableModels.map(m => (
+                <button
+                  key={m.model}
+                  onClick={() => setHealthCheckConfig(prev => ({
+                    ...prev,
+                    testModels: { ...prev.testModels, claude: m.model }
+                  }))}
+                  className={`w-full text-left px-2 py-1 rounded text-xs transition-colors ${
+                    healthCheckConfig.testModels?.claude === m.model
+                      ? 'bg-green-500/30 text-green-300'
+                      : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+                  }`}
+                >
+                  {m.model}
+                  <span className="text-gray-500 ml-2">({m.responseTimeMs}ms)</span>
+                </button>
+              ))}
+            </div>
           </div>
+        )}
+
+        {/* 当前选择的模型 */}
+        <div>
+          <label className="block text-xs text-gray-500 mb-1">当前监控模型</label>
+          <select
+            value={healthCheckConfig.testModels?.claude || ''}
+            onChange={e => setHealthCheckConfig(prev => ({
+              ...prev,
+              testModels: { ...prev.testModels, claude: e.target.value }
+            }))}
+            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+          >
+            {/* 如果有可用模型，显示可用模型列表 */}
+            {availableModels.length > 0 ? (
+              availableModels.map(m => (
+                <option key={m.model} value={m.model}>{m.model}</option>
+              ))
+            ) : (
+              /* 否则显示默认列表 */
+              CLAUDE_MODEL_FALLBACK_LIST.map(model => (
+                <option key={model} value={model}>{model}</option>
+              ))
+            )}
+          </select>
+          <p className="text-xs text-gray-500 mt-1">
+            点击"测试可用模型"自动检测哪些模型可用
+          </p>
+        </div>
+
+        {/* OpenAI 模型 */}
+        <div className="mt-3">
+          <label className="block text-xs text-gray-500 mb-1">OpenAI/Codex 模型</label>
+          <input
+            type="text"
+            value={healthCheckConfig.testModels?.codex || ''}
+            onChange={e => setHealthCheckConfig(prev => ({
+              ...prev,
+              testModels: { ...prev.testModels, codex: e.target.value }
+            }))}
+            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+            placeholder="gpt-4o-mini"
+          />
         </div>
       </div>
     </div>

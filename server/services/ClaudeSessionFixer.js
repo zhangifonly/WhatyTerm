@@ -47,14 +47,83 @@ class ClaudeSessionFixer {
   }
 
   /**
+   * 扫描所有 Claude Code 项目目录，找到最近修改的会话文件
+   * 当无法确定工作目录时使用此方法作为备用
+   */
+  async findMostRecentSessionFile() {
+    try {
+      // 检查 Claude Code 项目目录是否存在
+      try {
+        await fs.access(this.claudeDir);
+      } catch {
+        console.log(`[ClaudeSessionFixer] Claude Code 项目目录不存在: ${this.claudeDir}`);
+        return null;
+      }
+
+      // 获取所有项目目录
+      const projectDirs = await fs.readdir(this.claudeDir);
+
+      let mostRecentFile = null;
+      let mostRecentTime = 0;
+
+      for (const dir of projectDirs) {
+        const projectPath = path.join(this.claudeDir, dir);
+
+        // 跳过非目录
+        try {
+          const stat = await fs.stat(projectPath);
+          if (!stat.isDirectory()) continue;
+        } catch {
+          continue;
+        }
+
+        // 查找该项目目录下的 .jsonl 文件
+        try {
+          const files = await fs.readdir(projectPath);
+          const jsonlFiles = files.filter(f =>
+            f.endsWith('.jsonl') &&
+            !f.startsWith('agent-') &&
+            !f.endsWith('.backup')
+          );
+
+          for (const file of jsonlFiles) {
+            const filePath = path.join(projectPath, file);
+            try {
+              const stat = await fs.stat(filePath);
+              if (stat.mtime.getTime() > mostRecentTime) {
+                mostRecentTime = stat.mtime.getTime();
+                mostRecentFile = filePath;
+              }
+            } catch {
+              continue;
+            }
+          }
+        } catch {
+          continue;
+        }
+      }
+
+      if (mostRecentFile) {
+        console.log(`[ClaudeSessionFixer] 找到最近修改的会话文件: ${mostRecentFile}`);
+      }
+
+      return mostRecentFile;
+    } catch (err) {
+      console.error('[ClaudeSessionFixer] 扫描项目目录失败:', err.message);
+      return null;
+    }
+  }
+
+  /**
    * 查找当前工作目录对应的 Claude Code 会话文件
    */
   async findSessionFile(workingDir) {
     try {
       // 验证 workingDir 是有效的绝对路径
       if (!workingDir || typeof workingDir !== 'string' || !path.isAbsolute(workingDir)) {
-        console.log(`[ClaudeSessionFixer] 无效的工作目录: ${workingDir}`);
-        return null;
+        console.log(`[ClaudeSessionFixer] 无效的工作目录: ${workingDir}，尝试查找最近修改的会话文件`);
+        // 备用方案：扫描所有项目目录找最近修改的文件
+        return await this.findMostRecentSessionFile();
       }
 
       // 将工作目录路径转换为 Claude Code 项目目录格式

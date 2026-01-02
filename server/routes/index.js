@@ -785,6 +785,45 @@ export function setupRoutes(app, sessionManager, historyLogger, io = null, aiEng
   });
 
   /**
+   * 测试多个模型，返回可用模型列表
+   * POST /api/providers/:appType/test-models
+   * Body: { settingsConfig: { ... }, models?: string[] }
+   */
+  app.post('/api/providers/:appType/test-models', async (req, res) => {
+    const { appType } = req.params;
+    const { settingsConfig, models } = req.body;
+
+    if (!['claude', 'codex', 'gemini'].includes(appType)) {
+      return res.status(400).json({ error: '不支持的应用类型' });
+    }
+
+    if (!settingsConfig) {
+      return res.status(400).json({ error: '缺少配置信息' });
+    }
+
+    // 创建临时供应商对象用于测试
+    const tempProvider = {
+      id: 'temp-test-models',
+      name: 'Model Test',
+      settingsConfig
+    };
+
+    try {
+      const result = await healthCheck.testMultipleModels(appType, tempProvider, models);
+
+      res.json({
+        success: true,
+        ...result
+      });
+    } catch (error) {
+      res.json({
+        success: false,
+        error: error.message || '测试失败'
+      });
+    }
+  });
+
+  /**
    * 获取检查日志
    * GET /api/providers/:appType/:id/check-logs
    */
