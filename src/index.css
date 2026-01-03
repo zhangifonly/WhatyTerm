@@ -526,7 +526,7 @@ body {
 }
 
 .terminal-wrapper .xterm-viewport {
-  overflow-y: auto !important;
+  overflow-y: scroll !important;
 }
 
 /* AI 建议卡片 */
@@ -2119,6 +2119,41 @@ body {
   width: 100%;
   padding: 12px;
   font-size: 16px;
+}
+
+/* 密码设置提示 */
+.password-setup-notice {
+  text-align: center;
+  padding: 20px 0;
+}
+
+.password-setup-notice .notice-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+
+.password-setup-notice h2 {
+  font-size: 20px;
+  color: hsl(var(--foreground));
+  margin-bottom: 16px;
+}
+
+.password-setup-notice p {
+  color: hsl(var(--muted-foreground));
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+
+.password-setup-notice .notice-instruction {
+  background: hsl(var(--secondary));
+  padding: 16px;
+  border-radius: 8px;
+  border: 1px solid hsl(var(--border));
+  margin-top: 20px;
+}
+
+.password-setup-notice .notice-instruction strong {
+  color: hsl(var(--primary));
 }
 
 /* 设置页面标签页 */

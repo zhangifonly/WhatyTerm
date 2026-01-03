@@ -1237,6 +1237,13 @@ export class SessionManager {
         // 保存处理器引用以便清理
         session._muxHandlers = { outputHandler, bellHandler, exitHandler };
 
+        // 设置初始工作目录和项目名称（从 mux-server 返回的 cwd 获取）
+        const initialCwd = muxSessionInfo.cwd || options.workingDir || process.env.USERPROFILE || process.env.HOME;
+        if (initialCwd) {
+          session.workingDir = initialCwd;
+          session.projectName = path.basename(initialCwd) || initialCwd;
+        }
+
         // 重写 PTY 相关方法以使用 MuxClient
         session._attachToTmux = function() {
           // mux-server 模式下不需要 attach
