@@ -179,6 +179,11 @@ export class Session {
     this.pty = null;
     this.attachCount = 0;
 
+    // 项目跟踪字段（用于录制分段）
+    this.currentProjectPath = null;  // 当前所在项目路径
+    this.projectSegments = [];       // 项目切换历史 [{ projectPath, aiType, startTime, endTime }]
+    this.projectChangeCallbacks = []; // 项目变化回调
+
     if (!options.skipPty) {
       this._ensureTmuxSession(options.isNew);
     }
@@ -434,6 +439,83 @@ export class Session {
     }
   }
 
+  // 项目变化回调
+  onProjectChange(callback) {
+    this.projectChangeCallbacks.push(callback);
+    return callback;
+  }
+
+  offProjectChange(callback) {
+    const index = this.projectChangeCallbacks.indexOf(callback);
+    if (index > -1) {
+      this.projectChangeCallbacks.splice(index, 1);
+    }
+  }
+
+  /**
+   * 更新当前项目上下文
+   * 当检测到 CLI 工作目录变化时调用
+   */
+  updateProjectContext(projectPath, aiType) {
+    if (!projectPath || projectPath === this.currentProjectPath) {
+      return false;
+    }
+
+    const now = Date.now();
+    const previousPath = this.currentProjectPath;
+
+    // 结束上一个项目片段
+    if (this.projectSegments.length > 0) {
+      const lastSegment = this.projectSegments[this.projectSegments.length - 1];
+      if (!lastSegment.endTime) {
+        lastSegment.endTime = now;
+      }
+    }
+
+    // 创建新的项目片段
+    this.projectSegments.push({
+      projectPath,
+      aiType,
+      startTime: now,
+      endTime: null,
+      segmentIndex: this.projectSegments.length
+    });
+
+    this.currentProjectPath = projectPath;
+
+    console.log(`[Session] 项目切换: ${previousPath || '(无)'} -> ${projectPath}`);
+
+    // 触发回调
+    this.projectChangeCallbacks.forEach(cb => {
+      try {
+        cb({
+          sessionId: this.id,
+          from: previousPath,
+          to: projectPath,
+          aiType,
+          timestamp: now,
+          segmentIndex: this.projectSegments.length - 1
+        });
+      } catch (err) {
+        console.error('[Session] 项目变化回调执行失败:', err);
+      }
+    });
+
+    return true;
+  }
+
+  /**
+   * 获取项目切换历史
+   */
+  getProjectHistory() {
+    // 确保最后一个片段有结束时间
+    const history = this.projectSegments.map((seg, idx) => ({
+      ...seg,
+      endTime: seg.endTime || (idx === this.projectSegments.length - 1 ? Date.now() : seg.endTime)
+    }));
+    return history;
+  }
+
   updateSettings(settings) {
     if (settings.goal !== undefined) this.goal = settings.goal;
     if (settings.systemPrompt !== undefined) this.systemPrompt = settings.systemPrompt;
@@ -445,7 +527,14 @@ export class Session {
       }
     }
     if (settings.autoActionEnabled !== undefined) {
+      const oldValue = this.autoActionEnabled;
       this.autoActionEnabled = settings.autoActionEnabled;
+      // 记录状态变化，便于调试
+      if (oldValue !== settings.autoActionEnabled) {
+        console.log(`[Session ${this.name}] autoActionEnabled 变化: ${oldValue} -> ${settings.autoActionEnabled}`);
+        // 打印调用栈，追踪变化来源
+        console.log(new Error('autoActionEnabled 变化调用栈').stack);
+      }
     }
     this.updatedAt = new Date();
   }

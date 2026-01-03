@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from '../i18n';
 import './RecentProjects.css';
 
-const RecentProjects = ({ socket, onOpenProject, compact = false }) => {
+const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) => {
   const { t } = useTranslation();
   const [projects, setProjects] = useState({ claude: [], codex: [], gemini: [] });
   const [activeTab, setActiveTab] = useState('claude');
@@ -46,6 +46,13 @@ const RecentProjects = ({ socket, onOpenProject, compact = false }) => {
   const handleOpenProject = (project) => {
     if (onOpenProject) {
       onOpenProject(project);
+    }
+  };
+
+  const handlePlayback = (project, e) => {
+    e.stopPropagation(); // 阻止触发 handleOpenProject
+    if (onPlayback) {
+      onPlayback(project.path);
     }
   };
 
@@ -133,7 +140,18 @@ const RecentProjects = ({ socket, onOpenProject, compact = false }) => {
                         <span className="compact-desc">{project.description}</span>
                       )}
                     </div>
-                    <span className="compact-path">{project.path}</span>
+                    <div className="compact-item-actions">
+                      {onPlayback && (
+                        <button
+                          className="compact-playback-btn"
+                          onClick={(e) => handlePlayback(project, e)}
+                          title={t('recentProjects.playback', '回放')}
+                        >
+                          ▶
+                        </button>
+                      )}
+                      <span className="compact-path">{project.path}</span>
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -214,6 +232,15 @@ const RecentProjects = ({ socket, onOpenProject, compact = false }) => {
               </div>
             </div>
             <div className="project-action">
+              {onPlayback && (
+                <button
+                  className="btn-playback"
+                  onClick={(e) => handlePlayback(project, e)}
+                  title={t('recentProjects.playback', '回放')}
+                >
+                  ▶
+                </button>
+              )}
               <button className="btn-continue">
                 {t('recentProjects.continue')}
               </button>

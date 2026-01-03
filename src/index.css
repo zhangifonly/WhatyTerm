@@ -180,6 +180,7 @@ body {
 .app {
   display: flex;
   height: 100vh;
+  overflow: hidden;  /* 防止整体滚动 */
 }
 
 /* 侧边栏 */
@@ -191,7 +192,7 @@ body {
   display: flex;
   flex-direction: column;
   position: relative;
-  overflow: visible;
+  overflow: hidden;  /* 只允许 session-list 内部滚动 */
   z-index: 1000;
 }
 
@@ -318,6 +319,8 @@ body {
   padding: 10px;
   position: relative;
   z-index: 1;
+  min-height: 0;  /* 重要：允许 flex 子元素收缩 */
+  overscroll-behavior: contain;  /* 阻止滚动链传递到父元素 */
 }
 
 .session-item {
@@ -334,9 +337,7 @@ body {
 .session-item:hover {
   background: hsl(var(--primary) / 0.12);
   border-color: hsl(var(--primary) / 0.2);
-  transform: translateX(4px);
-  overflow: visible;
-  z-index: 100;
+  /* tooltip 使用 fixed 定位在 body 层级，不需要 overflow: visible */
 }
 
 .session-item.active {
@@ -458,10 +459,7 @@ body {
   opacity: 1;
 }
 
-/* 确保 session-list 不裁剪 tooltip */
-.session-list:has(.session-item:hover) {
-  overflow: visible;
-}
+/* tooltip 使用 fixed 定位，不需要改变 session-list 的 overflow */
 
 .session-ai-status {
   font-size: 11px;
@@ -474,7 +472,8 @@ body {
   flex: 1;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: hidden;  /* 防止滚动传递 */
+  min-height: 0;  /* 允许 flex 子元素正确收缩 */
 }
 
 /* 当显示欢迎页面时允许滚动 */
@@ -893,6 +892,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  min-width: 0; /* 允许 flex 子项收缩，防止内容撑大 */
 }
 
 /* 卡片样式 - 玻璃态设计 */
@@ -1503,12 +1503,65 @@ body {
 
 /* 侧边栏底部 */
 .sidebar-footer {
-  padding: 16px;
+  padding: 12px;
   border-top: 1px solid hsl(var(--border));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;  /* 防止被压缩 */
+}
+
+.sidebar-footer-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.qr-toggle-btn {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  background: hsl(var(--secondary) / 0.8);
+  border: 1px solid hsl(var(--border) / 0.5);
+  border-radius: 8px;
+  transition: all 0.2s ease;
+}
+
+.qr-toggle-btn:hover {
+  background: hsl(var(--primary) / 0.15);
+  border-color: hsl(var(--primary) / 0.3);
+}
+
+.qr-toggle-btn.active {
+  background: hsl(var(--primary) / 0.2);
+  border-color: hsl(var(--primary) / 0.4);
+}
+
+.qr-code-panel {
+  padding: 12px;
+  background: hsl(var(--card) / 0.8);
+  border-radius: 8px;
+  text-align: center;
+  animation: slideDown 0.2s ease-out;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .settings-btn {
-  width: 100%;
+  flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;

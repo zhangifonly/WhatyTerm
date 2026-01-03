@@ -73,6 +73,7 @@ import projectTaskReader from './services/ProjectTaskReader.js';
 import RecentProjectsService from './services/RecentProjectsService.js';
 import processDetector from './services/ProcessDetector.js';
 import { getTerminalRecorder } from './services/TerminalRecorder.js';
+import { getProjectRecordingService } from './services/ProjectRecordingService.js';
 import cliRegistry from './services/CliRegistry.js';
 import cliLearner from './services/CliLearner.js';
 import tokenStatsService from './services/TokenStatsService.js';
@@ -100,6 +101,20 @@ async function extractProjectDesc(workingDir) {
     const claudeMdPath = `${workingDir}/CLAUDE.md`;
     const readmePath = `${workingDir}/README.md`;
 
+    // 清理 markdown 格式的函数
+    const cleanMarkdown = (text) => {
+      return text
+        // 移除 markdown 链接，保留链接文本：[text](url) -> text
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+        // 移除行内代码：`code` -> code
+        .replace(/`([^`]+)`/g, '$1')
+        // 移除加粗：**text** -> text
+        .replace(/\*\*([^*]+)\*\*/g, '$1')
+        // 移除斜体：*text* -> text
+        .replace(/\*([^*]+)\*/g, '$1')
+        .trim();
+    };
+
     // 提取描述的逻辑：标题 + 第一段有意义的文本
     const extractFromContent = (content) => {
       const lines = content.split('\n');
@@ -110,11 +125,17 @@ async function extractProjectDesc(workingDir) {
         const line = lines[i].trim();
         if (!line || line.startsWith('```')) continue;
 
-        // 找第一个标题
-        if (!title && line.startsWith('# ')) {
-          let extractedTitle = line.slice(2).trim();
+        // 找第一个标题（支持一级和二级标题）
+        if (!title && (line.startsWith('# ') || line.startsWith('## '))) {
+          let extractedTitle = line.replace(/^##?\s+/, '').trim();
+          // 移除 "CLAUDE.md - " 或 "README.md - " 前缀
           extractedTitle = extractedTitle.replace(/^(CLAUDE\.md|README\.md)\s*[-–—:：]\s*/i, '');
-          title = extractedTitle.slice(0, 100);
+          // 跳过无意义的标题（如单独的 CLAUDE.md、README.md、README、项目概述、Overview 等）
+          if (/^(CLAUDE\.md|README\.md|README|CLAUDE|项目概述|Overview|简介|Introduction|About|Description)$/i.test(extractedTitle)) {
+            continue; // 跳过这个标题，继续找下一个
+          }
+          // 清理标题中的 markdown 格式
+          title = cleanMarkdown(extractedTitle).slice(0, 100);
         }
         // 找第一个有意义的文本（非标题、非列表、非代码块、非表格、非图片）
         if (!firstText &&
@@ -134,7 +155,8 @@ async function extractProjectDesc(workingDir) {
             line.length > 15) {
           let text = line.startsWith('>') ? line.slice(1).trim() : line;
           if (text.length > 15) {
-            firstText = text.slice(0, 150);
+            // 清理文本中的 markdown 格式
+            firstText = cleanMarkdown(text).slice(0, 150);
           }
         }
 
@@ -173,6 +195,7 @@ async function extractProjectGoal(workingDir) {
   const fs = await import('fs/promises');
 
   // 从内容中提取目标的通用函数
+  // 只从明确的目标/概览章节提取，不使用回退逻辑避免错误提取
   const extractGoalFromContent = (content) => {
     const lines = content.split('\n');
     let inOverviewSection = false;
@@ -192,29 +215,20 @@ async function extractProjectGoal(workingDir) {
         break;
       }
 
-      // 收集概览章节的内容（过滤表格行）
+      // 只收集概览章节的内容（过滤表格行、代码块等）
       if (inOverviewSection && line &&
           !line.startsWith('#') &&
           !line.startsWith('```') &&
           !line.startsWith('|') &&
-          !line.match(/^[-|:]+$/)) {  // 过滤表格分隔线
+          !line.startsWith('[') &&  // 过滤链接行
+          !line.match(/^[-|:]+$/) &&  // 过滤表格分隔线
+          !line.match(/^https?:\/\//)) {  // 过滤 URL
         goalLines.push(line);
         if (goalLines.join('').length > 200) break;
       }
-
-      // 如果没有概览章节，收集第一段普通文本
-      if (!inOverviewSection && goalLines.length === 0 && line &&
-          !line.startsWith('#') &&
-          !line.startsWith('-') &&
-          !line.startsWith('*') &&
-          !line.startsWith('```') &&
-          !line.startsWith('>') &&
-          !line.startsWith('|') &&
-          line.length > 15) {
-        goalLines.push(line);
-      }
     }
 
+    // 只返回从明确章节提取的内容，不使用回退逻辑
     return goalLines.join(' ').slice(0, 300);
   };
 
@@ -285,6 +299,7 @@ app.use(sessionMiddleware);
 let sessionManager = null;
 const historyLogger = new HistoryLogger();
 const terminalRecorder = getTerminalRecorder();
+const projectRecordingService = getProjectRecordingService();
 const aiEngine = new AIEngine();
 const authService = new AuthService();
 const providerService = new ProviderService(io);
@@ -1469,6 +1484,121 @@ app.get('/api/token-stats/models', (req, res) => {
   }
 });
 
+// ==================== 项目录制 API ====================
+
+// 获取有录制数据的项目列表
+app.get('/api/project-recordings', (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 20;
+    const projects = projectRecordingService.getProjectsWithRecordings(limit);
+    res.json({ success: true, data: projects });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取项目的录制片段列表
+app.get('/api/project-recordings/:projectPath', (req, res) => {
+  try {
+    const projectPath = decodeURIComponent(req.params.projectPath);
+    const limit = parseInt(req.query.limit) || 50;
+    const segments = projectRecordingService.getProjectRecordings(projectPath, limit);
+    const timeRange = projectRecordingService.getProjectTimeRange(projectPath);
+    res.json({ success: true, data: { segments, timeRange } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取项目的录制事件（用于回放）
+app.get('/api/project-recordings/:projectPath/events', (req, res) => {
+  try {
+    const projectPath = decodeURIComponent(req.params.projectPath);
+    const startTime = parseInt(req.query.startTime) || 0;
+    const endTime = parseInt(req.query.endTime) || Date.now();
+    const events = projectRecordingService.getProjectEvents(projectPath, startTime, endTime);
+    const timeRange = projectRecordingService.getProjectTimeRange(projectPath);
+    res.json({ success: true, data: { events, timeRange } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取单个录制片段的事件
+app.get('/api/project-recordings/segment/:segmentId', (req, res) => {
+  try {
+    const segmentId = parseInt(req.params.segmentId);
+    const events = projectRecordingService.getSegmentEvents(segmentId);
+    if (!events) {
+      return res.status(404).json({ error: '片段不存在' });
+    }
+    res.json({ success: true, data: events });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 获取项目录制统计
+app.get('/api/project-recordings/stats', (req, res) => {
+  try {
+    const stats = projectRecordingService.getStats();
+    res.json({ success: true, data: stats });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 删除项目的所有录制
+app.delete('/api/project-recordings/:projectPath', (req, res) => {
+  try {
+    const projectPath = decodeURIComponent(req.params.projectPath);
+    const deleted = projectRecordingService.deleteProjectRecordings(projectPath);
+    res.json({ success: true, deleted });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 手动迁移会话录制到项目（用于测试和补救）
+app.post('/api/project-recordings/migrate', (req, res) => {
+  try {
+    const { sessionId, projectPath } = req.body;
+    if (!sessionId || !projectPath) {
+      return res.status(400).json({ error: '需要 sessionId 和 projectPath' });
+    }
+
+    // 获取会话录制时间范围
+    const range = terminalRecorder.getTimeRange(sessionId);
+    if (!range || !range.startTime) {
+      return res.status(404).json({ error: '该会话没有录制数据' });
+    }
+
+    // 创建单项目历史记录（使用下划线命名以匹配 ProjectRecordingService）
+    const projectHistory = [{
+      project_path: projectPath,
+      start_time: range.startTime,
+      end_time: range.endTime
+    }];
+
+    // 执行迁移
+    projectRecordingService.migrateSessionRecordings(sessionId, projectHistory, terminalRecorder);
+
+    // 返回迁移结果
+    const projectInfo = projectRecordingService.getProjectRecordings(projectPath);
+    res.json({
+      success: true,
+      message: '迁移完成',
+      data: {
+        sessionId,
+        projectPath,
+        timeRange: projectInfo.timeRange
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // API 路由使用认证中间件
 app.use('/api', authMiddleware);
 
@@ -1917,6 +2047,22 @@ async function updateAllSessionsProjectInfo() {
 
     console.log(`[会话信息] ${session.name}: 项目=${projectName}, 说明=${session.projectDesc || '无'}`);
 
+    // 检测项目切换（用于录制分段）
+    const aiType = session.aiType || 'claude';
+    if (session.updateProjectContext) {
+      const projectChanged = session.updateProjectContext(workingDir, aiType);
+      if (projectChanged) {
+        console.log(`[项目切换] 会话 ${session.name}: 切换到项目 ${workingDir}`);
+        // 通知 ProjectRecordingService 记录项目切换
+        io.emit('project:changed', {
+          sessionId: session.id,
+          projectPath: workingDir,
+          aiType,
+          timestamp: Date.now()
+        });
+      }
+    }
+
     // 保存会话到数据库（确保 workingDir 被持久化）
     sessionManager.updateSession(session);
 
@@ -2345,11 +2491,18 @@ async function runBackgroundAutoAction() {
 
               // 向终端发送"继续"命令恢复工作
               // 根据 CLAUDE.md 规范：必须分两次发送，先文本后回车
-              console.log(`[自动修复] 会话 ${session.name}: 供应商切换成功，发送"继续"命令恢复工作`);
-              session.write('继续');
-              setTimeout(() => {
-                session.write('\r');
-              }, 200);
+              // 执行前重新检查自动操作开关状态
+              if (!session.autoActionEnabled) {
+                console.log(`[自动修复] 会话 ${session.name}: 自动操作已关闭，跳过发送"继续"命令`);
+              } else {
+                console.log(`[自动修复] 会话 ${session.name}: 供应商切换成功，发送"继续"命令恢复工作`);
+                session.write('继续');
+                setTimeout(() => {
+                  if (session.autoActionEnabled) {
+                    session.write('\r');
+                  }
+                }, 200);
+              }
             }
           } else if (status.autoFixAction === 'run_fixer') {
             // thinking 错误：启动 ClaudeSessionFixer 修复程序
@@ -2379,9 +2532,18 @@ async function runBackgroundAutoAction() {
               console.log(`[后台自动操作] 会话 ${session.name}: 修复成功，移除了 ${fixResult.removedCount} 个 thinking blocks`);
 
               // 修复成功后重启 Claude Code
-              console.log(`[后台自动操作] 会话 ${session.name}: 发送 claude -c 继续开发`);
-              session.write('claude -c');
-              setTimeout(() => session.write('\r'), 100);
+              // 执行前重新检查自动操作开关状态
+              if (!session.autoActionEnabled) {
+                console.log(`[后台自动操作] 会话 ${session.name}: 自动操作已关闭，跳过发送 claude -c 命令`);
+              } else {
+                console.log(`[后台自动操作] 会话 ${session.name}: 发送 claude -c 继续开发`);
+                session.write('claude -c');
+                setTimeout(() => {
+                  if (session.autoActionEnabled) {
+                    session.write('\r');
+                  }
+                }, 100);
+              }
 
               historyLogger.log(session.id, {
                 type: 'system',
@@ -2438,6 +2600,14 @@ async function runBackgroundAutoAction() {
 
           if (lastAction && lastAction.action === action && lastAction.contentHash === contentHash && (now - lastAction.time) < cooldownTime) {
             console.log(`[后台自动操作] 会话 ${session.name}: 跳过重复操作 \"${action}\" (冷却${cooldownTime/1000}秒)`);
+            session.isAutoActioning = false;
+            updateCheckState(sessionData.id, false, status);
+            continue;
+          }
+
+          // 执行操作前，重新检查自动操作开关状态（防止用户在分析期间关闭开关）
+          if (!session.autoActionEnabled) {
+            console.log(`[后台自动操作] 会话 ${session.name}: 自动操作已关闭，跳过执行`);
             session.isAutoActioning = false;
             updateCheckState(sessionData.id, false, status);
             continue;
@@ -2580,6 +2750,13 @@ async function runBackgroundAutoAction() {
           'Esc': '\x1b',
           'esc': '\x1b',
         };
+
+        // 执行操作前，重新检查自动操作开关状态（防止用户在 AI 分析期间关闭开关）
+        if (!session.autoActionEnabled) {
+          console.log(`[后台自动操作] 会话 ${session.name}: 自动操作已关闭，跳过执行`);
+          session.isAutoActioning = false;
+          continue;
+        }
 
         if (keyMap[action]) {
           // 如果是特殊按键名称，转换为实际按键，直接发送
@@ -3285,7 +3462,36 @@ io.on('connection', (socket) => {
   });
 
   // 关闭会话（可恢复）
-  socket.on('session:close', (sessionId) => {
+  socket.on('session:close', async (sessionId) => {
+    const session = sessionManager.getSession(sessionId);
+
+    // 在关闭会话前，迁移录制数据到项目存储
+    if (session) {
+      try {
+        const projectHistory = session.getProjectHistory ? session.getProjectHistory() : [];
+        if (projectHistory.length > 0) {
+          console.log(`[会话关闭] 迁移录制数据到项目存储: ${sessionId}, 项目片段数: ${projectHistory.length}`);
+          projectRecordingService.migrateSessionRecordings(sessionId, projectHistory, terminalRecorder);
+        } else if (session.workingDir) {
+          // 如果没有项目历史但有工作目录，创建单一片段
+          console.log(`[会话关闭] 使用工作目录作为项目: ${session.workingDir}`);
+          const timeRange = terminalRecorder.getTimeRange(sessionId);
+          if (timeRange) {
+            projectRecordingService.recordProjectSwitch(sessionId, session.workingDir, session.aiType || 'claude', timeRange.startTime);
+            const singleSegment = [{
+              project_path: session.workingDir,
+              ai_type: session.aiType || 'claude',
+              start_time: timeRange.startTime,
+              end_time: timeRange.endTime
+            }];
+            projectRecordingService.migrateSessionRecordings(sessionId, singleSegment, terminalRecorder);
+          }
+        }
+      } catch (err) {
+        console.error(`[会话关闭] 迁移录制数据失败:`, err);
+      }
+    }
+
     const result = sessionManager.closeSession(sessionId);
     if (result.success) {
       // 清理会话相关的缓存数据
@@ -3441,6 +3647,12 @@ io.on('connection', (socket) => {
       socket.leave(`session:${socket.data.currentSessionId}`);
     }
 
+    // 如果是同一个会话重复 attach（如 socket 重连），也要先移除旧的回调
+    if (socket.data.currentSessionId === sessionId && socket.data.outputCallback) {
+      session.offOutput(socket.data.outputCallback);
+      socket.data.outputCallback = null;
+    }
+
     socket.join(`session:${sessionId}`);
     socket.data.currentSessionId = sessionId;
 
@@ -3535,13 +3747,6 @@ io.on('connection', (socket) => {
 
     const session = sessionManager.getSession(data.sessionId);
     if (session) {
-      // 调试：打印收到的输入（显示特殊字符）
-      const debugInput = data.input
-        .replace(/\r/g, '\\r')
-        .replace(/\n/g, '\\n')
-        .replace(/\x1b/g, '\\x1b');
-      console.log(`[终端输入] 会话 ${session.name}: "${debugInput}" (长度: ${data.input.length}, 字节: ${Buffer.from(data.input).toString('hex')})`);
-
       // 维护输入缓冲区，检测 CLI 命令
       if (!session._inputBuffer) session._inputBuffer = '';
 
@@ -3551,7 +3756,6 @@ io.on('connection', (socket) => {
       } else if (data.input === '\r' || data.input === '\n') {
         // 回车时检查缓冲区
         const cmd = session._inputBuffer.trim();
-        console.log(`[终端输入] 会话 ${session.name}: 检测命令 "${cmd}"`);
 
         // 使用 CliRegistry 动态检测 CLI 命令
         const detectedTool = cliRegistry.findByCommand(cmd);
@@ -3639,12 +3843,9 @@ io.on('connection', (socket) => {
         session._inputBuffer += data.input;
       }
 
-      // mux-server 模式下 session.write() 是异步的，需要 await
-      try {
-        await session.write(data.input);
-      } catch (err) {
-        console.error(`[终端输入] 写入失败:`, err.message);
-      }
+      // tmux 模式下 write() 是同步的，mux-server 模式下是异步的
+      // 直接调用，不使用 await 以避免不必要的延迟
+      session.write(data.input);
 
       // 录制终端输入
       terminalRecorder.recordInput(data.sessionId, data.input);
@@ -3974,8 +4175,8 @@ ${context.join('\n\n')}
 
   // 测试供应商连接
   socket.on('settings:testProvider', async (data) => {
-    const { providerId, appType } = data;
-    console.log(`[AI设置] 测试供应商: ${appType}:${providerId}`);
+    const { providerId, appType, model: testModel } = data;
+    console.log(`[AI设置] 测试供应商: ${appType}:${providerId}, 模型: ${testModel || '默认'}`);
 
     try {
       // 从 CC Switch 数据库获取供应商配置
@@ -4039,6 +4240,8 @@ ${context.join('\n\n')}
       }
 
       // 构造供应商配置对象（符合 ProviderHealthCheck 的格式）
+      // 优先使用用户选择的测试模型，否则使用供应商配置的模型
+      const finalModel = testModel || model;
       const provider = {
         id: row.id,
         name: row.name,
@@ -4046,24 +4249,27 @@ ${context.join('\n\n')}
           codex: {
             apiUrl: apiUrl,
             apiKey: apiKey,
-            model: model || 'gpt-5-codex'
+            model: finalModel || 'gpt-4o'
           }
         } : {
           claude: {
             apiUrl: apiUrl,
-            apiKey: apiKey
+            apiKey: apiKey,
+            model: finalModel || 'claude-sonnet-4-5-20250929'
           }
         }
       };
 
       // 执行健康检查
       const result = await healthCheckScheduler.healthCheck.checkOnce(appType, provider);
+      const testedModel = finalModel || (providerApiType === 'codex' ? 'gpt-4o' : 'claude-sonnet-4-5-20250929');
 
       socket.emit('settings:testResult', {
         success: result.success,
-        message: result.success ? `连接成功 (${result.responseTimeMs}ms)` : result.message,
+        message: result.success ? `连接成功 (${result.responseTimeMs}ms) - 模型: ${testedModel}` : result.message,
         responseTimeMs: result.responseTimeMs,
-        status: result.status
+        status: result.status,
+        model: testedModel
       });
     } catch (err) {
       console.error('[AI设置] 测试供应商失败:', err);

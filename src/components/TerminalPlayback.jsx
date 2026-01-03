@@ -1,6 +1,7 @@
 /**
  * 终端回放组件
  * 支持时间轴控制、播放/暂停、速度调节
+ * 支持两种模式：会话模式（sessionId）和项目模式（projectPath）
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -9,11 +10,14 @@ import { FitAddon } from '@xterm/addon-fit';
 import { useTranslation } from '../i18n';
 import './TerminalPlayback.css';
 
-export default function TerminalPlayback({ sessionId, onClose }) {
+export default function TerminalPlayback({ sessionId, projectPath, onClose }) {
   const { t } = useTranslation();
   const terminalRef = useRef(null);
   const terminalInstance = useRef(null);
   const fitAddon = useRef(null);
+
+  // 模式判断：优先使用 projectPath
+  const isProjectMode = !!projectPath;
 
   // 状态
   const [loading, setLoading] = useState(true);
@@ -22,6 +26,10 @@ export default function TerminalPlayback({ sessionId, onClose }) {
   const [inputEvents, setInputEvents] = useState([]); // 输入事件列表
   const [timeRange, setTimeRange] = useState(null);
   const [termSize, setTermSize] = useState({ cols: 120, rows: 30 });
+
+  // 项目模式额外状态
+  const [projectInfo, setProjectInfo] = useState(null);
+  const [segments, setSegments] = useState([]);
 
   // 播放控制
   const [isPlaying, setIsPlaying] = useState(false);
@@ -32,13 +40,17 @@ export default function TerminalPlayback({ sessionId, onClose }) {
 
   // 加载录制数据
   useEffect(() => {
-    loadRecordings();
+    if (isProjectMode) {
+      loadProjectRecordings();
+    } else {
+      loadRecordings();
+    }
     return () => {
       if (playbackTimer.current) {
         clearTimeout(playbackTimer.current);
       }
     };
-  }, [sessionId]);
+  }, [sessionId, projectPath]);
 
   // 数据加载完成后初始化终端
   useEffect(() => {
@@ -153,6 +165,73 @@ export default function TerminalPlayback({ sessionId, onClose }) {
       }
     } catch (err) {
       console.error('加载剩余数据失败:', err);
+    }
+  };
+
+  // 加载项目录制数据
+  const loadProjectRecordings = async () => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const encodedPath = encodeURIComponent(projectPath);
+
+      // 获取项目录制信息
+      const infoRes = await fetch(`/api/project-recordings/${encodedPath}`);
+      const infoData = await infoRes.json();
+
+      if (!infoData.success || !infoData.data.timeRange) {
+        setError('该项目暂无录制数据');
+        setLoading(false);
+        return;
+      }
+
+      const { segments: segmentList, timeRange: range } = infoData.data;
+      setSegments(segmentList || []);
+      setTimeRange(range);
+
+      if (range.cols && range.rows) {
+        setTermSize({ cols: range.cols, rows: range.rows });
+      }
+
+      // 加载项目的所有录制事件
+      const eventsRes = await fetch(
+        `/api/project-recordings/${encodedPath}/events?startTime=${range.startTime}&endTime=${range.endTime}`
+      );
+      const eventsData = await eventsRes.json();
+
+      if (!eventsData.success || eventsData.data.events.length === 0) {
+        setError('该项目暂无录制数据');
+        setLoading(false);
+        return;
+      }
+
+      const projectEvents = eventsData.data.events;
+
+      // 处理输入事件
+      const inputs = extractInputEvents(projectEvents);
+      console.log('[TerminalPlayback] 项目事件总数:', projectEvents.length);
+      console.log('[TerminalPlayback] 输入事件数:', projectEvents.filter(e => e.type === 'i').length);
+      console.log('[TerminalPlayback] 提取后的输入数:', inputs.length);
+      if (inputs.length > 0) {
+        console.log('[TerminalPlayback] 前3个输入:', inputs.slice(0, 3));
+      }
+      setInputEvents(inputs);
+      setEvents(projectEvents);
+      setCurrentTime(projectEvents[0].timestamp);
+      setLoading(false);
+
+      // 设置项目信息
+      setProjectInfo({
+        path: projectPath,
+        name: projectPath.split('/').pop() || projectPath.split('\\').pop() || projectPath,
+        segmentCount: segmentList?.length || 0,
+        totalEvents: projectEvents.length
+      });
+    } catch (err) {
+      console.error('加载项目录制数据失败:', err);
+      setError('加载项目录制数据失败');
+      setLoading(false);
     }
   };
 
@@ -333,7 +412,20 @@ export default function TerminalPlayback({ sessionId, onClose }) {
     <div className="playback-overlay" onClick={onClose}>
       <div className="playback-modal" onClick={(e) => e.stopPropagation()}>
         <div className="playback-header">
-          <span>终端回放</span>
+          <span>
+            {isProjectMode ? (
+              <>
+                项目回放: {projectInfo?.name || projectPath.split('/').pop() || projectPath}
+                {projectInfo && (
+                  <span className="playback-project-stats">
+                    ({segments.length} 个片段, {events.length} 个事件)
+                  </span>
+                )}
+              </>
+            ) : (
+              '终端回放'
+            )}
+          </span>
           <button className="playback-close" onClick={onClose}>×</button>
         </div>
 
