@@ -76,6 +76,15 @@ function useAuth() {
   return { ...authStatus, login, logout, setupAuth, checkAuth };
 }
 
+// 光标同步防抖和位置缓存（模块级变量）
+// 仅在 Windows 平台启用光标同步（用于 IME 输入法定位）
+// macOS/Linux 不需要此功能，禁用以避免输入时底部闪烁
+const isWindowsPlatform = typeof navigator !== 'undefined' &&
+  (navigator.platform?.includes('Win') || navigator.userAgent?.includes('Windows'));
+let lastCursorX = -1;
+let lastCursorY = -1;
+let cursorSyncTimeout = null;
+
 const convertAnsiToHtml = (text) => {
   if (!text) return '';
 
@@ -120,6 +129,7 @@ export default function App() {
   const [suggestion, setSuggestion] = useState(null);
   const [showHistory, setShowHistory] = useState(false);
   const [playbackSessionId, setPlaybackSessionId] = useState(null); // 用于存储管理的回放
+  const [playbackProjectPath, setPlaybackProjectPath] = useState(null); // 用于项目级别的回放
   const [editingGoal, setEditingGoal] = useState(false);
   const [goalInput, setGoalInput] = useState('');
   const [generatingGoal, setGeneratingGoal] = useState(false);
@@ -138,7 +148,11 @@ export default function App() {
   // 关闭会话确认对话框状态
   const [closeSessionConfirm, setCloseSessionConfirm] = useState({ show: false, session: null });
   const [tunnelUrl, setTunnelUrl] = useState('');
-  const [showQRCode, setShowQRCode] = useState(false);
+  // 二维码折叠状态（从 localStorage 读取）
+  const [qrCodeExpanded, setQrCodeExpanded] = useState(() => {
+    const saved = localStorage.getItem('webtmux_qr_expanded');
+    return saved === 'true';
+  });
   const [aiStatusMap, setAiStatusMap] = useState({});
   const [aiStatusLoading, setAiStatusLoading] = useState({});
   const [aiDebugLogs, setAiDebugLogs] = useState([]);
@@ -180,6 +194,11 @@ export default function App() {
     currentSessionRef.current = currentSession;
   }, [currentSession]);
 
+  // 保存二维码折叠偏好到 localStorage
+  useEffect(() => {
+    localStorage.setItem('webtmux_qr_expanded', qrCodeExpanded.toString());
+  }, [qrCodeExpanded]);
+
   // 设置暗色主题
   useEffect(() => {
     document.documentElement.classList.add('dark');
@@ -219,10 +238,17 @@ export default function App() {
     });
 
     socket.on('session:attached', (data) => {
-      // 优先使用 screenContent（最近的屏幕内容），减少历史 ANSI 序列的干扰
-      // fullContent 包含完整历史，但其中的光标定位序列会导致光标位置混乱
-      console.log('[session:attached] 收到内容长度:', data.fullContent?.length || 0, data.screenContent?.length || 0);
-      setPendingScreenContent(data.screenContent || data.fullContent || '');
+      // 使用 fullContent（包含滚动历史）以支持向上翻页
+      // screenContent 只有当前屏幕内容，会丢失历史
+      const fullLen = data.fullContent?.length || 0;
+      const screenLen = data.screenContent?.length || 0;
+      const fullLines = data.fullContent?.split('\n').length || 0;
+      console.log('[session:attached] 收到内容:', {
+        fullContentLength: fullLen,
+        screenContentLength: screenLen,
+        fullContentLines: fullLines
+      });
+      setPendingScreenContent(data.fullContent || data.screenContent || '');
       setPendingCursorPosition(data.cursorPosition);
       setCurrentSession(data.session);
     });
@@ -238,10 +264,15 @@ export default function App() {
       if (terminalInstance.current && data.sessionId === currentSessionRef.current?.id) {
         terminalInstance.current.write(data.data);
 
-        // mux-server 模式下，将 xterm.js 光标移动到 Ink 假光标位置
-        // Ink 框架使用反色空格作为视觉光标，需要找到它并同步真实光标位置
-        // 这样 IME 候选框才会出现在正确的位置
-        requestAnimationFrame(() => {
+        // Windows 平台：将 xterm.js 光标移动到 Ink 假光标位置（用于 IME 输入法定位）
+        // macOS/Linux 不需要此功能，跳过以避免输入时底部闪烁
+        if (!isWindowsPlatform) return;
+
+        // 使用防抖避免频繁移动导致闪烁
+        if (cursorSyncTimeout) {
+          clearTimeout(cursorSyncTimeout);
+        }
+        cursorSyncTimeout = setTimeout(() => {
           if (!terminalInstance.current) return;
           const term = terminalInstance.current;
           const buffer = term.buffer.active;
@@ -260,13 +291,18 @@ export default function App() {
                 if (isInverse && (char === ' ' || char === '')) {
                   const y = row - buffer.viewportY + 1;
                   const x = col + 1;
-                  term.write(`\x1b[${y};${x}H`);
+                  // 只有位置变化时才移动光标，避免重复移动
+                  if (x !== lastCursorX || y !== lastCursorY) {
+                    lastCursorX = x;
+                    lastCursorY = y;
+                    term.write(`\x1b[${y};${x}H`);
+                  }
                   return;
                 }
               }
             }
           }
-        });
+        }, 100); // 100ms 防抖
       }
     });
 
@@ -674,6 +710,9 @@ export default function App() {
     terminalInstance.current = term;
     setTerminalReady(true); // 标记终端已初始化
 
+    // 自动获取焦点
+    term.focus();
+
     const handleResize = () => {
       if (fitAddon.current && terminalInstance.current) {
         fitAddon.current.fit();
@@ -717,7 +756,6 @@ export default function App() {
 
   // 处理缓存的屏幕内容
   useEffect(() => {
-    console.log('[pendingScreenContent] useEffect 运行, pendingScreenContent:', pendingScreenContent?.length || 0, 'terminalReady:', terminalReady, 'terminalInstance:', !!terminalInstance.current);
     // 只有当终端实例存在时才处理
     if (pendingScreenContent === null || !terminalInstance.current) {
       return;
@@ -727,8 +765,9 @@ export default function App() {
 
     // 只有当有实际内容时才重置终端，避免不必要的清空
     if (pendingScreenContent.trim().length > 0) {
-      // 重置终端
-      term.reset();
+      // 清空终端（包括 scrollback buffer）
+      // 然后写入新会话的完整历史，这样用户可以向上滚动查看
+      term.clear();
 
       // 先调用 fit 确保尺寸正确
       if (fitAddon.current) {
@@ -738,6 +777,15 @@ export default function App() {
       // 写入当前可见区域内容
       let content = pendingScreenContent.replace(/\r\n$/, '');
 
+      // 调试：检查写入前的内容
+      const contentLines = content.split(/\r?\n/).length;
+      console.log('[Terminal] 准备写入内容:', {
+        contentLength: content.length,
+        contentLines: contentLines,
+        termRows: term.rows,
+        willHaveScrollback: contentLines > term.rows
+      });
+
       // 过滤掉光标保存/恢复序列，避免干扰
       content = content
         .replace(/\x1b\[s/g, '')  // 移除保存光标
@@ -745,9 +793,19 @@ export default function App() {
         .replace(/\x1b7/g, '')    // 移除 DEC 保存光标
         .replace(/\x1b8/g, '');   // 移除 DEC 恢复光标
 
-      // 写入内容
-      term.write(content);
-      term.scrollToBottom();
+      // 写入内容，使用 callback 确保写入完成后再滚动到底部
+      term.write(content, () => {
+        // 调试：检查 buffer 状态
+        const buffer = term.buffer.active;
+        console.log('[Terminal] 写入完成后 buffer 状态:', {
+          length: buffer.length,
+          baseY: buffer.baseY,
+          viewportY: buffer.viewportY,
+          rows: term.rows,
+          canScroll: buffer.length > term.rows
+        });
+        term.scrollToBottom();
+      });
 
       // 发送 resize 事件同步尺寸
       setTimeout(() => {
@@ -763,6 +821,9 @@ export default function App() {
     } else {
       console.warn('[Terminal] 收到空的屏幕内容，跳过重置以避免清空终端');
     }
+
+    // 切换会话后自动获取焦点
+    term.focus();
 
     setPendingScreenContent(null);
     setPendingCursorPosition(null);
@@ -996,23 +1057,30 @@ export default function App() {
         </div>
 
         <div className="sidebar-footer">
-          {/* 二维码 */}
-          {tunnelUrl && (
-            <div style={{
-              padding: '12px',
-              backgroundColor: 'var(--bg-tertiary)',
-              borderRadius: '8px',
-              marginBottom: '12px',
-              textAlign: 'center'
-            }}>
-              <QRCodeDisplay url={tunnelUrl} />
-            </div>
-          )}
-          <div style={{ display: 'flex', gap: '8px' }}>
+          {/* 底部按钮行 */}
+          <div className="sidebar-footer-row">
+            {/* 二维码折叠按钮 */}
+            {tunnelUrl && (
+              <button
+                className={`btn btn-icon qr-toggle-btn ${qrCodeExpanded ? 'active' : ''}`}
+                onClick={() => setQrCodeExpanded(!qrCodeExpanded)}
+                title={qrCodeExpanded ? "收起二维码" : "显示远程访问二维码"}
+              >
+                📱
+              </button>
+            )}
+            {/* 设置按钮 */}
             <button className="btn btn-secondary settings-btn" onClick={() => setShowSettings(true)}>
               ⚙️ 设置
             </button>
           </div>
+
+          {/* 可折叠的二维码区域 */}
+          {tunnelUrl && qrCodeExpanded && (
+            <div className="qr-code-panel">
+              <QRCodeDisplay url={tunnelUrl} />
+            </div>
+          )}
         </div>
       </aside>
 
@@ -1020,7 +1088,11 @@ export default function App() {
       <main className="main-content">
         {currentSession ? (
           <div className="terminal-container">
-            <div className="terminal-wrapper" ref={terminalRef} />
+            <div
+              className="terminal-wrapper"
+              ref={terminalRef}
+              onClick={() => terminalInstance.current?.focus()}
+            />
 
             {/* AI 建议卡片 - 仅在开启建议显示、非自动模式下显示，且 AI 状态允许操作 */}
             {suggestion && aiSettings.showSuggestions && !currentSession.autoActionEnabled &&
@@ -1197,6 +1269,9 @@ export default function App() {
                     socket={socket}
                     onOpenProject={(project) => {
                       handleOpenRecentProject(project);
+                    }}
+                    onPlayback={(projectPath) => {
+                      setPlaybackProjectPath(projectPath);
                     }}
                     compact={true}
                   />
@@ -1896,6 +1971,13 @@ export default function App() {
           onClose={() => setPlaybackSessionId(null)}
         />
       )}
+      {/* 项目级别的回放面板 */}
+      {playbackProjectPath && (
+        <TerminalPlayback
+          projectPath={playbackProjectPath}
+          onClose={() => setPlaybackProjectPath(null)}
+        />
+      )}
       {/* AI 设置对话框 */}
       {showSettings && (
         <SettingsModal
@@ -2042,6 +2124,36 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
   // 供应商测试状态
   const [providerTestStatus, setProviderTestStatus] = useState(null); // null | 'testing' | 'success' | 'error'
   const [providerTestMessage, setProviderTestMessage] = useState('');
+  // 测试模型选择状态
+  const [testModel, setTestModel] = useState('');
+
+  // 预设模型列表
+  const MODEL_OPTIONS = {
+    claude: [
+      { id: 'claude-opus-4-5-20251101', name: 'Claude Opus 4.5' },
+      { id: 'claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5' },
+      { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5' },
+      { id: 'opus', name: 'Opus (别名)' },
+      { id: 'sonnet', name: 'Sonnet (别名)' },
+      { id: 'haiku', name: 'Haiku (别名)' },
+    ],
+    codex: [
+      { id: 'gpt-4o', name: 'GPT-4o' },
+      { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
+      { id: 'gpt-4-turbo', name: 'GPT-4 Turbo' },
+      { id: 'gpt-4', name: 'GPT-4' },
+      { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo' },
+      { id: 'o1-preview', name: 'O1 Preview' },
+      { id: 'o1-mini', name: 'O1 Mini' },
+    ],
+    gemini: [
+      { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash' },
+      { id: 'gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash Lite' },
+      { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro' },
+      { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' },
+      { id: 'gemini-1.0-pro', name: 'Gemini 1.0 Pro' },
+    ]
+  };
 
   // 当 settings._providerId 变化时，同步更新下拉框选择（用于页面加载后恢复选择）
   useEffect(() => {
@@ -2113,9 +2225,14 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
   const testSelectedProvider = () => {
     if (!selectedProviderId) return;
     const [appType, providerId] = selectedProviderId.split(':');
+    // 获取当前供应商的默认模型
+    const provider = providers.find(p => p.appType === appType && p.id === providerId);
+    const defaultProviderModel = provider?.model || '';
+    // 使用用户选择的模型，如果没有选择则使用供应商默认模型
+    const modelToTest = testModel || defaultProviderModel;
     setProviderTestStatus('testing');
     setProviderTestMessage(t('common.testing'));
-    socket.emit('settings:testProvider', { providerId, appType });
+    socket.emit('settings:testProvider', { providerId, appType, model: modelToTest });
   };
 
   // 选择供应商时自动填充配置
@@ -2431,11 +2548,34 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
                         {apiKey ? `${apiKey.substring(0, 8)}...` : '未配置'}
                       </span>
                     </div>
-                    <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                       <span style={{ color: '#aaa' }}>模型: </span>
-                      <span style={{ color: '#fff', fontFamily: 'monospace', fontSize: '11px' }}>
-                        {model}
-                      </span>
+                      <select
+                        value={testModel || model}
+                        onChange={(e) => setTestModel(e.target.value)}
+                        style={{
+                          padding: '4px 8px',
+                          background: '#2a2a2a',
+                          color: '#fff',
+                          border: '1px solid #444',
+                          borderRadius: '4px',
+                          fontSize: '11px',
+                          fontFamily: 'monospace',
+                          cursor: 'pointer',
+                          minWidth: '180px'
+                        }}
+                      >
+                        {/* 当前配置的模型（如果不在预设列表中） */}
+                        {model && !MODEL_OPTIONS[appType]?.find(m => m.id === model) && (
+                          <option value={model}>{model} (当前)</option>
+                        )}
+                        {/* 预设模型列表 */}
+                        {MODEL_OPTIONS[appType]?.map(m => (
+                          <option key={m.id} value={m.id}>
+                            {m.name}{m.id === model ? ' (当前)' : ''}
+                          </option>
+                        ))}
+                      </select>
                     </div>
                   </div>
                   {/* 测试按钮和结果 */}

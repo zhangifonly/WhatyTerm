@@ -103,7 +103,24 @@
       "Bash(npm show cloudflared --json)",
       "Bash(npm show:*)",
       "WebFetch(domain:docs.anthropic.com)",
-      "Bash(git -C D:/AI/WhatyTerm status --short)"
+      "Bash(git -C D:/AI/WhatyTerm status --short)",
+      "Bash(git pull:*)",
+      "Bash(lsof:*)",
+      "Bash(npm rebuild:*)",
+      "Bash(npm ls:*)",
+      "Bash(rm:*)",
+      "Bash(xargs kill:*)",
+      "Bash(npx node-gyp rebuild:*)",
+      "Bash(npm run electron:build:mac:*)",
+      "Bash(python3:*)",
+      "Bash(tmux list-sessions:*)",
+      "Bash(while read pid)",
+      "Bash(do ps -o pid=,comm= -p $pid done)",
+      "Bash(pkill:*)",
+      "Bash(ps:*)",
+      "Bash(tmux capture-pane:*)",
+      "Bash(tmux show-options:*)",
+      "Bash(grep:*)"
     ]
   }
 }

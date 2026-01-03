@@ -1055,13 +1055,14 @@ ${historyText || '(空)'}
       return null;
     }
 
-    // 检测 Codex CLI 特征（必须在 Claude Code 之前检测，因为两者都有 > 提示符）
+    // 检测 Codex CLI 特征
+    // 注意：必须使用严格的模式，避免与 Claude Code 输出混淆
+    // 移除了容易产生误报的模式：
+    // - "Updated Plan" / "Worked for Xm Xs" - 可能在多种 CLI 中出现
+    // - "model: gpt-*" - Claude Code 讨论 GPT 模型时会匹配
     if (/OpenAI Codex|codex-cli|openai.*codex/i.test(lastLines) ||
-        /Updated Plan|Worked for \d+m\s+\d+s/i.test(lastLines) ||
-        /^[•●]\s*(Ran|Explored|Read)\s/m.test(lastLines) ||
-        /Reviewing local code|Generating response/i.test(lastLines) ||
-        /Summarize recent commits/i.test(lastLines) ||
-        /model:\s*(gpt-|o\d-|codex)/i.test(lastLines)) {
+        /codex\s+v\d+\.\d+/i.test(lastLines) ||
+        /Codex\s*>\s*$/m.test(lastLines)) {
       return 'codex';
     }
 

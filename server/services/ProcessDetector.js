@@ -243,11 +243,12 @@ class ProcessDetector {
     if (/esc to interrupt/i.test(last500) ||
         /\? for shortcuts/i.test(last500) ||
         /Press up to edit/i.test(last500)) {
-      // 尝试从更多上下文判断
-      if (/claude/i.test(cleanContent)) return 'claude';
-      if (/codex/i.test(cleanContent)) return 'codex';
-      if (/gemini/i.test(cleanContent)) return 'gemini';
-      return 'claude'; // 默认假设是 Claude
+      // 尝试从更多上下文判断，使用更严格的模式
+      // 注意：简单的 /codex/i 会在 Claude Code 讨论 Codex 时产生误报
+      if (/claude-code|Claude Code|anthropic/i.test(cleanContent)) return 'claude';
+      if (/codex-cli|OpenAI Codex/i.test(cleanContent)) return 'codex';
+      if (/gemini-cli|Google Gemini/i.test(cleanContent)) return 'gemini';
+      return 'claude'; // 默认假设是 Claude（最常用）
     }
 
     return null;
