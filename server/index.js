@@ -850,17 +850,20 @@ const authMiddleware = (req, res, next) => {
     return next();
   }
 
-  // 如果未启用认证，直接通过
-  if (!authService.isAuthRequired()) {
-    return next();
-  }
-
   // 本机访问自动放行
   if (isLocalRequest(req)) {
     return next();
   }
 
-  // 检查 session
+  // 远程访问：如果未设置密码，禁止访问
+  if (!authService.isAuthRequired()) {
+    return res.status(403).json({
+      error: '请到本机设置管理员密码后再远程访问',
+      requirePasswordSetup: true
+    });
+  }
+
+  // 远程访问：检查 session
   if (req.session && req.session.authenticated) {
     return next();
   }
@@ -873,11 +876,17 @@ const authMiddleware = (req, res, next) => {
 app.get('/api/auth/status', (req, res) => {
   const status = authService.getStatus();
   const isLocal = isLocalRequest(req);
+  const passwordNotSet = !authService.isAuthRequired();
+
+  // 远程访问 + 未设置密码 = 需要先在本机设置密码
+  const requirePasswordSetup = !isLocal && passwordNotSet;
+
   res.json({
     ...status,
     isLocal,
-    // 本机访问视为已认证
-    authenticated: isLocal || req.session?.authenticated || false
+    requirePasswordSetup,
+    // 本机访问视为已认证；远程访问且未设置密码则未认证
+    authenticated: isLocal || (!requirePasswordSetup && req.session?.authenticated) || false
   });
 });
 
@@ -2411,10 +2420,15 @@ async function runBackgroundAutoAction() {
         }
 
         // 处理需要操作的情况
-        if (status.needsAction && status.suggestedAction) {
+        // 支持 actionType === 'suggestion'：把 suggestion 作为输入发送
+        let action = status.suggestedAction;
+        if (status.actionType === 'suggestion' && status.suggestion && !action) {
+          action = status.suggestion;
+        }
+
+        if (status.needsAction && action) {
           // 跳转到操作执行逻辑（复用后面的代码）
           // 这里直接处理
-          const action = status.suggestedAction;
           const lastAction = lastActionMap.get(session.id);
           const contentHash = computeContentHash(terminalContent, 500);
 
@@ -2423,7 +2437,7 @@ async function runBackgroundAutoAction() {
           const cooldownTime = status.actionType === 'select' ? 3000 : 30000;
 
           if (lastAction && lastAction.action === action && lastAction.contentHash === contentHash && (now - lastAction.time) < cooldownTime) {
-            console.log(`[后台自动操作] 会话 ${session.name}: 跳过重复操作 "${action}" (冷却${cooldownTime/1000}秒)`);
+            console.log(`[后台自动操作] 会话 ${session.name}: 跳过重复操作 \"${action}\" (冷却${cooldownTime/1000}秒)`);
             session.isAutoActioning = false;
             updateCheckState(sessionData.id, false, status);
             continue;
@@ -2442,7 +2456,7 @@ async function runBackgroundAutoAction() {
             } catch (e) {
               session.write(action);
             }
-          } else if (status.actionType === 'text_input' || action.length > 1) {
+          } else if (status.actionType === 'text_input' || status.actionType === 'suggestion' || action.length > 1) {
             // Claude Code 文本输入模式：分两次发送，模拟人工输入
             console.log(`[后台自动操作] 会话 ${session.name}: 分开发送文本 "${action}" + CR`);
             session.write(action);

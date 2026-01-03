@@ -1439,7 +1439,8 @@ ${historyText || '(空)'}
     // 去除 ANSI 转义序列后再匹配（终端内容可能包含颜色代码）
     const cleanLast800 = last800Chars.replace(/\x1b\[[0-9;]*m/g, '');
     // 检测 > 提示符（可能带有空格或光标）
-    const hasInputPrompt = /^>\s*$/m.test(cleanLast800) || />\s*\|/.test(cleanLast800);
+    // 支持多种格式：行首 >、> 后有光标、行尾 >
+    const hasInputPrompt = /^>\s*$/m.test(cleanLast800) || />\s*\|/.test(cleanLast800) || /\n>\s*$/.test(cleanLast800);
 
     if (hasInputPrompt) {
       // 检测"是否继续"类问题 - 应该自动回答"继续"
@@ -1474,6 +1475,27 @@ ${historyText || '(空)'}
           suggestedAction: null,
           actionReason: '等待用户回答问题，不自动操作',
           suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI
+        };
+      }
+
+      // 优先检测部署/脚本阶段（npm run、启动服务、localhost 等）
+      // 这种情况下不应该自动发送"继续"，而是提醒用户检查
+      const isDeploymentContext = /(npm run|yarn start|启动服务|localhost:\d+|server.*running|deployment)/i.test(terminalContent);
+      if (isDeploymentContext) {
+        console.log('[AIEngine] 部署/脚本阶段但有输入提示符，返回建议供执行');
+        return {
+          currentState: '部署/脚本阶段空闲',
+          workingDir: '未显示',
+          recentAction: '等待输入',
+          needsAction: true,
+          actionType: 'suggestion',  // 表示 suggestion 可以作为输入发送
+          suggestedAction: null,
+          actionReason: '部署/脚本阶段空闲，提醒检查服务状态',
+          suggestion: '请检查服务状态和未完成项目',
+          hasInputPrompt: true,
           updatedAt: new Date().toISOString(),
           preAnalyzed: true,
           detectedCLI
@@ -1675,8 +1697,10 @@ ${historyText || '(空)'}
       };
     }
 
-    // 9. 检测部署/脚本阶段关键词
+    // 9. 检测部署/脚本阶段关键词（没有输入提示符的情况）
+    // 注意：有输入提示符的情况已在前面的 hasInputPrompt 块中处理
     if (/(npm run|yarn start|启动服务|localhost:\d+|server.*running|deployment)/i.test(terminalContent)) {
+      // 没有输入提示符，说明服务正在运行，不自动操作
       return {
         currentState: '部署/脚本阶段',
         workingDir: '未显示',

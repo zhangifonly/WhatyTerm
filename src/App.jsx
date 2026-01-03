@@ -219,9 +219,10 @@ export default function App() {
     });
 
     socket.on('session:attached', (data) => {
-      // 使用完整内容（包含滚动历史），如果没有则使用当前屏幕内容
+      // 优先使用 screenContent（最近的屏幕内容），减少历史 ANSI 序列的干扰
+      // fullContent 包含完整历史，但其中的光标定位序列会导致光标位置混乱
       console.log('[session:attached] 收到内容长度:', data.fullContent?.length || 0, data.screenContent?.length || 0);
-      setPendingScreenContent(data.fullContent || data.screenContent || '');
+      setPendingScreenContent(data.screenContent || data.fullContent || '');
       setPendingCursorPosition(data.cursorPosition);
       setCurrentSession(data.session);
     });
@@ -236,6 +237,36 @@ export default function App() {
     socket.on('terminal:output', (data) => {
       if (terminalInstance.current && data.sessionId === currentSessionRef.current?.id) {
         terminalInstance.current.write(data.data);
+
+        // mux-server 模式下，将 xterm.js 光标移动到 Ink 假光标位置
+        // Ink 框架使用反色空格作为视觉光标，需要找到它并同步真实光标位置
+        // 这样 IME 候选框才会出现在正确的位置
+        requestAnimationFrame(() => {
+          if (!terminalInstance.current) return;
+          const term = terminalInstance.current;
+          const buffer = term.buffer.active;
+
+          // 从底部向上搜索反色空格（Ink 的假光标）
+          for (let row = buffer.viewportY + term.rows - 1; row >= buffer.viewportY; row--) {
+            const line = buffer.getLine(row);
+            if (!line) continue;
+
+            for (let col = 0; col < term.cols; col++) {
+              const cell = line.getCell(col);
+              if (cell) {
+                const char = cell.getChars();
+                const isInverse = cell.isInverse();
+                // Ink 假光标：反色属性的空格或空字符
+                if (isInverse && (char === ' ' || char === '')) {
+                  const y = row - buffer.viewportY + 1;
+                  const x = col + 1;
+                  term.write(`\x1b[${y};${x}H`);
+                  return;
+                }
+              }
+            }
+          }
+        });
       }
     });
 
@@ -702,25 +733,33 @@ export default function App() {
       // 先调用 fit 确保尺寸正确
       if (fitAddon.current) {
         fitAddon.current.fit();
-        // 同步尺寸到服务器
-        const session = currentSessionRef.current;
-        if (session) {
-          socket.emit('terminal:resize', {
-            sessionId: session.id,
-            cols: term.cols,
-            rows: term.rows
-          });
-        }
       }
 
       // 写入当前可见区域内容
-      const content = pendingScreenContent.replace(/\r\n$/, '');
-      term.write(content);
+      let content = pendingScreenContent.replace(/\r\n$/, '');
 
-      // 设置光标位置
-      if (pendingCursorPosition) {
-        term.write(`\x1b[${pendingCursorPosition.y};${pendingCursorPosition.x}H`);
-      }
+      // 过滤掉光标保存/恢复序列，避免干扰
+      content = content
+        .replace(/\x1b\[s/g, '')  // 移除保存光标
+        .replace(/\x1b\[u/g, '')  // 移除恢复光标
+        .replace(/\x1b7/g, '')    // 移除 DEC 保存光标
+        .replace(/\x1b8/g, '');   // 移除 DEC 恢复光标
+
+      // 写入内容
+      term.write(content);
+      term.scrollToBottom();
+
+      // 发送 resize 事件同步尺寸
+      setTimeout(() => {
+        const session = currentSessionRef.current;
+        if (session && terminalInstance.current) {
+          socket.emit('terminal:resize', {
+            sessionId: session.id,
+            cols: terminalInstance.current.cols,
+            rows: terminalInstance.current.rows
+          });
+        }
+      }, 100);
     } else {
       console.warn('[Terminal] 收到空的屏幕内容，跳过重置以避免清空终端');
     }
@@ -857,6 +896,11 @@ export default function App() {
   // 注意：本机访问时 authenticated 会自动为 true
   if (auth.loading) {
     return <div className="loading-screen">加载中...</div>;
+  }
+
+  // 远程访问但未设置密码，显示提示页面
+  if (auth.requirePasswordSetup) {
+    return <LoginPage auth={auth} />;
   }
 
   if (auth.enabled && !auth.authenticated) {
@@ -3302,10 +3346,30 @@ function LoginPage({ auth }) {
     setLoading(false);
   };
 
+  // 远程访问但未设置密码，显示提示信息
+  if (auth.requirePasswordSetup) {
+    return (
+      <div className="login-page">
+        <div className="login-card">
+          <h1>WhatyTerm</h1>
+          <p className="login-subtitle">AI 自动化终端管理工具</p>
+          <div className="password-setup-notice">
+            <div className="notice-icon">🔒</div>
+            <h2>需要设置管理员密码</h2>
+            <p>为了安全起见，远程访问需要先在本机设置管理员密码。</p>
+            <p className="notice-instruction">
+              请在本机打开 WhatyTerm，进入 <strong>设置 → 安全</strong> 页面设置密码。
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="login-page">
       <div className="login-card">
-        <h1>WebTmux</h1>
+        <h1>WhatyTerm</h1>
         <p className="login-subtitle">AI 自动化终端管理工具</p>
         <form onSubmit={handleSubmit}>
           <div className="form-group">
