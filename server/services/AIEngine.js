@@ -1436,11 +1436,12 @@ ${historyText || '(空)'}
     // 2.7 检测 Claude Code 空闲状态下的中文问句
     // 检查最后 800 字符中是否有问句（增加范围以确保捕获问句）
     const last800Chars = terminalContent.slice(-800);
-    // 去除 ANSI 转义序列后再匹配（终端内容可能包含颜色代码）
-    const cleanLast800 = last800Chars.replace(/\x1b\[[0-9;]*m/g, '');
+    // 去除 ANSI 转义序列后再匹配（终端内容可能包含颜色代码和控制序列）
+    // 匹配所有 ANSI 转义序列：颜色、光标移动、清除等
+    const cleanLast800 = last800Chars.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
     // 检测 > 提示符（可能带有空格或光标）
-    // 支持多种格式：行首 >、> 后有光标、行尾 >
-    const hasInputPrompt = /^>\s*$/m.test(cleanLast800) || />\s*\|/.test(cleanLast800) || /\n>\s*$/.test(cleanLast800);
+    // 支持多种格式：行首 >、> 后有光标、行尾 >、独立的 > 字符
+    const hasInputPrompt = /^>\s*$/m.test(cleanLast800) || />\s*\|/.test(cleanLast800) || /\n>\s*$/.test(cleanLast800) || /─>─/.test(cleanLast800);
 
     if (hasInputPrompt) {
       // 检测"是否继续"类问题 - 应该自动回答"继续"
