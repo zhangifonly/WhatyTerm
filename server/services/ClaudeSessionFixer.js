@@ -63,6 +63,56 @@ class ClaudeSessionFixer {
   }
 
   /**
+   * 检测终端内容中是否有 Settings Error
+   * 返回 { hasError: boolean, settingsPath: string | null }
+   */
+  detectSettingsError(terminalContent) {
+    if (!terminalContent) return { hasError: false, settingsPath: null };
+
+    // 检测 "Settings Error" 关键字
+    if (!terminalContent.includes('Settings Error')) {
+      return { hasError: false, settingsPath: null };
+    }
+
+    // 提取 settings.local.json 文件路径
+    const pathMatch = terminalContent.match(/([\/\w\-\.]+\/\.claude\/settings\.local\.json)/);
+    const settingsPath = pathMatch ? pathMatch[1] : null;
+
+    console.log(`[ClaudeSessionFixer] 检测到 Settings Error, 路径: ${settingsPath}`);
+    return { hasError: true, settingsPath };
+  }
+
+  /**
+   * 修复 settings.local.json 文件（删除 permissions 部分）
+   */
+  async fixSettingsError(settingsPath) {
+    if (!settingsPath) {
+      return { success: false, error: '未找到 settings.local.json 路径' };
+    }
+
+    try {
+      // 读取文件
+      const content = await fs.readFile(settingsPath, 'utf-8');
+      const settings = JSON.parse(content);
+
+      // 删除 permissions 部分
+      if (settings.permissions) {
+        delete settings.permissions;
+        console.log(`[ClaudeSessionFixer] 删除 permissions 配置`);
+      }
+
+      // 写回文件
+      await fs.writeFile(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
+      console.log(`[ClaudeSessionFixer] 已修复 settings.local.json: ${settingsPath}`);
+
+      return { success: true, path: settingsPath };
+    } catch (err) {
+      console.error(`[ClaudeSessionFixer] 修复 settings.local.json 失败:`, err.message);
+      return { success: false, error: err.message };
+    }
+  }
+
+  /**
    * 扫描所有 Claude Code 项目目录，找到最近修改的会话文件
    * 当无法确定工作目录时使用此方法作为备用
    */

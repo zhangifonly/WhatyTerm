@@ -227,10 +227,10 @@ export class Session {
           });
           console.log(`tmux 会话已存在: ${this.tmuxSessionName}`);
         } catch {
-          execSync(`${tmuxCmd} new-session -d -s "${this.tmuxSessionName}" -x 80 -y 24`, {
-            stdio: 'ignore'
-          });
-          console.log(`重新创建 tmux 会话: ${this.tmuxSessionName}`);
+          // 恢复会话时 tmux 不存在，不自动创建（由 _loadSessions 处理）
+          console.log(`tmux 会话不存在，跳过: ${this.tmuxSessionName}`);
+          this.invalid = true;  // 标记为无效会话
+          return;
         }
       }
       // 统一设置 tmux 选项（无论新建还是已存在）
@@ -637,6 +637,65 @@ export class Session {
   }
 
   destroy() {
+    // 先清理 tmux 会话中的所有子进程（递归获取所有后代进程）
+    if (useTmux && this.tmuxSessionName) {
+      try {
+        // 获取 pane PID
+        const panePid = execSync(
+          `${getTmuxPrefix()} list-panes -t "${this.tmuxSessionName}" -F "#{pane_pid}" 2>/dev/null | head -1`,
+          { encoding: 'utf-8' }
+        ).trim();
+
+        if (panePid) {
+          // 递归获取所有后代进程
+          const getAllDescendants = (pid) => {
+            const descendants = [];
+            try {
+              const children = execSync(`pgrep -P ${pid} 2>/dev/null`, { encoding: 'utf-8' }).trim();
+              if (children) {
+                for (const childPid of children.split('\n').filter(p => p)) {
+                  descendants.push(childPid);
+                  // 递归获取子进程的子进程
+                  descendants.push(...getAllDescendants(childPid));
+                }
+              }
+            } catch {
+              // 没有子进程
+            }
+            return descendants;
+          };
+
+          const allPids = getAllDescendants(panePid);
+
+          if (allPids.length > 0) {
+            console.log(`[Session] 发现 ${allPids.length} 个后代进程需要终止`);
+            // 从最深层开始终止（反向顺序）
+            for (const pid of allPids.reverse()) {
+              try {
+                process.kill(parseInt(pid), 'SIGTERM');
+                console.log(`[Session] 终止进程: ${pid}`);
+              } catch (e) {
+                // 进程可能已退出
+              }
+            }
+
+            // 等待 1 秒后强制终止未退出的进程
+            setTimeout(() => {
+              for (const pid of allPids) {
+                try {
+                  process.kill(parseInt(pid), 'SIGKILL');
+                } catch {
+                  // 进程已退出
+                }
+              }
+            }, 1000);
+          }
+        }
+      } catch (err) {
+        console.log(`[Session] 清理子进程时出错: ${err.message}`);
+      }
+    }
+
     if (this.pty) {
       try {
         // 先尝试优雅终止
@@ -949,6 +1008,37 @@ export class SessionManager {
 
     // tmux 模式：正常恢复会话
     for (const row of rows) {
+      // 先检查 tmux 会话是否存在
+      let tmuxExists = false;
+      try {
+        execSync(`${getTmuxPrefix()} has-session -t "${row.tmux_session_name}"`, { stdio: 'pipe' });
+        tmuxExists = true;
+      } catch {
+        tmuxExists = false;
+      }
+
+      // 如果 tmux 会话不存在，移动到已关闭列表
+      if (!tmuxExists) {
+        console.log(`[SessionManager] tmux 会话 "${row.tmux_session_name}" 不存在，移动到已关闭列表`);
+        try {
+          const stmt = this.db.prepare(`
+            INSERT OR REPLACE INTO closed_sessions
+            (id, name, tmux_session_name, goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, ai_type, project_name, project_desc, work_dir, closed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          stmt.run(
+            row.id, row.name, row.tmux_session_name, row.goal || '', row.system_prompt || '',
+            row.ai_enabled, row.auto_mode, row.auto_action_enabled, row.ai_type || 'claude',
+            row.project_name || '', row.project_desc || '', row.working_dir || '', Date.now()
+          );
+          // 从 sessions 表删除
+          this.db.prepare('DELETE FROM sessions WHERE id = ?').run(row.id);
+        } catch (err) {
+          console.error(`[SessionManager] 移动会话到已关闭列表失败:`, err.message);
+        }
+        continue;
+      }
+
       const session = new Session({
         id: row.id,
         name: row.name,
@@ -1628,6 +1718,13 @@ export class SessionManager {
    */
   restoreSession(closedSessionId) {
     try {
+      // 检查会话是否已经存在（防止重复恢复）
+      if (this.sessions.has(closedSessionId)) {
+        const existingSession = this.sessions.get(closedSessionId);
+        console.log(`[SessionManager] 会话已存在，无需重复恢复: ${existingSession.name}`);
+        return { success: true, session: existingSession.toJSON(), alreadyExists: true };
+      }
+
       const closedSession = this._getClosedSessionById(closedSessionId);
       if (!closedSession) {
         return { success: false, error: '关闭的会话不存在' };

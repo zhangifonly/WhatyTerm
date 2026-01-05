@@ -6,7 +6,7 @@ import { dirname, join } from 'path';
 import { ProxyAgent, Agent } from 'undici';
 import Database from 'better-sqlite3';
 import ProviderService from './ProviderService.js';
-import ConfigService from './ConfigService.js';
+import configService from './ConfigService.js';
 import processDetector from './ProcessDetector.js';
 import tokenStatsService from './TokenStatsService.js';
 import { DEFAULT_MODEL, CLAUDE_CODE_FAKE, CODEX_FAKE, CLAUDE_MODEL_FALLBACK_LIST } from '../config/constants.js';
@@ -18,9 +18,6 @@ const CC_SWITCH_DB_PATH = join(os.homedir(), '.cc-switch', 'cc-switch.db');
 
 // 创建 ProviderService 实例（不传 io，AIEngine 不需要推送事件）
 const providerService = new ProviderService();
-
-// 创建 ConfigService 实例
-const configService = new ConfigService();
 
 // 生成 Claude Code 格式的 user_id
 function generateClaudeCodeUserId() {

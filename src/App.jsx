@@ -12,6 +12,7 @@ import CliToolsManager from './components/CliToolsManager';
 import ProviderPriority from './components/ProviderPriority';
 import TerminalPlayback from './components/TerminalPlayback';
 import StorageManager from './components/StorageManager';
+import AdvancedSettings from './components/ProviderManager/AdvancedSettings';
 
 const socket = io();
 
@@ -154,6 +155,8 @@ export default function App() {
     return saved === 'true';
   });
   const [aiStatusMap, setAiStatusMap] = useState({});
+  const [sessionMemory, setSessionMemory] = useState({}); // 会话内存占用 {sessionId: {memory, processCount}}
+  const [processDetails, setProcessDetails] = useState(null); // 进程详情弹窗 {sessionId, details, position}
   const [aiStatusLoading, setAiStatusLoading] = useState({});
   const [aiDebugLogs, setAiDebugLogs] = useState([]);
   const [showDebugPanel, setShowDebugPanel] = useState(false);
@@ -361,7 +364,6 @@ export default function App() {
       setAiSettings(prev => ({ ...prev, ...settings }));
       if (settings.tunnelUrl) {
         setTunnelUrl(settings.tunnelUrl);
-        setShowQRCode(true);  // 自动显示二维码
       }
     });
     socket.emit('settings:load');
@@ -372,7 +374,6 @@ export default function App() {
       .then(data => {
         if (data.tunnelUrl) {
           setTunnelUrl(data.tunnelUrl);
-          setShowQRCode(true);  // 自动显示二维码
         }
       })
       .catch(err => console.error('加载 tunnel URL 失败:', err));
@@ -381,13 +382,11 @@ export default function App() {
     socket.on('tunnel:connected', (data) => {
       console.log('[Tunnel] 已连接:', data.url);
       setTunnelUrl(data.url);
-      setShowQRCode(true);
     });
 
     socket.on('tunnel:disconnected', () => {
       console.log('[Tunnel] 已断开');
       setTunnelUrl('');
-      setShowQRCode(false);
     });
 
     // 加载历史 AI 操作日志
@@ -524,6 +523,19 @@ export default function App() {
       }
     });
 
+    // 监听会话内存更新
+    socket.on('sessions:memory', (memoryMap) => {
+      setSessionMemory(memoryMap);
+    });
+
+    // 监听进程详情响应
+    socket.on('session:processDetails', (data) => {
+      setProcessDetails(prev => prev && prev.sessionId === data.sessionId
+        ? { ...prev, details: data.details }
+        : prev
+      );
+    });
+
     socket.on('ai:statusLoading', (data) => {
       setAiStatusLoading(prev => ({ ...prev, [data.sessionId]: true }));
       addDebugLog('request', { sessionId: data.sessionId, message: t('aiPanel.requestingAnalysis') });
@@ -610,6 +622,20 @@ export default function App() {
       socket.off('provider:switchError');
     };
   }, [addDebugLog]);
+
+  // 点击外部关闭进程详情弹窗
+  useEffect(() => {
+    if (!processDetails) return;
+
+    const handleClickOutside = (e) => {
+      if (!e.target.closest('.process-details-popup') && !e.target.closest('.process-count')) {
+        setProcessDetails(null);
+      }
+    };
+
+    document.addEventListener('click', handleClickOutside);
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, [processDetails]);
 
   // 根据服务器的下次分析时间计算倒计时
   useEffect(() => {
@@ -763,8 +789,13 @@ export default function App() {
 
     const term = terminalInstance.current;
 
+    // 使用局部变量保存当前要处理的内容，立即清空状态防止重复处理
+    const contentToWrite = pendingScreenContent;
+    setPendingScreenContent(null);
+    setPendingCursorPosition(null);
+
     // 只有当有实际内容时才重置终端，避免不必要的清空
-    if (pendingScreenContent.trim().length > 0) {
+    if (contentToWrite.trim().length > 0) {
       // 清空终端（包括 scrollback buffer）
       // 然后写入新会话的完整历史，这样用户可以向上滚动查看
       term.clear();
@@ -775,7 +806,7 @@ export default function App() {
       }
 
       // 写入当前可见区域内容
-      let content = pendingScreenContent.replace(/\r\n$/, '');
+      let content = contentToWrite.replace(/\r\n$/, '');
 
       // 调试：检查写入前的内容
       const contentLines = content.split(/\r?\n/).length;
@@ -824,9 +855,6 @@ export default function App() {
 
     // 切换会话后自动获取焦点
     term.focus();
-
-    setPendingScreenContent(null);
-    setPendingCursorPosition(null);
   }, [pendingScreenContent, pendingCursorPosition, terminalReady]);
 
   // 附加到会话
@@ -945,9 +973,6 @@ export default function App() {
         body: JSON.stringify({ tunnelUrl: url })
       });
       setTunnelUrl(url);
-      if (url) {
-        setShowQRCode(true);  // 有URL时自动显示二维码
-      }
     } catch (err) {
       console.error('保存 tunnel URL 失败:', err);
     }
@@ -1016,6 +1041,28 @@ export default function App() {
                 <div className="session-name">
                   <span className={`session-status ${session.autoActionEnabled ? 'auto' : 'paused'}`} />
                   {session.projectName || session.name}
+                  {sessionMemory[session.id]?.memory > 0 && (
+                    <span className={`session-memory ${sessionMemory[session.id]?.memory > 500 ? 'high' : ''}`}>
+                      {sessionMemory[session.id]?.processCount > 1 && (
+                        <span
+                          className="process-count clickable"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            setProcessDetails({
+                              sessionId: session.id,
+                              details: null,
+                              position: { top: rect.bottom + 5, left: rect.left }
+                            });
+                            socket.emit('session:processDetails', session.id);
+                          }}
+                        >
+                          {sessionMemory[session.id]?.processCount}
+                        </span>
+                      )}
+                      {sessionMemory[session.id]?.memory}MB
+                    </span>
+                  )}
                 </div>
                 <button
                   className="btn-delete"
@@ -2050,6 +2097,37 @@ export default function App() {
           {hoveredSession.projectDesc || hoveredSession.goal}
         </div>
       )}
+
+      {/* 进程详情弹窗 */}
+      {processDetails && (
+        <div
+          className="process-details-popup"
+          style={{
+            top: processDetails.position?.top || 100,
+            left: Math.min(processDetails.position?.left || 100, window.innerWidth - 320)
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="popup-header">
+            <span className="popup-title">进程详情</span>
+            <button className="popup-close" onClick={() => setProcessDetails(null)}>×</button>
+          </div>
+          {!processDetails.details ? (
+            <div className="loading">加载中...</div>
+          ) : processDetails.details.length === 0 ? (
+            <div className="loading">无进程信息</div>
+          ) : (
+            processDetails.details.map((proc, idx) => (
+              <div key={idx} className="process-item">
+                <span className="pid">{proc.pid}</span>
+                <span className="cpu">{proc.cpu}%</span>
+                <span className="memory">{proc.memory}MB</span>
+                <span className="command" title={proc.command}>{proc.command}</span>
+              </div>
+            ))
+          )}
+        </div>
+      )}
     </div>
     </ToastContainer>
   );
@@ -2411,6 +2489,12 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
             onClick={() => setActiveTab('storage')}
           >
             存储管理
+          </button>
+          <button
+            className={`tab-btn ${activeTab === 'advanced' ? 'active' : ''}`}
+            onClick={() => setActiveTab('advanced')}
+          >
+            高级
           </button>
           <button
             className={`tab-btn ${activeTab === 'about' ? 'active' : ''}`}
@@ -3055,6 +3139,10 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
 
         {activeTab === 'storage' && (
           <StorageManager socket={socket} onPlayback={onPlayback} />
+        )}
+
+        {activeTab === 'advanced' && (
+          <AdvancedSettings embedded={true} />
         )}
 
         {activeTab === 'about' && (

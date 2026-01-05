@@ -404,6 +404,135 @@ body {
   color: hsl(var(--foreground));
 }
 
+/* 会话内存显示 */
+.session-memory {
+  font-size: 11px;
+  font-weight: 400;
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted) / 0.5);
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.session-memory .process-count {
+  background: hsl(var(--primary) / 0.2);
+  color: hsl(var(--primary));
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+}
+
+.session-memory.high {
+  color: hsl(var(--destructive));
+  background: hsl(var(--destructive) / 0.15);
+}
+
+.session-memory.high .process-count {
+  background: hsl(var(--destructive) / 0.3);
+  color: hsl(var(--destructive));
+}
+
+.session-memory .process-count.clickable {
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.session-memory .process-count.clickable:hover {
+  background: hsl(var(--primary) / 0.4);
+  transform: scale(1.05);
+}
+
+/* 进程详情弹窗 */
+.process-details-popup {
+  position: fixed;
+  z-index: 10000;
+  background: hsl(var(--popover));
+  border: 1px solid hsl(var(--border));
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  padding: 12px;
+  min-width: 280px;
+  max-width: 400px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.process-details-popup .popup-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid hsl(var(--border));
+}
+
+.process-details-popup .popup-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: hsl(var(--foreground));
+}
+
+.process-details-popup .popup-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: hsl(var(--muted-foreground));
+  font-size: 16px;
+  padding: 0;
+  line-height: 1;
+}
+
+.process-details-popup .popup-close:hover {
+  color: hsl(var(--foreground));
+}
+
+.process-details-popup .process-item {
+  display: grid;
+  grid-template-columns: 50px 45px 55px 1fr;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 11px;
+  border-bottom: 1px solid hsl(var(--border) / 0.5);
+  align-items: center;
+}
+
+.process-details-popup .process-item:last-child {
+  border-bottom: none;
+}
+
+.process-details-popup .process-item .pid {
+  color: hsl(var(--muted-foreground));
+  font-family: monospace;
+}
+
+.process-details-popup .process-item .cpu {
+  color: hsl(var(--primary));
+  font-weight: 500;
+}
+
+.process-details-popup .process-item .memory {
+  color: hsl(var(--warning));
+  font-weight: 500;
+}
+
+.process-details-popup .process-item .command {
+  color: hsl(var(--foreground));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.process-details-popup .loading {
+  text-align: center;
+  color: hsl(var(--muted-foreground));
+  padding: 16px;
+  font-size: 12px;
+}
+
 .session-status {
   width: 8px;
   height: 8px;

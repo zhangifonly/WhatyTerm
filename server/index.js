@@ -78,6 +78,7 @@ import cliRegistry from './services/CliRegistry.js';
 import cliLearner from './services/CliLearner.js';
 import tokenStatsService from './services/TokenStatsService.js';
 import builtinProviderDB from './services/BuiltinProviderDB.js';
+import configService from './services/ConfigService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -130,8 +131,8 @@ async function extractProjectDesc(workingDir) {
           let extractedTitle = line.replace(/^##?\s+/, '').trim();
           // 移除 "CLAUDE.md - " 或 "README.md - " 前缀
           extractedTitle = extractedTitle.replace(/^(CLAUDE\.md|README\.md)\s*[-–—:：]\s*/i, '');
-          // 跳过无意义的标题（如单独的 CLAUDE.md、README.md、README、项目概述、Overview 等）
-          if (/^(CLAUDE\.md|README\.md|README|CLAUDE|项目概述|Overview|简介|Introduction|About|Description)$/i.test(extractedTitle)) {
+          // 跳过无意义的标题
+          if (/^(CLAUDE\.md|README\.md|README|CLAUDE|项目概述|Overview|简介|Introduction|About|Description|Getting Started|Quick Start|Installation|Setup|Usage|技术栈|Tech Stack|Prerequisites|Requirements|Features|目录|Table of Contents|License|Contributing|Changelog|FAQ|常用命令|Commands|Scripts|Documentation|Docs|API|Configuration|Config|环境|Environment|部署|Deploy|Deployment)$/i.test(extractedTitle)) {
             continue; // 跳过这个标题，继续找下一个
           }
           // 清理标题中的 markdown 格式
@@ -154,6 +155,10 @@ async function extractProjectDesc(workingDir) {
             !line.endsWith(':') &&
             line.length > 15) {
           let text = line.startsWith('>') ? line.slice(1).trim() : line;
+          // 跳过通用/模板化的文本
+          if (/^(This (is a|file|project|repository|package)|Welcome to|A (simple|minimal|basic)|Created (with|by|using)|Built (with|using)|Bootstrapped with|Generated (by|with)|An? (example|demo|sample|template)|Here('s| is)|First,? run|Open \[)/i.test(text)) {
+            continue; // 跳过通用文本，继续找下一个
+          }
           if (text.length > 15) {
             // 清理文本中的 markdown 格式
             firstText = cleanMarkdown(text).slice(0, 150);
@@ -186,6 +191,196 @@ async function extractProjectDesc(workingDir) {
   } catch {}
 
   return '';
+}
+
+/**
+ * 获取工作目录匹配的孤儿进程（父进程为 PID 1）
+ * Claude Code 通过 Task tool 启动的后台进程会被孤儿化
+ * 优化：使用 lsof 一次性获取所有进程的工作目录
+ */
+function getOrphanProcessesByWorkDir(workDir) {
+  if (!workDir) return [];
+
+  try {
+    // 使用 lsof 一次性获取所有进程的 cwd，然后过滤
+    // 格式: COMMAND PID USER FD TYPE ... NAME
+    const lsofOutput = execSync(
+      `lsof -d cwd 2>/dev/null | grep "${workDir}" | awk '{print $2}'`,
+      { encoding: 'utf-8', timeout: 3000 }
+    ).trim();
+
+    if (!lsofOutput) return [];
+
+    const pids = lsofOutput.split('\n').filter(p => p && p !== 'PID');
+
+    // 过滤出父进程为 1 的孤儿进程
+    const orphanPids = [];
+    for (const pid of pids) {
+      try {
+        const ppid = execSync(`ps -p ${pid} -o ppid= 2>/dev/null`, { encoding: 'utf-8' }).trim();
+        if (ppid === '1') {
+          orphanPids.push(pid);
+          // 获取该进程的子进程
+          const children = execSync(`pgrep -P ${pid} 2>/dev/null`, { encoding: 'utf-8' }).trim();
+          if (children) {
+            orphanPids.push(...children.split('\n').filter(p => p));
+          }
+        }
+      } catch {}
+    }
+
+    return orphanPids;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 获取单个 tmux 会话的内存占用（MB）和进程数量
+ * @param {string} tmuxSessionName - tmux 会话名称
+ * @param {string} workDir - 会话工作目录（用于匹配孤儿进程）
+ * @returns {{ memory: number, processCount: number }}
+ */
+function getSessionMemory(tmuxSessionName, workDir = '') {
+  if (!useTmux) return { memory: 0, processCount: 0 };
+
+  try {
+    // 获取 pane PID
+    const panePid = execSync(
+      `${getTmuxPrefix()} list-panes -t "${tmuxSessionName}" -F "#{pane_pid}" 2>/dev/null | head -1`,
+      { encoding: 'utf-8' }
+    ).trim();
+
+    if (!panePid) return { memory: 0, processCount: 0 };
+
+    // 递归获取所有后代进程
+    const getAllDescendants = (pid) => {
+      const descendants = [];
+      try {
+        const children = execSync(`pgrep -P ${pid} 2>/dev/null`, { encoding: 'utf-8' }).trim();
+        if (children) {
+          for (const childPid of children.split('\n').filter(p => p)) {
+            descendants.push(childPid);
+            descendants.push(...getAllDescendants(childPid));
+          }
+        }
+      } catch {
+        // 没有子进程
+      }
+      return descendants;
+    };
+
+    const childPids = getAllDescendants(panePid);
+    let allPids = [panePid, ...childPids];
+
+    // 获取工作目录匹配的孤儿进程（Claude Code Task tool 启动的后台进程）
+    if (workDir) {
+      const orphanPids = getOrphanProcessesByWorkDir(workDir);
+      // 合并并去重
+      allPids = [...new Set([...allPids, ...orphanPids])];
+    }
+
+    const processCount = allPids.length;
+
+    // 获取总内存（KB）
+    const rssOutput = execSync(
+      `ps -o rss= -p ${allPids.join(',')} 2>/dev/null`,
+      { encoding: 'utf-8' }
+    );
+
+    const totalKB = rssOutput.split('\n')
+      .map(line => parseInt(line.trim()) || 0)
+      .reduce((sum, val) => sum + val, 0);
+
+    return { memory: Math.round(totalKB / 1024), processCount };
+  } catch {
+    return { memory: 0, processCount: 0 };
+  }
+}
+
+/**
+ * 获取所有会话的内存占用
+ */
+function getAllSessionsMemory() {
+  const memoryMap = {};
+
+  if (!sessionManager) return memoryMap;
+
+  const sessions = sessionManager.listSessions();
+  for (const session of sessions) {
+    const memory = getSessionMemory(session.tmuxSessionName, session.workingDir);
+    memoryMap[session.id] = memory;
+  }
+
+  return memoryMap;
+}
+
+/**
+ * 获取会话的进程详情列表
+ * @param {string} tmuxSessionName - tmux 会话名称
+ * @param {string} workDir - 会话工作目录（用于匹配孤儿进程）
+ */
+function getSessionProcessDetails(tmuxSessionName, workDir = '') {
+  if (!useTmux) return [];
+
+  try {
+    const panePid = execSync(
+      `${getTmuxPrefix()} list-panes -t "${tmuxSessionName}" -F "#{pane_pid}" 2>/dev/null | head -1`,
+      { encoding: 'utf-8' }
+    ).trim();
+
+    if (!panePid) return [];
+
+    // 递归获取所有后代进程
+    const getAllDescendants = (pid) => {
+      const descendants = [];
+      try {
+        const children = execSync(`pgrep -P ${pid} 2>/dev/null`, { encoding: 'utf-8' }).trim();
+        if (children) {
+          for (const childPid of children.split('\n').filter(p => p)) {
+            descendants.push(childPid);
+            descendants.push(...getAllDescendants(childPid));
+          }
+        }
+      } catch {}
+      return descendants;
+    };
+
+    let allPids = [panePid, ...getAllDescendants(panePid)];
+
+    // 获取工作目录匹配的孤儿进程
+    if (workDir) {
+      const orphanPids = getOrphanProcessesByWorkDir(workDir);
+      allPids = [...new Set([...allPids, ...orphanPids])];
+    }
+
+    // 获取每个进程的详细信息
+    const details = [];
+    for (const pid of allPids) {
+      try {
+        const info = execSync(
+          `ps -p ${pid} -o pid=,pcpu=,rss=,comm= 2>/dev/null`,
+          { encoding: 'utf-8' }
+        ).trim();
+
+        if (info) {
+          const parts = info.split(/\s+/);
+          if (parts.length >= 4) {
+            details.push({
+              pid: parts[0],
+              cpu: parseFloat(parts[1]) || 0,
+              memory: Math.round((parseInt(parts[2]) || 0) / 1024),
+              command: parts.slice(3).join(' ')
+            });
+          }
+        }
+      } catch {}
+    }
+
+    return details;
+  } catch {
+    return [];
+  }
 }
 
 // 从 goal.md、CLAUDE.md 或 README.md 提取项目目标
@@ -262,7 +457,21 @@ async function extractProjectGoal(workingDir) {
     // README.md 也不存在
   }
 
-  return '';
+  // 尝试从 package.json 的 description 字段读取
+  try {
+    const pkgPath = `${workingDir}/package.json`;
+    const content = await fs.readFile(pkgPath, 'utf-8');
+    const pkg = JSON.parse(content);
+    if (pkg.description && pkg.description.length > 5) {
+      return pkg.description;
+    }
+  } catch {
+    // package.json 不存在或解析失败
+  }
+
+  // 如果没有提取到目标，使用项目名称作为默认目标
+  const projectName = path.basename(workingDir);
+  return projectName ? `${projectName} 项目开发` : '';
 }
 
 // 注意：refreshSessionMetadata 和 refreshAllSessionsMetadata 功能已合并到 updateAllSessionsProjectInfo() 中
@@ -2009,10 +2218,10 @@ async function updateAllSessionsProjectInfo() {
           goal: session.goal
         });
       }
-      // 如果 projectDesc 为空，尝试获取
-      if (!session.projectDesc && session.workingDir) {
+      // 尝试获取/更新 projectDesc（总是尝试，以便检测 CLAUDE.md 变化）
+      if (session.workingDir) {
         const projectDesc = await extractProjectDesc(session.workingDir);
-        if (projectDesc) {
+        if (projectDesc && projectDesc !== session.projectDesc) {
           session.projectDesc = projectDesc;
           sessionManager.updateSession(session);
           io.emit('session:updated', {
@@ -2127,6 +2336,28 @@ async function runBackgroundAutoAction() {
     const fixCooldown = baseCooldown * Math.pow(2, Math.min(fixAttempts, 3));
     const canFix = now - lastFixTime > fixCooldown;
     const hasApiError = claudeSessionFixer.detectApiError(terminalContent);
+
+    // 检测 Settings Error 并自动修复（带冷却时间防止重复）
+    const settingsError = claudeSessionFixer.detectSettingsError(terminalContent);
+    if (settingsError.hasError && settingsError.settingsPath) {
+      // 检查冷却时间（30秒内不重复处理）
+      const lastSettingsFix = session.lastSettingsFixTime || 0;
+      if (now - lastSettingsFix > 30000) {
+        console.log(`[Settings修复] 会话 ${session.name}: 检测到 Settings Error`);
+        const fixResult = await claudeSessionFixer.fixSettingsError(settingsError.settingsPath);
+        if (fixResult.success) {
+          console.log(`[Settings修复] 会话 ${session.name}: 已修复 settings.local.json，发送 "2" 继续`);
+          session.lastSettingsFixTime = now;  // 记录修复时间
+          // 发送 "2" 选择 "Continue without these settings"
+          session.write('2');
+          historyLogger.log(session.id, {
+            type: 'ai_decision',
+            content: `自动修复 Settings Error: 删除了 permissions 配置，选择继续`
+          });
+          continue;
+        }
+      }
+    }
 
     // 调试日志
     if (hasApiError) {
@@ -2827,6 +3058,132 @@ async function runBackgroundAutoAction() {
 
 // 每 1 秒检查一次（实际检测由 sessionCheckState 控制，支持爆发模式的 3 秒间隔）
 setInterval(runBackgroundAutoAction, 1000);
+
+// 内存限制状态跟踪
+const memoryLimitState = new Map(); // sessionId -> { warned: boolean, limited: boolean }
+
+// 检查内存限制并执行相应操作
+async function checkMemoryLimits(memoryMap) {
+  const config = configService.getMemoryLimitConfig();
+  if (!config.enabled) return;
+
+  const sessions = sessionManager?.getAllSessions() || [];
+
+  for (const session of sessions) {
+    const memInfo = memoryMap[session.id];
+    if (!memInfo) continue;
+
+    const memoryMB = memInfo.memory;
+    const state = memoryLimitState.get(session.id) || { warned: false, limited: false };
+
+    // 检查是否超过限制阈值
+    if (memoryMB >= config.limitMB) {
+      if (!state.limited) {
+        console.log(`[内存限制] 会话 ${session.name} 内存超限: ${memoryMB}MB >= ${config.limitMB}MB`);
+        state.limited = true;
+        memoryLimitState.set(session.id, state);
+
+        // 发送超限通知
+        io?.emit('session:memoryLimit', {
+          sessionId: session.id,
+          sessionName: session.name,
+          memoryMB,
+          limitMB: config.limitMB,
+          type: 'limit'
+        });
+
+        // 暂停自动操作
+        if (config.pauseAutoActionOnLimit && session.autoAction) {
+          console.log(`[内存限制] 暂停会话 ${session.name} 的自动操作`);
+          sessionManager.updateSession(session.id, { autoAction: false });
+          io?.emit('session:autoActionPaused', {
+            sessionId: session.id,
+            reason: 'memory_limit'
+          });
+        }
+
+        // 自动终止进程
+        if (config.autoKillOnLimit) {
+          console.log(`[内存限制] 终止会话 ${session.name} 的子进程`);
+          try {
+            killSessionProcesses(session.tmuxSessionName);
+            io?.emit('session:processKilled', {
+              sessionId: session.id,
+              reason: 'memory_limit'
+            });
+          } catch (err) {
+            console.error(`[内存限制] 终止进程失败:`, err);
+          }
+        }
+      }
+    }
+    // 检查是否超过警告阈值
+    else if (memoryMB >= config.warningMB) {
+      if (!state.warned) {
+        console.log(`[内存警告] 会话 ${session.name} 内存较高: ${memoryMB}MB >= ${config.warningMB}MB`);
+        state.warned = true;
+        state.limited = false;
+        memoryLimitState.set(session.id, state);
+
+        io?.emit('session:memoryWarning', {
+          sessionId: session.id,
+          sessionName: session.name,
+          memoryMB,
+          warningMB: config.warningMB
+        });
+      }
+    }
+    // 内存恢复正常
+    else if (state.warned || state.limited) {
+      console.log(`[内存恢复] 会话 ${session.name} 内存恢复正常: ${memoryMB}MB`);
+      memoryLimitState.set(session.id, { warned: false, limited: false });
+
+      io?.emit('session:memoryNormal', {
+        sessionId: session.id,
+        sessionName: session.name,
+        memoryMB
+      });
+    }
+  }
+}
+
+// 终止会话的所有子进程
+function killSessionProcesses(tmuxSessionName) {
+  if (!useTmux || !tmuxSessionName) return;
+
+  try {
+    const tmuxPrefix = getTmuxPrefix();
+    // 获取 pane PID
+    const panePid = execSync(
+      `${tmuxPrefix} list-panes -t ${tmuxSessionName} -F "#{pane_pid}" 2>/dev/null | head -1`,
+      { encoding: 'utf-8', timeout: 5000 }
+    ).trim();
+
+    if (panePid) {
+      // 终止所有子进程
+      execSync(`pkill -TERM -P ${panePid} 2>/dev/null || true`, { timeout: 5000 });
+    }
+  } catch (err) {
+    // 忽略错误
+  }
+}
+
+// 会话内存监控：每 30 秒更新一次所有会话的内存占用
+setInterval(() => {
+  if (!io || !sessionManager) return;
+  const memoryMap = getAllSessionsMemory();
+  io.emit('sessions:memory', memoryMap);
+
+  // 检查内存限制
+  checkMemoryLimits(memoryMap);
+}, 30000);
+
+// 启动后 5 秒发送一次内存数据
+setTimeout(() => {
+  if (!io || !sessionManager) return;
+  const memoryMap = getAllSessionsMemory();
+  io.emit('sessions:memory', memoryMap);
+}, 5000);
 
 // 后台 AI 状态分析：定期分析所有会话的状态（不依赖前端请求）
 const aiStatusCache = new Map(); // 缓存每个会话的最新 AI 状态
@@ -3614,6 +3971,15 @@ io.on('connection', (socket) => {
       io.emit('closedSessions:updated', sessionManager.getClosedSessions());
     } else {
       socket.emit('error', { message: result.error || '删除失败' });
+    }
+  });
+
+  // 获取会话进程详情
+  socket.on('session:processDetails', (sessionId) => {
+    const session = sessionManager?.getSession(sessionId);
+    if (session) {
+      const details = getSessionProcessDetails(session.tmuxSessionName, session.workingDir);
+      socket.emit('session:processDetails', { sessionId, details });
     }
   });
 
@@ -4532,6 +4898,74 @@ function isPortInUse(port) {
 }
 
 /**
+ * 获取占用端口的进程信息
+ * @returns {Promise<{pid: number, command: string, isOurProcess: boolean} | null>}
+ */
+async function getPortProcess(port) {
+  const { exec } = await import('child_process');
+  const { promisify } = await import('util');
+  const execAsync = promisify(exec);
+
+  try {
+    // macOS/Linux: 使用 lsof 获取占用端口的进程
+    const { stdout } = await execAsync(`lsof -i :${port} -t 2>/dev/null`);
+    const pid = parseInt(stdout.trim().split('\n')[0], 10);
+    if (!pid) return null;
+
+    // 获取进程命令行
+    const { stdout: cmdStdout } = await execAsync(`ps -p ${pid} -o command= 2>/dev/null`);
+    const command = cmdStdout.trim();
+
+    // 判断是否是我们的进程（包含 server/index.js 或 WebTmux）
+    const isOurProcess = command.includes('server/index.js') ||
+                         command.includes('WebTmux') ||
+                         command.includes('whatyterm');
+
+    return { pid, command, isOurProcess };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 清理占用端口的旧进程
+ * @returns {Promise<boolean>} 是否成功清理
+ */
+async function cleanupOldProcess(port) {
+  const processInfo = await getPortProcess(port);
+  if (!processInfo) return false;
+
+  if (processInfo.isOurProcess) {
+    console.log(`[Server] 发现旧的 WebTmux 进程 (PID: ${processInfo.pid})，正在清理...`);
+    try {
+      process.kill(processInfo.pid, 'SIGTERM');
+      // 等待进程退出
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      // 检查是否还在运行
+      const stillInUse = await isPortInUse(port);
+      if (stillInUse) {
+        // 强制终止
+        console.log(`[Server] 进程未响应，强制终止...`);
+        process.kill(processInfo.pid, 'SIGKILL');
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      console.log(`[Server] 旧进程已清理`);
+      return true;
+    } catch (err) {
+      console.error(`[Server] 清理旧进程失败:`, err.message);
+      return false;
+    }
+  } else {
+    console.error(`[Server] 端口 ${port} 被其他应用占用:`);
+    console.error(`  PID: ${processInfo.pid}`);
+    console.error(`  命令: ${processInfo.command}`);
+    return false;
+  }
+}
+
+/**
  * 查找可用端口
  */
 async function findAvailablePort(startPort, maxAttempts = 100) {
@@ -4551,8 +4985,23 @@ async function findAvailablePort(startPort, maxAttempts = 100) {
  */
 async function startServer() {
   try {
-    // 查找可用端口
-    currentPort = await findAvailablePort(DEFAULT_PORT);
+    // 检查端口是否被占用
+    const portInUse = await isPortInUse(DEFAULT_PORT);
+    if (portInUse) {
+      // 尝试清理旧的 WebTmux 进程
+      const cleaned = await cleanupOldProcess(DEFAULT_PORT);
+      if (!cleaned) {
+        console.error(`[Server] 无法启动：端口 ${DEFAULT_PORT} 被占用且无法清理`);
+        process.exit(1);
+      }
+      // 再次检查端口
+      const stillInUse = await isPortInUse(DEFAULT_PORT);
+      if (stillInUse) {
+        console.error(`[Server] 清理后端口仍被占用，退出`);
+        process.exit(1);
+      }
+    }
+    currentPort = DEFAULT_PORT;
 
     server.listen(currentPort, HOST, async () => {
       console.log(`WebTmux 服务器运行在 http://${HOST}:${currentPort}`);

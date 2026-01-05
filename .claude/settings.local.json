@@ -120,7 +120,21 @@
       "Bash(ps:*)",
       "Bash(tmux capture-pane:*)",
       "Bash(tmux show-options:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(sort:*)",
+      "Bash(tmux kill-server:*)",
+      "Bash(tmux list-panes:*)",
+      "Bash(do ps -o pid,rss,comm -p $pid)",
+      "Bash(done)",
+      "Bash(xargs -I{} sh -c 'echo \"\"webtmux-4ce5985c:\"\"; ps -o rss=,comm= -p {} $\\(pgrep -P {} 2>/dev/null\\) 2>/dev/null | awk \"\"{sum+=\\\\$1; print \\\\$2, int\\(\\\\$1/1024\\)\\\\\"\"MB\\\\\"\"} END {print \\\\\"\"总计:\\\\\"\", int\\(sum/1024\\)\\\\\"\"MB\\\\\"\"}\"\"')",
+      "Bash(kill:*)",
+      "Bash(npx eslint:*)",
+      "Bash(# 检查进程 34413 是什么 ps -p 34413 -o pid,ppid,comm,args echo \"\"\"\" echo \"\"=== 检查 34413 的子进程 ===\"\" pgrep -P 34413)",
+      "Bash(do ps -p $pid -o pid,ppid,comm done)",
+      "Bash(# 追踪 mathviz node 进程的父进程链 echo \"\"=== 进程 3031 \\(mathviz vite\\) 的父进程链 ===\"\" pid=3031 while [ \"\"$pid\"\" != \"\"1\"\" ] && [ -n \"\"$pid\"\" ]; do ps -p $pid -o pid,ppid,comm)",
+      "Bash(# 检查 mathviz 相关进程的工作目录 echo \"\"=== npm run dev \\(2999\\) 的工作目录 ===\"\" lsof -p 2999)",
+      "Bash(# 测试孤儿进程检测的性能 time \\(ps -eo pid,ppid,comm)",
+      "Bash(tmux kill-session:*)"
     ]
   }
 }
