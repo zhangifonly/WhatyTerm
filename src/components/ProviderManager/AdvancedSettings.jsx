@@ -11,7 +11,7 @@ const CLAUDE_MODEL_FALLBACK_LIST = [
  * 高级设置组件
  * 包含健康检查配置、自动故障转移、定时健康检查
  */
-export default function AdvancedSettings({ onClose }) {
+export default function AdvancedSettings({ onClose, embedded = false }) {
   const [activeTab, setActiveTab] = useState('health-check'); // 'health-check' | 'failover' | 'scheduler'
   const [healthCheckConfig, setHealthCheckConfig] = useState({
     timeoutSecs: 45,
@@ -36,6 +36,13 @@ export default function AdvancedSettings({ onClose }) {
     checkOnStartup: true,
     notifyOnFailure: false
   });
+  const [memoryLimitConfig, setMemoryLimitConfig] = useState({
+    enabled: false,
+    limitMB: 1024,
+    warningMB: 512,
+    autoKillOnLimit: false,
+    pauseAutoActionOnLimit: true
+  });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   // 模型测试相关状态
@@ -50,21 +57,24 @@ export default function AdvancedSettings({ onClose }) {
 
   const loadConfigs = async () => {
     try {
-      const [healthRes, failoverRes, schedulerRes] = await Promise.all([
+      const [healthRes, failoverRes, schedulerRes, memoryLimitRes] = await Promise.all([
         fetch('/api/config/health-check'),
         fetch('/api/config/failover'),
-        fetch('/api/config/scheduler')
+        fetch('/api/config/scheduler'),
+        fetch('/api/config/memory-limit')
       ]);
 
-      const [healthData, failoverData, schedulerData] = await Promise.all([
+      const [healthData, failoverData, schedulerData, memoryLimitData] = await Promise.all([
         healthRes.json(),
         failoverRes.json(),
-        schedulerRes.json()
+        schedulerRes.json(),
+        memoryLimitRes.json()
       ]);
 
       setHealthCheckConfig(prev => ({ ...prev, ...healthData }));
       setFailoverConfig(prev => ({ ...prev, ...failoverData }));
       setSchedulerConfig(prev => ({ ...prev, ...schedulerData }));
+      setMemoryLimitConfig(prev => ({ ...prev, ...memoryLimitData }));
     } catch (err) {
       console.error('加载配置失败:', err);
     } finally {
@@ -88,6 +98,10 @@ export default function AdvancedSettings({ onClose }) {
         'scheduler': {
           url: '/api/config/scheduler',
           data: schedulerConfig
+        },
+        'memory-limit': {
+          url: '/api/config/memory-limit',
+          data: memoryLimitConfig
         }
       };
 
@@ -450,6 +464,198 @@ export default function AdvancedSettings({ onClose }) {
     </div>
   );
 
+  // 渲染内存限制配置
+  const renderMemoryLimitTab = () => (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between p-3 bg-gray-800 rounded">
+        <div>
+          <div className="text-sm text-white mb-1">启用内存限制</div>
+          <div className="text-xs text-gray-400">监控会话子进程的内存使用</div>
+        </div>
+        <label className="relative inline-flex items-center cursor-pointer">
+          <input
+            type="checkbox"
+            checked={memoryLimitConfig.enabled}
+            onChange={e => setMemoryLimitConfig(prev => ({ ...prev, enabled: e.target.checked }))}
+            className="sr-only peer"
+          />
+          <div className="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+        </label>
+      </div>
+
+      {memoryLimitConfig.enabled && (
+        <>
+          <div>
+            <label className="block text-sm text-gray-400 mb-2">内存限制（MB）</label>
+            <input
+              type="number"
+              value={memoryLimitConfig.limitMB}
+              onChange={e => setMemoryLimitConfig(prev => ({ ...prev, limitMB: parseInt(e.target.value) || 1024 }))}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+              min="256"
+              max="8192"
+              step="256"
+            />
+            <p className="text-xs text-gray-500 mt-1">超过此值将触发限制操作</p>
+          </div>
+
+          <div>
+            <label className="block text-sm text-gray-400 mb-2">警告阈值（MB）</label>
+            <input
+              type="number"
+              value={memoryLimitConfig.warningMB}
+              onChange={e => setMemoryLimitConfig(prev => ({ ...prev, warningMB: parseInt(e.target.value) || 512 }))}
+              className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:border-blue-500 focus:outline-none"
+              min="128"
+              max="4096"
+              step="128"
+            />
+            <p className="text-xs text-gray-500 mt-1">超过此值将显示警告提示</p>
+          </div>
+
+          <div className="space-y-3">
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={memoryLimitConfig.autoKillOnLimit}
+                onChange={e => setMemoryLimitConfig(prev => ({ ...prev, autoKillOnLimit: e.target.checked }))}
+                className="w-4 h-4 rounded border-gray-600 bg-gray-700 text-blue-500"
+              />
+              <div>
+                <div className="text-sm text-gray-300">超限时自动终止进程</div>
+                <div className="text-xs text-gray-500">内存超限时自动杀死子进程</div>
+              </div>
+            </label>
+
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={memoryLimitConfig.pauseAutoActionOnLimit}
+                onChange={e => setMemoryLimitConfig(prev => ({ ...prev, pauseAutoActionOnLimit: e.target.checked }))}
+                className="w-4 h-4 rounded border-gray-600 bg-gray-700 text-blue-500"
+              />
+              <div>
+                <div className="text-sm text-gray-300">超限时暂停自动操作</div>
+                <div className="text-xs text-gray-500">内存超限时暂停 AI 自动操作</div>
+              </div>
+            </label>
+          </div>
+
+          <div className="bg-blue-500/10 border border-blue-500/30 rounded p-3">
+            <div className="text-sm text-blue-400 mb-2">💡 内存监控说明</div>
+            <ul className="text-xs text-gray-400 space-y-1">
+              <li>• 监控每个会话的 tmux 子进程内存使用</li>
+              <li>• 包括 Claude Code 及其启动的所有子进程</li>
+              <li>• 建议限制值设为 1024-2048 MB</li>
+              <li>• 警告阈值应小于限制值</li>
+            </ul>
+          </div>
+
+          {memoryLimitConfig.autoKillOnLimit && (
+            <div className="bg-red-500/10 border border-red-500/30 rounded p-3">
+              <div className="text-sm text-red-400 mb-2">⚠️ 警告</div>
+              <p className="text-xs text-gray-400">
+                启用自动终止进程可能导致未保存的工作丢失。建议仅在测试环境或有自动保存机制时启用。
+              </p>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+
+  // 内容部分（嵌入模式和弹窗模式共用）
+  const content = (
+    <>
+      {/* 标签切换 */}
+      <div className="flex border-b border-gray-700">
+        <button
+          onClick={() => setActiveTab('health-check')}
+          className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
+            activeTab === 'health-check'
+              ? 'text-blue-400 border-b-2 border-blue-400 bg-gray-800/50'
+              : 'text-gray-400 hover:text-gray-300'
+          }`}
+        >
+          健康检查
+        </button>
+        <button
+          onClick={() => setActiveTab('failover')}
+          className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
+            activeTab === 'failover'
+              ? 'text-blue-400 border-b-2 border-blue-400 bg-gray-800/50'
+              : 'text-gray-400 hover:text-gray-300'
+          }`}
+        >
+          故障转移
+        </button>
+        <button
+          onClick={() => setActiveTab('scheduler')}
+          className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
+            activeTab === 'scheduler'
+              ? 'text-blue-400 border-b-2 border-blue-400 bg-gray-800/50'
+              : 'text-gray-400 hover:text-gray-300'
+          }`}
+        >
+          定时检查
+        </button>
+        <button
+          onClick={() => setActiveTab('memory-limit')}
+          className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
+            activeTab === 'memory-limit'
+              ? 'text-blue-400 border-b-2 border-blue-400 bg-gray-800/50'
+              : 'text-gray-400 hover:text-gray-300'
+          }`}
+        >
+          内存限制
+        </button>
+      </div>
+
+      {/* 内容 */}
+      <div className={`p-4 overflow-y-auto ${embedded ? 'max-h-[400px]' : 'max-h-[55vh]'}`}>
+        {loading ? (
+          <div className="text-gray-400 text-sm py-8 text-center">加载中...</div>
+        ) : (
+          <>
+            {activeTab === 'health-check' && renderHealthCheckTab()}
+            {activeTab === 'failover' && renderFailoverTab()}
+            {activeTab === 'scheduler' && renderSchedulerTab()}
+            {activeTab === 'memory-limit' && renderMemoryLimitTab()}
+          </>
+        )}
+      </div>
+
+      {/* 底部 */}
+      <div className="flex justify-end gap-2 p-4 border-t border-gray-700">
+        {!embedded && (
+          <button
+            onClick={onClose}
+            className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white text-sm rounded transition-colors"
+          >
+            取消
+          </button>
+        )}
+        <button
+          onClick={handleSave}
+          disabled={saving || loading}
+          className="px-4 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-700 disabled:cursor-not-allowed text-white text-sm rounded transition-colors"
+        >
+          {saving ? '保存中...' : '保存'}
+        </button>
+      </div>
+    </>
+  );
+
+  // 嵌入模式：直接返回内容
+  if (embedded) {
+    return (
+      <div className="bg-gray-900 rounded-lg overflow-hidden">
+        {content}
+      </div>
+    );
+  }
+
+  // 弹窗模式
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
       <div
@@ -466,70 +672,7 @@ export default function AdvancedSettings({ onClose }) {
             ×
           </button>
         </div>
-
-        {/* 标签切换 */}
-        <div className="flex border-b border-gray-700">
-          <button
-            onClick={() => setActiveTab('health-check')}
-            className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
-              activeTab === 'health-check'
-                ? 'text-blue-400 border-b-2 border-blue-400 bg-gray-800/50'
-                : 'text-gray-400 hover:text-gray-300'
-            }`}
-          >
-            健康检查
-          </button>
-          <button
-            onClick={() => setActiveTab('failover')}
-            className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
-              activeTab === 'failover'
-                ? 'text-blue-400 border-b-2 border-blue-400 bg-gray-800/50'
-                : 'text-gray-400 hover:text-gray-300'
-            }`}
-          >
-            故障转移
-          </button>
-          <button
-            onClick={() => setActiveTab('scheduler')}
-            className={`flex-1 px-4 py-3 text-sm font-medium transition-colors ${
-              activeTab === 'scheduler'
-                ? 'text-blue-400 border-b-2 border-blue-400 bg-gray-800/50'
-                : 'text-gray-400 hover:text-gray-300'
-            }`}
-          >
-            定时检查
-          </button>
-        </div>
-
-        {/* 内容 */}
-        <div className="p-4 overflow-y-auto max-h-[55vh]">
-          {loading ? (
-            <div className="text-gray-400 text-sm py-8 text-center">加载中...</div>
-          ) : (
-            <>
-              {activeTab === 'health-check' && renderHealthCheckTab()}
-              {activeTab === 'failover' && renderFailoverTab()}
-              {activeTab === 'scheduler' && renderSchedulerTab()}
-            </>
-          )}
-        </div>
-
-        {/* 底部 */}
-        <div className="flex justify-end gap-2 p-4 border-t border-gray-700">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white text-sm rounded transition-colors"
-          >
-            取消
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving || loading}
-            className="px-4 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-700 disabled:cursor-not-allowed text-white text-sm rounded transition-colors"
-          >
-            {saving ? '保存中...' : '保存'}
-          </button>
-        </div>
+        {content}
       </div>
     </div>
   );

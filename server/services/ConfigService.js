@@ -33,6 +33,13 @@ class ConfigService {
         intervalMinutes: 30,
         checkOnStartup: true,
         notifyOnFailure: false
+      },
+      memoryLimit: {
+        enabled: false,              // 是否启用内存限制
+        limitMB: 1024,               // MB，超过此值触发限制
+        warningMB: 512,              // MB，超过此值显示警告
+        autoKillOnLimit: false,      // 超限时是否自动杀进程
+        pauseAutoActionOnLimit: true // 超限时暂停自动操作
       }
     };
     this.config = { ...this.defaultConfig };
@@ -58,7 +65,8 @@ class ConfigService {
       this.config = {
         healthCheck: { ...this.defaultConfig.healthCheck, ...loaded.healthCheck },
         failover: { ...this.defaultConfig.failover, ...loaded.failover },
-        scheduler: { ...this.defaultConfig.scheduler, ...loaded.scheduler }
+        scheduler: { ...this.defaultConfig.scheduler, ...loaded.scheduler },
+        memoryLimit: { ...this.defaultConfig.memoryLimit, ...loaded.memoryLimit }
       };
 
       console.log('[ConfigService] 配置加载成功');
@@ -136,6 +144,21 @@ class ConfigService {
     return this.config.scheduler;
   }
 
+  // 获取内存限制配置
+  getMemoryLimitConfig() {
+    return this.config.memoryLimit;
+  }
+
+  // 更新内存限制配置
+  async updateMemoryLimitConfig(updates) {
+    this.config.memoryLimit = {
+      ...this.config.memoryLimit,
+      ...updates
+    };
+    await this.saveConfig();
+    return this.config.memoryLimit;
+  }
+
   // 重置为默认配置
   async resetConfig() {
     this.config = { ...this.defaultConfig };
@@ -144,4 +167,6 @@ class ConfigService {
   }
 }
 
-export default ConfigService;
+// 导出单例实例
+const configService = new ConfigService();
+export default configService;

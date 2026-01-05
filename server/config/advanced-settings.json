@@ -18,8 +18,15 @@
   },
   "scheduler": {
     "enabled": true,
-    "intervalMinutes": 1,
+    "intervalMinutes": 30,
     "checkOnStartup": false,
     "notifyOnFailure": true
+  },
+  "memoryLimit": {
+    "enabled": false,
+    "limitMB": 1024,
+    "warningMB": 512,
+    "autoKillOnLimit": false,
+    "pauseAutoActionOnLimit": true
   }
 }

@@ -20,6 +20,17 @@ export class TerminalRecorder {
 
     // 定时刷新到数据库（每5秒）
     this.flushInterval = setInterval(() => this._flushAll(), 5000);
+
+    // 定时清理旧数据（每小时清理超过24小时的录制）
+    this.cleanupInterval = setInterval(() => {
+      const deleted = this.cleanOldRecordings(24);
+      if (deleted > 0) {
+        console.log(`[TerminalRecorder] 自动清理了 ${deleted} 条超过24小时的录制数据`);
+      }
+    }, 60 * 60 * 1000);
+
+    // 启动时也清理一次
+    this.cleanOldRecordings(24);
   }
 
   _ensureDir() {

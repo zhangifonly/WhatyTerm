@@ -1,6 +1,6 @@
 import ProviderService from '../services/ProviderService.js';
 import ProviderHealthCheck from '../services/ProviderHealthCheck.js';
-import ConfigService from '../services/ConfigService.js';
+import configService from '../services/ConfigService.js';
 import { getTerminalRecorder } from '../services/TerminalRecorder.js';
 import presets from '../config/providerPresets.js';
 import dependencyManager from '../services/DependencyManager.js';
@@ -15,7 +15,6 @@ export function setupRoutes(app, getSessionManager, historyLogger, io = null, ai
   // 初始化服务
   const providerService = new ProviderService(io);
   const healthCheck = new ProviderHealthCheck();
-  const configService = new ConfigService();
 
   // 启动时执行迁移（仅首次）
   providerService.migrateFromOldSettings();
@@ -1128,6 +1127,30 @@ export function setupRoutes(app, getSessionManager, historyLogger, io = null, ai
       res.json({ success: true, config });
     } catch (err) {
       console.error('[Routes] 保存定时检查配置失败:', err);
+      res.status(500).json({ error: '保存配置失败' });
+    }
+  });
+
+  /**
+   * 获取内存限制配置
+   * GET /api/config/memory-limit
+   */
+  app.get('/api/config/memory-limit', (req, res) => {
+    const config = configService.getMemoryLimitConfig();
+    res.json(config);
+  });
+
+  /**
+   * 更新内存限制配置
+   * PUT /api/config/memory-limit
+   * Body: { enabled?, limitMB?, warningMB?, autoKillOnLimit?, pauseAutoActionOnLimit? }
+   */
+  app.put('/api/config/memory-limit', async (req, res) => {
+    try {
+      const config = await configService.updateMemoryLimitConfig(req.body);
+      res.json({ success: true, config });
+    } catch (err) {
+      console.error('[Routes] 保存内存限制配置失败:', err);
       res.status(500).json({ error: '保存配置失败' });
     }
   });

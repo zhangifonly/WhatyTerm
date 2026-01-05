@@ -1,5 +1,5 @@
 import ProviderHealthCheck from './ProviderHealthCheck.js';
-import ConfigService from './ConfigService.js';
+import configService from './ConfigService.js';
 import BuiltinProviderDB from './BuiltinProviderDB.js';
 
 /**
@@ -9,7 +9,7 @@ import BuiltinProviderDB from './BuiltinProviderDB.js';
 class HealthCheckScheduler {
   constructor(io = null) {
     this.healthCheck = new ProviderHealthCheck();
-    this.configService = new ConfigService();
+    this.configService = configService;
     this.io = io;
     this.timer = null;
     this.config = null;
