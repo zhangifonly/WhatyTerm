@@ -2291,6 +2291,33 @@ setInterval(updateAllSessionsProjectInfo, 30000);
 // 启动时立即执行一次
 setTimeout(updateAllSessionsProjectInfo, 3000);
 
+// 用户输入暂停状态跟踪
+// sessionId -> { pausedUntil: timestamp, timer: timeoutId }
+const userInputPauseState = new Map();
+const USER_INPUT_PAUSE_DURATION = 5000; // 用户输入后暂停 5 秒
+
+// 记录用户输入，暂停自动操作
+function pauseAutoActionForUserInput(sessionId) {
+  const existing = userInputPauseState.get(sessionId);
+  if (existing?.timer) {
+    clearTimeout(existing.timer);
+  }
+
+  const pausedUntil = Date.now() + USER_INPUT_PAUSE_DURATION;
+  const timer = setTimeout(() => {
+    userInputPauseState.delete(sessionId);
+  }, USER_INPUT_PAUSE_DURATION);
+
+  userInputPauseState.set(sessionId, { pausedUntil, timer });
+}
+
+// 检查会话是否因用户输入而暂停
+function isAutoActionPausedByUserInput(sessionId) {
+  const state = userInputPauseState.get(sessionId);
+  if (!state) return false;
+  return Date.now() < state.pausedUntil;
+}
+
 // 后台自动操作：定时检查所有启用了自动操作的会话
 async function runBackgroundAutoAction() {
   // 等待 SessionManager 初始化完成
@@ -2615,6 +2642,11 @@ async function runBackgroundAutoAction() {
 
     const session = sessionManager.getSession(sessionData.id);
     if (!session || session.isAutoActioning) continue;
+
+    // 检查是否因用户输入而暂停
+    if (isAutoActionPausedByUserInput(sessionData.id)) {
+      continue; // 用户正在输入，跳过自动操作
+    }
 
     // 先快速检查终端内容是否变化（每次循环都检查）
     const quickContent = session.getScreenContent();
@@ -4113,6 +4145,9 @@ io.on('connection', (socket) => {
 
     const session = sessionManager.getSession(data.sessionId);
     if (session) {
+      // 用户输入时暂停自动操作 5 秒
+      pauseAutoActionForUserInput(data.sessionId);
+
       // 维护输入缓冲区，检测 CLI 命令
       if (!session._inputBuffer) session._inputBuffer = '';
 
