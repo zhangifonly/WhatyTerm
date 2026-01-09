@@ -1409,7 +1409,31 @@ ${historyText || '(空)'}
       };
     }
 
-    // 2.6 检测 Claude Code 空闲状态
+    // 2.6 先检测问句（优先于空闲状态检测）
+    // 检查最后 800 字符中是否有问句
+    const last800Chars = terminalContent.slice(-800);
+    const cleanLast800 = last800Chars.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+
+    // 检测"继续实现"类问题 - 应该自动回答"继续"
+    const isContinueImplementQuestion = /(要继续|是否继续|继续.{0,10}实现.{0,20}[？?])/i.test(cleanLast800);
+    if (isContinueImplementQuestion) {
+      console.log('[AIEngine] 检测到"继续实现"问题，自动回答继续');
+      return {
+        currentState: `${cliName}询问是否继续`,
+        workingDir: '未显示',
+        recentAction: '显示问题',
+        needsAction: true,
+        actionType: 'text_input',
+        suggestedAction: '继续',
+        actionReason: '自动回答继续以保持工作流程',
+        suggestion: null,
+        updatedAt: new Date().toISOString(),
+        preAnalyzed: true,
+        detectedCLI
+      };
+    }
+
+    // 2.7 检测 Claude Code 空闲状态
     // 当显示 "> " 单箭头提示符时，说明 Claude Code 处于空闲状态，等待用户输入
     // 注意："accept edits on" 底部状态栏是正常状态，但 ">> accept edits" 双箭头是编辑确认界面
     // 重要：必须排除 ">> accept edits" 和 "shift+tab to cycle" 的情况
@@ -1431,12 +1455,7 @@ ${historyText || '(空)'}
       };
     }
 
-    // 2.7 检测 Claude Code 空闲状态下的中文问句
-    // 检查最后 800 字符中是否有问句（增加范围以确保捕获问句）
-    const last800Chars = terminalContent.slice(-800);
-    // 去除 ANSI 转义序列后再匹配（终端内容可能包含颜色代码和控制序列）
-    // 匹配所有 ANSI 转义序列：颜色、光标移动、清除等
-    const cleanLast800 = last800Chars.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+    // 2.8 检测 Claude Code 空闲状态下的中文问句
     // 检测 > 提示符（可能带有空格或光标）
     // 支持多种格式：行首 >、> 后有光标、行尾 >、独立的 > 字符
     const hasInputPrompt = /^>\s*$/m.test(cleanLast800) || />\s*\|/.test(cleanLast800) || /\n>\s*$/.test(cleanLast800) || /─>─/.test(cleanLast800);

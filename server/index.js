@@ -236,6 +236,169 @@ function getOrphanProcessesByWorkDir(workDir) {
 }
 
 /**
+ * 清理与项目相关的孤儿进程
+ * 在会话关闭时调用，清理 Claude Code 启动的后台进程（如 Gradle daemon、node 开发服务器等）
+ * @param {string} workDir - 项目工作目录
+ * @param {string} sessionName - 会话名称（用于日志）
+ * @returns {{ cleaned: number, failed: number, processes: Array }} 清理结果
+ */
+function cleanupOrphanProcesses(workDir, sessionName = '') {
+  if (!workDir) return { cleaned: 0, failed: 0, processes: [] };
+
+  const result = { cleaned: 0, failed: 0, processes: [] };
+
+  try {
+    // 已知的可清理进程类型（命令名包含这些关键字）
+    const cleanableTypes = [
+      'GradleDaemon',  // Gradle 守护进程
+      'java',          // Java 进程（包括 javac）
+      'node',          // Node.js 进程
+      'vite',          // Vite 开发服务器
+      'esbuild',       // esbuild 构建工具
+      'webpack',       // Webpack
+      'tsc',           // TypeScript 编译器
+      'python',        // Python 进程
+      'npm',           // npm 进程
+      'pnpm',          // pnpm 进程
+      'yarn',          // yarn 进程
+    ];
+
+    // 获取所有进程信息（用于查找子进程）
+    const allProcessOutput = execSync(
+      `ps -eo pid,ppid,comm,args 2>/dev/null`,
+      { encoding: 'utf-8', timeout: 5000 }
+    ).trim();
+
+    if (!allProcessOutput) return result;
+
+    // 构建进程树
+    const processMap = new Map(); // pid -> { ppid, comm, args }
+    const childrenMap = new Map(); // ppid -> [pid, ...]
+
+    const allLines = allProcessOutput.split('\n').filter(l => l.trim());
+    for (const line of allLines) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 4) continue;
+
+      const pid = parts[0];
+      const ppid = parts[1];
+      const comm = parts[2];
+      const args = parts.slice(3).join(' ');
+
+      processMap.set(pid, { ppid, comm, args });
+
+      if (!childrenMap.has(ppid)) {
+        childrenMap.set(ppid, []);
+      }
+      childrenMap.get(ppid).push(pid);
+    }
+
+    // 递归获取所有子进程
+    function getAllDescendants(pid) {
+      const descendants = [];
+      const children = childrenMap.get(pid) || [];
+      for (const childPid of children) {
+        descendants.push(childPid);
+        descendants.push(...getAllDescendants(childPid));
+      }
+      return descendants;
+    }
+
+    // 找到与项目相关的根进程（PPID=1 的孤儿进程）
+    const orphanPids = [];
+    for (const [pid, info] of processMap) {
+      if (info.ppid !== '1') continue;
+
+      // 检查是否是可清理的进程类型
+      const isCleanableType = cleanableTypes.some(type =>
+        info.comm.toLowerCase().includes(type.toLowerCase()) ||
+        info.args.toLowerCase().includes(type.toLowerCase())
+      );
+      if (!isCleanableType) continue;
+
+      // 检查进程是否与项目目录相关
+      const isRelatedToProject = info.args.includes(workDir);
+
+      // 如果命令行参数不包含项目路径，尝试检查工作目录
+      let cwdRelated = false;
+      if (!isRelatedToProject) {
+        try {
+          const cwdOutput = execSync(
+            `lsof -p ${pid} -d cwd -Fn 2>/dev/null | grep "^n" | cut -c2-`,
+            { encoding: 'utf-8', timeout: 1000 }
+          ).trim();
+          cwdRelated = cwdOutput && cwdOutput.startsWith(workDir);
+        } catch {}
+      }
+
+      if (isRelatedToProject || cwdRelated) {
+        orphanPids.push(pid);
+      }
+    }
+
+    // 收集所有需要清理的进程（孤儿进程 + 它们的所有子进程）
+    const pidsToKill = new Set();
+    for (const orphanPid of orphanPids) {
+      pidsToKill.add(orphanPid);
+      const descendants = getAllDescendants(orphanPid);
+      for (const desc of descendants) {
+        pidsToKill.add(desc);
+      }
+    }
+
+    // 按进程树深度排序，先杀子进程再杀父进程
+    const sortedPids = Array.from(pidsToKill).sort((a, b) => {
+      // 计算进程深度
+      const getDepth = (pid) => {
+        let depth = 0;
+        let current = pid;
+        while (processMap.has(current) && processMap.get(current).ppid !== '1') {
+          depth++;
+          current = processMap.get(current).ppid;
+          if (depth > 100) break; // 防止无限循环
+        }
+        return depth;
+      };
+      return getDepth(b) - getDepth(a); // 深度大的先杀
+    });
+
+    // 清理进程
+    for (const pid of sortedPids) {
+      const info = processMap.get(pid);
+      if (!info) continue;
+
+      try {
+        // 先尝试 SIGTERM
+        execSync(`kill -15 ${pid} 2>/dev/null`, { timeout: 1000 });
+        result.cleaned++;
+        result.processes.push({ pid, comm: info.comm, args: info.args.substring(0, 100) });
+        console.log(`[孤儿进程清理] 已终止进程 PID=${pid} (${info.comm}), 会话: ${sessionName}`);
+      } catch (err) {
+        // 如果 SIGTERM 失败，尝试 SIGKILL
+        try {
+          execSync(`kill -9 ${pid} 2>/dev/null`, { timeout: 1000 });
+          result.cleaned++;
+          result.processes.push({ pid, comm: info.comm, args: info.args.substring(0, 100) });
+          console.log(`[孤儿进程清理] 已强制终止进程 PID=${pid} (${info.comm}), 会话: ${sessionName}`);
+        } catch {
+          result.failed++;
+          console.log(`[孤儿进程清理] 无法终止进程 PID=${pid} (${info.comm})`);
+        }
+      }
+    }
+
+    if (result.cleaned > 0) {
+      console.log(`[孤儿进程清理] 会话 ${sessionName}: 清理了 ${result.cleaned} 个进程（含子进程）`);
+    }
+
+  } catch (err) {
+    console.error(`[孤儿进程清理] 清理失败:`, err.message);
+  }
+
+  return result;
+}
+
+/**
  * 获取单个 tmux 会话的内存占用（MB）和进程数量
  * @param {string} tmuxSessionName - tmux 会话名称
  * @param {string} workDir - 会话工作目录（用于匹配孤儿进程）
@@ -3099,7 +3262,7 @@ async function checkMemoryLimits(memoryMap) {
   const config = configService.getMemoryLimitConfig();
   if (!config.enabled) return;
 
-  const sessions = sessionManager?.getAllSessions() || [];
+  const sessions = sessionManager?.listSessions() || [];
 
   for (const session of sessions) {
     const memInfo = memoryMap[session.id];
@@ -3839,6 +4002,23 @@ io.on('connection', (socket) => {
 
   // 删除会话（永久删除）
   socket.on('session:delete', (sessionId) => {
+    // 在删除前获取会话信息用于清理孤儿进程
+    const session = sessionManager.getSession(sessionId);
+    const workingDir = session?.workingDir;
+    const sessionName = session?.name || sessionId;
+
+    // 清理与项目相关的孤儿进程
+    if (workingDir) {
+      try {
+        const cleanupResult = cleanupOrphanProcesses(workingDir, sessionName);
+        if (cleanupResult.cleaned > 0) {
+          console.log(`[会话删除] 清理了 ${cleanupResult.cleaned} 个孤儿进程`);
+        }
+      } catch (err) {
+        console.error(`[会话删除] 清理孤儿进程失败:`, err.message);
+      }
+    }
+
     const success = sessionManager.deleteSession(sessionId);
     if (success) {
       // 清理会话相关的缓存数据
@@ -3878,6 +4058,18 @@ io.on('connection', (socket) => {
         }
       } catch (err) {
         console.error(`[会话关闭] 迁移录制数据失败:`, err);
+      }
+    }
+
+    // 在关闭 tmux 会话前，清理与项目相关的孤儿进程
+    if (session?.workingDir) {
+      try {
+        const cleanupResult = cleanupOrphanProcesses(session.workingDir, session.name || sessionId);
+        if (cleanupResult.cleaned > 0) {
+          console.log(`[会话关闭] 清理了 ${cleanupResult.cleaned} 个孤儿进程`);
+        }
+      } catch (err) {
+        console.error(`[会话关闭] 清理孤儿进程失败:`, err.message);
       }
     }
 
@@ -4907,7 +5099,7 @@ ${context.join('\n\n')}
   }
 });
 
-const DEFAULT_PORT = 3000;
+const DEFAULT_PORT = 3928;  // 使用不常用端口，避免与其他开发服务冲突
 const HOST = process.env.HOST || '127.0.0.1';
 let currentPort = parseInt(process.env.PORT) || DEFAULT_PORT;
 
@@ -5202,8 +5394,17 @@ async function startServer() {
 
       if (existsSync(claudeSettingsPath)) {
         try {
-          watch(claudeSettingsPath, (eventType) => {
-            if (eventType === 'change') {
+          // 使用 watchFile 替代 watch，因为 watch 在 macOS 上可能不可靠
+          const { watchFile } = await import('fs');
+          let lastMtime = 0;
+          try {
+            const stats = await import('fs/promises').then(fs => fs.stat(claudeSettingsPath));
+            lastMtime = stats.mtimeMs;
+          } catch {}
+
+          watchFile(claudeSettingsPath, { interval: 2000 }, (curr, prev) => {
+            if (curr.mtimeMs !== prev.mtimeMs && curr.mtimeMs !== lastMtime) {
+              lastMtime = curr.mtimeMs;
               // 防抖：500ms 内多次变化只触发一次刷新
               if (configWatchDebounce) {
                 clearTimeout(configWatchDebounce);

@@ -59,7 +59,7 @@ class FrpTunnel {
     this.tunnelUrl = '';
     this.io = null;
     this.enabled = true;
-    this.localPort = 3000;
+    this.localPort = 3928;
     this.subdomain = '';
     this.configPath = '';
     this.selectedServer = null;   // 当前选中的服务器
@@ -70,7 +70,7 @@ class FrpTunnel {
    * @param {Object} io - Socket.IO 实例
    * @param {number} port - 本地服务端口
    */
-  init(io, port = 3000) {
+  init(io, port = 3928) {
     this.io = io;
     this.localPort = port;
     this.subdomain = this._generateSubdomain();

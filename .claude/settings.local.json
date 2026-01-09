@@ -134,7 +134,13 @@
       "Bash(# 追踪 mathviz node 进程的父进程链 echo \"\"=== 进程 3031 \\(mathviz vite\\) 的父进程链 ===\"\" pid=3031 while [ \"\"$pid\"\" != \"\"1\"\" ] && [ -n \"\"$pid\"\" ]; do ps -p $pid -o pid,ppid,comm)",
       "Bash(# 检查 mathviz 相关进程的工作目录 echo \"\"=== npm run dev \\(2999\\) 的工作目录 ===\"\" lsof -p 2999)",
       "Bash(# 测试孤儿进程检测的性能 time \\(ps -eo pid,ppid,comm)",
-      "Bash(tmux kill-session:*)"
+      "Bash(tmux kill-session:*)",
+      "Bash(for s in webtmux-fc75d745 webtmux-edd1be67 webtmux-7f73e5f5)",
+      "Bash(do echo \"=== $s ===\" tmux capture-pane -t \"$s\" -p)",
+      "Bash(~/.claude/settings.json)",
+      "WebSearch",
+      "Bash(# 追踪 javac 进程的父进程链 for pid in 19881 47823 60201; do echo \"\"=== javac PID $pid 的进程链 ===\"\" current=$pid while [ \"\"$current\"\" != \"\"1\"\" ] && [ -n \"\"$current\"\" ]; do ps -p $current -o pid,ppid,rss,comm)",
+      "Bash(# 先杀掉子进程，再杀父进程 kill -15 34374 50077 sleep 1 kill -15 34327 50044 sleep 1 # 检查是否还在运行 ps aux)"
     ]
   }
 }

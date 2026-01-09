@@ -215,6 +215,12 @@ export default function App() {
     // 更新会话列表并缓存到 localStorage
     const handleSessionsList = (data) => {
       setSessions(data);
+      // 同时更新 currentSession（如果当前会话在列表中）
+      setCurrentSession(prev => {
+        if (!prev) return prev;
+        const updated = data.find(s => s.id === prev.id);
+        return updated ? { ...prev, ...updated } : prev;
+      });
       try {
         localStorage.setItem('webtmux_sessions_cache', JSON.stringify(data));
       } catch { /* 忽略存储错误 */ }
@@ -670,6 +676,8 @@ export default function App() {
       fontFamily: 'Monaco, Menlo, monospace',
       scrollback: 5000,
       allowProposedApi: true,
+      // 鼠标选择优化：按住 Option(Mac)/Alt(Win) 键可强制选择文本，绕过终端程序的鼠标模式
+      macOptionClickForcesSelection: true,
       theme: {
         background: '#000000',
         foreground: '#eaeaea',
@@ -1138,8 +1146,12 @@ export default function App() {
             <div
               className="terminal-wrapper"
               ref={terminalRef}
-              onClick={() => terminalInstance.current?.focus()}
-            />
+              onMouseDown={() => terminalInstance.current?.focus()}
+            >
+              <span className="terminal-selection-tip">
+                按住 Shift 或 Option 键选择文字
+              </span>
+            </div>
 
             {/* AI 建议卡片 - 仅在开启建议显示、非自动模式下显示，且 AI 状态允许操作 */}
             {suggestion && aiSettings.showSuggestions && !currentSession.autoActionEnabled &&
