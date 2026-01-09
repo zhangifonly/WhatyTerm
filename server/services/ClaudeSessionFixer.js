@@ -25,10 +25,6 @@ class ClaudeSessionFixer {
     // 移除换行符和多余空格以处理跨行的错误信息（如 "th\ninking.signature"）
     const cleanContent = terminalContent.replace(/\r?\n\s*/g, '');
 
-    // 调试：输出清理后的内容片段
-    const last500 = cleanContent.slice(-500);
-    console.log(`[ClaudeSessionFixer] 检测内容片段: ${last500.substring(0, 200)}...`);
-
     // 检测各类 API 错误
     const errorPatterns = [
       // tool_use_id 相关错误

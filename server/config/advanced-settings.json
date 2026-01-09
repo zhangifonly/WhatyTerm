@@ -24,9 +24,9 @@
   },
   "memoryLimit": {
     "enabled": false,
-    "limitMB": 1024,
+    "limitMB": 2048,
     "warningMB": 512,
-    "autoKillOnLimit": false,
+    "autoKillOnLimit": true,
     "pauseAutoActionOnLimit": true
   }
 }

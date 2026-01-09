@@ -646,6 +646,7 @@ body {
     hsl(var(--primary) / 0.5) 50%,
     transparent 100%);
   z-index: 10;
+  pointer-events: none;  /* 确保不阻挡鼠标事件 */
 }
 
 .terminal-wrapper .xterm {
@@ -653,8 +654,39 @@ body {
   width: 100%;
 }
 
+/* 确保 xterm 的选择层正常工作 */
+.terminal-wrapper .xterm-screen {
+  cursor: text;
+}
+
+.terminal-wrapper .xterm-selection {
+  pointer-events: none;
+}
+
 .terminal-wrapper .xterm-viewport {
   overflow-y: scroll !important;
+}
+
+/* 终端选择提示 */
+.terminal-selection-tip {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 11px;
+  color: hsl(var(--muted-foreground) / 0.6);
+  background: hsl(var(--background) / 0.8);
+  padding: 4px 8px;
+  border-radius: 4px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s;
+  z-index: 20;
+  backdrop-filter: blur(4px);
+  border: 1px solid hsl(var(--border) / 0.3);
+}
+
+.terminal-wrapper:hover .terminal-selection-tip {
+  opacity: 1;
 }
 
 /* AI 建议卡片 */
