@@ -4,6 +4,9 @@ import configService from '../services/ConfigService.js';
 import { getTerminalRecorder } from '../services/TerminalRecorder.js';
 import presets from '../config/providerPresets.js';
 import dependencyManager from '../services/DependencyManager.js';
+import subscriptionService from '../services/SubscriptionService.js';
+import cloudflareTunnel from '../services/CloudflareTunnel.js';
+import frpTunnel from '../services/FrpTunnel.js';
 import Database from 'better-sqlite3';
 import path from 'path';
 import os from 'os';
@@ -15,6 +18,67 @@ export function setupRoutes(app, getSessionManager, historyLogger, io = null, ai
   // 初始化服务
   const providerService = new ProviderService(io);
   const healthCheck = new ProviderHealthCheck();
+
+  /**
+   * 切换隧道类型（根据订阅状态）
+   * @param {number} port - 服务端口
+   */
+  async function switchTunnel(port) {
+    const isPremium = subscriptionService.hasValidSubscription();
+    const availableTunnels = subscriptionService.getAvailableTunnelTypes();
+    console.log(`[Tunnel] 切换隧道，订阅状态: ${isPremium ? '付费' : '免费'}, 可用: ${availableTunnels.join(', ')}`);
+
+    // 停止当前隧道
+    try {
+      cloudflareTunnel.stop();
+    } catch (e) { /* ignore */ }
+    try {
+      frpTunnel.stop();
+      frpTunnel.stopHealthCheck();
+      frpTunnel.stopTunnelCheck();
+    } catch (e) { /* ignore */ }
+
+    let tunnelUrl = null;
+
+    if (isPremium) {
+      // 付费用户：同时测试两种隧道，优先 FRP
+      console.log('[Tunnel] 付费用户：测试所有可用隧道...');
+      frpTunnel.init(io, port);
+      cloudflareTunnel.init(io, port);
+
+      const frpInstalled = await frpTunnel.checkInstalled();
+      const results = await Promise.all([
+        frpInstalled ? frpTunnel.start() : Promise.resolve(null),
+        cloudflareTunnel.start()
+      ]);
+
+      const [frpUrl, cloudflareUrl] = results;
+
+      if (frpUrl) {
+        tunnelUrl = frpUrl;
+        console.log(`[Tunnel] 使用 FRP 隧道: ${tunnelUrl}`);
+        if (cloudflareUrl) {
+          cloudflareTunnel.stop();
+        }
+        frpTunnel.startHealthCheck(60000);
+        frpTunnel.startTunnelCheck(30000);
+      } else if (cloudflareUrl) {
+        tunnelUrl = cloudflareUrl;
+        console.log(`[Tunnel] FRP 不可用，使用 Cloudflare: ${tunnelUrl}`);
+      }
+    } else {
+      // 免费用户：只能使用 Cloudflare Tunnel
+      console.log('[Tunnel] 免费用户：启动 Cloudflare Tunnel');
+      cloudflareTunnel.init(io, port);
+      tunnelUrl = await cloudflareTunnel.start();
+    }
+
+    if (tunnelUrl) {
+      console.log(`[Tunnel] 新隧道地址: ${tunnelUrl}`);
+    }
+
+    return tunnelUrl;
+  }
 
   // 启动时执行迁移（仅首次）
   providerService.migrateFromOldSettings();
@@ -424,15 +488,19 @@ export function setupRoutes(app, getSessionManager, historyLogger, io = null, ai
    * 获取所有预设
    * GET /api/providers/presets
    * Query: ?category=xxx
+   * 注意：isPartner=true 的合作伙伴供应商会被过滤掉，不在前端显示
    */
   app.get('/api/providers/presets', (req, res) => {
     const { category } = req.query;
 
+    // 过滤掉合作伙伴供应商（isPartner: true）
+    const filterPartners = (list) => list.filter(p => !p.isPartner);
+
     if (category) {
       const filtered = presets.getPresetsByCategory(category);
-      res.json(filtered);
+      res.json(filterPartners(filtered));
     } else {
-      res.json(presets.providerPresets);
+      res.json(filterPartners(presets.providerPresets));
     }
   });
 
@@ -1907,6 +1975,196 @@ export function setupRoutes(app, getSessionManager, historyLogger, io = null, ai
     try {
       const available = dependencyManager.isWingetAvailable();
       res.json({ available });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ============================================
+  // 监控策略插件 API
+  // ============================================
+
+  /**
+   * 获取所有可用的监控策略插件
+   * GET /api/monitor-plugins
+   */
+  app.get('/api/monitor-plugins', (req, res) => {
+    try {
+      if (!aiEngine) {
+        return res.status(503).json({ error: 'AIEngine 未初始化' });
+      }
+      const plugins = aiEngine.getAvailablePlugins();
+      res.json({ plugins });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 根据项目上下文选择合适的插件
+   * POST /api/monitor-plugins/select
+   * Body: { projectContext: { projectPath, projectDesc, workingDir }, forcedPluginId?: string }
+   */
+  app.post('/api/monitor-plugins/select', (req, res) => {
+    try {
+      if (!aiEngine) {
+        return res.status(503).json({ error: 'AIEngine 未初始化' });
+      }
+      const { projectContext, forcedPluginId } = req.body;
+      const plugin = aiEngine.selectPlugin(projectContext || {}, forcedPluginId);
+
+      if (!plugin) {
+        return res.json({ plugin: null });
+      }
+
+      res.json({
+        plugin: {
+          id: plugin.id,
+          name: plugin.name,
+          description: plugin.description,
+          phases: plugin.phases
+        }
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ============================================
+  // 订阅管理 API
+  // ============================================
+
+  /**
+   * 获取订阅状态
+   * GET /api/subscription/status
+   */
+  app.get('/api/subscription/status', (req, res) => {
+    try {
+      const status = subscriptionService.getStatus();
+      const remainingDays = subscriptionService.getRemainingDays();
+      res.json({
+        ...status,
+        remainingDays
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 获取订阅页面 URL
+   * GET /api/subscription/url
+   */
+  app.get('/api/subscription/url', (req, res) => {
+    try {
+      const url = subscriptionService.getSubscriptionUrl();
+      res.json({ url });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 激活许可证
+   * POST /api/subscription/activate
+   * Body: { code: string }
+   */
+  app.post('/api/subscription/activate', async (req, res) => {
+    try {
+      const { code } = req.body;
+
+      if (!code) {
+        return res.status(400).json({ error: '缺少激活码' });
+      }
+
+      const result = await subscriptionService.activateLicense(code);
+
+      // 激活成功后切换到 FRP 隧道（付费模式）
+      if (result.success) {
+        const port = req.app.get('port') || 3928;
+        switchTunnel(port).catch(err => {
+          console.error('[Tunnel] 切换隧道失败:', err.message);
+        });
+      }
+
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 邮箱+密码登录激活许可证
+   * POST /api/subscription/activate-by-login
+   * Body: { email: string, password: string }
+   */
+  app.post('/api/subscription/activate-by-login', async (req, res) => {
+    try {
+      const { email, password } = req.body;
+
+      if (!email || !password) {
+        return res.status(400).json({ error: '缺少邮箱或密码' });
+      }
+
+      const result = await subscriptionService.activateLicenseByLogin(email, password);
+
+      // 激活成功后切换到 FRP 隧道（付费模式）
+      if (result.success) {
+        const port = req.app.get('port') || 3928;
+        switchTunnel(port).catch(err => {
+          console.error('[Tunnel] 切换隧道失败:', err.message);
+        });
+      }
+
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 在线验证许可证
+   * POST /api/subscription/verify
+   */
+  app.post('/api/subscription/verify', async (req, res) => {
+    try {
+      const result = await subscriptionService.verifyLicenseOnline();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 停用许可证
+   * POST /api/subscription/deactivate
+   */
+  app.post('/api/subscription/deactivate', async (req, res) => {
+    try {
+      const result = await subscriptionService.deactivateLicense();
+
+      // 停用成功后切换到 Cloudflare 隧道（免费模式）
+      if (result.success) {
+        const port = req.app.get('port') || 3928;
+        switchTunnel(port).catch(err => {
+          console.error('[Tunnel] 切换隧道失败:', err.message);
+        });
+      }
+
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 获取机器 ID（用于显示给用户）
+   * GET /api/subscription/machine-id
+   */
+  app.get('/api/subscription/machine-id', (req, res) => {
+    try {
+      const status = subscriptionService.getStatus();
+      res.json({ machineId: status.machineId });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
