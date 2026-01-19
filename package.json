@@ -1,7 +1,8 @@
 {
   "name": "whatyterm",
-  "version": "1.0.51",
+  "version": "1.0.52",
   "description": "网梯终端 - AI 智能终端管理工具",
+  "license": "MIT",
   "author": {
     "name": "WhatyTerm",
     "email": "support@whatyterm.com"
@@ -18,13 +19,15 @@
     "server:dev": "node --watch server/index.js",
     "client:dev": "vite",
     "build": "vite build",
+    "build:premium": "node scripts/build-premium.js",
+    "build:release": "npm run build && npm run build:premium",
     "start": "node server/index.js",
     "db:migrate": "node server/db/migrate.js",
     "electron:dev": "NODE_ENV=development electron .",
-    "electron:build": "npm run build && electron-builder",
-    "electron:build:mac": "npm run build && electron-builder --mac",
-    "electron:build:win": "npm run build && electron-builder --win",
-    "electron:build:all": "npm run build && electron-builder --mac --win"
+    "electron:build": "npm run build:release && electron-builder",
+    "electron:build:mac": "npm run build:release && electron-builder --mac",
+    "electron:build:win": "npm run build:release && electron-builder --win",
+    "electron:build:all": "npm run build:release && electron-builder --mac --win"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
@@ -50,6 +53,7 @@
     "concurrently": "^9.1.0",
     "electron": "^39.2.7",
     "electron-builder": "^26.0.12",
+    "javascript-obfuscator": "^4.2.2",
     "postcss": "^8.5.6",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
