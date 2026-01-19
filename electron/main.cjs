@@ -439,9 +439,9 @@ function createWindow() {
     mainWindow.webContents.openDevTools();
   } else {
     writeLog('[Electron] 生产模式，等待服务器启动...');
-    waitForServer('http://localhost:3000', 30000).then(() => {
-      writeLog('[Electron] 服务器已就绪，加载 http://localhost:3000');
-      mainWindow.loadURL('http://localhost:3000');
+    waitForServer('http://localhost:3928', 30000).then(() => {
+      writeLog('[Electron] 服务器已就绪，加载 http://localhost:3928');
+      mainWindow.loadURL('http://localhost:3928');
     }).catch((err) => {
       writeLog(`[Electron] 服务器启动超时: ${err.message}`);
       dialog.showErrorBox('服务器启动失败', '无法连接到 WhatyTerm 服务器，请检查日志。');
@@ -540,7 +540,7 @@ function startServer() {
   const env = {
     ...process.env,
     NODE_ENV: 'production',
-    PORT: '3000',
+    PORT: '3928',  // 与服务器默认端口保持一致
     NODE_PATH: nodePath,
     ELECTRON_RUN_AS_NODE: '1'  // 让 Electron 以 Node.js 模式运行
   };
