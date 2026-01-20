@@ -142,10 +142,16 @@ class DefaultPlugin extends BasePlugin {
     const lastLines = terminalContent.split('\n').slice(-20).join('\n');
 
     // 检测确认界面（Claude Code 权限确认等）
+    // "Do you want to proceed?" 且有 "1. Yes" 和 "2. No" 选项
+    const hasDoYouWantToProceed = /Do you want to proceed\?/i.test(lastLines);
+    const hasOption1Yes = /1\.\s*Yes/i.test(lastLines);
+    const hasOption2No = /2\.\s*No/i.test(lastLines);
+
     if (/Allow once|Allow for this session|Deny/i.test(lastLines) ||
         /\[1\].*\[2\].*\[3\]/i.test(lastLines) ||
         /选择.*[123]|choose.*[123]/i.test(lastLines) ||
-        /\(y\/n\)|\[Y\/n\]|\[yes\/no\]/i.test(lastLines)) {
+        /\(y\/n\)|\[Y\/n\]|\[yes\/no\]/i.test(lastLines) ||
+        (hasDoYouWantToProceed && hasOption1Yes)) {
       return 'confirmation';
     }
 
@@ -193,7 +199,7 @@ class DefaultPlugin extends BasePlugin {
     const config = this.getPhaseConfig(phase);
     const lastLines = terminalContent.split('\n').slice(-30).join('\n');
 
-    // 确认界面：自动选择选项 2
+    // 确认界面：根据类型选择合适的选项
     if (phase === 'confirmation') {
       // 检测 y/n 确认
       if (/\(y\/n\)|\[Y\/n\]|\[yes\/no\]/i.test(lastLines)) {
@@ -207,7 +213,24 @@ class DefaultPlugin extends BasePlugin {
         };
       }
 
-      // 检测数字选择（Claude Code 权限）
+      // 检测 "Do you want to proceed? 1. Yes 2. No" 格式（Bash 命令确认）
+      // 注意：选项可能在不同行，所以分开检测
+      const hasDoYouWantToProceed = /Do you want to proceed\?/i.test(lastLines);
+      const hasOption1Yes = /1\.\s*Yes/i.test(lastLines);
+      const hasOption2No = /2\.\s*No/i.test(lastLines);
+
+      if (hasDoYouWantToProceed && hasOption1Yes && hasOption2No) {
+        return {
+          needsAction: true,
+          actionType: 'select',
+          suggestedAction: '1',
+          phase,
+          phaseConfig: config,
+          message: '检测到 Bash 命令确认（1.Yes/2.No），自动选择选项 1（Yes）'
+        };
+      }
+
+      // 检测数字选择（Claude Code 权限确认：Allow once / Allow for this session / Deny）
       if (/\[1\].*\[2\].*\[3\]/i.test(lastLines) ||
           /Allow once.*Allow for this session/i.test(lastLines)) {
         return {
@@ -220,6 +243,7 @@ class DefaultPlugin extends BasePlugin {
         };
       }
 
+      // 默认选择选项 2（适用于其他未知确认界面）
       return {
         needsAction: true,
         actionType: 'single_char',
