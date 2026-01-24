@@ -1336,6 +1336,18 @@ const AI_SETTINGS_PATH = join(__dirname, 'db/ai-settings.json');
 
 app.get('/api/tunnel/url', (req, res) => {
   try {
+    // 优先返回当前活动的隧道 URL
+    const frpUrl = frpTunnel.getUrl ? frpTunnel.getUrl() : null;
+    const cloudflareUrl = cloudflareTunnel.getUrl ? cloudflareTunnel.getUrl() : null;
+
+    if (frpUrl) {
+      return res.json({ tunnelUrl: frpUrl });
+    }
+    if (cloudflareUrl) {
+      return res.json({ tunnelUrl: cloudflareUrl });
+    }
+
+    // 如果没有活动隧道，从文件读取保存的 URL
     if (existsSync(AI_SETTINGS_PATH)) {
       const settings = JSON.parse(readFileSync(AI_SETTINGS_PATH, 'utf-8'));
       res.json({ tunnelUrl: settings.tunnelUrl || '' });
