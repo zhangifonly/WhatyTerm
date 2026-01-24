@@ -669,6 +669,25 @@ class DependencyManager {
       }
     }
 
+    // 2.5. 检查系统 PATH 中的可执行文件
+    try {
+      const cmd = this.isWindows ? 'where' : 'which';
+      const executable = dep.getExecutable();
+      const systemPath = execSync(`${cmd} ${executable}`, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      if (systemPath) {
+        // 验证系统安装的版本是否可用
+        try {
+          execSync(`"${systemPath}" --version`, { stdio: 'pipe', timeout: 5000 });
+          console.log(`[DependencyManager] ${name} 使用系统安装: ${systemPath}`);
+          return true;
+        } catch (err) {
+          console.warn(`[DependencyManager] 系统 ${name} 执行失败: ${err.message}`);
+        }
+      }
+    } catch {
+      // 系统 PATH 中没有找到
+    }
+
     // 3. 下载安装
     try {
       await this.install(name, progressCallback);

@@ -160,10 +160,13 @@ export default function ProviderEditor({ appType, providerId, provider, onClose,
   const currentApiField = formData.apiType;
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={(e) => {
+      if (e.target === e.currentTarget) {
+        onClose();
+      }
+    }}>
       <div
         className="bg-gray-900 rounded-lg w-full max-w-2xl max-h-[85vh] overflow-hidden"
-        onClick={e => e.stopPropagation()}
       >
         {/* 头部 */}
         <div className="flex items-center justify-between p-4 border-b border-gray-700">

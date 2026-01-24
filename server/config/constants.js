@@ -35,6 +35,7 @@ export const DEFAULT_MODEL = 'claude-sonnet-4-5-20250929';
 export const CLAUDE_MODEL_FALLBACK_LIST = [
   'claude-haiku-4-5-20251001',      // 最便宜，优先使用
   'claude-sonnet-4-5-20250929',     // Sonnet 4.5
+  'claude-opus-4-5-20251101',       // Opus 4.5（某些供应商如 Owly 只支持此模型）
 ];
 
 // Claude Code 伪装配置

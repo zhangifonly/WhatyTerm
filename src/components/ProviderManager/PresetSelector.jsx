@@ -15,6 +15,11 @@ export default function PresetSelector({ presets, categories, onApply }) {
 
   // 过滤预设
   const filteredPresets = presets.filter(preset => {
+    // 隐藏合作伙伴供应商（带星号的）
+    if (preset.isPartner) {
+      return false;
+    }
+
     // 分类过滤
     if (selectedCategory !== 'all' && preset.category !== selectedCategory) {
       return false;

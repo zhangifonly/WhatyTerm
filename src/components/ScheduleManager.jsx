@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from '../i18n';
 import './ScheduleManager.css';
 
-const ScheduleManager = ({ socket, sessionId, onClose }) => {
+const ScheduleManager = ({ socket, sessionId, projectPath, onClose }) => {
   const { t } = useTranslation();
   const [schedules, setSchedules] = useState([]);
   const [showForm, setShowForm] = useState(false);
@@ -41,15 +41,15 @@ const ScheduleManager = ({ socket, sessionId, onClose }) => {
   ];
 
   useEffect(() => {
-    console.log('[ScheduleManager] useEffect triggered, socket:', !!socket, 'sessionId:', sessionId);
-    if (!socket || !sessionId) {
-      console.log('[ScheduleManager] Missing socket or sessionId, returning');
+    console.log('[ScheduleManager] useEffect triggered, socket:', !!socket, 'projectPath:', projectPath);
+    if (!socket || !projectPath) {
+      console.log('[ScheduleManager] Missing socket or projectPath, returning');
       return;
     }
 
-    // 获取预约列表
-    console.log('[ScheduleManager] Emitting schedule:getList for sessionId:', sessionId);
-    socket.emit('schedule:getList', { sessionId });
+    // 获取预约列表（基于项目路径）
+    console.log('[ScheduleManager] Emitting schedule:getList for projectPath:', projectPath);
+    socket.emit('schedule:getList', { projectPath });
 
     // 监听预约列表更新
     const handleList = (data) => {
@@ -90,7 +90,7 @@ const ScheduleManager = ({ socket, sessionId, onClose }) => {
       socket.off('schedule:deleted', handleDeleted);
       socket.off('schedule:error', handleError);
     };
-  }, [socket, sessionId, t]);
+  }, [socket, projectPath, t]);
 
   const resetForm = () => {
     setFormData({
@@ -145,7 +145,8 @@ const ScheduleManager = ({ socket, sessionId, onClose }) => {
     }
 
     const data = {
-      sessionId,
+      projectPath,
+      sessionId,  // 保留 sessionId 用于执行时找到对应会话
       type: formData.type,
       action: formData.action,
       time: formData.time,

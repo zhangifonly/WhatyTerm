@@ -63,6 +63,29 @@ export class ProviderHealthCheck {
     }
   }
 
+  /**
+   * 从供应商配置中获取模型
+   * @param {string} appType
+   * @param {Object} provider
+   * @returns {string|null}
+   */
+  _getProviderModel(appType, provider) {
+    const config = provider?.settingsConfig;
+    if (!config) return null;
+
+    switch (appType) {
+      case 'claude':
+        // 支持两种配置格式
+        return config.claude?.model || config.env?.ANTHROPIC_MODEL || null;
+      case 'codex':
+        return config.openai?.model || config.env?.OPENAI_MODEL || null;
+      case 'gemini':
+        return config.gemini?.model || config.env?.GEMINI_MODEL || null;
+      default:
+        return null;
+    }
+  }
+
   getConfig() {
     return this.config;
   }
@@ -123,23 +146,37 @@ export class ProviderHealthCheck {
    */
   async checkOnce(appType, provider) {
     const startTime = Date.now();
-    const testModel = this.config.testModels[appType];
+    // 优先使用供应商配置的模型，否则使用全局测试模型
+    const testModel = this._getProviderModel(appType, provider) || this.config.testModels[appType];
+
+    // 检查是否有 apiType 配置，用于决定使用哪种 API 格式
+    const apiType = provider.settingsConfig?.apiType;
 
     try {
       let result;
 
-      switch (appType) {
-        case 'claude':
-          result = await this._checkClaudeStream(provider, testModel);
-          break;
-        case 'codex':
-          result = await this._checkCodexStream(provider, testModel);
-          break;
-        case 'gemini':
-          result = await this._checkGeminiStream(provider, testModel);
-          break;
-        default:
-          throw new Error(`不支持的应用类型: ${appType}`);
+      // 如果配置了 apiType，根据 apiType 决定检查方式
+      if (apiType === 'openai') {
+        // 使用 OpenAI 兼容 API 检查
+        result = await this._checkOpenAICompatibleStream(provider, testModel);
+      } else if (apiType === 'claude') {
+        // 使用 Claude 原生 API 检查
+        result = await this._checkClaudeStream(provider, testModel);
+      } else {
+        // 没有 apiType 配置，根据 appType 决定
+        switch (appType) {
+          case 'claude':
+            result = await this._checkClaudeStream(provider, testModel);
+            break;
+          case 'codex':
+            result = await this._checkCodexStream(provider, testModel);
+            break;
+          case 'gemini':
+            result = await this._checkGeminiStream(provider, testModel);
+            break;
+          default:
+            throw new Error(`不支持的应用类型: ${appType}`);
+        }
       }
 
       const responseTime = Date.now() - startTime;
@@ -168,6 +205,67 @@ export class ProviderHealthCheck {
         testedAt: Date.now(),
         retryCount: 0
       };
+    }
+  }
+
+  /**
+   * OpenAI 兼容 API 流式检查
+   * 用于 apiType='openai' 的供应商配置
+   */
+  async _checkOpenAICompatibleStream(provider, model) {
+    const openaiConfig = provider.settingsConfig?.openai;
+
+    if (!openaiConfig?.apiUrl || !openaiConfig?.apiKey) {
+      throw new Error('OpenAI 兼容配置不完整（需要 apiUrl 和 apiKey）');
+    }
+
+    const url = openaiConfig.apiUrl;
+    const testModel = openaiConfig.model || model || 'gpt-4';
+
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      this.config.timeoutSecs * 1000
+    );
+
+    try {
+      const body = {
+        model: testModel,
+        messages: [
+          { role: 'user', content: 'hi' }
+        ],
+        max_tokens: 1,
+        temperature: 0,
+        stream: true
+      };
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${openaiConfig.apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
+      }
+
+      // 读取流的第一个数据块
+      const reader = response.body.getReader();
+      const { value, done } = await reader.read();
+      reader.cancel();
+
+      if (done || !value) {
+        throw new Error('未收到响应数据');
+      }
+
+      return { statusCode: response.status };
+    } finally {
+      clearTimeout(timeout);
     }
   }
 

@@ -9,6 +9,7 @@ import ScheduleManager from './components/ScheduleManager';
 import ClosedSessionsList from './components/ClosedSessionsList';
 import RecentProjects from './components/RecentProjects';
 import CliToolsManager from './components/CliToolsManager';
+import MonitorPluginsManager from './components/MonitorPluginsManager';
 import ProviderPriority from './components/ProviderPriority';
 import TerminalPlayback from './components/TerminalPlayback';
 import StorageManager from './components/StorageManager';
@@ -137,6 +138,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showScheduleManager, setShowScheduleManager] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [creatingProjectPaths, setCreatingProjectPaths] = useState(new Set()); // 正在创建会话的项目路径
   const [aiPanelCollapsed, setAiPanelCollapsed] = useState(false);
   const [aiSettings, setAiSettings] = useState({
     model: 'sonnet',
@@ -155,6 +157,7 @@ export default function App() {
     return saved === 'true';
   });
   const [aiStatusMap, setAiStatusMap] = useState({});
+  const [monitorPlugins, setMonitorPlugins] = useState([]); // 监控策略插件列表
   const [sessionMemory, setSessionMemory] = useState({}); // 会话内存占用 {sessionId: {memory, processCount}}
   const [processDetails, setProcessDetails] = useState(null); // 进程详情弹窗 {sessionId, details, position}
   const [aiStatusLoading, setAiStatusLoading] = useState({});
@@ -212,9 +215,28 @@ export default function App() {
 
   // 初始化 Socket 监听
   useEffect(() => {
+    // 规范化路径（去除末尾斜杠）
+    const normalizePath = (p) => p ? p.replace(/\/+$/, '') : '';
+
     // 更新会话列表并缓存到 localStorage
     const handleSessionsList = (data) => {
       setSessions(data);
+      // 清除已创建会话的"正在创建"标记
+      setCreatingProjectPaths(prev => {
+        const newSet = new Set(prev);
+        for (const session of data) {
+          if (session.workingDir) {
+            const normalizedWorkingDir = normalizePath(session.workingDir);
+            // 检查规范化后的路径是否在集合中
+            for (const path of newSet) {
+              if (normalizePath(path) === normalizedWorkingDir) {
+                newSet.delete(path);
+              }
+            }
+          }
+        }
+        return newSet.size !== prev.size ? newSet : prev;
+      });
       // 同时更新 currentSession（如果当前会话在列表中）
       setCurrentSession(prev => {
         if (!prev) return prev;
@@ -267,6 +289,22 @@ export default function App() {
       setCurrentSession(prev => prev?.id === sessionUpdate.id ? { ...prev, ...sessionUpdate } : prev);
       // 更新 sessions 列表中的对应会话
       setSessions(prev => prev.map(s => s.id === sessionUpdate.id ? { ...s, ...sessionUpdate } : s));
+    });
+
+    // 处理会话退出事件（用户输入 exit 退出时触发）
+    socket.on('session:exited', ({ sessionId }) => {
+      console.log(`[App] 会话已退出: ${sessionId}`);
+      // 如果退出的是当前会话，清除 currentSession
+      setCurrentSession(prev => {
+        if (prev?.id === sessionId) {
+          // 清理终端
+          if (terminalInstance.current) {
+            terminalInstance.current.clear();
+          }
+          return null;
+        }
+        return prev;
+      });
     });
 
     socket.on('terminal:output', (data) => {
@@ -352,6 +390,7 @@ export default function App() {
       socket.off('sessions:updated');
       socket.off('session:attached');
       socket.off('session:updated');
+      socket.off('session:exited');
       socket.off('terminal:output');
       socket.off('ai:suggestion');
       socket.off('ai:autoExecuted');
@@ -383,6 +422,16 @@ export default function App() {
         }
       })
       .catch(err => console.error('加载 tunnel URL 失败:', err));
+
+    // 加载监控策略插件列表
+    fetch('/api/monitor-plugins')
+      .then(res => res.json())
+      .then(data => {
+        if (data.plugins) {
+          setMonitorPlugins(data.plugins);
+        }
+      })
+      .catch(err => console.error('加载监控插件失败:', err));
 
     // 监听 Cloudflare Tunnel 连接事件（自动获取免费域名）
     socket.on('tunnel:connected', (data) => {
@@ -880,14 +929,27 @@ export default function App() {
 
   // 打开最近项目（如果已有会话则切换，否则创建新会话）
   const handleOpenRecentProject = (project) => {
+    // 规范化路径（去除末尾斜杠）
+    const normalizePath = (p) => p ? p.replace(/\/+$/, '') : '';
+    const projectPath = normalizePath(project.path);
+
     // 检查是否有现有会话在该项目目录下工作
-    const existingSession = sessions.find(s => s.workingDir === project.path);
+    const existingSession = sessions.find(s => normalizePath(s.workingDir) === projectPath);
 
     if (existingSession) {
       // 已有会话，直接切换
       console.log(`[App] 项目 ${project.name} 已有会话 ${existingSession.id}，切换过去`);
       attachSession(existingSession.id);
     } else {
+      // 检查是否正在创建该项目的会话（防止重复点击）
+      if (creatingProjectPaths.has(projectPath)) {
+        console.log(`[App] 项目 ${project.name} 正在创建会话中，忽略重复点击`);
+        return;
+      }
+
+      // 标记为正在创建
+      setCreatingProjectPaths(prev => new Set(prev).add(projectPath));
+
       // 没有现有会话，创建新会话
       const sessionData = {
         name: project.name,
@@ -1300,6 +1362,56 @@ export default function App() {
                       </button>
                     </div>
                   </>
+                )}
+              </div>
+              {/* 监控策略插件选择 */}
+              <div className="settings-row" style={{ marginTop: '12px' }}>
+                <span className="settings-label" style={{ marginRight: '8px' }}>监控策略:</span>
+                <select
+                  value={currentSession.monitorPluginId || 'auto'}
+                  onChange={(e) => {
+                    const pluginId = e.target.value;
+                    socket.emit('session:updateSettings', {
+                      sessionId: currentSession.id,
+                      settings: { monitorPluginId: pluginId }
+                    });
+                    // 更新本地状态
+                    setCurrentSession(prev => ({ ...prev, monitorPluginId: pluginId }));
+                  }}
+                  style={{
+                    flex: 1,
+                    padding: '4px 8px',
+                    background: '#2a2a2a',
+                    border: '1px solid #444',
+                    borderRadius: '4px',
+                    color: '#fff',
+                    fontSize: '12px'
+                  }}
+                >
+                  <option value="auto">自动检测</option>
+                  {monitorPlugins.map(plugin => (
+                    <option key={plugin.id} value={plugin.id}>
+                      {plugin.name}
+                    </option>
+                  ))}
+                </select>
+                {/* 显示自动检测到的插件 */}
+                {(currentSession.monitorPluginId === 'auto' || !currentSession.monitorPluginId) &&
+                 aiStatusMap[currentSession.id]?.pluginName && (
+                  <span style={{
+                    marginLeft: '8px',
+                    padding: '2px 8px',
+                    background: '#10b981',
+                    color: '#fff',
+                    borderRadius: '4px',
+                    fontSize: '11px',
+                    whiteSpace: 'nowrap'
+                  }}>
+                    → {aiStatusMap[currentSession.id].pluginName}
+                    {aiStatusMap[currentSession.id].phaseName && (
+                      <span style={{ opacity: 0.8 }}> · {aiStatusMap[currentSession.id].phaseName}</span>
+                    )}
+                  </span>
                 )}
               </div>
             </div>
@@ -1847,6 +1959,43 @@ export default function App() {
 
             {aiStatusMap[currentSession.id] ? (
               <>
+                {/* 监控策略插件信息 - 紧凑的状态标签 */}
+                {aiStatusMap[currentSession.id].pluginName && (
+                  <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    padding: '8px 12px',
+                    background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.15) 0%, rgba(59, 130, 246, 0.1) 100%)',
+                    borderRadius: '8px',
+                    border: '1px solid rgba(16, 185, 129, 0.3)',
+                    marginBottom: '12px'
+                  }}>
+                    <span style={{ color: '#10b981', fontSize: '12px', fontWeight: 500 }}>监控策略</span>
+                    <span style={{
+                      background: '#10b981',
+                      color: '#fff',
+                      padding: '3px 10px',
+                      borderRadius: '12px',
+                      fontSize: '11px',
+                      fontWeight: 600
+                    }}>
+                      {aiStatusMap[currentSession.id].pluginName}
+                    </span>
+                    {aiStatusMap[currentSession.id].phaseName && (
+                      <span style={{
+                        background: '#3b82f6',
+                        color: '#fff',
+                        padding: '3px 10px',
+                        borderRadius: '12px',
+                        fontSize: '11px',
+                        fontWeight: 500
+                      }}>
+                        {aiStatusMap[currentSession.id].phaseName}
+                      </span>
+                    )}
+                  </div>
+                )}
                 <div className="ai-status-section">
                   <h4>{t('aiPanel.currentState')}</h4>
                   <p>{aiStatusMap[currentSession.id].currentState || t('aiPanel.waitingAnalysis')}</p>
@@ -2060,6 +2209,7 @@ export default function App() {
         <ScheduleManager
           socket={socket}
           sessionId={currentSession.id}
+          projectPath={currentSession.workingDir}
           onClose={() => setShowScheduleManager(false)}
         />
       )}
@@ -2196,6 +2346,447 @@ function QRCodeDisplay({ url }) {
   );
 }
 
+// 订阅状态缓存（模块级变量，避免重复请求）
+let subscriptionStatusCache = null;
+let subscriptionStatusCacheTime = 0;
+const SUBSCRIPTION_CACHE_TTL = 60000; // 缓存 60 秒
+
+// 订阅面板组件（嵌入设置页面）
+function SubscriptionPanel() {
+  const [status, setStatus] = useState(subscriptionStatusCache);
+  const [loading, setLoading] = useState(!subscriptionStatusCache);
+  const [activating, setActivating] = useState(false);
+  const [activationCode, setActivationCode] = useState('');
+  const [message, setMessage] = useState(null);
+
+  // 激活方式切换
+  const [activationMode, setActivationMode] = useState('login'); // 'login' | 'code'
+
+  // 邮箱+密码登录
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+
+  useEffect(() => {
+    // 如果缓存有效，直接使用
+    const now = Date.now();
+    if (subscriptionStatusCache && (now - subscriptionStatusCacheTime) < SUBSCRIPTION_CACHE_TTL) {
+      setStatus(subscriptionStatusCache);
+      setLoading(false);
+      return;
+    }
+    loadStatus();
+  }, []);
+
+  const loadStatus = async (forceRefresh = false) => {
+    // 如果不是强制刷新且缓存有效，直接返回
+    const now = Date.now();
+    if (!forceRefresh && subscriptionStatusCache && (now - subscriptionStatusCacheTime) < SUBSCRIPTION_CACHE_TTL) {
+      setStatus(subscriptionStatusCache);
+      setLoading(false);
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const res = await fetch('/api/subscription/status');
+      const data = await res.json();
+      // 更新缓存
+      subscriptionStatusCache = data;
+      subscriptionStatusCacheTime = Date.now();
+      setStatus(data);
+    } catch (err) {
+      setMessage({ type: 'error', text: '加载订阅状态失败' });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleActivate = async () => {
+    if (!activationCode.trim()) {
+      setMessage({ type: 'error', text: '请输入激活码' });
+      return;
+    }
+
+    try {
+      setActivating(true);
+      setMessage(null);
+
+      const res = await fetch('/api/subscription/activate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: activationCode.trim() })
+      });
+
+      const result = await res.json();
+
+      if (result.success) {
+        setMessage({ type: 'success', text: '激活成功！' });
+        setActivationCode('');
+        await loadStatus(true); // 强制刷新
+      } else {
+        setMessage({ type: 'error', text: result.message || '激活失败' });
+      }
+    } catch (err) {
+      setMessage({ type: 'error', text: '网络错误，请稍后重试' });
+    } finally {
+      setActivating(false);
+    }
+  };
+
+  // 邮箱+密码激活
+  const handleActivateByLogin = async () => {
+    if (!email.trim() || !password.trim()) {
+      setMessage({ type: 'error', text: '请输入邮箱和密码' });
+      return;
+    }
+
+    try {
+      setActivating(true);
+      setMessage(null);
+
+      const res = await fetch('/api/subscription/activate-by-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: email.trim(),
+          password: password.trim()
+        })
+      });
+
+      const result = await res.json();
+
+      if (result.success) {
+        setMessage({ type: 'success', text: '激活成功！' });
+        setEmail('');
+        setPassword('');
+        await loadStatus(true);
+      } else {
+        setMessage({ type: 'error', text: result.message || '激活失败' });
+      }
+    } catch (err) {
+      setMessage({ type: 'error', text: '网络错误，请稍后重试' });
+    } finally {
+      setActivating(false);
+    }
+  };
+
+  const handleVerify = async () => {
+    try {
+      setMessage(null);
+      const res = await fetch('/api/subscription/verify', { method: 'POST' });
+      const result = await res.json();
+
+      if (result.success) {
+        setMessage({ type: 'success', text: result.message || '验证成功' });
+        await loadStatus(true); // 强制刷新
+      } else {
+        setMessage({ type: 'error', text: result.message || '验证失败' });
+      }
+    } catch (err) {
+      setMessage({ type: 'error', text: '网络错误' });
+    }
+  };
+
+  const handleDeactivate = async () => {
+    if (!confirm('确定要停用许可证吗？')) return;
+
+    try {
+      const res = await fetch('/api/subscription/deactivate', { method: 'POST' });
+      const result = await res.json();
+
+      if (result.success) {
+        setMessage({ type: 'success', text: '许可证已停用' });
+        await loadStatus(true); // 强制刷新
+      } else {
+        setMessage({ type: 'error', text: result.message || '停用失败' });
+      }
+    } catch (err) {
+      setMessage({ type: 'error', text: '网络错误' });
+    }
+  };
+
+  const openSubscriptionPage = () => {
+    if (status?.subscriptionUrl) {
+      window.open(status.subscriptionUrl, '_blank');
+    }
+  };
+
+  const copyMachineId = () => {
+    if (status?.machineId) {
+      navigator.clipboard.writeText(status.machineId);
+      setMessage({ type: 'success', text: '机器 ID 已复制' });
+      setTimeout(() => setMessage(null), 2000);
+    }
+  };
+
+  if (loading) {
+    return <div style={{ textAlign: 'center', padding: '40px', color: '#888' }}>加载中...</div>;
+  }
+
+  return (
+    <div style={{ padding: '0 4px' }}>
+      {/* 消息提示 */}
+      {message && (
+        <div style={{
+          marginBottom: '16px',
+          padding: '12px',
+          borderRadius: '6px',
+          background: message.type === 'success' ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)',
+          color: message.type === 'success' ? '#10b981' : '#ef4444'
+        }}>
+          {message.text}
+        </div>
+      )}
+
+      {/* 订阅状态 */}
+      <div style={{ marginBottom: '20px', padding: '16px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+          <span style={{ color: '#888' }}>订阅状态</span>
+          <span style={{
+            padding: '4px 12px',
+            borderRadius: '4px',
+            fontSize: '13px',
+            background: status?.valid ? 'rgba(16, 185, 129, 0.2)' : 'rgba(100, 100, 100, 0.3)',
+            color: status?.valid ? '#10b981' : '#888'
+          }}>
+            {status?.valid ? '已激活' : '未激活'}
+          </span>
+        </div>
+
+        {status?.valid && status?.info && (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+              <span style={{ color: '#888' }}>订阅类型</span>
+              <span style={{ color: '#fff' }}>{status.info.plan}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+              <span style={{ color: '#888' }}>到期时间</span>
+              <span style={{ color: '#fff' }}>{new Date(status.info.expiresAt).toLocaleDateString()}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={{ color: '#888' }}>剩余天数</span>
+              <span style={{ color: status.remainingDays <= 7 ? '#f59e0b' : '#fff' }}>
+                {status.remainingDays} 天
+              </span>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* 机器 ID */}
+      <div style={{ marginBottom: '20px', padding: '16px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+          <span style={{ color: '#888' }}>机器 ID</span>
+          <button
+            onClick={copyMachineId}
+            style={{ background: 'none', border: 'none', color: '#3b82f6', cursor: 'pointer', fontSize: '13px' }}
+          >
+            复制
+          </button>
+        </div>
+        <code style={{ fontSize: '11px', color: '#aaa', wordBreak: 'break-all', display: 'block' }}>
+          {status?.machineId}
+        </code>
+        <small style={{ color: '#666', fontSize: '11px', marginTop: '8px', display: 'block' }}>
+          购买订阅时需要提供此 ID
+        </small>
+      </div>
+
+      {/* 激活区域 */}
+      {!status?.valid && (
+        <div style={{ marginBottom: '20px', padding: '16px', background: 'rgba(255,255,255,0.05)', borderRadius: '8px' }}>
+          <h3 style={{ fontSize: '14px', color: '#fff', marginBottom: '12px' }}>激活许可证</h3>
+
+          {/* 激活方式切换 */}
+          <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+            <button
+              onClick={() => setActivationMode('login')}
+              style={{
+                flex: 1,
+                padding: '8px',
+                background: activationMode === 'login' ? '#3b82f6' : 'transparent',
+                border: '1px solid #4b5563',
+                borderRadius: '6px',
+                color: activationMode === 'login' ? '#fff' : '#888',
+                cursor: 'pointer',
+                fontSize: '13px'
+              }}
+            >
+              邮箱登录
+            </button>
+            <button
+              onClick={() => setActivationMode('code')}
+              style={{
+                flex: 1,
+                padding: '8px',
+                background: activationMode === 'code' ? '#3b82f6' : 'transparent',
+                border: '1px solid #4b5563',
+                borderRadius: '6px',
+                color: activationMode === 'code' ? '#fff' : '#888',
+                cursor: 'pointer',
+                fontSize: '13px'
+              }}
+            >
+              激活码
+            </button>
+          </div>
+
+          {/* 邮箱登录激活 */}
+          {activationMode === 'login' && (
+            <div style={{ marginBottom: '12px' }}>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="邮箱"
+                style={{
+                  width: '100%',
+                  padding: '10px 12px',
+                  marginBottom: '8px',
+                  background: '#374151',
+                  border: '1px solid #4b5563',
+                  borderRadius: '6px',
+                  color: '#fff',
+                  fontSize: '14px',
+                  boxSizing: 'border-box'
+                }}
+              />
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="密码"
+                style={{
+                  width: '100%',
+                  padding: '10px 12px',
+                  marginBottom: '12px',
+                  background: '#374151',
+                  border: '1px solid #4b5563',
+                  borderRadius: '6px',
+                  color: '#fff',
+                  fontSize: '14px',
+                  boxSizing: 'border-box'
+                }}
+              />
+              <button
+                onClick={handleActivateByLogin}
+                disabled={activating}
+                style={{
+                  width: '100%',
+                  padding: '12px',
+                  background: activating ? '#4b5563' : '#3b82f6',
+                  border: 'none',
+                  borderRadius: '6px',
+                  color: '#fff',
+                  cursor: activating ? 'not-allowed' : 'pointer',
+                  fontSize: '14px'
+                }}
+              >
+                {activating ? '激活中...' : '登录激活'}
+              </button>
+              <p style={{ fontSize: '12px', color: '#888', marginTop: '8px', textAlign: 'center' }}>
+                使用购买订阅时注册的邮箱和密码
+              </p>
+            </div>
+          )}
+
+          {/* 激活码激活 */}
+          {activationMode === 'code' && (
+            <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+              <input
+                type="text"
+                value={activationCode}
+                onChange={(e) => setActivationCode(e.target.value)}
+                placeholder="输入激活码或许可证密钥"
+                style={{
+                  flex: 1,
+                  padding: '10px 12px',
+                  background: '#374151',
+                  border: '1px solid #4b5563',
+                  borderRadius: '6px',
+                  color: '#fff',
+                  fontSize: '14px'
+                }}
+              />
+              <button
+                onClick={handleActivate}
+                disabled={activating}
+                style={{
+                  padding: '10px 20px',
+                  background: activating ? '#4b5563' : '#3b82f6',
+                  border: 'none',
+                  borderRadius: '6px',
+                  color: '#fff',
+                  cursor: activating ? 'not-allowed' : 'pointer'
+                }}
+              >
+                {activating ? '激活中...' : '激活'}
+              </button>
+            </div>
+          )}
+
+          <button
+            onClick={openSubscriptionPage}
+            style={{
+              width: '100%',
+              padding: '12px',
+              background: '#10b981',
+              border: 'none',
+              borderRadius: '6px',
+              color: '#fff',
+              cursor: 'pointer',
+              fontSize: '14px'
+            }}
+          >
+            购买订阅
+          </button>
+        </div>
+      )}
+
+      {/* 已激活的操作 */}
+      {status?.valid && (
+        <div style={{ display: 'flex', gap: '12px' }}>
+          <button
+            onClick={handleVerify}
+            style={{
+              flex: 1,
+              padding: '12px',
+              background: '#3b82f6',
+              border: 'none',
+              borderRadius: '6px',
+              color: '#fff',
+              cursor: 'pointer'
+            }}
+          >
+            在线验证
+          </button>
+          <button
+            onClick={handleDeactivate}
+            style={{
+              padding: '12px 20px',
+              background: '#ef4444',
+              border: 'none',
+              borderRadius: '6px',
+              color: '#fff',
+              cursor: 'pointer'
+            }}
+          >
+            停用
+          </button>
+        </div>
+      )}
+
+      {/* 缓存状态 */}
+      {status?.lastVerifyTime && (
+        <div style={{ marginTop: '16px', textAlign: 'center', fontSize: '12px', color: '#666' }}>
+          上次验证: {new Date(status.lastVerifyTime).toLocaleString()}
+          {status.cacheValid && ' (缓存有效)'}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, onTunnelUrlChange, socket, onPlayback }) {
   const { t, language, setLanguage: changeLanguage } = useTranslation();
   const [activeTab, setActiveTab] = useState('ai');
@@ -2220,28 +2811,26 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
   // 预设模型列表
   const MODEL_OPTIONS = {
     claude: [
-      { id: 'claude-opus-4-5-20251101', name: 'Claude Opus 4.5' },
-      { id: 'claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5' },
-      { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5' },
-      { id: 'opus', name: 'Opus (别名)' },
-      { id: 'sonnet', name: 'Sonnet (别名)' },
-      { id: 'haiku', name: 'Haiku (别名)' },
+      { id: 'claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5 (推荐)' },
+      { id: 'claude-opus-4-5-20251101', name: 'Claude Opus 4.5 (旗舰)' },
+      { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5 (快速)' },
+      { id: 'claude-opus-4-1-20250805', name: 'Claude Opus 4.1' },
+      { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4.0' },
+      { id: 'claude-opus-4-20250514', name: 'Claude Opus 4.0' },
+      { id: 'claude-3-7-sonnet-20250219', name: 'Claude 3.7 Sonnet' },
+      { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku' },
     ],
     codex: [
-      { id: 'gpt-4o', name: 'GPT-4o' },
-      { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
-      { id: 'gpt-4-turbo', name: 'GPT-4 Turbo' },
-      { id: 'gpt-4', name: 'GPT-4' },
-      { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo' },
-      { id: 'o1-preview', name: 'O1 Preview' },
-      { id: 'o1-mini', name: 'O1 Mini' },
+      { id: 'gpt-5.1-codex-max', name: 'GPT-5.1 Codex Max (旗舰深度推理)' },
+      { id: 'gpt-5.1-codex-mini', name: 'GPT-5.1 Codex Mini (快速精简)' },
+      { id: 'gpt-5.2', name: 'GPT-5.2 (最新前沿模型)' },
     ],
     gemini: [
-      { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash' },
-      { id: 'gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash Lite' },
-      { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro' },
-      { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash' },
-      { id: 'gemini-1.0-pro', name: 'Gemini 1.0 Pro' },
+      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (默认)' },
+      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+      { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite' },
+      { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro (预览版)' },
+      { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash (预览版)' },
     ]
   };
 
@@ -2318,8 +2907,11 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
     // 获取当前供应商的默认模型
     const provider = providers.find(p => p.appType === appType && p.id === providerId);
     const defaultProviderModel = provider?.model || '';
-    // 使用用户选择的模型，如果没有选择则使用供应商默认模型
-    const modelToTest = testModel || defaultProviderModel;
+    // 优先使用已保存的模型配置，其次是临时选择的模型，最后是供应商默认模型
+    // 这样确保测试和监控使用相同的模型
+    const savedModel = appType === 'claude' ? settings?.claude?.model :
+                       appType === 'codex' ? settings?.codex?.model : '';
+    const modelToTest = testModel || savedModel || defaultProviderModel;
     setProviderTestStatus('testing');
     setProviderTestMessage(t('common.testing'));
     socket.emit('settings:testProvider', { providerId, appType, model: modelToTest });
@@ -2328,9 +2920,10 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
   // 选择供应商时自动填充配置
   const handleProviderSelect = async (value) => {
     setSelectedProviderId(value);
-    // 重置测试状态
+    // 重置测试状态和测试模型
     setProviderTestStatus(null);
     setProviderTestMessage('');
+    setTestModel(''); // 重置测试模型，让它使用已保存的模型
 
     if (!value) {
       // 清空选择
@@ -2349,7 +2942,10 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
     const apiType = provider.apiType || (appType === 'codex' ? 'openai' : appType);
     const apiUrl = provider.url || '';
     const apiKey = provider.apiKey || '';
-    const model = provider.model || '';
+    const providerModel = provider.model || '';
+
+    // 检查是否是同一个供应商（保留用户之前选择的模型）
+    const isSameProvider = settings?._providerId === value;
 
     // 根据 apiType 设置对应的配置
     const updates = {
@@ -2360,17 +2956,21 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
 
     if (apiType === 'openai') {
       // Codex 使用 OpenAI 协议
+      // 如果是同一个供应商，保留用户之前选择的模型
+      const existingModel = isSameProvider ? settings?.openai?.model : null;
       updates.openai = {
         apiUrl: apiUrl ? `${apiUrl}/v1/chat/completions` : '',
         apiKey,
-        model: model || 'gpt-4o'
+        model: existingModel || providerModel || 'gpt-4o'
       };
     } else if (apiType === 'claude') {
       // Claude 使用 Anthropic 协议
+      // 如果是同一个供应商，保留用户之前选择的模型
+      const existingModel = isSameProvider ? settings?.claude?.model : null;
       updates.claude = {
         apiUrl: apiUrl ? `${apiUrl}/v1/messages` : '',
         apiKey,
-        model: model || defaultModel
+        model: existingModel || providerModel || defaultModel
       };
     }
 
@@ -2457,8 +3057,13 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
   };
 
   return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className={`modal settings-modal ${activeTab === 'api' ? 'api-tab' : ''}`} onClick={(e) => e.stopPropagation()}>
+    <div className="modal-overlay" onClick={(e) => {
+      // 只有点击 overlay 本身时才关闭，点击子元素不关闭
+      if (e.target === e.currentTarget) {
+        onClose();
+      }
+    }}>
+      <div className={`modal settings-modal ${activeTab === 'api' ? 'api-tab' : ''}`}>
         <div className="settings-tabs">
           <button
             className={`tab-btn ${activeTab === 'ai' ? 'active' : ''}`}
@@ -2491,6 +3096,12 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
             CLI 工具
           </button>
           <button
+            className={`tab-btn ${activeTab === 'monitor-plugins' ? 'active' : ''}`}
+            onClick={() => setActiveTab('monitor-plugins')}
+          >
+            监控插件
+          </button>
+          <button
             className={`tab-btn ${activeTab === 'provider-priority' ? 'active' : ''}`}
             onClick={() => setActiveTab('provider-priority')}
           >
@@ -2501,6 +3112,12 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
             onClick={() => setActiveTab('storage')}
           >
             存储管理
+          </button>
+          <button
+            className={`tab-btn ${activeTab === 'subscription' ? 'active' : ''}`}
+            onClick={() => setActiveTab('subscription')}
+          >
+            订阅
           </button>
           <button
             className={`tab-btn ${activeTab === 'advanced' ? 'active' : ''}`}
@@ -2648,7 +3265,22 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
                       <span style={{ color: '#aaa' }}>模型: </span>
                       <select
                         value={testModel || model}
-                        onChange={(e) => setTestModel(e.target.value)}
+                        onChange={(e) => {
+                          const newModel = e.target.value;
+                          setTestModel(newModel);
+                          // 同时更新 settings 中的模型配置
+                          if (appType === 'claude') {
+                            onChange(prev => ({
+                              ...prev,
+                              claude: { ...prev.claude, model: newModel }
+                            }));
+                          } else if (appType === 'codex') {
+                            onChange(prev => ({
+                              ...prev,
+                              openai: { ...prev.openai, model: newModel }
+                            }));
+                          }
+                        }}
                         style={{
                           padding: '4px 8px',
                           background: '#2a2a2a',
@@ -2677,6 +3309,7 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
                   {/* 测试按钮和结果 */}
                   <div style={{ marginTop: '12px', display: 'flex', alignItems: 'center', gap: '12px' }}>
                     <button
+                      type="button"
                       onClick={testSelectedProvider}
                       disabled={providerTestStatus === 'testing'}
                       style={{
@@ -3145,12 +3778,20 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
           <CliToolsManager />
         )}
 
+        {activeTab === 'monitor-plugins' && (
+          <MonitorPluginsManager />
+        )}
+
         {activeTab === 'provider-priority' && (
           <ProviderPriority />
         )}
 
         {activeTab === 'storage' && (
           <StorageManager socket={socket} onPlayback={onPlayback} />
+        )}
+
+        {activeTab === 'subscription' && (
+          <SubscriptionPanel />
         )}
 
         {activeTab === 'advanced' && (
@@ -3342,6 +3983,20 @@ function CreateSessionModal({ onClose, onCreate }) {
   const [goal, setGoal] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
   const [aiType, setAiType] = useState('claude'); // 默认使用 Claude
+  const [monitorPlugin, setMonitorPlugin] = useState('auto'); // 监控策略插件
+  const [availablePlugins, setAvailablePlugins] = useState([]);
+
+  // 加载可用的监控策略插件
+  useEffect(() => {
+    fetch('/api/monitor-plugins')
+      .then(res => res.json())
+      .then(data => {
+        if (data.plugins) {
+          setAvailablePlugins(data.plugins);
+        }
+      })
+      .catch(err => console.error('加载监控插件失败:', err));
+  }, []);
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -3349,7 +4004,8 @@ function CreateSessionModal({ onClose, onCreate }) {
       name: name || `session-${Date.now()}`,
       goal,
       systemPrompt,
-      aiType // 添加 AI 类型
+      aiType, // 添加 AI 类型
+      monitorPlugin: monitorPlugin === 'auto' ? null : monitorPlugin // 监控策略插件
     });
   };
 
@@ -3369,6 +4025,26 @@ function CreateSessionModal({ onClose, onCreate }) {
               <option value="codex">Codex</option>
               <option value="gemini">Gemini</option>
             </select>
+          </div>
+          <div className="form-group">
+            <label>{t('session.monitorPlugin') || '监控策略'}</label>
+            <select
+              value={monitorPlugin}
+              onChange={(e) => setMonitorPlugin(e.target.value)}
+              style={{ width: '100%', padding: '8px', background: '#2a2a2a', border: '1px solid #444', borderRadius: '4px', color: '#fff' }}
+            >
+              <option value="auto">{t('session.monitorPluginAuto') || '自动检测'}</option>
+              {availablePlugins.map(plugin => (
+                <option key={plugin.id} value={plugin.id}>
+                  {plugin.name} - {plugin.phases?.length || 0} 阶段
+                </option>
+              ))}
+            </select>
+            {monitorPlugin !== 'auto' && availablePlugins.find(p => p.id === monitorPlugin) && (
+              <div style={{ marginTop: '4px', fontSize: '12px', color: '#888' }}>
+                {availablePlugins.find(p => p.id === monitorPlugin)?.description}
+              </div>
+            )}
           </div>
           <div className="form-group">
             <label>{t('session.sessionName')}</label>
