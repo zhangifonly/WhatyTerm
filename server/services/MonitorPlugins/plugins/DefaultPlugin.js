@@ -155,9 +155,11 @@ class DefaultPlugin extends BasePlugin {
     // 清除 ANSI 转义序列的版本，用于文本匹配
     const cleanLastLines = lastLines.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1B\][^\x07]*\x07/g, '');
 
-    // 优先检测运行中状态（Claude Code 正在执行操作）
+    // 优先检测运行中状态（Claude Code / OpenCode 正在执行操作）
     // 这必须在 accept_edits 之前检测，因为 accept_edits 可能在运行中也存在
+    // OpenCode 特有的运行标志：[build] thinking, [plan] thinking
     if (/Compacting|Running|Garnishing|ctrl\+c to interrupt|esc to interrupt/i.test(lastLines) ||
+        /\[build\].*thinking|\[plan\].*thinking/i.test(lastLines) ||
         /\u280b|\u2819|\u2839|\u2838|\u283c|\u2834|\u2826|\u2827|\u2807|\u280f|\u28fe|\u28fd|\u28fb|\u28bf/.test(lastLines)) {
       return 'running';
     }
@@ -429,9 +431,16 @@ class DefaultPlugin extends BasePlugin {
 
     // Claude Code 空闲提示符（更宽松的匹配）
     // 匹配单独的 > 提示符，允许前面有空格，后面可能有光标等
+    // OpenCode 空闲提示符：@general、[build] 或 [plan] 后跟空行
     const claudeCodeIdle = /^[\s>]*>\s*$/m.test(lastLines) ||
                           /\n>\s*$/.test(lastLines) ||
                           />\s*[\x00-\x1f]*$/.test(lastLines);
+
+    // OpenCode 空闲提示符
+    const openCodeIdle = /@general\s*$/m.test(lastLines) ||
+                         /\[build\]\s*$/m.test(lastLines) ||
+                         /\[plan\]\s*$/m.test(lastLines) ||
+                         /OpenCode\s*>\s*$/m.test(lastLines);
 
     // Shell 空闲提示符（更宽松）
     const shellIdle = /[\$#%]\s*[\x00-\x1f]*$/.test(lastLines) ||
@@ -440,7 +449,7 @@ class DefaultPlugin extends BasePlugin {
     // 通用空闲检测
     const genericIdle = />>>\s*$|In \[\d+\]:\s*$/m.test(lastLines);
 
-    return claudeCodeIdle || shellIdle || genericIdle;
+    return claudeCodeIdle || openCodeIdle || shellIdle || genericIdle;
   }
 
   /**

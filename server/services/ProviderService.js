@@ -138,7 +138,7 @@ export class ProviderService {
       const db = new Database(ccSwitchDbPath, { readonly: true });
 
       // 读取所有供应商
-      const rows = db.prepare('SELECT * FROM providers WHERE app_type IN (?, ?, ?)').all('claude', 'codex', 'gemini');
+      const rows = db.prepare('SELECT * FROM providers WHERE app_type IN (?, ?, ?, ?)').all('claude', 'codex', 'gemini', 'opencode');
       db.close();
 
       if (rows.length === 0) {
@@ -210,7 +210,8 @@ export class ProviderService {
         return {
           claude: { current: null, providers: {} },
           codex: { current: null, providers: {} },
-          gemini: { current: null, providers: {} }
+          gemini: { current: null, providers: {} },
+          opencode: { current: null, providers: {} }
         };
       }
       const data = fs.readFileSync(this.providersFile, 'utf8');
@@ -247,7 +248,7 @@ export class ProviderService {
       return JSON.parse(data);
     } catch (error) {
       console.error('[ProviderService] 读取 provider-endpoints.json 失败:', error);
-      return { claude: {}, codex: {}, gemini: {} };
+      return { claude: {}, codex: {}, gemini: {}, opencode: {} };
     }
   }
 

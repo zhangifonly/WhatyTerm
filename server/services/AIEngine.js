@@ -41,7 +41,7 @@ console.log('[AIEngine] 不使用代理，直连 API');
 
 /**
  * 根据 AI 类型获取对应的 CLI 命令
- * @param {string} aiType - AI 类型 (claude/codex/gemini)
+ * @param {string} aiType - AI 类型 (claude/codex/gemini/opencode)
  * @returns {string} CLI 命令
  */
 function getCliCommand(aiType) {
@@ -49,14 +49,15 @@ function getCliCommand(aiType) {
     'claude': 'claude -c',
     'codex': 'codex',
     'gemini': 'gemini',
-    'droid': 'droid'
+    'droid': 'droid',
+    'opencode': 'opencode'
   };
   return commands[aiType] || commands['claude'];
 }
 
 /**
  * 根据 AI 类型获取 CLI 工具名称
- * @param {string} aiType - AI 类型 (claude/codex/gemini)
+ * @param {string} aiType - AI 类型 (claude/codex/gemini/opencode)
  * @returns {string} CLI 工具名称
  */
 function getCliName(aiType) {
@@ -64,7 +65,8 @@ function getCliName(aiType) {
     'claude': 'Claude Code',
     'codex': 'OpenAI Codex',
     'gemini': 'Google Gemini',
-    'droid': 'Droid AI'
+    'droid': 'Droid AI',
+    'opencode': 'OpenCode'
   };
   return names[aiType] || names['claude'];
 }
@@ -362,6 +364,49 @@ export class AIEngine {
           temperature: 0.7,
           _currentProvider: this._currentProvider
         };
+      } else if (appType === 'opencode') {
+        // OpenCode 支持多种后端（Claude, OpenAI, Gemini 等）
+        const env = settingsConfig.env || {};
+        const provider = env.OPENCODE_PROVIDER || 'anthropic';
+
+        let apiUrl = '';
+        let apiKey = '';
+        let model = '';
+
+        if (provider === 'anthropic' || provider === 'claude') {
+          apiUrl = env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
+          apiKey = env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || '';
+          model = env.ANTHROPIC_MODEL || DEFAULT_MODEL;
+
+          if (!apiUrl.endsWith('/v1/messages')) {
+            apiUrl = apiUrl.replace(/\/+$/, '');
+            apiUrl = `${apiUrl}/v1/messages`;
+          }
+
+          return {
+            apiType: 'opencode',
+            opencode: { apiUrl, apiKey, model, provider: 'anthropic' },
+            openai: { apiUrl: '', apiKey: '', model: 'gpt-4o' },
+            claude: { apiUrl, apiKey, model },
+            maxTokens: 500,
+            temperature: 0.7,
+            _currentProvider: this._currentProvider
+          };
+        } else {
+          apiUrl = env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+          apiKey = env.OPENAI_API_KEY || '';
+          model = env.OPENAI_MODEL || 'gpt-4o';
+
+          return {
+            apiType: 'opencode',
+            opencode: { apiUrl, apiKey, model, provider: 'openai' },
+            openai: { apiUrl, apiKey, model },
+            claude: { apiUrl: '', apiKey: '', model: DEFAULT_MODEL },
+            maxTokens: 500,
+            temperature: 0.7,
+            _currentProvider: this._currentProvider
+          };
+        }
       } else {
         // Claude 使用 env.ANTHROPIC_BASE_URL 和 ANTHROPIC_AUTH_TOKEN
         const env = settingsConfig.env || {};
@@ -484,6 +529,49 @@ export class AIEngine {
           temperature: 0.7,
           _currentProvider: this._currentProvider
         };
+      } else if (appType === 'opencode') {
+        // OpenCode 支持多种后端（Claude, OpenAI, Gemini 等）
+        const env = settingsConfig.env || {};
+        const provider = env.OPENCODE_PROVIDER || 'anthropic';
+
+        let apiUrl = '';
+        let apiKey = '';
+        let model = '';
+
+        if (provider === 'anthropic' || provider === 'claude') {
+          apiUrl = env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
+          apiKey = env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || '';
+          model = env.ANTHROPIC_MODEL || DEFAULT_MODEL;
+
+          if (!apiUrl.endsWith('/v1/messages')) {
+            apiUrl = apiUrl.replace(/\/+$/, '');
+            apiUrl = `${apiUrl}/v1/messages`;
+          }
+
+          return {
+            apiType: 'opencode',
+            opencode: { apiUrl, apiKey, model, provider: 'anthropic' },
+            openai: { apiUrl: '', apiKey: '', model: 'gpt-4o' },
+            claude: { apiUrl, apiKey, model },
+            maxTokens: 500,
+            temperature: 0.7,
+            _currentProvider: this._currentProvider
+          };
+        } else {
+          apiUrl = env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+          apiKey = env.OPENAI_API_KEY || '';
+          model = env.OPENAI_MODEL || 'gpt-4o';
+
+          return {
+            apiType: 'opencode',
+            opencode: { apiUrl, apiKey, model, provider: 'openai' },
+            openai: { apiUrl, apiKey, model },
+            claude: { apiUrl: '', apiKey: '', model: DEFAULT_MODEL },
+            maxTokens: 500,
+            temperature: 0.7,
+            _currentProvider: this._currentProvider
+          };
+        }
       } else {
         // Claude 使用 env.ANTHROPIC_BASE_URL 和 ANTHROPIC_AUTH_TOKEN
         const env = settingsConfig.env || {};
@@ -564,6 +652,15 @@ export class AIEngine {
       // Gemini 使用 Google GenerativeLanguage API 格式
       const config = this.settings.gemini;
       return this._callGeminiApi(prompt, config);
+    } else if (apiType === 'opencode') {
+      // OpenCode 支持多种后端，根据配置选择
+      // 默认使用 Claude API 格式（因为 OpenCode 主要支持 Claude/OpenAI）
+      const config = this.settings.opencode || this.settings.claude || this.settings.openai;
+      if (config.apiUrl && config.apiUrl.includes('anthropic')) {
+        return this._callClaudeApi(prompt, config);
+      } else {
+        return this._callOpenAiApi(prompt, config);
+      }
     } else {
       const config = this.settings.openai;
       return this._callOpenAiApi(prompt, config);
@@ -1294,6 +1391,17 @@ ${historyText || '(空)'}
       return 'droid';
     }
 
+    // 检测 OpenCode CLI 特征
+    // OpenCode 是 SST/Anomaly 团队开发的开源 AI 编码代理
+    if (/opencode.*v\d+\.\d+/i.test(lastLines) ||
+        /opencode-ai/i.test(lastLines) ||
+        /OpenCode\s*>\s*$/m.test(lastLines) ||
+        /\[build\]|\[plan\]/i.test(lastLines) && /opencode/i.test(terminalContent) ||
+        /@general/i.test(lastLines) && /opencode/i.test(terminalContent) ||
+        /anomalyco\/opencode/i.test(lastLines)) {
+      return 'opencode';
+    }
+
     return null;
   }
 
@@ -1495,6 +1603,15 @@ ${historyText || '(空)'}
       // Droid CLI 运行中标志（排除确认界面）
       isRunning = !isConfirmDialog && (
         /esc to interrupt/i.test(cleanContent) ||
+        /Thinking|Processing|Generating/i.test(cleanContent) ||
+        /\(\d+m\s*\d+s\)|\d+m\s+\d+s\s*$/.test(cleanContent.slice(-500))
+      );
+    } else if (aiType === 'opencode') {
+      // OpenCode CLI 运行中标志（排除确认界面）
+      // OpenCode 特有标志：[build] thinking, [plan] thinking
+      isRunning = !isConfirmDialog && (
+        /esc to interrupt/i.test(cleanContent) ||
+        /\[build\].*thinking|\[plan\].*thinking/i.test(cleanContent) ||
         /Thinking|Processing|Generating/i.test(cleanContent) ||
         /\(\d+m\s*\d+s\)|\d+m\s+\d+s\s*$/.test(cleanContent.slice(-500))
       );

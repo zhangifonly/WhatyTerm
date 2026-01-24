@@ -239,6 +239,15 @@ class ProcessDetector {
       return 'gemini';
     }
 
+    // OpenCode CLI 特征
+    if (/opencode.*v\d+\.\d+/i.test(last500) ||
+        /opencode-ai|anomalyco\/opencode/i.test(last500) ||
+        /OpenCode\s*>\s*$/m.test(last500) ||
+        /\[build\]|\[plan\]/i.test(last500) && /opencode/i.test(cleanContent) ||
+        /@general/i.test(last500) && /opencode/i.test(cleanContent)) {
+      return 'opencode';
+    }
+
     // 通用 CLI 特征（无法确定具体类型）
     if (/esc to interrupt/i.test(last500) ||
         /\? for shortcuts/i.test(last500) ||
@@ -248,6 +257,7 @@ class ProcessDetector {
       if (/claude-code|Claude Code|anthropic/i.test(cleanContent)) return 'claude';
       if (/codex-cli|OpenAI Codex/i.test(cleanContent)) return 'codex';
       if (/gemini-cli|Google Gemini/i.test(cleanContent)) return 'gemini';
+      if (/opencode|anomalyco|sst\/opencode/i.test(cleanContent)) return 'opencode';
       return 'claude'; // 默认假设是 Claude（最常用）
     }
 
