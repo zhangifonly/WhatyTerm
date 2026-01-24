@@ -116,5 +116,5 @@ linux:
 # 自动更新配置
 publish:
   provider: generic
-  url: https://ai.whaty.org/whatyterm/releases
+  url: https://term.whaty.org/releases
   channel: latest

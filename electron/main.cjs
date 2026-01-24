@@ -20,7 +20,7 @@ function setupAutoUpdater() {
   // 配置更新服务器
   autoUpdater.setFeedURL({
     provider: 'generic',
-    url: 'https://ai.whaty.org/whatyterm/releases'
+    url: 'https://term.whaty.org/releases'
   });
 
   // 禁用自动下载，让用户确认后再下载
