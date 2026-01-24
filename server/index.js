@@ -4566,6 +4566,23 @@ io.on('connection', (socket) => {
     }
   });
 
+  // 更新会话设置（支持监控策略等）
+  socket.on('session:updateSettings', (data) => {
+    const { sessionId, settings } = data;
+    const session = sessionManager.getSession(sessionId);
+    if (session) {
+      session.updateSettings(settings);
+
+      // 保存到数据库
+      sessionManager.updateSession(session);
+
+      console.log(`[Session ${session.name}] 设置已更新:`, settings);
+
+      io.to(`session:${sessionId}`).emit('session:updated', session.toJSON());
+      io.emit('sessions:updated', sessionManager.listSessions());
+    }
+  });
+
   // AI 生成目标
   socket.on('goal:generate', async (data) => {
     const session = sessionManager.getSession(data.sessionId);
