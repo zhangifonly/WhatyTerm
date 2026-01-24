@@ -164,6 +164,7 @@ export class Session {
     this.aiEnabled = options.aiEnabled ?? true;
     this.autoMode = options.autoMode ?? false;
     this.autoActionEnabled = options.autoActionEnabled ?? false;  // 后台自动操作开关
+    this.monitorPluginId = options.monitorPluginId || 'auto';  // 监控策略插件 ID，默认自动选择
     this.status = 'running';
     this.createdAt = options.createdAt || new Date();
     this.updatedAt = new Date();
@@ -172,6 +173,7 @@ export class Session {
     this.outputBuffer = '';
     this.outputCallbacks = [];
     this.bellCallbacks = [];  // bell 事件回调（Claude Code 需要输入时触发）
+    this.exitCallbacks = [];  // 会话退出回调（用户输入 exit 退出时触发）
     this.isAnalyzing = false;
     this.analysisTimer = null;
     this.autoActionTimer = null;  // 后台自动操作定时器
@@ -314,14 +316,9 @@ export class Session {
         console.log(`PTY 退出: ${this.tmuxSessionName}, code=${exitCode}`);
         this.pty = null;
 
-        // Windows 原生模式：PTY 退出后重新创建
-        if (this.attachCount > 0) {
-          console.log(`重新创建 Windows PTY: ${this.tmuxSessionName}`);
-          this.outputCallbacks.forEach(cb => cb('\r\n\x1b[33m[终端已重启]\x1b[0m\r\n'));
-          setTimeout(() => {
-            this._attachToTmux();
-          }, 1000);
-        }
+        // Windows 原生模式：PTY 退出表示用户执行了 exit，触发退出回调
+        console.log(`[Session] Windows 原生模式会话退出: ${this.tmuxSessionName}`);
+        this.exitCallbacks.forEach(cb => cb(exitCode));
       });
 
       return;
@@ -361,25 +358,18 @@ export class Session {
       console.log(`PTY 退出: ${this.tmuxSessionName}, code=${exitCode}`);
       this.pty = null;
 
-      // 检查 tmux 会话是否还存在，如果不存在则重新创建
-      if (this.attachCount > 0) {
-        try {
-          execSync(`${getTmuxPrefix()} has-session -t "${this.tmuxSessionName}"`, { stdio: 'pipe' });
-        } catch {
-          // tmux 会话已退出，重新创建
-          console.log(`重新创建 tmux 会话: ${this.tmuxSessionName}`);
-          try {
-            execSync(`${getTmuxPrefix()} new-session -d -s "${this.tmuxSessionName}" -x 80 -y 24`, {
-              stdio: 'ignore'
-            });
-            // 通知客户端会话已重启
-            this.outputCallbacks.forEach(cb => cb('\r\n\x1b[33m[会话已重启]\x1b[0m\r\n'));
-            // 重新连接
-            this._attachToTmux();
-          } catch (err) {
-            console.error(`重新创建 tmux 会话失败: ${err.message}`);
-          }
+      // 检查 tmux 会话是否还存在
+      try {
+        execSync(`${getTmuxPrefix()} has-session -t "${this.tmuxSessionName}"`, { stdio: 'pipe' });
+        // tmux 会话还存在，只是 PTY 断开了，重新连接
+        if (this.attachCount > 0) {
+          console.log(`[Session] 重新连接 tmux 会话: ${this.tmuxSessionName}`);
+          this._attachToTmux();
         }
+      } catch {
+        // tmux 会话已退出（用户执行了 exit），触发退出回调
+        console.log(`[Session] tmux 会话已退出: ${this.tmuxSessionName}`);
+        this.exitCallbacks.forEach(cb => cb(exitCode));
       }
     });
   }
@@ -436,6 +426,19 @@ export class Session {
     const index = this.bellCallbacks.indexOf(callback);
     if (index > -1) {
       this.bellCallbacks.splice(index, 1);
+    }
+  }
+
+  // 会话退出回调（用户输入 exit 退出时触发）
+  onExit(callback) {
+    this.exitCallbacks.push(callback);
+    return callback;
+  }
+
+  offExit(callback) {
+    const index = this.exitCallbacks.indexOf(callback);
+    if (index > -1) {
+      this.exitCallbacks.splice(index, 1);
     }
   }
 
@@ -535,6 +538,10 @@ export class Session {
         // 打印调用栈，追踪变化来源
         console.log(new Error('autoActionEnabled 变化调用栈').stack);
       }
+    }
+    if (settings.monitorPluginId !== undefined) {
+      this.monitorPluginId = settings.monitorPluginId;
+      console.log(`[Session ${this.name}] 监控插件变更: ${settings.monitorPluginId}`);
     }
     this.updatedAt = new Date();
   }
@@ -753,6 +760,7 @@ export class Session {
       aiEnabled: this.aiEnabled,
       autoMode: this.autoMode,
       autoActionEnabled: this.autoActionEnabled,
+      monitorPluginId: this.monitorPluginId || 'auto',  // 监控策略插件 ID
       status: this.status,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,

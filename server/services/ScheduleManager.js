@@ -33,10 +33,21 @@ class ScheduleManager {
    * 初始化数据库表
    */
   initDatabase() {
+    // 检查是否需要迁移（添加 projectPath 字段）
+    const tableInfo = this.db.prepare("PRAGMA table_info(schedules)").all();
+    const hasProjectPath = tableInfo.some(col => col.name === 'projectPath');
+
+    if (!hasProjectPath && tableInfo.length > 0) {
+      // 表存在但没有 projectPath 字段，需要迁移
+      console.log('[ScheduleManager] 迁移数据库：添加 projectPath 字段');
+      this.db.exec(`ALTER TABLE schedules ADD COLUMN projectPath TEXT`);
+    }
+
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS schedules (
         id TEXT PRIMARY KEY,
-        sessionId TEXT NOT NULL,
+        sessionId TEXT,
+        projectPath TEXT,
         type TEXT NOT NULL,
         action TEXT NOT NULL,
         time TEXT NOT NULL,
@@ -44,14 +55,14 @@ class ScheduleManager {
         date TEXT,
         enabled INTEGER DEFAULT 1,
         createdAt INTEGER NOT NULL,
-        nextRun INTEGER,
-        FOREIGN KEY (sessionId) REFERENCES sessions(id) ON DELETE CASCADE
+        nextRun INTEGER
       )
     `);
 
     // 创建索引
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_schedules_session ON schedules(sessionId);
+      CREATE INDEX IF NOT EXISTS idx_schedules_project ON schedules(projectPath);
       CREATE INDEX IF NOT EXISTS idx_schedules_enabled ON schedules(enabled);
       CREATE INDEX IF NOT EXISTS idx_schedules_nextRun ON schedules(nextRun);
     `);
@@ -146,20 +157,21 @@ class ScheduleManager {
     const now = Date.now();
     const nextRun = this.calculateNextRun(schedule);
 
-    console.log(`[ScheduleManager] 创建预约: id=${id}, nextRun=${nextRun}`);
+    console.log(`[ScheduleManager] 创建预约: id=${id}, projectPath=${schedule.projectPath}, nextRun=${nextRun}`);
 
     if (nextRun === null) {
       throw new Error('无法计算下次执行时间');
     }
 
     const stmt = this.db.prepare(`
-      INSERT INTO schedules (id, sessionId, type, action, time, weekdays, date, enabled, createdAt, nextRun)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO schedules (id, sessionId, projectPath, type, action, time, weekdays, date, enabled, createdAt, nextRun)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const result = stmt.run(
       id,
-      schedule.sessionId,
+      schedule.sessionId || null,
+      schedule.projectPath || null,
       schedule.type,
       schedule.action,
       schedule.time,
@@ -191,12 +203,13 @@ class ScheduleManager {
     return {
       ...row,
       enabled: Boolean(row.enabled),
-      weekdays: row.weekdays ? JSON.parse(row.weekdays) : null
+      weekdays: row.weekdays ? JSON.parse(row.weekdays) : null,
+      projectPath: row.projectPath || null
     };
   }
 
   /**
-   * 获取会话的所有预约
+   * 获取会话的所有预约（兼容旧版）
    * @param {string} sessionId - 会话ID
    * @returns {Array}
    */
@@ -207,7 +220,25 @@ class ScheduleManager {
     return rows.map(row => ({
       ...row,
       enabled: Boolean(row.enabled),
-      weekdays: row.weekdays ? JSON.parse(row.weekdays) : null
+      weekdays: row.weekdays ? JSON.parse(row.weekdays) : null,
+      projectPath: row.projectPath || null
+    }));
+  }
+
+  /**
+   * 获取项目的所有预约
+   * @param {string} projectPath - 项目路径
+   * @returns {Array}
+   */
+  getProjectSchedules(projectPath) {
+    const stmt = this.db.prepare('SELECT * FROM schedules WHERE projectPath = ? ORDER BY nextRun ASC');
+    const rows = stmt.all(projectPath);
+
+    return rows.map(row => ({
+      ...row,
+      enabled: Boolean(row.enabled),
+      weekdays: row.weekdays ? JSON.parse(row.weekdays) : null,
+      projectPath: row.projectPath || null
     }));
   }
 
@@ -222,7 +253,8 @@ class ScheduleManager {
     return rows.map(row => ({
       ...row,
       enabled: Boolean(row.enabled),
-      weekdays: row.weekdays ? JSON.parse(row.weekdays) : null
+      weekdays: row.weekdays ? JSON.parse(row.weekdays) : null,
+      projectPath: row.projectPath || null
     }));
   }
 
@@ -295,6 +327,17 @@ class ScheduleManager {
   }
 
   /**
+   * 删除项目的所有预约
+   * @param {string} projectPath - 项目路径
+   * @returns {number} - 删除的数量
+   */
+  deleteProjectSchedules(projectPath) {
+    const stmt = this.db.prepare('DELETE FROM schedules WHERE projectPath = ?');
+    const result = stmt.run(projectPath);
+    return result.changes;
+  }
+
+  /**
    * 启用/禁用预约
    * @param {string} id - 预约ID
    * @param {boolean} enabled - 是否启用
@@ -309,6 +352,8 @@ class ScheduleManager {
    */
   checkSchedules() {
     const now = Date.now();
+    console.log(`[ScheduleManager] 检查预约, 当前时间: ${now} (${new Date(now).toLocaleString()})`);
+
     const stmt = this.db.prepare(`
       SELECT * FROM schedules
       WHERE enabled = 1 AND nextRun <= ?
@@ -316,21 +361,38 @@ class ScheduleManager {
     `);
 
     const dueSchedules = stmt.all(now);
+    console.log(`[ScheduleManager] 找到 ${dueSchedules.length} 个到期预约`);
+
+    if (dueSchedules.length > 0) {
+      console.log(`[ScheduleManager] 到期预约详情:`, dueSchedules.map(s => ({
+        id: s.id,
+        sessionId: s.sessionId,
+        action: s.action,
+        nextRun: s.nextRun,
+        nextRunTime: new Date(s.nextRun).toLocaleString()
+      })));
+    }
 
     for (const schedule of dueSchedules) {
       try {
+        console.log(`[ScheduleManager] 执行预约 ${schedule.id}, 动作: ${schedule.action}, 会话: ${schedule.sessionId}`);
+
         // 触发回调
         if (this.callbacks.onScheduleTrigger) {
+          console.log(`[ScheduleManager] 触发回调 onScheduleTrigger`);
           this.callbacks.onScheduleTrigger({
             ...schedule,
             enabled: Boolean(schedule.enabled),
             weekdays: schedule.weekdays ? JSON.parse(schedule.weekdays) : null
           });
+        } else {
+          console.log(`[ScheduleManager] 警告: 没有注册 onScheduleTrigger 回调!`);
         }
 
         // 更新下次执行时间（单次预约除外）
         if (schedule.type === 'once') {
           // 单次预约执行后禁用
+          console.log(`[ScheduleManager] 单次预约执行完成，禁用预约 ${schedule.id}`);
           this.updateSchedule(schedule.id, { enabled: false, nextRun: null });
         } else {
           // 重复预约更新下次执行时间
@@ -340,15 +402,17 @@ class ScheduleManager {
           });
 
           if (nextRun) {
+            console.log(`[ScheduleManager] 更新预约 ${schedule.id} 下次执行时间: ${nextRun} (${new Date(nextRun).toLocaleString()})`);
             const updateStmt = this.db.prepare('UPDATE schedules SET nextRun = ? WHERE id = ?');
             updateStmt.run(nextRun, schedule.id);
           } else {
             // 无法计算下次执行时间，禁用预约
+            console.log(`[ScheduleManager] 无法计算下次执行时间，禁用预约 ${schedule.id}`);
             this.updateSchedule(schedule.id, { enabled: false });
           }
         }
       } catch (error) {
-        console.error(`执行预约失败 [${schedule.id}]:`, error);
+        console.error(`[ScheduleManager] 执行预约失败 [${schedule.id}]:`, error);
       }
     }
   }

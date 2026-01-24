@@ -463,14 +463,17 @@ export function getPresetById(id) {
 
 /**
  * 获取所有分类
+ * 注意：统计数量时排除 isPartner=true 的合作伙伴供应商
  * @returns {Array}
  */
 export function getCategories() {
+  // 过滤掉合作伙伴供应商
+  const publicPresets = providerPresets.filter(p => !p.isPartner);
   return [
-    { id: 'official', name: '官方', count: providerPresets.filter(p => p.category === 'official').length },
-    { id: 'cn_official', name: '国产官方', count: providerPresets.filter(p => p.category === 'cn_official').length },
-    { id: 'aggregator', name: '聚合平台', count: providerPresets.filter(p => p.category === 'aggregator').length },
-    { id: 'third_party', name: '第三方', count: providerPresets.filter(p => p.category === 'third_party').length },
+    { id: 'official', name: '官方', count: publicPresets.filter(p => p.category === 'official').length },
+    { id: 'cn_official', name: '国产官方', count: publicPresets.filter(p => p.category === 'cn_official').length },
+    { id: 'aggregator', name: '聚合平台', count: publicPresets.filter(p => p.category === 'aggregator').length },
+    { id: 'third_party', name: '第三方', count: publicPresets.filter(p => p.category === 'third_party').length },
     { id: 'custom', name: '自定义', count: 0 }
   ];
 }

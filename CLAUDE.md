@@ -1,5 +1,39 @@
 # WebTmux 开发规则
 
+## 服务端口配置
+
+- **默认端口**: `3928`
+- **开发模式**: `npm run dev` 启动后访问 `http://127.0.0.1:3928`
+- **Vite 开发服务器**: 默认 `5050`，如被占用会自动切换
+
+## 隧道服务配置
+
+### 隧道类型选择规则
+
+| 用户类型 | 可用隧道 | 选择策略 |
+|---------|---------|---------|
+| 付费用户 | FRP + Cloudflare | 并行测试，优先 FRP（固定域名） |
+| 免费用户 | Cloudflare | 只能使用 Cloudflare（随机域名） |
+
+### 平台差异
+
+| 平台 | FRP 实现方式 | 说明 |
+|------|-------------|------|
+| macOS/Linux | frpc 二进制 | 调用 frpc 可执行文件 |
+| Windows | 自定义 FRP 库 | 使用 NativeFrpClient（纯 Node.js 实现） |
+
+### Windows 平台 FRP 实现
+
+Windows 平台**不使用 frpc.exe**，而是使用自定义改造的 FRP 库实现隧道功能。原因：
+- frpc.exe 未签名，会被 Windows Defender 阻止
+- 自定义库可以更好地集成到应用中
+
+相关代码：
+- `server/services/FrpTunnel.js` - 隧道服务主逻辑
+- `server/services/frp/NativeFrpClient.js` - Windows 专用 FRP 客户端
+- `server/services/frp/protocol.js` - FRP 协议实现
+- `server/services/frp/crypto.js` - 加密模块
+
 ## Claude Code 输入规则（重要！）
 
 向 Claude Code 发送文本输入时，**必须分两次发送**：
@@ -169,3 +203,39 @@ ssh us-lax02 "grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' /var/www/downloads/index.html | 
 - **服务器**: US-LAX02
 - **HTML 文件**: `/var/www/downloads/index.html`
 - **安装包目录**: `/var/www/downloads/whatyterm/v版本号/`
+
+## 网络请求规则（重要！）
+
+**必须使用 curl 命令代替 WebFetch 工具**进行网络请求。
+
+### 原因
+
+1. WebFetch 工具对许多网站有访问限制
+2. curl 命令更灵活，支持更多选项
+3. curl 可以绕过一些反爬虫机制
+
+### 使用方式
+
+```bash
+# 获取网页内容
+curl -s "https://example.com/api/data"
+
+# 带 User-Agent 的请求
+curl -s -A "Mozilla/5.0" "https://example.com"
+
+# POST 请求
+curl -s -X POST -H "Content-Type: application/json" -d '{"key":"value"}' "https://example.com/api"
+
+# 获取 JSON 并格式化
+curl -s "https://api.example.com/data" | jq .
+
+# 下载文件
+curl -sLO "https://example.com/file.zip"
+```
+
+### 注意事项
+
+- 使用 `-s` 静默模式避免进度条输出
+- 使用 `-L` 跟随重定向
+- 对于需要认证的 API，使用 `-H "Authorization: Bearer TOKEN"`
+- 某些网站可能需要设置合适的 User-Agent

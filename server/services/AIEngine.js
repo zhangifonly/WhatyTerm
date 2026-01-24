@@ -9,6 +9,7 @@ import ProviderService from './ProviderService.js';
 import configService from './ConfigService.js';
 import processDetector from './ProcessDetector.js';
 import tokenStatsService from './TokenStatsService.js';
+import pluginManager from './MonitorPlugins/index.js';
 import { DEFAULT_MODEL, CLAUDE_CODE_FAKE, CODEX_FAKE, CLAUDE_MODEL_FALLBACK_LIST } from '../config/constants.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -112,6 +113,32 @@ export class AIEngine {
     this.failoverConfig = null;
     this._failoverConfigLoaded = false;
     this._loadFailoverConfig();
+
+    // 初始化插件管理器
+    this._initPluginManager();
+  }
+
+  async _initPluginManager() {
+    try {
+      await pluginManager.loadBuiltinPlugins();
+      console.log('[AIEngine] 监控策略插件已加载:', pluginManager.listPlugins().map(p => p.name).join(', '));
+    } catch (err) {
+      console.error('[AIEngine] 加载监控策略插件失败:', err);
+    }
+  }
+
+  /**
+   * 获取可用的监控策略插件列表
+   */
+  getAvailablePlugins() {
+    return pluginManager.listPlugins();
+  }
+
+  /**
+   * 根据项目上下文选择合适的插件
+   */
+  selectPlugin(projectContext, forcedPluginId = null) {
+    return pluginManager.selectPlugin(projectContext, forcedPluginId);
   }
 
   async _loadFailoverConfig() {
@@ -176,6 +203,16 @@ export class AIEngine {
               if (savedSettings?.tunnelUrl) {
                 result.tunnelUrl = savedSettings.tunnelUrl;
               }
+              // 保留用户选择的模型（如果有）
+              if (savedSettings?.claude?.model && result.claude) {
+                result.claude.model = savedSettings.claude.model;
+              }
+              if (savedSettings?.openai?.model && result.openai) {
+                result.openai.model = savedSettings.openai.model;
+              }
+              if (savedSettings?.codex?.model && result.codex) {
+                result.codex.model = savedSettings.codex.model;
+              }
               return result;
             }
           }
@@ -199,6 +236,16 @@ export class AIEngine {
                 result._providerName = savedSettings?._providerName || `${row.name} (${appType})`;
                 if (savedSettings?.tunnelUrl) {
                   result.tunnelUrl = savedSettings.tunnelUrl;
+                }
+                // 保留用户选择的模型（如果有）
+                if (savedSettings?.claude?.model && result.claude) {
+                  result.claude.model = savedSettings.claude.model;
+                }
+                if (savedSettings?.openai?.model && result.openai) {
+                  result.openai.model = savedSettings.openai.model;
+                }
+                if (savedSettings?.codex?.model && result.codex) {
+                  result.codex.model = savedSettings.codex.model;
                 }
                 return result;
               }
@@ -276,6 +323,38 @@ export class AIEngine {
             apiUrl: apiUrl,
             apiKey: apiKey,
             model: model || 'gpt-5-codex'
+          },
+          openai: { apiUrl: '', apiKey: '', model: 'gpt-4o' },
+          claude: { apiUrl: '', apiKey: '', model: DEFAULT_MODEL },
+          maxTokens: 500,
+          temperature: 0.7,
+          _currentProvider: this._currentProvider
+        };
+      } else if (appType === 'gemini') {
+        // Gemini 使用 env.GEMINI_API_KEY 和 env.GOOGLE_GEMINI_BASE_URL
+        const env = settingsConfig.env || {};
+        const apiKey = env.GEMINI_API_KEY || '';
+        let apiUrl = env.GOOGLE_GEMINI_BASE_URL || '';
+        const model = env.GEMINI_MODEL || 'gemini-2.5-flash';
+
+        if (!apiKey) {
+          return null;
+        }
+
+        // 如果没有自定义 base URL，使用 Google 官方 API
+        if (!apiUrl) {
+          apiUrl = 'https://generativelanguage.googleapis.com/v1beta';
+        }
+
+        // 规范化 API URL
+        apiUrl = apiUrl.replace(/\/+$/, '');
+
+        return {
+          apiType: 'gemini',
+          gemini: {
+            apiUrl: apiUrl,
+            apiKey: apiKey,
+            model: model
           },
           openai: { apiUrl: '', apiKey: '', model: 'gpt-4o' },
           claude: { apiUrl: '', apiKey: '', model: DEFAULT_MODEL },
@@ -373,6 +452,38 @@ export class AIEngine {
           temperature: 0.7,
           _currentProvider: this._currentProvider
         };
+      } else if (appType === 'gemini') {
+        // Gemini 使用 env.GEMINI_API_KEY 和 env.GOOGLE_GEMINI_BASE_URL
+        const env = settingsConfig.env || {};
+        const apiKey = env.GEMINI_API_KEY || '';
+        let apiUrl = env.GOOGLE_GEMINI_BASE_URL || '';
+        const model = env.GEMINI_MODEL || 'gemini-2.5-flash';
+
+        if (!apiKey) {
+          return null;
+        }
+
+        // 如果没有自定义 base URL，使用 Google 官方 API
+        if (!apiUrl) {
+          apiUrl = 'https://generativelanguage.googleapis.com/v1beta';
+        }
+
+        // 规范化 API URL
+        apiUrl = apiUrl.replace(/\/+$/, '');
+
+        return {
+          apiType: 'gemini',
+          gemini: {
+            apiUrl: apiUrl,
+            apiKey: apiKey,
+            model: model
+          },
+          openai: { apiUrl: '', apiKey: '', model: 'gpt-4o' },
+          claude: { apiUrl: '', apiKey: '', model: DEFAULT_MODEL },
+          maxTokens: 500,
+          temperature: 0.7,
+          _currentProvider: this._currentProvider
+        };
       } else {
         // Claude 使用 env.ANTHROPIC_BASE_URL 和 ANTHROPIC_AUTH_TOKEN
         const env = settingsConfig.env || {};
@@ -449,6 +560,10 @@ export class AIEngine {
       // Codex 使用 OpenAI Responses API 格式
       const config = this.settings.codex || this.settings.openai;
       return this._callCodexApi(prompt, config);
+    } else if (apiType === 'gemini') {
+      // Gemini 使用 Google GenerativeLanguage API 格式
+      const config = this.settings.gemini;
+      return this._callGeminiApi(prompt, config);
     } else {
       const config = this.settings.openai;
       return this._callOpenAiApi(prompt, config);
@@ -696,10 +811,19 @@ export class AIEngine {
   }
 
   // 获取要尝试的模型列表
-  _getModelsToTry(configModel) {
+  _getModelsToTry(configModel, skipFallback = false) {
+    // 如果明确指定不使用降级列表（供应商只支持特定模型），直接返回配置的模型
+    if (skipFallback && configModel) {
+      return [configModel];
+    }
+
     // 如果有上次成功的模型，优先使用
     if (this._lastWorkingModel && this._lastWorkingModel !== configModel) {
       const models = [this._lastWorkingModel];
+      // 添加配置的模型作为备选
+      if (configModel && !models.includes(configModel)) {
+        models.push(configModel);
+      }
       // 添加其他模型作为备选
       for (const m of CLAUDE_MODEL_FALLBACK_LIST) {
         if (!models.includes(m)) {
@@ -725,6 +849,8 @@ export class AIEngine {
     return msg.includes('model_not_found') ||
            msg.includes('无可用渠道') ||
            msg.includes('model not found') ||
+           msg.includes('No available accounts') ||  // Owly 返回的错误
+           msg.includes('no available accounts') ||
            (msg.includes('503') && msg.includes('model'));
   }
 
@@ -916,6 +1042,83 @@ export class AIEngine {
     return { text: result || null, usage };
   }
 
+  // 调用 Gemini API
+  async _callGeminiApi(prompt, config) {
+    if (!config || !config.apiKey) {
+      throw new Error('Gemini API 未配置');
+    }
+
+    const model = config.model || 'gemini-2.5-flash';
+    let apiUrl = config.apiUrl || 'https://generativelanguage.googleapis.com/v1beta';
+
+    // 构建完整 URL
+    if (!apiUrl.includes('/models/')) {
+      apiUrl = `${apiUrl}/models/${model}:generateContent`;
+    }
+
+    // 添加 API Key 到 URL
+    const urlWithKey = `${apiUrl}?key=${config.apiKey}`;
+
+    const requestBody = {
+      contents: [
+        {
+          parts: [
+            { text: prompt }
+          ]
+        }
+      ],
+      generationConfig: {
+        temperature: this.settings.temperature || 0.7,
+        maxOutputTokens: this.settings.maxTokens || 500
+      }
+    };
+
+    console.log(`[AIEngine] 调用 Gemini API: ${model}`);
+
+    try {
+      const response = await fetch(urlWithKey, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestBody)
+      });
+
+      const responseText = await response.text();
+
+      if (!response.ok) {
+        console.error(`[AIEngine] Gemini API 错误 ${response.status}:`, responseText.slice(0, 500));
+        throw new Error(`Gemini API 调用失败: ${response.status}`);
+      }
+
+      const data = JSON.parse(responseText);
+
+      // 提取响应文本
+      let text = null;
+      if (data.candidates && data.candidates[0]?.content?.parts) {
+        text = data.candidates[0].content.parts
+          .filter(p => p.text)
+          .map(p => p.text)
+          .join('');
+      }
+
+      // 提取 usage 信息
+      const usage = data.usageMetadata ? {
+        input_tokens: data.usageMetadata.promptTokenCount || 0,
+        output_tokens: data.usageMetadata.candidatesTokenCount || 0
+      } : null;
+
+      return {
+        text,
+        usage,
+        model: model
+      };
+    } catch (err) {
+      console.error('[AIEngine] Gemini API 调用失败:', err);
+      throw err;
+    }
+  }
+
   async analyze({ goal, systemPrompt, history }) {
     if (!goal) return null;
 
@@ -1100,8 +1303,17 @@ ${historyText || '(空)'}
    * @param {string} terminalContent - 终端内容
    * @param {string} aiType - AI 类型 (claude/codex/gemini)
    * @param {string} tmuxSession - tmux 会话名称（可选，用于进程检测）
+   * @param {object} projectContext - 项目上下文（可选，用于插件选择）
+   * @param {string} forcedPluginId - 强制使用的插件 ID（可选）
    */
-  preAnalyzeStatus(terminalContent, aiType = 'claude', tmuxSession = null) {
+  preAnalyzeStatus(terminalContent, aiType = 'claude', tmuxSession = null, projectContext = null, forcedPluginId = null) {
+    // 获取选中的插件（用于在返回结果中显示）
+    const selectedPlugin = pluginManager.selectPlugin(projectContext || {}, forcedPluginId);
+    const pluginInfo = selectedPlugin ? {
+      plugin: selectedPlugin.id,
+      pluginName: selectedPlugin.name
+    } : {};
+
     if (!terminalContent || terminalContent.trim().length === 0) {
       return {
         currentState: '终端内容为空',
@@ -1114,12 +1326,63 @@ ${historyText || '(空)'}
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
-        detectedCLI: null
+        detectedCLI: null,
+        ...pluginInfo
       };
     }
 
     // 检测运行的 CLI 工具（优先使用进程检测）
     const detectedCLI = this.detectRunningCLI(terminalContent, tmuxSession);
+
+    // 尝试使用插件系统分析（如果有项目上下文）
+    // 注意：默认插件也需要执行分析，以支持免费用户的自动化操作
+    if (projectContext || forcedPluginId) {
+      const plugin = pluginManager.selectPlugin(projectContext || {}, forcedPluginId);
+      if (plugin) {
+        // 检测当前阶段
+        const phase = plugin.detectPhase(terminalContent, projectContext || {});
+        const phaseConfig = plugin.getPhaseConfig(phase);
+
+        // 使用插件分析状态（包括默认插件）
+        const pluginResult = plugin.analyzeStatus(terminalContent, phase, projectContext || {});
+        if (pluginResult) {
+          console.log(`[AIEngine] 插件 ${plugin.name} 分析结果: ${pluginResult.message || pluginResult.actionType}`);
+          return {
+            ...pluginResult,
+            // 确保 currentState 字段存在（前端显示用）
+            currentState: pluginResult.currentState || pluginResult.message || pluginResult.actionType,
+            plugin: plugin.id,
+            pluginName: plugin.name,
+            phase,
+            phaseName: plugin.phases.find(p => p.id === phase)?.name || phase,
+            detectedCLI,
+            updatedAt: new Date().toISOString(),
+            preAnalyzed: true
+          };
+        }
+
+        // 如果插件没有返回结果但阶段配置禁用自动操作，返回不操作状态
+        if (phaseConfig.autoActionEnabled === false) {
+          return {
+            currentState: `${plugin.name} - ${plugin.phases.find(p => p.id === phase)?.name || phase}`,
+            workingDir: '未显示',
+            recentAction: '等待',
+            needsAction: false,
+            actionType: 'none',
+            suggestedAction: null,
+            actionReason: `${phaseConfig.requireConfirmation ? '需要人工确认' : '当前阶段不自动操作'}`,
+            suggestion: null,
+            plugin: plugin.id,
+            pluginName: plugin.name,
+            phase,
+            phaseName: plugin.phases.find(p => p.id === phase)?.name || phase,
+            detectedCLI,
+            updatedAt: new Date().toISOString(),
+            preAnalyzed: true
+          };
+        }
+      }
+    }
 
     // 先清理 ANSI 转义序列，确保正则能正确匹配
     const cleanContent = terminalContent.replace(/\x1b\[[0-9;]*m/g, '');
@@ -1180,6 +1443,7 @@ ${historyText || '(空)'}
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
         detectedCLI,
+        ...pluginInfo,
         needsSessionFix: true  // 标记需要修复
       };
     }
@@ -1195,16 +1459,23 @@ ${historyText || '(空)'}
                              /Do you want to (make this edit|create|delete|run)/i.test(cleanContent)) &&
                             /1\.\s*Yes/i.test(cleanContent);
 
+    // 检查是否有 accept edits 等待状态（Claude Code 完成任务后等待用户接受编辑）
+    const isWaitingForAccept = /accept edits on|shift\+tab to cycle/i.test(cleanContent);
+    // 检查是否有 Brewed for（任务完成标志）
+    const hasBrewedFor = /Brewed for \d+m\s*\d+s/i.test(cleanContent);
+
     if (aiType === 'claude') {
       // Claude Code 运行中标志
-      // 如果是确认界面，不判断为运行中
+      // 如果是确认界面或等待接受编辑，不判断为运行中
       const hasRunningIndicator = /esc to interrupt/i.test(cleanContent) ||
                                   /ctrl\+t to show todos/i.test(cleanContent);
       // 运行时间只在最后500字符内检测，避免匹配到历史 timeout 参数
+      // 但要排除 "Brewed for" 这种完成时间
       const last500 = cleanContent.slice(-500);
-      const hasRecentRuntime = /\(\d+m\s*\d+s\)|\d+m\s+\d+s\s*$/.test(last500);
+      // 如果有 Brewed for 或 accept edits，说明任务已完成，不是运行中
+      const hasRecentRuntime = /\(\d+m\s*\d+s\)|\d+m\s+\d+s/.test(last500) && !hasBrewedFor && !isWaitingForAccept;
 
-      isRunning = !isConfirmDialog && (hasRunningIndicator || hasRecentRuntime);
+      isRunning = !isConfirmDialog && !isWaitingForAccept && (hasRunningIndicator || hasRecentRuntime);
     } else if (aiType === 'codex') {
       // Codex CLI 运行中标志（排除确认界面）
       isRunning = !isConfirmDialog && (
@@ -1249,11 +1520,32 @@ ${historyText || '(空)'}
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
-        detectedCLI
+        detectedCLI,
+        ...pluginInfo
       };
     }
 
-    // 1. 检测确认界面（Do you want to...）
+    // 1.5 检测 accept edits 状态（Claude Code 完成任务后等待用户接受编辑）
+    // 这种状态需要用户手动操作（Tab 接受、Shift+Tab 切换、Esc 取消）
+    if (isWaitingForAccept) {
+      console.log(`[AIEngine] 检测到 ${cliName} 等待接受编辑，发送 Tab 接受全部编辑`);
+      return {
+        currentState: `${cliName}等待接受编辑`,
+        workingDir: '未显示',
+        recentAction: '等待接受编辑',
+        needsAction: true,
+        actionType: 'single_char',
+        suggestedAction: '\t',  // Tab 键接受编辑
+        actionReason: '检测到编辑等待接受，发送 Tab 接受全部编辑',
+        suggestion: null,
+        updatedAt: new Date().toISOString(),
+        preAnalyzed: true,
+        detectedCLI,
+        ...pluginInfo
+      };
+    }
+
+    // 2. 检测确认界面（Do you want to...）
     const isEditConfirm = /Do you want to (make this edit|create|delete|run)/i.test(cleanContent);
     const hasOption1Yes = /1\.\s*Yes/i.test(cleanContent);
     const hasOption2Yes = /2\.\s*Yes/i.test(cleanContent);
@@ -1273,7 +1565,8 @@ ${historyText || '(空)'}
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
-        detectedCLI
+        detectedCLI,
+        ...pluginInfo
       };
     }
 
@@ -1296,7 +1589,8 @@ ${historyText || '(空)'}
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
-        detectedCLI
+        detectedCLI,
+        ...pluginInfo
       };
     }
 
@@ -1322,7 +1616,8 @@ ${historyText || '(空)'}
           suggestion: null,
           updatedAt: new Date().toISOString(),
           preAnalyzed: true,
-          detectedCLI
+          detectedCLI,
+        ...pluginInfo
         };
       }
 
@@ -1341,7 +1636,8 @@ ${historyText || '(空)'}
           suggestion: null,
           updatedAt: new Date().toISOString(),
           preAnalyzed: true,
-          detectedCLI
+          detectedCLI,
+        ...pluginInfo
         };
       }
 
@@ -1360,7 +1656,8 @@ ${historyText || '(空)'}
           suggestion: null,
           updatedAt: new Date().toISOString(),
           preAnalyzed: true,
-          detectedCLI
+          detectedCLI,
+        ...pluginInfo
         };
       }
     }
@@ -1384,7 +1681,8 @@ ${historyText || '(空)'}
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
-        detectedCLI
+        detectedCLI,
+        ...pluginInfo
       };
     }
 
@@ -1405,7 +1703,8 @@ ${historyText || '(空)'}
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
-        detectedCLI
+        detectedCLI,
+        ...pluginInfo
       };
     }
 
@@ -1429,7 +1728,8 @@ ${historyText || '(空)'}
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
-        detectedCLI
+        detectedCLI,
+        ...pluginInfo
       };
     }
 
@@ -1451,7 +1751,8 @@ ${historyText || '(空)'}
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
-        detectedCLI
+        detectedCLI,
+        ...pluginInfo
       };
     }
 
@@ -1476,7 +1777,8 @@ ${historyText || '(空)'}
           suggestion: null,
           updatedAt: new Date().toISOString(),
           preAnalyzed: true,
-          detectedCLI
+          detectedCLI,
+          ...pluginInfo
         };
       }
 
@@ -1495,7 +1797,8 @@ ${historyText || '(空)'}
           suggestion: null,
           updatedAt: new Date().toISOString(),
           preAnalyzed: true,
-          detectedCLI
+          detectedCLI,
+          ...pluginInfo
         };
       }
 
@@ -1516,7 +1819,8 @@ ${historyText || '(空)'}
           hasInputPrompt: true,
           updatedAt: new Date().toISOString(),
           preAnalyzed: true,
-          detectedCLI
+          detectedCLI,
+          ...pluginInfo
         };
       }
 
@@ -1536,7 +1840,8 @@ ${historyText || '(空)'}
           suggestion: null,
           updatedAt: new Date().toISOString(),
           preAnalyzed: true,
-          detectedCLI
+          detectedCLI,
+          ...pluginInfo
         };
       }
     }
@@ -1557,7 +1862,8 @@ ${historyText || '(空)'}
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
-        detectedCLI
+        detectedCLI,
+        ...pluginInfo
       };
     }
 
@@ -1574,7 +1880,8 @@ ${historyText || '(空)'}
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
-        detectedCLI
+        detectedCLI,
+        ...pluginInfo
       };
     }
 
@@ -1616,6 +1923,7 @@ ${historyText || '(空)'}
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
         detectedCLI,
+        ...pluginInfo,
         needsErrorAnalysis: true,  // 标记需要 AI 错误分析
         errorContent: recentLines,  // 传递错误内容供 AI 分析
         errorCount: totalErrors
@@ -1640,7 +1948,8 @@ ${historyText || '(空)'}
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
-        detectedCLI
+        detectedCLI,
+        ...pluginInfo
       };
     }
 
@@ -1675,7 +1984,8 @@ ${historyText || '(空)'}
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
-        detectedCLI
+        detectedCLI,
+        ...pluginInfo
       };
     }
 
@@ -1694,7 +2004,8 @@ ${historyText || '(空)'}
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
-        detectedCLI
+        detectedCLI,
+        ...pluginInfo
       };
     }
 
@@ -1711,7 +2022,8 @@ ${historyText || '(空)'}
         suggestion: `可输入 ${getCliCommand(aiType)} 重新启动${cliName}`,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
-        detectedCLI
+        detectedCLI,
+        ...pluginInfo
       };
     }
 
@@ -1730,7 +2042,8 @@ ${historyText || '(空)'}
         suggestion: '请检查服务状态和未完成项目',
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
-        detectedCLI
+        detectedCLI,
+        ...pluginInfo
       };
     }
 
@@ -1742,10 +2055,14 @@ ${historyText || '(空)'}
    * 分析终端状态
    * @param {string} terminalContent - 终端内容
    * @param {string} aiType - AI 类型 (claude/codex/gemini)
+   * @param {string} sessionId - 会话 ID
+   * @param {string} tmuxSession - tmux 会话名称（可选，用于进程检测）
+   * @param {object} projectContext - 项目上下文（可选，用于插件选择）
+   * @param {string} forcedPluginId - 强制使用的插件 ID（可选）
    */
-  async analyzeStatus(terminalContent, aiType = 'claude', sessionId = null) {
-    // 先尝试预判断
-    const preResult = this.preAnalyzeStatus(terminalContent, aiType);
+  async analyzeStatus(terminalContent, aiType = 'claude', sessionId = null, tmuxSession = null, projectContext = null, forcedPluginId = null) {
+    // 先尝试预判断（传递完整参数）
+    const preResult = this.preAnalyzeStatus(terminalContent, aiType, tmuxSession, projectContext, forcedPluginId);
     if (preResult) {
       console.log('[AIEngine] 预判断成功，跳过AI调用:', preResult.currentState);
       return preResult;

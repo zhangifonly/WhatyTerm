@@ -27,7 +27,8 @@ class DefaultPlugin extends BasePlugin {
       { id: 'running', name: '运行中', priority: 1 },
       { id: 'waiting', name: '等待输入', priority: 2 },
       { id: 'error', name: '错误', priority: 3 },
-      { id: 'confirmation', name: '确认', priority: 4 }
+      { id: 'confirmation', name: '确认', priority: 4 },
+      { id: 'accept_edits', name: '接受编辑', priority: 5 }
     ];
 
     // 常见错误模式及其处理建议
@@ -124,6 +125,17 @@ class DefaultPlugin extends BasePlugin {
         warningPatterns: [],
         autoActionEnabled: true,
         idleTimeout: 5000
+      },
+      accept_edits: {
+        autoActions: ['a'],
+        checkpoints: [
+          '检查待接受的编辑数量',
+          '确认编辑内容正确',
+          '按 a 接受所有编辑'
+        ],
+        warningPatterns: [],
+        autoActionEnabled: true,
+        idleTimeout: 3000
       }
     };
   }
@@ -140,18 +152,64 @@ class DefaultPlugin extends BasePlugin {
    */
   detectPhase(terminalContent, projectContext) {
     const lastLines = terminalContent.split('\n').slice(-20).join('\n');
+    // 清除 ANSI 转义序列的版本，用于文本匹配
+    const cleanLastLines = lastLines.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1B\][^\x07]*\x07/g, '');
+
+    // 优先检测运行中状态（Claude Code 正在执行操作）
+    // 这必须在 accept_edits 之前检测，因为 accept_edits 可能在运行中也存在
+    if (/Compacting|Running|Garnishing|ctrl\+c to interrupt|esc to interrupt/i.test(lastLines) ||
+        /\u280b|\u2819|\u2839|\u2838|\u283c|\u2834|\u2826|\u2827|\u2807|\u280f|\u28fe|\u28fd|\u28fb|\u28bf/.test(lastLines)) {
+      return 'running';
+    }
+
+    // 检测 accept edits 状态（Claude Code 完成任务后等待用户接受编辑）
+    // 只有在不运行时才检测这个状态
+    // 条件：有 accept edits 提示，且有空闲的 > 提示符
+    if (/accept edits on|shift\+tab to cycle/i.test(lastLines)) {
+      // 检查是否有空闲的 > 提示符（没有运行指示）
+      const hasIdlePrompt = /^❯\s*$/m.test(lastLines) || /\n❯\s*$/m.test(lastLines);
+      // 排除有排队消息的情况（说明还在处理中）
+      const hasQueuedMessages = /Press up to edit queued messages/i.test(lastLines);
+
+      if (hasIdlePrompt && !hasQueuedMessages) {
+        return 'accept_edits';
+      }
+      // 如果有排队消息或正在运行，返回运行中状态
+      return 'running';
+    }
 
     // 检测确认界面（Claude Code 权限确认等）
-    // "Do you want to proceed?" 且有 "1. Yes" 和 "2. No" 选项
-    const hasDoYouWantToProceed = /Do you want to proceed\?/i.test(lastLines);
-    const hasOption1Yes = /1\.\s*Yes/i.test(lastLines);
-    const hasOption2No = /2\.\s*No/i.test(lastLines);
+    // "Do you want to proceed?" 或 "Do you want to make this edit" 且有选项
+    // 使用清理后的文本进行匹配，避免 ANSI 转义序列干扰
+    const hasDoYouWantToProceed = /Do you want to proceed\?/i.test(cleanLastLines);
+    const hasDoYouWantToMakeEdit = /Do you want to make this edit/i.test(cleanLastLines);
+    const hasOption1Yes = /1\.\s*Yes/i.test(cleanLastLines);
+    const hasOption2No = /2\.\s*No/i.test(cleanLastLines);
+    const hasOption2AllowEdits = /2\.\s*Yes,\s*allow/i.test(cleanLastLines);
+    const hasOption3No = /3\.\s*No/i.test(cleanLastLines);
+
+    // 调试日志
+    if (hasDoYouWantToProceed || hasDoYouWantToMakeEdit) {
+      console.log('[DefaultPlugin] 检测到确认提示:', {
+        hasDoYouWantToProceed,
+        hasDoYouWantToMakeEdit,
+        hasOption1Yes,
+        hasOption2AllowEdits,
+        hasOption3No,
+        cleanLastLinesPreview: cleanLastLines.slice(-200)
+      });
+    }
+
+    // 检测任何 "Do you want to proceed/make" 确认界面
+    if ((hasDoYouWantToProceed || hasDoYouWantToMakeEdit) && hasOption1Yes) {
+      return 'confirmation';
+    }
 
     if (/Allow once|Allow for this session|Deny/i.test(lastLines) ||
+        /allow all edits during this session/i.test(lastLines) ||
         /\[1\].*\[2\].*\[3\]/i.test(lastLines) ||
         /选择.*[123]|choose.*[123]/i.test(lastLines) ||
-        /\(y\/n\)|\[Y\/n\]|\[yes\/no\]/i.test(lastLines) ||
-        (hasDoYouWantToProceed && hasOption1Yes)) {
+        /\(y\/n\)|\[Y\/n\]|\[yes\/no\]/i.test(lastLines)) {
       return 'confirmation';
     }
 
@@ -199,6 +257,20 @@ class DefaultPlugin extends BasePlugin {
     const config = this.getPhaseConfig(phase);
     const lastLines = terminalContent.split('\n').slice(-30).join('\n');
 
+    // accept_edits 阶段：发送 "继续" 命令让 Claude Code 继续工作
+    // Claude Code 在等待接受编辑时，底部显示 "accept edits on"
+    // 此时终端在等待用户输入，发送 "继续" 命令
+    if (phase === 'accept_edits') {
+      return {
+        needsAction: true,
+        actionType: 'text_input',
+        suggestedAction: '继续',
+        phase,
+        phaseConfig: config,
+        message: '检测到 Claude Code 等待接受编辑，发送 "继续" 命令'
+      };
+    }
+
     // 确认界面：根据类型选择合适的选项
     if (phase === 'confirmation') {
       // 检测 y/n 确认
@@ -213,20 +285,27 @@ class DefaultPlugin extends BasePlugin {
         };
       }
 
-      // 检测 "Do you want to proceed? 1. Yes 2. No" 格式（Bash 命令确认）
-      // 注意：选项可能在不同行，所以分开检测
+      // 检测 "Do you want to proceed?" 格式的确认界面
+      // 支持多种选项格式：
+      // - 1. Yes / 2. No
+      // - 1. Yes / 2. Yes, allow... / 3. No
       const hasDoYouWantToProceed = /Do you want to proceed\?/i.test(lastLines);
       const hasOption1Yes = /1\.\s*Yes/i.test(lastLines);
-      const hasOption2No = /2\.\s*No/i.test(lastLines);
+      const hasOption2Or3No = /[23]\.\s*No/i.test(lastLines);
 
-      if (hasDoYouWantToProceed && hasOption1Yes && hasOption2No) {
+      if (hasDoYouWantToProceed && hasOption1Yes) {
+        // 如果有 "2. Yes, allow" 选项，选择 2（允许本项目）
+        // 否则选择 1（Yes）
+        const hasOption2Allow = /2\.\s*Yes,\s*allow/i.test(lastLines);
         return {
           needsAction: true,
           actionType: 'select',
-          suggestedAction: '1',
+          suggestedAction: hasOption2Allow ? '2' : '1',
           phase,
           phaseConfig: config,
-          message: '检测到 Bash 命令确认（1.Yes/2.No），自动选择选项 1（Yes）'
+          message: hasOption2Allow
+            ? '检测到 Claude Code 项目权限确认，自动选择选项 2（允许本项目）'
+            : '检测到 Bash 命令确认，自动选择选项 1（Yes）'
         };
       }
 
@@ -235,7 +314,7 @@ class DefaultPlugin extends BasePlugin {
           /Allow once.*Allow for this session/i.test(lastLines)) {
         return {
           needsAction: true,
-          actionType: 'single_char',
+          actionType: 'select',
           suggestedAction: '2',
           phase,
           phaseConfig: config,
@@ -246,7 +325,7 @@ class DefaultPlugin extends BasePlugin {
       // 默认选择选项 2（适用于其他未知确认界面）
       return {
         needsAction: true,
-        actionType: 'single_char',
+        actionType: 'select',
         suggestedAction: '2',
         phase,
         phaseConfig: config,
@@ -293,15 +372,17 @@ class DefaultPlugin extends BasePlugin {
       };
     }
 
-    // 空闲状态：检查是否需要操作
-    if (phase === 'idle' && this.isIdle(terminalContent)) {
+    // 空闲状态：返回不需要操作（未检测到明确的空闲提示符）
+    // 注意：如果检测到空闲提示符，detectPhase 会返回 'waiting' 而不是 'idle'
+    // 所以 phase='idle' 意味着终端处于未知状态，不应自动操作
+    if (phase === 'idle') {
       return {
-        needsAction: true,
-        actionType: 'text_input',
-        suggestedAction: '继续',
+        needsAction: false,
+        actionType: 'none',
+        suggestedAction: null,
         phase,
         phaseConfig: config,
-        message: '检测到空闲状态，发送"继续"指令'
+        message: '终端状态不明确，等待用户操作或状态变化'
       };
     }
 
@@ -329,13 +410,15 @@ class DefaultPlugin extends BasePlugin {
   }
 
   /**
-   * 检测是否空闲
+   * 检测是否空闲（检测到明确的输入提示符）
    */
   isIdle(terminalContent) {
-    const lastLines = terminalContent.split('\n').slice(-10).join('\n');
+    // 清理 ANSI 转义序列
+    const cleanContent = terminalContent.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+    const lastLines = cleanContent.split('\n').slice(-15).join('\n');
 
-    // 排除运行中状态
-    if (/running|processing|loading|compiling|building/i.test(lastLines)) {
+    // 排除运行中状态（Claude Code 运行中显示 "esc to interrupt"）
+    if (/esc to interrupt|running|processing|loading|compiling|building/i.test(lastLines)) {
       return false;
     }
 
@@ -344,14 +427,18 @@ class DefaultPlugin extends BasePlugin {
       return false;
     }
 
-    // Claude Code 空闲提示符
-    const claudeCodeIdle = />\s*$/.test(lastLines);
+    // Claude Code 空闲提示符（更宽松的匹配）
+    // 匹配单独的 > 提示符，允许前面有空格，后面可能有光标等
+    const claudeCodeIdle = /^[\s>]*>\s*$/m.test(lastLines) ||
+                          /\n>\s*$/.test(lastLines) ||
+                          />\s*[\x00-\x1f]*$/.test(lastLines);
 
-    // Shell 空闲提示符
-    const shellIdle = /[\$#]\s*$/.test(lastLines);
+    // Shell 空闲提示符（更宽松）
+    const shellIdle = /[\$#%]\s*[\x00-\x1f]*$/.test(lastLines) ||
+                     /\n.*[\$#%]\s*$/.test(lastLines);
 
     // 通用空闲检测
-    const genericIdle = />>>\s*$|In \[\d+\]:\s*$/.test(lastLines);
+    const genericIdle = />>>\s*$|In \[\d+\]:\s*$/m.test(lastLines);
 
     return claudeCodeIdle || shellIdle || genericIdle;
   }
