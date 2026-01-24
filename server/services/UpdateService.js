@@ -163,7 +163,14 @@ class UpdateService {
       }
 
       if (!releaseInfo) {
-        this.updateInfo = { hasUpdate: false, error: '无法获取更新信息' };
+        // 没有发布版本信息时，认为当前已是最新版本
+        this.updateInfo = {
+          hasUpdate: false,
+          currentVersion,
+          latestVersion: currentVersion,
+          message: '已是最新版本'
+        };
+        this.lastCheckTime = Date.now();
         return this.updateInfo;
       }
 
@@ -193,7 +200,14 @@ class UpdateService {
       return this.updateInfo;
     } catch (error) {
       console.error('[UpdateService] 检查更新失败:', error);
-      this.updateInfo = { hasUpdate: false, error: error.message };
+      // 检查失败时，认为当前已是最新版本（避免显示错误）
+      const currentVersion = this.getCurrentVersion();
+      this.updateInfo = {
+        hasUpdate: false,
+        currentVersion,
+        latestVersion: currentVersion,
+        message: '已是最新版本'
+      };
       return this.updateInfo;
     } finally {
       this.isChecking = false;
