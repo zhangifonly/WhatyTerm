@@ -136,6 +136,7 @@ export default function App() {
   const [goalInput, setGoalInput] = useState('');
   const [generatingGoal, setGeneratingGoal] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsDefaultTab, setSettingsDefaultTab] = useState('ai'); // 设置页面默认标签页
   const [showScheduleManager, setShowScheduleManager] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [creatingProjectPaths, setCreatingProjectPaths] = useState(new Set()); // 正在创建会话的项目路径
@@ -188,6 +189,8 @@ export default function App() {
   // 会话悬停提示状态
   const [hoveredSession, setHoveredSession] = useState(null);
   const [tooltipPosition, setTooltipPosition] = useState({ top: 0 });
+  // 订阅状态
+  const [subscriptionStatus, setSubscriptionStatus] = useState(null);
   // 注意：autoActionEnabled 现在存储在服务器端，通过 session.autoActionEnabled 获取
 
   const terminalRef = useRef(null);
@@ -432,6 +435,14 @@ export default function App() {
         }
       })
       .catch(err => console.error('加载监控插件失败:', err));
+
+    // 加载订阅状态
+    fetch('/api/subscription/status')
+      .then(res => res.json())
+      .then(data => {
+        setSubscriptionStatus(data);
+      })
+      .catch(err => console.error('加载订阅状态失败:', err));
 
     // 监听 Cloudflare Tunnel 连接事件（自动获取免费域名）
     socket.on('tunnel:connected', (data) => {
@@ -1176,6 +1187,19 @@ export default function App() {
         <div className="sidebar-footer">
           {/* 底部按钮行 */}
           <div className="sidebar-footer-row">
+            {/* 订阅状态标志 */}
+            <span
+              className={`subscription-badge ${subscriptionStatus?.valid ? 'pro' : 'free'}`}
+              title={subscriptionStatus?.valid
+                ? `${subscriptionStatus.info?.plan || 'Pro'} - 剩余 ${subscriptionStatus.remainingDays || 0} 天`
+                : '免费版 - 点击升级'}
+              onClick={() => {
+                setSettingsDefaultTab('subscription');
+                setShowSettings(true);
+              }}
+            >
+              {subscriptionStatus?.valid ? 'Pro' : 'Free'}
+            </span>
             {/* 二维码折叠按钮 */}
             {tunnelUrl && (
               <button
@@ -1187,7 +1211,10 @@ export default function App() {
               </button>
             )}
             {/* 设置按钮 */}
-            <button className="btn btn-secondary settings-btn" onClick={() => setShowSettings(true)}>
+            <button className="btn btn-secondary settings-btn" onClick={() => {
+              setSettingsDefaultTab('ai');
+              setShowSettings(true);
+            }}>
               ⚙️ 设置
             </button>
           </div>
@@ -2197,6 +2224,7 @@ export default function App() {
           tunnelUrl={tunnelUrl}
           onTunnelUrlChange={saveTunnelUrl}
           socket={socket}
+          defaultTab={settingsDefaultTab}
           onPlayback={(sessionId) => {
             setShowSettings(false);
             setPlaybackSessionId(sessionId);
@@ -2787,9 +2815,9 @@ function SubscriptionPanel() {
   );
 }
 
-function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, onTunnelUrlChange, socket, onPlayback }) {
+function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, onTunnelUrlChange, socket, defaultTab = 'ai', onPlayback }) {
   const { t, language, setLanguage: changeLanguage } = useTranslation();
-  const [activeTab, setActiveTab] = useState('ai');
+  const [activeTab, setActiveTab] = useState(defaultTab);
   const [authUsername, setAuthUsername] = useState(auth.username || 'admin');
   const [authPassword, setAuthPassword] = useState('');
   const [authConfirm, setAuthConfirm] = useState('');
