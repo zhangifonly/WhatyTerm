@@ -3840,10 +3840,19 @@ function AboutPage({ socket, onClose }) {
   const { t } = useTranslation();
   const [updateStatus, setUpdateStatus] = useState('');
   const [checking, setChecking] = useState(false);
-  const [latestVersion, setLatestVersion] = useState(null);
+  const [updateInfo, setUpdateInfo] = useState(null);
+  const [currentVersion, setCurrentVersion] = useState('');
   const [systemInfo, setSystemInfo] = useState(null);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
 
   useEffect(() => {
+    // 获取当前版本
+    fetch('/api/update/version')
+      .then(res => res.json())
+      .then(data => setCurrentVersion(data.version || '1.0.0'))
+      .catch(() => setCurrentVersion('1.0.0'));
+
     // 获取系统信息
     if (socket) {
       socket.emit('system:info');
@@ -3862,24 +3871,50 @@ function AboutPage({ socket, onClose }) {
     setUpdateStatus(t('about.checking'));
 
     try {
-      const response = await fetch('https://api.github.com/repos/zhangifonly/WhatyTerm/releases/latest');
+      const response = await fetch('/api/update/check?force=true');
       const data = await response.json();
 
-      if (data.tag_name) {
-        setLatestVersion(data);
-        const currentVersion = '1.0.0';
-        const latestVer = data.tag_name.replace(/^v/, '');
-
-        if (latestVer === currentVersion) {
-          setUpdateStatus(t('about.upToDate'));
-        } else {
-          setUpdateStatus(t('about.newVersionAvailable') + ': ' + data.tag_name);
-        }
+      if (data.error) {
+        setUpdateStatus('检查更新失败: ' + data.error);
+      } else if (data.hasUpdate) {
+        setUpdateInfo(data);
+        setUpdateStatus(`发现新版本: v${data.latestVersion}`);
+      } else {
+        setUpdateInfo(null);
+        setUpdateStatus(t('about.upToDate'));
       }
     } catch (error) {
-      setUpdateStatus('检查更新失败');
+      setUpdateStatus('检查更新失败: ' + error.message);
     } finally {
       setChecking(false);
+    }
+  };
+
+  const downloadUpdate = async () => {
+    if (!updateInfo) return;
+
+    setDownloading(true);
+    setDownloadProgress(0);
+
+    try {
+      // 获取下载链接
+      const response = await fetch(`/api/update/download?platform=${navigator.platform.includes('Mac') ? 'darwin' : navigator.platform.includes('Win') ? 'win32' : 'linux'}&arch=${navigator.userAgent.includes('arm64') ? 'arm64' : 'x64'}`);
+      const data = await response.json();
+
+      if (data.url) {
+        // 打开下载链接
+        window.open(data.url, '_blank');
+        setUpdateStatus('已打开下载页面');
+      } else if (updateInfo.downloadUrl) {
+        window.open(updateInfo.downloadUrl, '_blank');
+        setUpdateStatus('已打开下载页面');
+      } else {
+        setUpdateStatus('未找到下载链接');
+      }
+    } catch (error) {
+      setUpdateStatus('获取下载链接失败');
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -3894,42 +3929,60 @@ function AboutPage({ socket, onClose }) {
           {t('about.description')}
         </p>
         <p style={{ color: '#666', fontSize: '14px' }}>
-          {t('about.version')}: v1.0.0
+          {t('about.version')}: v{currentVersion}
         </p>
       </div>
 
       {/* 检查更新 */}
       <div style={{ marginBottom: '30px', textAlign: 'center' }}>
-        <button
-          onClick={checkUpdate}
-          disabled={checking}
-          style={{
-            padding: '10px 24px',
-            background: '#4a9eff',
-            border: 'none',
-            borderRadius: '6px',
-            color: '#fff',
-            fontSize: '14px',
-            cursor: checking ? 'not-allowed' : 'pointer',
-            opacity: checking ? 0.6 : 1
-          }}
-        >
-          {checking ? t('about.checking') : t('about.checkUpdate')}
-        </button>
+        <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
+          <button
+            onClick={checkUpdate}
+            disabled={checking || downloading}
+            style={{
+              padding: '10px 24px',
+              background: '#4a9eff',
+              border: 'none',
+              borderRadius: '6px',
+              color: '#fff',
+              fontSize: '14px',
+              cursor: (checking || downloading) ? 'not-allowed' : 'pointer',
+              opacity: (checking || downloading) ? 0.6 : 1
+            }}
+          >
+            {checking ? t('about.checking') : t('about.checkUpdate')}
+          </button>
+          {updateInfo && updateInfo.hasUpdate && (
+            <button
+              onClick={downloadUpdate}
+              disabled={downloading}
+              style={{
+                padding: '10px 24px',
+                background: '#22c55e',
+                border: 'none',
+                borderRadius: '6px',
+                color: '#fff',
+                fontSize: '14px',
+                cursor: downloading ? 'not-allowed' : 'pointer',
+                opacity: downloading ? 0.6 : 1
+              }}
+            >
+              {downloading ? '下载中...' : `下载 v${updateInfo.latestVersion}`}
+            </button>
+          )}
+        </div>
         {updateStatus && (
-          <p style={{ marginTop: '12px', color: '#4a9eff', fontSize: '14px' }}>
+          <p style={{ marginTop: '12px', color: updateInfo?.hasUpdate ? '#22c55e' : '#4a9eff', fontSize: '14px' }}>
             {updateStatus}
           </p>
         )}
-        {latestVersion && latestVersion.html_url && (
-          <a
-            href={latestVersion.html_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{ color: '#4a9eff', fontSize: '14px', marginTop: '8px', display: 'inline-block' }}
-          >
-            {t('about.download')} →
-          </a>
+        {updateInfo && updateInfo.notes && (
+          <div style={{ marginTop: '16px', padding: '12px', background: '#2a2a2a', borderRadius: '8px', textAlign: 'left' }}>
+            <h4 style={{ color: '#fff', marginBottom: '8px', fontSize: '14px' }}>更新日志:</h4>
+            <p style={{ color: '#888', fontSize: '13px', whiteSpace: 'pre-wrap', maxHeight: '150px', overflow: 'auto' }}>
+              {updateInfo.notes}
+            </p>
+          </div>
         )}
       </div>
 

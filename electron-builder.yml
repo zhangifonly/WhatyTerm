@@ -113,6 +113,8 @@ linux:
       arch:
         - x64
 
+# 自动更新配置
 publish:
   provider: generic
-  url: https://example.com/releases
+  url: https://ai.whaty.org/whatyterm/releases
+  channel: latest

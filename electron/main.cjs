@@ -1,7 +1,8 @@
-const { app, BrowserWindow, Menu, dialog, shell, utilityProcess } = require('electron');
+const { app, BrowserWindow, Menu, dialog, shell, utilityProcess, ipcMain } = require('electron');
 const path = require('path');
 const { spawn, execSync } = require('child_process');
 const fs = require('fs');
+const { autoUpdater } = require('electron-updater');
 
 let mainWindow;
 let serverProcess;
@@ -11,6 +12,121 @@ let logStream;
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 const isWindows = process.platform === 'win32';
 const isMac = process.platform === 'darwin';
+
+// ==================== 自动更新配置 ====================
+
+// 配置自动更新
+function setupAutoUpdater() {
+  // 配置更新服务器
+  autoUpdater.setFeedURL({
+    provider: 'generic',
+    url: 'https://ai.whaty.org/whatyterm/releases'
+  });
+
+  // 禁用自动下载，让用户确认后再下载
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  // 更新事件监听
+  autoUpdater.on('checking-for-update', () => {
+    writeLog('[AutoUpdater] 正在检查更新...');
+    sendUpdateStatus('checking');
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    writeLog(`[AutoUpdater] 发现新版本: ${info.version}`);
+    sendUpdateStatus('available', {
+      version: info.version,
+      releaseNotes: info.releaseNotes,
+      releaseDate: info.releaseDate
+    });
+  });
+
+  autoUpdater.on('update-not-available', (info) => {
+    writeLog('[AutoUpdater] 当前已是最新版本');
+    sendUpdateStatus('up-to-date', { version: info.version });
+  });
+
+  autoUpdater.on('error', (err) => {
+    writeLog(`[AutoUpdater] 更新错误: ${err.message}`);
+    sendUpdateStatus('error', { message: err.message });
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    writeLog(`[AutoUpdater] 下载进度: ${progress.percent.toFixed(1)}%`);
+    sendUpdateStatus('downloading', {
+      percent: progress.percent,
+      bytesPerSecond: progress.bytesPerSecond,
+      transferred: progress.transferred,
+      total: progress.total
+    });
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    writeLog(`[AutoUpdater] 更新已下载: ${info.version}`);
+    sendUpdateStatus('downloaded', { version: info.version });
+
+    // 提示用户重启安装
+    if (mainWindow) {
+      dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: '更新已就绪',
+        message: `新版本 ${info.version} 已下载完成`,
+        detail: '点击"立即重启"安装更新，或稍后手动重启应用。',
+        buttons: ['立即重启', '稍后'],
+        defaultId: 0,
+        cancelId: 1
+      }).then(({ response }) => {
+        if (response === 0) {
+          autoUpdater.quitAndInstall();
+        }
+      });
+    }
+  });
+}
+
+// 发送更新状态到渲染进程
+function sendUpdateStatus(status, data = {}) {
+  if (mainWindow && mainWindow.webContents) {
+    mainWindow.webContents.send('update-status', { status, ...data });
+  }
+}
+
+// IPC 处理器
+function setupIpcHandlers() {
+  // 检查更新
+  ipcMain.handle('check-for-update', async () => {
+    if (isDev) {
+      return { status: 'dev-mode', message: '开发模式下不检查更新' };
+    }
+    try {
+      const result = await autoUpdater.checkForUpdates();
+      return { status: 'ok', updateInfo: result?.updateInfo };
+    } catch (err) {
+      return { status: 'error', message: err.message };
+    }
+  });
+
+  // 下载更新
+  ipcMain.handle('download-update', async () => {
+    try {
+      await autoUpdater.downloadUpdate();
+      return { status: 'ok' };
+    } catch (err) {
+      return { status: 'error', message: err.message };
+    }
+  });
+
+  // 安装更新并重启
+  ipcMain.handle('install-update', () => {
+    autoUpdater.quitAndInstall();
+  });
+
+  // 获取当前版本
+  ipcMain.handle('get-app-version', () => {
+    return app.getVersion();
+  });
+}
 
 // 获取日志目录（安装目录下的 logs 文件夹）
 function getLogPath() {
@@ -460,6 +576,25 @@ function createWindow() {
       label: 'WhatyTerm',
       submenu: [
         { label: '关于 WhatyTerm', role: 'about' },
+        { label: '检查更新...', click: () => {
+          if (isDev) {
+            dialog.showMessageBox(mainWindow, {
+              type: 'info',
+              title: '开发模式',
+              message: '开发模式下不支持自动更新',
+              buttons: ['确定']
+            });
+          } else {
+            autoUpdater.checkForUpdates().catch(err => {
+              dialog.showMessageBox(mainWindow, {
+                type: 'error',
+                title: '检查更新失败',
+                message: err.message,
+                buttons: ['确定']
+              });
+            });
+          }
+        }},
         { type: 'separator' },
         { label: '偏好设置...', accelerator: 'CmdOrCtrl+,', click: () => {
           mainWindow?.webContents.executeJavaScript('window.openSettings && window.openSettings()');
@@ -505,8 +640,8 @@ function createWindow() {
     {
       label: '帮助',
       submenu: [
-        { label: '文档', click: () => shell.openExternal('https://github.com/anthropics/claude-code') },
-        { label: '报告问题', click: () => shell.openExternal('https://github.com/anthropics/claude-code/issues') }
+        { label: '文档', click: () => shell.openExternal('https://ai.whaty.org') },
+        { label: '报告问题', click: () => shell.openExternal('https://github.com/zhangifonly/WhatyTerm/issues') }
       ]
     }
   ];
@@ -620,6 +755,14 @@ app.whenReady().then(async () => {
   // 初始化日志
   initLog();
 
+  // 初始化 IPC 处理器
+  setupIpcHandlers();
+
+  // 初始化自动更新（仅生产环境）
+  if (!isDev) {
+    setupAutoUpdater();
+  }
+
   // 检查依赖
   const dependenciesOk = await showDependencyDialog();
   if (!dependenciesOk) {
@@ -630,6 +773,16 @@ app.whenReady().then(async () => {
 
   startServer();
   createWindow();
+
+  // 延迟检查更新（启动后 3 秒）
+  if (!isDev) {
+    setTimeout(() => {
+      writeLog('[Electron] 开始检查更新...');
+      autoUpdater.checkForUpdates().catch(err => {
+        writeLog(`[AutoUpdater] 检查更新失败: ${err.message}`);
+      });
+    }, 3000);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

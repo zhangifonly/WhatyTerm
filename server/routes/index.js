@@ -7,6 +7,7 @@ import dependencyManager from '../services/DependencyManager.js';
 import subscriptionService from '../services/SubscriptionService.js';
 import cloudflareTunnel from '../services/CloudflareTunnel.js';
 import frpTunnel from '../services/FrpTunnel.js';
+import updateService from '../services/UpdateService.js';
 import Database from 'better-sqlite3';
 import path from 'path';
 import os from 'os';
@@ -2165,6 +2166,58 @@ export function setupRoutes(app, getSessionManager, historyLogger, io = null, ai
     try {
       const status = subscriptionService.getStatus();
       res.json({ machineId: status.machineId });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // ==================== 应用更新 API ====================
+
+  /**
+   * 检查更新
+   * GET /api/update/check
+   * @query force - 是否强制检查（忽略缓存）
+   */
+  app.get('/api/update/check', async (req, res) => {
+    try {
+      const force = req.query.force === 'true';
+      const result = await updateService.checkForUpdate(force);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 获取当前版本
+   * GET /api/update/version
+   */
+  app.get('/api/update/version', (req, res) => {
+    try {
+      const version = updateService.getCurrentVersion();
+      res.json({ version });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  /**
+   * 获取下载链接
+   * GET /api/update/download
+   * @query platform - 平台 (darwin, win32, linux)
+   * @query arch - 架构 (x64, arm64)
+   */
+  app.get('/api/update/download', (req, res) => {
+    try {
+      const platform = req.query.platform || process.platform;
+      const arch = req.query.arch || process.arch;
+      const url = updateService.getDownloadUrl(platform, arch);
+
+      if (url) {
+        res.json({ url });
+      } else {
+        res.status(404).json({ error: '未找到对应平台的下载链接' });
+      }
     } catch (err) {
       res.status(500).json({ error: err.message });
     }

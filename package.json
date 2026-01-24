@@ -27,13 +27,15 @@
     "electron:build": "npm run build:release && electron-builder",
     "electron:build:mac": "npm run build:release && electron-builder --mac",
     "electron:build:win": "npm run build:release && electron-builder --win",
-    "electron:build:all": "npm run build:release && electron-builder --mac --win"
+    "electron:build:all": "npm run build:release && electron-builder --mac --win",
+    "generate-update-files": "node scripts/generate-update-files.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
     "@emotion/is-prop-valid": "^1.4.0",
     "anser": "^2.3.3",
     "better-sqlite3": "^12.5.0",
+    "electron-updater": "^6.7.3",
     "express": "^4.21.1",
     "express-session": "^1.18.2",
     "node-pty": "^1.1.0",
