@@ -20,7 +20,7 @@ const UPDATE_CONFIG = {
   githubOwner: 'zhangifonly',
   githubRepo: 'WhatyTerm',
   // 自托管更新服务器
-  updateServerUrl: 'https://ai.whaty.org/whatyterm',
+  updateServerUrl: 'https://term.whaty.org',
   // 检查间隔（毫秒）
   checkInterval: 3600000, // 1小时
 };

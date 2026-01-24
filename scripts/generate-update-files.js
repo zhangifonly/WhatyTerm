@@ -240,7 +240,7 @@ function main() {
   generateLatestJson(files);
 
   console.log('\n完成！请将 release 目录下的文件上传到更新服务器。');
-  console.log('更新服务器 URL: https://ai.whaty.org/whatyterm/releases/');
+  console.log('更新服务器 URL: https://term.whaty.org/releases/');
 }
 
 main();
