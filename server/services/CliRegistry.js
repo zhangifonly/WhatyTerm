@@ -82,6 +82,23 @@ const DEFAULT_CLI_TOOLS = {
     builtin: true,
     enabled: true,
     createdAt: '2025-01-01T00:00:00.000Z'
+  },
+  opencode: {
+    id: 'opencode',
+    name: 'OpenCode',
+    processNames: ['opencode', 'opencode-cli'],
+    terminalPatterns: {
+      running: ['esc to interrupt', '\\(\\d+m\\s*\\d+s\\)', '\\[build\\].*thinking', '\\[plan\\].*thinking', 'Thinking'],
+      idle: ['^>\\s*$', '@general', '\\[build\\]\\s*$', '\\[plan\\]\\s*$', '\\? for shortcuts'],
+      confirm: ['Do you want to', '1\\.\\s*Yes', 'approve this action']
+    },
+    commands: {
+      start: 'opencode',
+      quit: '/quit'
+    },
+    builtin: true,
+    enabled: true,
+    createdAt: '2025-01-01T00:00:00.000Z'
   }
 };
 
