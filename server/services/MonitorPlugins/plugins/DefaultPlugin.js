@@ -155,32 +155,8 @@ class DefaultPlugin extends BasePlugin {
     // 清除 ANSI 转义序列的版本，用于文本匹配
     const cleanLastLines = lastLines.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1B\][^\x07]*\x07/g, '');
 
-    // 优先检测运行中状态（Claude Code / OpenCode 正在执行操作）
-    // 这必须在 accept_edits 之前检测，因为 accept_edits 可能在运行中也存在
-    // OpenCode 特有的运行标志：[build] thinking, [plan] thinking
-    if (/Compacting|Running|Garnishing|ctrl\+c to interrupt|esc to interrupt/i.test(lastLines) ||
-        /\[build\].*thinking|\[plan\].*thinking/i.test(lastLines) ||
-        /\u280b|\u2819|\u2839|\u2838|\u283c|\u2834|\u2826|\u2827|\u2807|\u280f|\u28fe|\u28fd|\u28fb|\u28bf/.test(lastLines)) {
-      return 'running';
-    }
-
-    // 检测 accept edits 状态（Claude Code 完成任务后等待用户接受编辑）
-    // 只有在不运行时才检测这个状态
-    // 条件：有 accept edits 提示，且有空闲的 > 提示符
-    if (/accept edits on|shift\+tab to cycle/i.test(lastLines)) {
-      // 检查是否有空闲的 > 提示符（没有运行指示）
-      const hasIdlePrompt = /^❯\s*$/m.test(lastLines) || /\n❯\s*$/m.test(lastLines);
-      // 排除有排队消息的情况（说明还在处理中）
-      const hasQueuedMessages = /Press up to edit queued messages/i.test(lastLines);
-
-      if (hasIdlePrompt && !hasQueuedMessages) {
-        return 'accept_edits';
-      }
-      // 如果有排队消息或正在运行，返回运行中状态
-      return 'running';
-    }
-
-    // 检测确认界面（Claude Code 权限确认等）
+    // 【最高优先级】检测确认界面（Claude Code 权限确认等）
+    // 确认界面需要用户交互，必须优先于运行状态检测
     // "Do you want to proceed?" 或 "Do you want to make this edit" 且有选项
     // 使用清理后的文本进行匹配，避免 ANSI 转义序列干扰
     const hasDoYouWantToProceed = /Do you want to proceed\?/i.test(cleanLastLines);
@@ -213,6 +189,41 @@ class DefaultPlugin extends BasePlugin {
         /选择.*[123]|choose.*[123]/i.test(lastLines) ||
         /\(y\/n\)|\[Y\/n\]|\[yes\/no\]/i.test(lastLines)) {
       return 'confirmation';
+    }
+
+    // 检测运行中状态（Claude Code / OpenCode 正在执行操作）
+    // 这必须在 accept_edits 之前检测，因为 accept_edits 可能在运行中也存在
+    // OpenCode 特有的运行标志：[build] thinking, [plan] thinking
+    // 注意：移除了 "Running" 因为它太通用，会匹配 bash 命令输出
+    if (/Compacting|Garnishing|ctrl\+c to interrupt|esc to interrupt/i.test(lastLines) ||
+        /\[build\].*thinking|\[plan\].*thinking/i.test(lastLines) ||
+        /\u280b|\u2819|\u2839|\u2838|\u283c|\u2834|\u2826|\u2827|\u2807|\u280f|\u28fe|\u28fd|\u28fb|\u28bf/.test(lastLines)) {
+      return 'running';
+    }
+
+    // 检测 accept edits 状态（Claude Code 完成任务后等待用户接受编辑）
+    // 只有在不运行时才检测这个状态
+    // 条件：有 accept edits 提示，且有空闲的 > 提示符
+    if (/accept edits on|shift\+tab to cycle/i.test(cleanLastLines)) {
+      // 检查是否有空闲的 > 提示符（没有运行指示）
+      // 使用清理后的文本匹配，避免 ANSI 转义序列干扰
+      // 同时匹配普通 > 和 Unicode ❯
+      const hasIdlePrompt = /^[>❯]\s*$/m.test(cleanLastLines) || /\n[>❯]\s*$/.test(cleanLastLines);
+      // 排除有排队消息的情况（说明还在处理中）
+      const hasQueuedMessages = /Press up to edit queued messages/i.test(cleanLastLines);
+      // 排除正在运行的情况（有 esc to interrupt 提示）
+      const isRunning = /esc to interrupt|ctrl\+c to interrupt/i.test(cleanLastLines);
+
+      if (hasIdlePrompt && !hasQueuedMessages && !isRunning) {
+        return 'accept_edits';
+      }
+      // 如果有排队消息或正在运行，返回运行中状态
+      if (hasQueuedMessages || isRunning) {
+        return 'running';
+      }
+      // 有 accept edits 提示但没有明确的空闲提示符，仍然返回 accept_edits
+      // 因为用户需要处理这个状态
+      return 'accept_edits';
     }
 
     // 检测错误状态（排除代码中的错误处理相关内容）

@@ -1,0 +1,33 @@
+services:
+  subscription:
+    build: .
+    container_name: whatyterm-subscription
+    restart: unless-stopped
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PORT=3100
+      - JWT_SECRET=${JWT_SECRET:-whatyterm-subscription-secret-2025}
+      - LICENSE_SECRET=${LICENSE_SECRET:-whatyterm-license-secret-2025}
+      - ADMIN_KEY=${ADMIN_KEY:-whatyterm-admin-2025}
+      # 支付宝配置
+      - ALIPAY_APP_ID=${ALIPAY_APP_ID}
+      - ALIPAY_PRIVATE_KEY=${ALIPAY_PRIVATE_KEY}
+      - ALIPAY_PUBLIC_KEY=${ALIPAY_PUBLIC_KEY}
+      - ALIPAY_NOTIFY_URL=${ALIPAY_NOTIFY_URL:-https://term.whaty.org/api/payment/alipay/notify}
+      - ALIPAY_RETURN_URL=${ALIPAY_RETURN_URL:-https://term.whaty.org/payment/result}
+      # 微信支付配置
+      - WECHAT_MCHID=${WECHAT_MCHID}
+      - WECHAT_API_KEY=${WECHAT_API_KEY}
+      - WECHAT_SERIAL_NO=${WECHAT_SERIAL_NO}
+      - WECHAT_PRIVATE_KEY=${WECHAT_PRIVATE_KEY}
+      - WECHAT_PLATFORM_CERT=${WECHAT_PLATFORM_CERT}
+      - WECHAT_APP_ID=${WECHAT_APP_ID}
+      - WECHAT_NOTIFY_URL=${WECHAT_NOTIFY_URL:-https://term.whaty.org/api/payment/wechat/notify}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3100/api/plans"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WhatyTerm 订阅</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); min-height: 100vh; }
+    .glass { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
+    .payment-modal { display: none; }
+    .payment-modal.active { display: flex; }
+    .qr-container { animation: pulse 2s infinite; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.8; }
+    }
+  </style>
+</head>
+<body class="text-gray-100">
+  <div id="app" class="container mx-auto px-4 py-8 max-w-4xl">
+    <!-- 头部 -->
+    <header class="flex justify-between items-center mb-12">
+      <div>
+        <h1 class="text-4xl font-bold mb-2 bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
+          WhatyTerm
+        </h1>
+        <p class="text-gray-400">AI 智能终端管理工具 - 订阅服务</p>
+      </div>
+      <a href="/user.html" class="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-medium">
+        登录 / 用户中心
+      </a>
+    </header>
+
+    <!-- 机器 ID 显示 -->
+    <div id="machine-info" class="glass rounded-xl p-6 mb-8 hidden">
+      <h2 class="text-lg font-semibold mb-3">您的机器 ID</h2>
+      <div class="flex items-center gap-3">
+        <code id="machine-id" class="flex-1 bg-gray-800 px-4 py-2 rounded font-mono text-sm"></code>
+        <button onclick="copyMachineId()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-sm">
+          复制
+        </button>
+      </div>
+      <p class="text-gray-500 text-sm mt-2">购买订阅后，请使用激活码在 WhatyTerm 中激活</p>
+    </div>
+
+    <!-- 订阅计划 -->
+    <section class="mb-12">
+      <h2 class="text-2xl font-bold mb-6 text-center">选择订阅计划</h2>
+      <div id="plans" class="grid md:grid-cols-3 gap-6">
+        <!-- 计划卡片将通过 JS 动态生成 -->
+      </div>
+    </section>
+
+    <!-- 激活说明 -->
+    <section class="glass rounded-xl p-6 mb-8">
+      <h2 class="text-xl font-semibold mb-4">如何激活？</h2>
+      <div class="space-y-4 text-gray-400">
+        <div class="flex items-start gap-3">
+          <span class="flex-shrink-0 w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center text-white font-bold">1</span>
+          <div>
+            <p class="font-medium text-white">注册/登录账户</p>
+            <p class="text-sm">前往 <a href="/user.html" class="text-blue-400 hover:underline">用户中心</a> 注册或登录您的账户</p>
+          </div>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="flex-shrink-0 w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center text-white font-bold">2</span>
+          <div>
+            <p class="font-medium text-white">兑换激活码</p>
+            <p class="text-sm">在用户中心输入激活码，绑定到您的账户</p>
+          </div>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="flex-shrink-0 w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center text-white font-bold">3</span>
+          <div>
+            <p class="font-medium text-white">在客户端激活</p>
+            <p class="text-sm">在 WhatyTerm 中使用邮箱和密码登录激活</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 功能对比 -->
+    <section class="glass rounded-xl p-6 mb-8">
+      <h2 class="text-xl font-semibold mb-4">功能对比</h2>
+      <table class="w-full">
+        <thead>
+          <tr class="border-b border-gray-700">
+            <th class="text-left py-3">功能</th>
+            <th class="text-center py-3">免费版</th>
+            <th class="text-center py-3">订阅版</th>
+          </tr>
+        </thead>
+        <tbody class="text-gray-400">
+          <tr class="border-b border-gray-800">
+            <td class="py-3">基础终端管理</td>
+            <td class="text-center text-green-400">✓</td>
+            <td class="text-center text-green-400">✓</td>
+          </tr>
+          <tr class="border-b border-gray-800">
+            <td class="py-3">默认监控策略</td>
+            <td class="text-center text-green-400">✓</td>
+            <td class="text-center text-green-400">✓</td>
+          </tr>
+          <tr class="border-b border-gray-800">
+            <td class="py-3">15+ 高级监控策略</td>
+            <td class="text-center text-red-400">✗</td>
+            <td class="text-center text-green-400">✓</td>
+          </tr>
+          <tr class="border-b border-gray-800">
+            <td class="py-3">论文写作策略</td>
+            <td class="text-center text-red-400">✗</td>
+            <td class="text-center text-green-400">✓</td>
+          </tr>
+          <tr class="border-b border-gray-800">
+            <td class="py-3">App 开发策略</td>
+            <td class="text-center text-red-400">✗</td>
+            <td class="text-center text-green-400">✓</td>
+          </tr>
+          <tr class="border-b border-gray-800">
+            <td class="py-3">数据分析策略</td>
+            <td class="text-center text-red-400">✗</td>
+            <td class="text-center text-green-400">✓</td>
+          </tr>
+          <tr class="border-b border-gray-800">
+            <td class="py-3">安全审计策略</td>
+            <td class="text-center text-red-400">✗</td>
+            <td class="text-center text-green-400">✓</td>
+          </tr>
+          <tr>
+            <td class="py-3">技术支持</td>
+            <td class="text-center">社区</td>
+            <td class="text-center text-green-400">优先</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 常见问题 -->
+    <section class="glass rounded-xl p-6">
+      <h2 class="text-xl font-semibold mb-4">常见问题</h2>
+      <div class="space-y-4">
+        <div>
+          <h3 class="font-medium text-blue-400">如何获取激活码？</h3>
+          <p class="text-gray-400 text-sm mt-1">选择订阅计划并完成支付后，激活码将显示在支付成功页面。</p>
+        </div>
+        <div>
+          <h3 class="font-medium text-blue-400">可以在多少台设备上使用？</h3>
+          <p class="text-gray-400 text-sm mt-1">个人版支持 1 台设备，专业版支持 5 台，企业版不限设备数。</p>
+        </div>
+        <div>
+          <h3 class="font-medium text-blue-400">订阅到期后会怎样？</h3>
+          <p class="text-gray-400 text-sm mt-1">到期后高级监控策略将不可用，但基础功能仍可正常使用。</p>
+        </div>
+        <div>
+          <h3 class="font-medium text-blue-400">如何更换设备？</h3>
+          <p class="text-gray-400 text-sm mt-1">登录 <a href="/user.html" class="text-blue-400 hover:underline">用户中心</a>，在设备管理中解绑旧设备，然后在新设备上使用邮箱密码重新激活。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 页脚 -->
+    <footer class="text-center text-gray-500 text-sm mt-12">
+      <p>© 2025 WhatyTerm. All rights reserved.</p>
+      <p class="mt-2">
+        <a href="mailto:support@whatyterm.com" class="text-blue-400 hover:underline">support@whatyterm.com</a>
+      </p>
+    </footer>
+  </div>
+
+  <!-- 支付弹窗 -->
+  <div id="payment-modal" class="payment-modal fixed inset-0 bg-black/70 items-center justify-center z-50">
+    <div class="glass rounded-2xl p-8 max-w-md w-full mx-4">
+      <div class="flex justify-between items-center mb-6">
+        <h3 class="text-xl font-bold">完成支付</h3>
+        <button onclick="closePaymentModal()" class="text-gray-400 hover:text-white text-2xl">&times;</button>
+      </div>
+
+      <!-- 订单信息 -->
+      <div id="order-info" class="mb-6 p-4 bg-gray-800/50 rounded-lg">
+        <div class="flex justify-between mb-2">
+          <span class="text-gray-400">订阅计划</span>
+          <span id="order-plan-name" class="font-medium"></span>
+        </div>
+        <div class="flex justify-between mb-2">
+          <span class="text-gray-400">订阅周期</span>
+          <span id="order-period" class="font-medium"></span>
+        </div>
+        <div class="flex justify-between text-lg">
+          <span class="text-gray-400">支付金额</span>
+          <span id="order-amount" class="font-bold text-green-400"></span>
+        </div>
+      </div>
+
+      <!-- 支付方式选择 -->
+      <div id="payment-methods" class="mb-6">
+        <p class="text-gray-400 text-sm mb-3">选择支付方式</p>
+        <div class="grid grid-cols-2 gap-3">
+          <button id="btn-alipay" onclick="selectPaymentMethod('alipay')"
+            class="payment-method-btn p-4 rounded-lg border-2 border-gray-700 hover:border-blue-500 transition-colors">
+            <div class="text-2xl mb-1">💳</div>
+            <div class="text-sm">支付宝</div>
+          </button>
+          <button id="btn-wechat" onclick="selectPaymentMethod('wechat')"
+            class="payment-method-btn p-4 rounded-lg border-2 border-gray-700 hover:border-green-500 transition-colors">
+            <div class="text-2xl mb-1">💬</div>
+            <div class="text-sm">微信支付</div>
+          </button>
+        </div>
+      </div>
+
+      <!-- 二维码区域 -->
+      <div id="qr-section" class="hidden">
+        <div class="text-center mb-4">
+          <p class="text-gray-400 text-sm mb-2">请使用 <span id="payment-method-name"></span> 扫描二维码</p>
+          <div class="qr-container inline-block p-4 bg-white rounded-lg">
+            <img id="qr-code-img" src="" alt="支付二维码" class="w-48 h-48">
+          </div>
+        </div>
+        <div class="text-center text-gray-400 text-sm">
+          <p>订单号: <span id="display-order-no"></span></p>
+          <p class="mt-1">支付有效期: <span id="expire-countdown"></span></p>
+        </div>
+        <div id="payment-status" class="mt-4 text-center hidden">
+          <div class="inline-flex items-center gap-2 px-4 py-2 bg-yellow-900/50 text-yellow-400 rounded-lg">
+            <svg class="animate-spin h-4 w-4" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <span>等待支付...</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 支付成功 -->
+      <div id="payment-success" class="hidden text-center">
+        <div class="text-6xl mb-4">✅</div>
+        <h4 class="text-xl font-bold text-green-400 mb-2">支付成功！</h4>
+        <p class="text-gray-400 mb-4">您的许可证密钥：</p>
+        <div class="p-4 bg-gray-800 rounded-lg mb-4">
+          <code id="license-key" class="text-lg font-mono text-green-400 break-all"></code>
+        </div>
+        <button onclick="copyLicenseKey()" class="px-6 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg">
+          复制许可证密钥
+        </button>
+        <p class="text-gray-500 text-sm mt-4">请在 WhatyTerm 应用中使用此密钥激活订阅</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // 状态变量
+    let currentPlan = null;
+    let currentPeriod = 'yearly';
+    let currentOrderNo = null;
+    let statusCheckInterval = null;
+    let countdownInterval = null;
+    let expireTime = null;
+
+    // 获取 URL 参数中的机器 ID
+    const urlParams = new URLSearchParams(window.location.search);
+    const machineId = urlParams.get('machineId');
+
+    if (machineId) {
+      document.getElementById('machine-info').classList.remove('hidden');
+      document.getElementById('machine-id').textContent = machineId;
+    }
+
+    // 复制机器 ID
+    function copyMachineId() {
+      navigator.clipboard.writeText(machineId);
+      alert('机器 ID 已复制');
+    }
+
+    // 加载订阅计划
+    async function loadPlans() {
+      try {
+        const res = await fetch('/api/plans');
+        const plans = await res.json();
+
+        const container = document.getElementById('plans');
+        container.innerHTML = plans.map((plan, index) => `
+          <div class="glass rounded-xl p-6 ${index === 1 ? 'ring-2 ring-blue-500' : ''}">
+            ${index === 1 ? '<div class="text-blue-400 text-sm font-medium mb-2">推荐</div>' : ''}
+            <h3 class="text-xl font-bold mb-2">${plan.name}</h3>
+            <p class="text-gray-400 text-sm mb-4">${plan.description}</p>
+            <div class="mb-4">
+              <span class="text-3xl font-bold">¥${(plan.price_monthly / 100).toFixed(0)}</span>
+              <span class="text-gray-400">/月</span>
+            </div>
+            <div class="text-gray-400 text-sm mb-4">
+              或 ¥${(plan.price_yearly / 100).toFixed(0)}/年 (省 ${Math.round((1 - plan.price_yearly / (plan.price_monthly * 12)) * 100)}%)
+            </div>
+            <ul class="text-sm text-gray-400 mb-6 space-y-2">
+              <li>✓ ${plan.max_devices === 999 ? '不限' : plan.max_devices} 台设备</li>
+              <li>✓ 所有高级监控策略</li>
+              <li>✓ ${plan.id === 'enterprise' ? '专属' : plan.id === 'professional' ? '优先' : '邮件'}技术支持</li>
+            </ul>
+            <div class="space-y-2">
+              <button onclick="selectPlan('${plan.id}', 'yearly', ${plan.price_yearly}, '${plan.name}')"
+                class="w-full py-3 ${index === 1 ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-700 hover:bg-gray-600'} rounded-lg font-medium">
+                年付 ¥${(plan.price_yearly / 100).toFixed(0)}
+              </button>
+              <button onclick="selectPlan('${plan.id}', 'monthly', ${plan.price_monthly}, '${plan.name}')"
+                class="w-full py-2 text-sm text-gray-400 hover:text-white">
+                月付 ¥${(plan.price_monthly / 100).toFixed(0)}
+              </button>
+            </div>
+          </div>
+        `).join('');
+      } catch (err) {
+        console.error('加载计划失败:', err);
+      }
+    }
+
+    // 选择计划
+    function selectPlan(planId, period, amount, planName) {
+      currentPlan = planId;
+      currentPeriod = period;
+
+      // 更新订单信息
+      document.getElementById('order-plan-name').textContent = planName;
+      document.getElementById('order-period').textContent = period === 'monthly' ? '月付' : '年付';
+      document.getElementById('order-amount').textContent = `¥${(amount / 100).toFixed(2)}`;
+
+      // 重置支付状态
+      document.getElementById('qr-section').classList.add('hidden');
+      document.getElementById('payment-success').classList.add('hidden');
+      document.getElementById('payment-methods').classList.remove('hidden');
+      document.querySelectorAll('.payment-method-btn').forEach(btn => {
+        btn.classList.remove('border-blue-500', 'border-green-500');
+        btn.classList.add('border-gray-700');
+      });
+
+      // 显示弹窗
+      document.getElementById('payment-modal').classList.add('active');
+
+      // 加载可用支付方式
+      loadPaymentMethods();
+    }
+
+    // 加载支付方式
+    async function loadPaymentMethods() {
+      try {
+        const res = await fetch('/api/payment/methods');
+        const methods = await res.json();
+
+        document.getElementById('btn-alipay').style.display = methods.find(m => m.id === 'alipay') ? 'block' : 'none';
+        document.getElementById('btn-wechat').style.display = methods.find(m => m.id === 'wechat') ? 'block' : 'none';
+
+        if (methods.length === 0) {
+          document.getElementById('payment-methods').innerHTML = `
+            <div class="text-center text-yellow-400 p-4">
+              <p>支付功能暂未配置</p>
+              <p class="text-sm text-gray-400 mt-2">请联系 support@whatyterm.com 获取激活码</p>
+            </div>
+          `;
+        }
+      } catch (err) {
+        console.error('加载支付方式失败:', err);
+      }
+    }
+
+    // 选择支付方式
+    async function selectPaymentMethod(method) {
+      // 更新按钮样式
+      document.querySelectorAll('.payment-method-btn').forEach(btn => {
+        btn.classList.remove('border-blue-500', 'border-green-500');
+        btn.classList.add('border-gray-700');
+      });
+
+      const btnId = method === 'alipay' ? 'btn-alipay' : 'btn-wechat';
+      const borderColor = method === 'alipay' ? 'border-blue-500' : 'border-green-500';
+      document.getElementById(btnId).classList.remove('border-gray-700');
+      document.getElementById(btnId).classList.add(borderColor);
+
+      // 创建订单
+      try {
+        const res = await fetch('/api/payment/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            planId: currentPlan,
+            period: currentPeriod,
+            paymentMethod: method,
+            machineId: machineId || null
+          })
+        });
+
+        const result = await res.json();
+
+        if (!result.success) {
+          alert(result.error || '创建订单失败');
+          return;
+        }
+
+        currentOrderNo = result.orderNo;
+        expireTime = Date.now() + (result.expireMinutes * 60 * 1000);
+
+        // 显示二维码
+        document.getElementById('payment-method-name').textContent = method === 'alipay' ? '支付宝' : '微信';
+        document.getElementById('qr-code-img').src = result.qrCodeImage;
+        document.getElementById('display-order-no').textContent = result.orderNo;
+        document.getElementById('qr-section').classList.remove('hidden');
+        document.getElementById('payment-status').classList.remove('hidden');
+
+        // 开始倒计时
+        startCountdown();
+
+        // 开始轮询支付状态
+        startStatusCheck();
+      } catch (err) {
+        console.error('创建订单失败:', err);
+        alert('创建订单失败，请稍后重试');
+      }
+    }
+
+    // 开始倒计时
+    function startCountdown() {
+      if (countdownInterval) clearInterval(countdownInterval);
+
+      function updateCountdown() {
+        const remaining = Math.max(0, expireTime - Date.now());
+        const minutes = Math.floor(remaining / 60000);
+        const seconds = Math.floor((remaining % 60000) / 1000);
+        document.getElementById('expire-countdown').textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+
+        if (remaining <= 0) {
+          clearInterval(countdownInterval);
+          clearInterval(statusCheckInterval);
+          alert('订单已过期，请重新下单');
+          closePaymentModal();
+        }
+      }
+
+      updateCountdown();
+      countdownInterval = setInterval(updateCountdown, 1000);
+    }
+
+    // 开始轮询支付状态
+    function startStatusCheck() {
+      if (statusCheckInterval) clearInterval(statusCheckInterval);
+
+      statusCheckInterval = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/payment/status/${currentOrderNo}`);
+          const result = await res.json();
+
+          if (result.status === 'paid') {
+            clearInterval(statusCheckInterval);
+            clearInterval(countdownInterval);
+            showPaymentSuccess(result.license);
+          }
+        } catch (err) {
+          console.error('查询状态失败:', err);
+        }
+      }, 3000);
+    }
+
+    // 显示支付成功
+    function showPaymentSuccess(license) {
+      document.getElementById('qr-section').classList.add('hidden');
+      document.getElementById('payment-methods').classList.add('hidden');
+      document.getElementById('payment-success').classList.remove('hidden');
+      document.getElementById('license-key').textContent = license.key;
+    }
+
+    // 复制许可证密钥
+    function copyLicenseKey() {
+      const key = document.getElementById('license-key').textContent;
+      navigator.clipboard.writeText(key);
+      alert('许可证密钥已复制');
+    }
+
+    // 关闭支付弹窗
+    function closePaymentModal() {
+      document.getElementById('payment-modal').classList.remove('active');
+      if (statusCheckInterval) clearInterval(statusCheckInterval);
+      if (countdownInterval) clearInterval(countdownInterval);
+      currentOrderNo = null;
+    }
+
+    // 初始化
+    loadPlans();
+  </script>
+</body>
+</html>
