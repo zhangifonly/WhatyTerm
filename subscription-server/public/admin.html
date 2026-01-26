@@ -1,0 +1,1061 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>管理后台 - WhatyTerm</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); min-height: 100vh; }
+    .glass { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
+  </style>
+</head>
+<body class="text-gray-100">
+  <!-- 登录界面 -->
+  <div id="login-page" class="min-h-screen flex items-center justify-center">
+    <div class="glass rounded-2xl p-8 w-full max-w-md">
+      <h1 class="text-2xl font-bold text-center mb-6">管理后台</h1>
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm text-gray-400 mb-2">管理密钥</label>
+          <input type="password" id="admin-key" placeholder="输入管理密钥"
+            class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500">
+        </div>
+        <button onclick="login()" class="w-full py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-medium">
+          登录
+        </button>
+        <p id="login-error" class="text-red-400 text-sm text-center hidden"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 管理界面 -->
+  <div id="admin-page" class="hidden">
+    <nav class="glass border-b border-gray-700">
+      <div class="container mx-auto px-4 py-4 flex justify-between items-center">
+        <h1 class="text-xl font-bold">WhatyTerm 管理后台</h1>
+        <button onclick="logout()" class="text-gray-400 hover:text-white">退出</button>
+      </div>
+    </nav>
+
+    <div class="container mx-auto px-4 py-8 max-w-4xl">
+      <!-- 统计信息 -->
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+        <div class="glass rounded-xl p-4 text-center">
+          <div id="stat-users" class="text-2xl font-bold text-blue-400">-</div>
+          <div class="text-gray-400 text-sm">用户数</div>
+        </div>
+        <div class="glass rounded-xl p-4 text-center">
+          <div id="stat-licenses" class="text-2xl font-bold text-green-400">-</div>
+          <div class="text-gray-400 text-sm">许可证</div>
+        </div>
+        <div class="glass rounded-xl p-4 text-center">
+          <div id="stat-activations" class="text-2xl font-bold text-purple-400">-</div>
+          <div class="text-gray-400 text-sm">激活设备</div>
+        </div>
+        <div class="glass rounded-xl p-4 text-center">
+          <div id="stat-codes" class="text-2xl font-bold text-yellow-400">-</div>
+          <div class="text-gray-400 text-sm">激活码</div>
+        </div>
+      </div>
+
+      <!-- 标签页 -->
+      <div class="flex flex-wrap gap-2 mb-6">
+        <button onclick="showTab('payment')" class="tab-btn px-4 py-2 rounded-lg bg-blue-600" data-tab="payment">支付配置</button>
+        <button onclick="showTab('codes')" class="tab-btn px-4 py-2 rounded-lg bg-gray-700" data-tab="codes">激活码</button>
+        <button onclick="showTab('licenses')" class="tab-btn px-4 py-2 rounded-lg bg-gray-700" data-tab="licenses">许可证</button>
+        <button onclick="showTab('users')" class="tab-btn px-4 py-2 rounded-lg bg-gray-700" data-tab="users">用户</button>
+        <button onclick="showTab('devices')" class="tab-btn px-4 py-2 rounded-lg bg-gray-700" data-tab="devices">设备</button>
+        <button onclick="showTab('orders')" class="tab-btn px-4 py-2 rounded-lg bg-gray-700" data-tab="orders">订单</button>
+      </div>
+
+      <!-- 支付配置 -->
+      <div id="tab-payment" class="tab-content">
+        <div class="glass rounded-xl p-6 mb-6">
+          <h2 class="text-xl font-bold mb-4">支付宝配置</h2>
+          <div id="alipay-status" class="mb-4 p-3 rounded-lg bg-red-900/30 text-red-400">
+            <span class="font-medium">状态：</span>未配置
+          </div>
+          <div class="space-y-4">
+            <div>
+              <label class="block text-sm text-gray-400 mb-2">应用 ID (APPID)</label>
+              <input type="text" id="alipay-app-id" placeholder="如：2021000000000000"
+                class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500">
+            </div>
+            <div>
+              <label class="block text-sm text-gray-400 mb-2">应用私钥 (RSA2)</label>
+              <textarea id="alipay-private-key" rows="4" placeholder="粘贴应用私钥内容（不含头尾）"
+                class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500 font-mono text-sm"></textarea>
+            </div>
+            <div>
+              <label class="block text-sm text-gray-400 mb-2">支付宝公钥</label>
+              <textarea id="alipay-public-key" rows="4" placeholder="粘贴支付宝公钥内容"
+                class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500 font-mono text-sm"></textarea>
+            </div>
+            <button onclick="saveAlipayConfig()" class="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-medium">
+              保存支付宝配置
+            </button>
+          </div>
+        </div>
+
+        <div class="glass rounded-xl p-6">
+          <h2 class="text-xl font-bold mb-4">微信支付配置</h2>
+          <div id="wechat-status" class="mb-4 p-3 rounded-lg bg-red-900/30 text-red-400">
+            <span class="font-medium">状态：</span>未配置
+          </div>
+          <div class="space-y-4">
+            <div class="grid grid-cols-2 gap-4">
+              <div>
+                <label class="block text-sm text-gray-400 mb-2">商户号 (MCHID)</label>
+                <input type="text" id="wechat-mchid" placeholder="如：1600000000"
+                  class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500">
+              </div>
+              <div>
+                <label class="block text-sm text-gray-400 mb-2">公众号/小程序 AppID</label>
+                <input type="text" id="wechat-app-id" placeholder="如：wx0000000000000000"
+                  class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500">
+              </div>
+            </div>
+            <div>
+              <label class="block text-sm text-gray-400 mb-2">API v3 密钥</label>
+              <input type="password" id="wechat-api-key" placeholder="32位 API v3 密钥"
+                class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500">
+            </div>
+            <div>
+              <label class="block text-sm text-gray-400 mb-2">商户证书序列号</label>
+              <input type="text" id="wechat-serial-no" placeholder="证书序列号"
+                class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500">
+            </div>
+            <div>
+              <label class="block text-sm text-gray-400 mb-2">商户私钥 (PEM 格式)</label>
+              <textarea id="wechat-private-key" rows="6" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"
+                class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500 font-mono text-sm"></textarea>
+            </div>
+            <button onclick="saveWechatConfig()" class="px-6 py-3 bg-green-600 hover:bg-green-700 rounded-lg font-medium">
+              保存微信支付配置
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 激活码管理 -->
+      <div id="tab-codes" class="tab-content hidden">
+        <div class="glass rounded-xl p-6 mb-6">
+          <h2 class="text-xl font-bold mb-4">生成激活码</h2>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+            <div>
+              <label class="block text-sm text-gray-400 mb-2">订阅计划</label>
+              <select id="code-plan" class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg">
+                <option value="personal">个人版</option>
+                <option value="professional">专业版</option>
+                <option value="enterprise">企业版</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-sm text-gray-400 mb-2">有效天数</label>
+              <input type="number" id="code-days" value="365" min="1"
+                class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg">
+            </div>
+            <div>
+              <label class="block text-sm text-gray-400 mb-2">生成数量</label>
+              <input type="number" id="code-count" value="1" min="1" max="100"
+                class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg">
+            </div>
+            <div>
+              <label class="block text-sm text-gray-400 mb-2">最大使用次数</label>
+              <input type="number" id="code-max-uses" value="1" min="1"
+                class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg">
+            </div>
+          </div>
+          <button onclick="generateCodes()" class="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-medium">
+            生成激活码
+          </button>
+          <div id="generated-codes" class="mt-4 hidden">
+            <label class="block text-sm text-gray-400 mb-2">生成的激活码</label>
+            <textarea id="codes-output" rows="4" readonly
+              class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg font-mono text-sm text-green-400"></textarea>
+            <button onclick="copyCodes()" class="mt-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm">
+              复制全部
+            </button>
+          </div>
+        </div>
+
+        <div class="glass rounded-xl p-6">
+          <div class="flex flex-wrap justify-between items-center mb-4 gap-4">
+            <h2 class="text-xl font-bold">激活码列表</h2>
+            <div class="flex gap-2">
+              <input type="text" id="codes-search" placeholder="搜索激活码..." onkeyup="loadCodes()"
+                class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm w-40">
+              <select id="codes-filter" onchange="loadCodes()" class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm">
+                <option value="">全部</option>
+                <option value="unused">未使用</option>
+                <option value="used">已使用</option>
+              </select>
+            </div>
+          </div>
+          <div id="codes-list" class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-gray-700">
+                  <th class="text-left py-3 px-2">激活码</th>
+                  <th class="text-left py-3 px-2">计划</th>
+                  <th class="text-left py-3 px-2">天数</th>
+                  <th class="text-left py-3 px-2">使用</th>
+                  <th class="text-left py-3 px-2">创建时间</th>
+                  <th class="text-left py-3 px-2">操作</th>
+                </tr>
+              </thead>
+              <tbody id="codes-tbody"></tbody>
+            </table>
+          </div>
+          <div id="codes-pagination" class="flex justify-center gap-2 mt-4"></div>
+        </div>
+      </div>
+
+      <!-- 许可证列表 -->
+      <div id="tab-licenses" class="tab-content hidden">
+        <div class="glass rounded-xl p-6">
+          <div class="flex flex-wrap justify-between items-center mb-4 gap-4">
+            <h2 class="text-xl font-bold">许可证列表</h2>
+            <div class="flex gap-2">
+              <input type="text" id="licenses-search" placeholder="搜索密钥/邮箱..." onkeyup="loadLicenses()"
+                class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm w-48">
+              <select id="licenses-filter" onchange="loadLicenses()" class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm">
+                <option value="">全部</option>
+                <option value="active">有效</option>
+                <option value="expired">已过期</option>
+                <option value="disabled">已禁用</option>
+              </select>
+            </div>
+          </div>
+          <div id="licenses-list" class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-gray-700">
+                  <th class="text-left py-3 px-2">许可证密钥</th>
+                  <th class="text-left py-3 px-2">用户</th>
+                  <th class="text-left py-3 px-2">计划</th>
+                  <th class="text-left py-3 px-2">设备</th>
+                  <th class="text-left py-3 px-2">状态</th>
+                  <th class="text-left py-3 px-2">到期时间</th>
+                  <th class="text-left py-3 px-2">操作</th>
+                </tr>
+              </thead>
+              <tbody id="licenses-tbody"></tbody>
+            </table>
+          </div>
+          <div id="licenses-pagination" class="flex justify-center gap-2 mt-4"></div>
+        </div>
+      </div>
+
+      <!-- 用户管理 -->
+      <div id="tab-users" class="tab-content hidden">
+        <div class="glass rounded-xl p-6">
+          <div class="flex flex-wrap justify-between items-center mb-4 gap-4">
+            <h2 class="text-xl font-bold">用户列表</h2>
+            <div class="flex gap-2">
+              <input type="text" id="users-search" placeholder="搜索邮箱/名称..." onkeyup="loadUsers()"
+                class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm w-48">
+            </div>
+          </div>
+          <div id="users-list" class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-gray-700">
+                  <th class="text-left py-3 px-2">邮箱</th>
+                  <th class="text-left py-3 px-2">名称</th>
+                  <th class="text-left py-3 px-2">许可证</th>
+                  <th class="text-left py-3 px-2">设备</th>
+                  <th class="text-left py-3 px-2">注册时间</th>
+                  <th class="text-left py-3 px-2">操作</th>
+                </tr>
+              </thead>
+              <tbody id="users-tbody"></tbody>
+            </table>
+          </div>
+          <div id="users-pagination" class="flex justify-center gap-2 mt-4"></div>
+        </div>
+      </div>
+
+      <!-- 设备管理 -->
+      <div id="tab-devices" class="tab-content hidden">
+        <div class="glass rounded-xl p-6">
+          <div class="flex flex-wrap justify-between items-center mb-4 gap-4">
+            <h2 class="text-xl font-bold">设备列表</h2>
+            <div class="flex gap-2">
+              <input type="text" id="devices-search" placeholder="搜索主机名/邮箱..." onkeyup="loadDevices()"
+                class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm w-48">
+              <select id="devices-filter" onchange="loadDevices()" class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm">
+                <option value="">全部</option>
+                <option value="active">已激活</option>
+                <option value="inactive">已解绑</option>
+              </select>
+            </div>
+          </div>
+          <div id="devices-list" class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-gray-700">
+                  <th class="text-left py-3 px-2">主机名</th>
+                  <th class="text-left py-3 px-2">用户</th>
+                  <th class="text-left py-3 px-2">平台</th>
+                  <th class="text-left py-3 px-2">状态</th>
+                  <th class="text-left py-3 px-2">最后活跃</th>
+                  <th class="text-left py-3 px-2">操作</th>
+                </tr>
+              </thead>
+              <tbody id="devices-tbody"></tbody>
+            </table>
+          </div>
+          <div id="devices-pagination" class="flex justify-center gap-2 mt-4"></div>
+        </div>
+      </div>
+
+      <!-- 订单列表 -->
+      <div id="tab-orders" class="tab-content hidden">
+        <div class="glass rounded-xl p-6">
+          <div class="flex flex-wrap justify-between items-center mb-4 gap-4">
+            <h2 class="text-xl font-bold">订单列表</h2>
+            <div class="flex gap-2">
+              <input type="text" id="orders-search" placeholder="搜索订单号..." onkeyup="loadOrders()"
+                class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm w-40">
+              <select id="orders-filter" onchange="loadOrders()" class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm">
+                <option value="">全部</option>
+                <option value="pending">待支付</option>
+                <option value="paid">已支付</option>
+                <option value="failed">失败</option>
+                <option value="cancelled">已取消</option>
+              </select>
+            </div>
+          </div>
+          <div id="orders-list" class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-gray-700">
+                  <th class="text-left py-3 px-2">订单号</th>
+                  <th class="text-left py-3 px-2">用户</th>
+                  <th class="text-left py-3 px-2">计划</th>
+                  <th class="text-left py-3 px-2">金额</th>
+                  <th class="text-left py-3 px-2">支付方式</th>
+                  <th class="text-left py-3 px-2">状态</th>
+                  <th class="text-left py-3 px-2">创建时间</th>
+                </tr>
+              </thead>
+              <tbody id="orders-tbody"></tbody>
+            </table>
+          </div>
+          <div id="orders-pagination" class="flex justify-center gap-2 mt-4"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 许可证延期弹窗 -->
+  <div id="extend-modal" class="fixed inset-0 bg-black/70 items-center justify-center z-50 hidden">
+    <div class="glass rounded-2xl p-6 max-w-sm w-full mx-4">
+      <h3 class="text-lg font-bold mb-4">许可证延期</h3>
+      <input type="hidden" id="extend-license-id">
+      <div class="mb-4">
+        <label class="block text-sm text-gray-400 mb-2">延期天数</label>
+        <input type="number" id="extend-days" value="30" min="1"
+          class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg">
+      </div>
+      <div class="flex gap-3">
+        <button onclick="closeExtendModal()" class="flex-1 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg">取消</button>
+        <button onclick="confirmExtend()" class="flex-1 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg">确认延期</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 用户详情弹窗 -->
+  <div id="user-detail-modal" class="fixed inset-0 bg-black/70 items-center justify-center z-50 hidden">
+    <div class="glass rounded-2xl p-6 max-w-2xl w-full mx-4 max-h-[80vh] overflow-y-auto">
+      <div class="flex justify-between items-center mb-4">
+        <h3 class="text-lg font-bold">用户详情</h3>
+        <button onclick="closeUserDetailModal()" class="text-gray-400 hover:text-white text-2xl">&times;</button>
+      </div>
+      <div id="user-detail-content"></div>
+    </div>
+  </div>
+
+  <script>
+    let adminKey = localStorage.getItem('adminKey') || '';
+
+    // 检查登录状态
+    if (adminKey) {
+      checkAuth();
+    }
+
+    async function checkAuth() {
+      try {
+        const res = await fetch('/api/admin/stats', {
+          headers: { 'X-Admin-Key': adminKey }
+        });
+        if (res.ok) {
+          showAdminPage();
+        } else {
+          localStorage.removeItem('adminKey');
+          adminKey = '';
+        }
+      } catch (err) {
+        console.error('认证检查失败:', err);
+      }
+    }
+
+    async function login() {
+      const key = document.getElementById('admin-key').value;
+      if (!key) {
+        showLoginError('请输入管理密钥');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/admin/stats', {
+          headers: { 'X-Admin-Key': key }
+        });
+
+        if (res.ok) {
+          adminKey = key;
+          localStorage.setItem('adminKey', key);
+          showAdminPage();
+        } else {
+          showLoginError('密钥错误');
+        }
+      } catch (err) {
+        showLoginError('网络错误');
+      }
+    }
+
+    function showLoginError(msg) {
+      const el = document.getElementById('login-error');
+      el.textContent = msg;
+      el.classList.remove('hidden');
+    }
+
+    function logout() {
+      adminKey = '';
+      localStorage.removeItem('adminKey');
+      document.getElementById('admin-page').classList.add('hidden');
+      document.getElementById('login-page').classList.remove('hidden');
+    }
+
+    function showAdminPage() {
+      document.getElementById('login-page').classList.add('hidden');
+      document.getElementById('admin-page').classList.remove('hidden');
+      loadStats();
+      loadPaymentConfig();
+      loadCodes();
+    }
+
+    function showTab(tab) {
+      document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+      document.querySelectorAll('.tab-btn').forEach(el => {
+        el.classList.remove('bg-blue-600');
+        el.classList.add('bg-gray-700');
+      });
+      document.getElementById(`tab-${tab}`).classList.remove('hidden');
+      document.querySelector(`[data-tab="${tab}"]`).classList.remove('bg-gray-700');
+      document.querySelector(`[data-tab="${tab}"]`).classList.add('bg-blue-600');
+
+      if (tab === 'codes') loadCodes();
+      if (tab === 'licenses') loadLicenses();
+      if (tab === 'users') loadUsers();
+      if (tab === 'devices') loadDevices();
+      if (tab === 'orders') loadOrders();
+    }
+
+    async function loadStats() {
+      try {
+        const res = await fetch('/api/admin/stats', {
+          headers: { 'X-Admin-Key': adminKey }
+        });
+        const stats = await res.json();
+        document.getElementById('stat-users').textContent = stats.totalUsers;
+        document.getElementById('stat-licenses').textContent = stats.activeLicenses;
+        document.getElementById('stat-activations').textContent = stats.totalActivations;
+        document.getElementById('stat-codes').textContent = `${stats.usedCodes}/${stats.totalCodes}`;
+      } catch (err) {
+        console.error('加载统计失败:', err);
+      }
+    }
+
+    async function loadPaymentConfig() {
+      try {
+        const res = await fetch('/api/admin/config/payment', {
+          headers: { 'X-Admin-Key': adminKey }
+        });
+        const config = await res.json();
+
+        // 支付宝状态
+        const alipayStatus = document.getElementById('alipay-status');
+        if (config.alipay.configured) {
+          alipayStatus.className = 'mb-4 p-3 rounded-lg bg-green-900/30 text-green-400';
+          alipayStatus.innerHTML = '<span class="font-medium">状态：</span>已配置 ✓';
+          document.getElementById('alipay-app-id').value = config.alipay.appId || '';
+        } else {
+          alipayStatus.className = 'mb-4 p-3 rounded-lg bg-red-900/30 text-red-400';
+          alipayStatus.innerHTML = '<span class="font-medium">状态：</span>未配置';
+        }
+
+        // 微信支付状态
+        const wechatStatus = document.getElementById('wechat-status');
+        if (config.wechat.configured) {
+          wechatStatus.className = 'mb-4 p-3 rounded-lg bg-green-900/30 text-green-400';
+          wechatStatus.innerHTML = '<span class="font-medium">状态：</span>已配置 ✓';
+          document.getElementById('wechat-mchid').value = config.wechat.mchid || '';
+          document.getElementById('wechat-app-id').value = config.wechat.appId || '';
+        } else {
+          wechatStatus.className = 'mb-4 p-3 rounded-lg bg-red-900/30 text-red-400';
+          wechatStatus.innerHTML = '<span class="font-medium">状态：</span>未配置';
+        }
+      } catch (err) {
+        console.error('加载支付配置失败:', err);
+      }
+    }
+
+    async function saveAlipayConfig() {
+      const config = {
+        appId: document.getElementById('alipay-app-id').value.trim(),
+        privateKey: document.getElementById('alipay-private-key').value.trim(),
+        publicKey: document.getElementById('alipay-public-key').value.trim()
+      };
+
+      if (!config.appId || !config.privateKey || !config.publicKey) {
+        alert('请填写完整的支付宝配置');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/admin/config/alipay', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Admin-Key': adminKey
+          },
+          body: JSON.stringify(config)
+        });
+
+        const result = await res.json();
+        if (result.success) {
+          alert('支付宝配置保存成功');
+          loadPaymentConfig();
+        } else {
+          alert(result.error || '保存失败');
+        }
+      } catch (err) {
+        alert('保存失败: ' + err.message);
+      }
+    }
+
+    async function saveWechatConfig() {
+      const config = {
+        mchid: document.getElementById('wechat-mchid').value.trim(),
+        appId: document.getElementById('wechat-app-id').value.trim(),
+        apiKey: document.getElementById('wechat-api-key').value.trim(),
+        serialNo: document.getElementById('wechat-serial-no').value.trim(),
+        privateKey: document.getElementById('wechat-private-key').value.trim()
+      };
+
+      if (!config.mchid || !config.apiKey || !config.serialNo || !config.privateKey) {
+        alert('请填写完整的微信支付配置');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/admin/config/wechat', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Admin-Key': adminKey
+          },
+          body: JSON.stringify(config)
+        });
+
+        const result = await res.json();
+        if (result.success) {
+          alert('微信支付配置保存成功');
+          loadPaymentConfig();
+        } else {
+          alert(result.error || '保存失败');
+        }
+      } catch (err) {
+        alert('保存失败: ' + err.message);
+      }
+    }
+
+    async function generateCodes() {
+      const planId = document.getElementById('code-plan').value;
+      const durationDays = parseInt(document.getElementById('code-days').value);
+      const count = parseInt(document.getElementById('code-count').value);
+      const maxUses = parseInt(document.getElementById('code-max-uses').value);
+
+      try {
+        const res = await fetch('/api/admin/codes/generate', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Admin-Key': adminKey
+          },
+          body: JSON.stringify({ planId, durationDays, count, maxUses })
+        });
+
+        const result = await res.json();
+        if (result.success) {
+          document.getElementById('codes-output').value = result.codes.join('\n');
+          document.getElementById('generated-codes').classList.remove('hidden');
+          loadCodes();
+          loadStats();
+        } else {
+          alert(result.error || '生成失败');
+        }
+      } catch (err) {
+        alert('生成失败: ' + err.message);
+      }
+    }
+
+    function copyCodes() {
+      const textarea = document.getElementById('codes-output');
+      textarea.select();
+      document.execCommand('copy');
+      alert('已复制到剪贴板');
+    }
+
+    // 分页状态
+    let codesPage = 1, licensesPage = 1, usersPage = 1, devicesPage = 1, ordersPage = 1;
+    const pageSize = 20;
+
+    async function loadCodes(page = 1) {
+      codesPage = page;
+      const search = document.getElementById('codes-search')?.value || '';
+      const status = document.getElementById('codes-filter')?.value || '';
+
+      try {
+        const params = new URLSearchParams({ page, limit: pageSize });
+        if (search) params.append('search', search);
+        if (status) params.append('status', status);
+
+        const res = await fetch(`/api/admin/codes?${params}`, {
+          headers: { 'X-Admin-Key': adminKey }
+        });
+        const result = await res.json();
+        const codes = result.data || result;
+        const pagination = result.pagination;
+
+        const tbody = document.getElementById('codes-tbody');
+        tbody.innerHTML = codes.map(code => `
+          <tr class="border-b border-gray-800">
+            <td class="py-3 px-2 font-mono text-sm">${code.code}</td>
+            <td class="py-3 px-2">${code.plan_name}</td>
+            <td class="py-3 px-2">${code.duration_days}</td>
+            <td class="py-3 px-2">${code.used_count}/${code.max_uses}</td>
+            <td class="py-3 px-2 text-gray-400">${new Date(code.created_at * 1000).toLocaleString()}</td>
+            <td class="py-3 px-2">
+              ${code.used_count === 0 ? `
+                <button onclick="deleteCode('${code.id}')" class="px-2 py-1 text-xs bg-red-600/20 text-red-400 hover:bg-red-600/40 rounded">删除</button>
+              ` : '<span class="text-gray-500 text-xs">已使用</span>'}
+            </td>
+          </tr>
+        `).join('');
+
+        if (pagination) {
+          renderPagination('codes-pagination', pagination, loadCodes);
+        }
+      } catch (err) {
+        console.error('加载激活码失败:', err);
+      }
+    }
+
+    async function deleteCode(id) {
+      if (!confirm('确定要删除此激活码吗？')) return;
+
+      try {
+        const res = await fetch(`/api/admin/codes/${id}`, {
+          method: 'DELETE',
+          headers: { 'X-Admin-Key': adminKey }
+        });
+        const result = await res.json();
+        if (result.success) {
+          loadCodes(codesPage);
+          loadStats();
+        } else {
+          alert(result.error || '删除失败');
+        }
+      } catch (err) {
+        alert('删除失败: ' + err.message);
+      }
+    }
+
+    async function loadLicenses(page = 1) {
+      licensesPage = page;
+      const search = document.getElementById('licenses-search')?.value || '';
+      const status = document.getElementById('licenses-filter')?.value || '';
+
+      try {
+        const params = new URLSearchParams({ page, limit: pageSize });
+        if (search) params.append('search', search);
+        if (status) params.append('status', status);
+
+        const res = await fetch(`/api/admin/licenses?${params}`, {
+          headers: { 'X-Admin-Key': adminKey }
+        });
+        const result = await res.json();
+        const licenses = result.data || result;
+        const pagination = result.pagination;
+
+        const tbody = document.getElementById('licenses-tbody');
+        tbody.innerHTML = licenses.map(license => {
+          const isExpired = license.expires_at < Date.now() / 1000;
+          const isDisabled = license.status === 'disabled';
+          let statusClass, statusText;
+          if (isDisabled) {
+            statusClass = 'text-gray-400';
+            statusText = '已禁用';
+          } else if (isExpired) {
+            statusClass = 'text-red-400';
+            statusText = '已过期';
+          } else {
+            statusClass = 'text-green-400';
+            statusText = '有效';
+          }
+          return `
+            <tr class="border-b border-gray-800">
+              <td class="py-3 px-2 font-mono text-xs">${license.license_key}</td>
+              <td class="py-3 px-2">${license.email}</td>
+              <td class="py-3 px-2">${license.plan_name}</td>
+              <td class="py-3 px-2">${license.active_devices || 0}/${license.max_devices}</td>
+              <td class="py-3 px-2 ${statusClass}">${statusText}</td>
+              <td class="py-3 px-2 text-gray-400">${new Date(license.expires_at * 1000).toLocaleDateString()}</td>
+              <td class="py-3 px-2">
+                <div class="flex gap-1">
+                  <button onclick="showExtendModal('${license.id}')" class="px-2 py-1 text-xs bg-blue-600/20 text-blue-400 hover:bg-blue-600/40 rounded">延期</button>
+                  <button onclick="toggleLicense('${license.id}')" class="px-2 py-1 text-xs ${isDisabled ? 'bg-green-600/20 text-green-400 hover:bg-green-600/40' : 'bg-yellow-600/20 text-yellow-400 hover:bg-yellow-600/40'} rounded">
+                    ${isDisabled ? '启用' : '禁用'}
+                  </button>
+                </div>
+              </td>
+            </tr>
+          `;
+        }).join('');
+
+        if (pagination) {
+          renderPagination('licenses-pagination', pagination, loadLicenses);
+        }
+      } catch (err) {
+        console.error('加载许可证失败:', err);
+      }
+    }
+
+    function showExtendModal(licenseId) {
+      document.getElementById('extend-license-id').value = licenseId;
+      document.getElementById('extend-days').value = 30;
+      document.getElementById('extend-modal').classList.remove('hidden');
+      document.getElementById('extend-modal').classList.add('flex');
+    }
+
+    function closeExtendModal() {
+      document.getElementById('extend-modal').classList.add('hidden');
+      document.getElementById('extend-modal').classList.remove('flex');
+    }
+
+    async function confirmExtend() {
+      const licenseId = document.getElementById('extend-license-id').value;
+      const days = parseInt(document.getElementById('extend-days').value);
+
+      if (!days || days < 1) {
+        alert('请输入有效的天数');
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/admin/licenses/${licenseId}/extend`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Admin-Key': adminKey
+          },
+          body: JSON.stringify({ days })
+        });
+        const result = await res.json();
+        if (result.success) {
+          alert(result.message);
+          closeExtendModal();
+          loadLicenses(licensesPage);
+        } else {
+          alert(result.error || '延期失败');
+        }
+      } catch (err) {
+        alert('延期失败: ' + err.message);
+      }
+    }
+
+    async function toggleLicense(licenseId) {
+      try {
+        const res = await fetch(`/api/admin/licenses/${licenseId}/toggle`, {
+          method: 'POST',
+          headers: { 'X-Admin-Key': adminKey }
+        });
+        const result = await res.json();
+        if (result.success) {
+          loadLicenses(licensesPage);
+        } else {
+          alert(result.error || '操作失败');
+        }
+      } catch (err) {
+        alert('操作失败: ' + err.message);
+      }
+    }
+
+    async function loadOrders(page = 1) {
+      ordersPage = page;
+      const search = document.getElementById('orders-search')?.value || '';
+      const status = document.getElementById('orders-filter')?.value || '';
+
+      try {
+        const params = new URLSearchParams({ page, limit: pageSize });
+        if (search) params.append('search', search);
+        if (status) params.append('status', status);
+
+        const res = await fetch(`/api/admin/orders?${params}`, {
+          headers: { 'X-Admin-Key': adminKey }
+        });
+        const result = await res.json();
+        const orders = result.data || result;
+        const pagination = result.pagination;
+
+        const tbody = document.getElementById('orders-tbody');
+        tbody.innerHTML = orders.map(order => {
+          const statusMap = {
+            pending: '<span class="text-yellow-400">待支付</span>',
+            paid: '<span class="text-green-400">已支付</span>',
+            failed: '<span class="text-red-400">失败</span>',
+            cancelled: '<span class="text-gray-400">已取消</span>'
+          };
+          const methodMap = { alipay: '支付宝', wechat: '微信' };
+          return `
+            <tr class="border-b border-gray-800">
+              <td class="py-3 px-2 font-mono text-xs">${order.payment_id || order.id.slice(0, 8)}</td>
+              <td class="py-3 px-2">${order.email || '-'}</td>
+              <td class="py-3 px-2">${order.plan_name}</td>
+              <td class="py-3 px-2">¥${(order.amount / 100).toFixed(2)}</td>
+              <td class="py-3 px-2">${methodMap[order.payment_method] || '-'}</td>
+              <td class="py-3 px-2">${statusMap[order.status] || order.status}</td>
+              <td class="py-3 px-2 text-gray-400">${new Date(order.created_at * 1000).toLocaleString()}</td>
+            </tr>
+          `;
+        }).join('');
+
+        if (pagination) {
+          renderPagination('orders-pagination', pagination, loadOrders);
+        }
+      } catch (err) {
+        console.error('加载订单失败:', err);
+      }
+    }
+
+    async function loadUsers(page = 1) {
+      usersPage = page;
+      const search = document.getElementById('users-search')?.value || '';
+
+      try {
+        const params = new URLSearchParams({ page, limit: pageSize });
+        if (search) params.append('search', search);
+
+        const res = await fetch(`/api/admin/users?${params}`, {
+          headers: { 'X-Admin-Key': adminKey }
+        });
+        const result = await res.json();
+        const users = result.data || result;
+        const pagination = result.pagination;
+
+        const tbody = document.getElementById('users-tbody');
+        tbody.innerHTML = users.map(user => `
+          <tr class="border-b border-gray-800">
+            <td class="py-3 px-2">${user.email}</td>
+            <td class="py-3 px-2">${user.name || '-'}</td>
+            <td class="py-3 px-2">${user.license_count || 0}</td>
+            <td class="py-3 px-2">${user.device_count || 0}</td>
+            <td class="py-3 px-2 text-gray-400">${new Date(user.created_at * 1000).toLocaleDateString()}</td>
+            <td class="py-3 px-2">
+              <button onclick="showUserDetail('${user.id}')" class="px-2 py-1 text-xs bg-blue-600/20 text-blue-400 hover:bg-blue-600/40 rounded">详情</button>
+            </td>
+          </tr>
+        `).join('');
+
+        if (pagination) {
+          renderPagination('users-pagination', pagination, loadUsers);
+        }
+      } catch (err) {
+        console.error('加载用户失败:', err);
+      }
+    }
+
+    async function showUserDetail(userId) {
+      try {
+        const res = await fetch(`/api/admin/users/${userId}`, {
+          headers: { 'X-Admin-Key': adminKey }
+        });
+        const data = await res.json();
+
+        const content = document.getElementById('user-detail-content');
+        content.innerHTML = `
+          <div class="mb-4 p-4 bg-gray-800/50 rounded-lg">
+            <h4 class="font-medium mb-2">用户信息</h4>
+            <p class="text-gray-400 text-sm">邮箱: ${data.user.email}</p>
+            <p class="text-gray-400 text-sm">名称: ${data.user.name || '-'}</p>
+            <p class="text-gray-400 text-sm">注册时间: ${new Date(data.user.created_at * 1000).toLocaleString()}</p>
+          </div>
+          <div class="mb-4">
+            <h4 class="font-medium mb-2">许可证 (${data.licenses.length})</h4>
+            ${data.licenses.length > 0 ? `
+              <div class="space-y-2">
+                ${data.licenses.map(l => `
+                  <div class="p-3 bg-gray-800/50 rounded-lg text-sm">
+                    <div class="flex justify-between">
+                      <span class="font-mono text-xs">${l.license_key}</span>
+                      <span class="${l.status === 'active' && l.expires_at > Date.now()/1000 ? 'text-green-400' : 'text-red-400'}">
+                        ${l.status === 'disabled' ? '已禁用' : (l.expires_at > Date.now()/1000 ? '有效' : '已过期')}
+                      </span>
+                    </div>
+                    <div class="text-gray-400 mt-1">${l.plan_name} · 到期: ${new Date(l.expires_at * 1000).toLocaleDateString()}</div>
+                  </div>
+                `).join('')}
+              </div>
+            ` : '<p class="text-gray-500 text-sm">暂无许可证</p>'}
+          </div>
+          <div>
+            <h4 class="font-medium mb-2">设备 (${data.devices.length})</h4>
+            ${data.devices.length > 0 ? `
+              <div class="space-y-2">
+                ${data.devices.map(d => `
+                  <div class="p-3 bg-gray-800/50 rounded-lg text-sm flex justify-between items-center">
+                    <div>
+                      <div>${d.hostname || '未知设备'}</div>
+                      <div class="text-gray-400 text-xs">${d.platform || ''} ${d.arch || ''}</div>
+                    </div>
+                    <span class="${d.is_active ? 'text-green-400' : 'text-gray-500'}">${d.is_active ? '已激活' : '已解绑'}</span>
+                  </div>
+                `).join('')}
+              </div>
+            ` : '<p class="text-gray-500 text-sm">暂无设备</p>'}
+          </div>
+        `;
+
+        document.getElementById('user-detail-modal').classList.remove('hidden');
+        document.getElementById('user-detail-modal').classList.add('flex');
+      } catch (err) {
+        alert('加载用户详情失败');
+      }
+    }
+
+    function closeUserDetailModal() {
+      document.getElementById('user-detail-modal').classList.add('hidden');
+      document.getElementById('user-detail-modal').classList.remove('flex');
+    }
+
+    async function loadDevices(page = 1) {
+      devicesPage = page;
+      const search = document.getElementById('devices-search')?.value || '';
+      const status = document.getElementById('devices-filter')?.value || '';
+
+      try {
+        const params = new URLSearchParams({ page, limit: pageSize });
+        if (search) params.append('search', search);
+        if (status) params.append('status', status);
+
+        const res = await fetch(`/api/admin/devices?${params}`, {
+          headers: { 'X-Admin-Key': adminKey }
+        });
+        const result = await res.json();
+        const devices = result.data || result;
+        const pagination = result.pagination;
+
+        const tbody = document.getElementById('devices-tbody');
+        tbody.innerHTML = devices.map(device => `
+          <tr class="border-b border-gray-800">
+            <td class="py-3 px-2">${device.hostname || '未知'}</td>
+            <td class="py-3 px-2">${device.email}</td>
+            <td class="py-3 px-2 text-gray-400">${device.platform || '-'} ${device.arch || ''}</td>
+            <td class="py-3 px-2">
+              <span class="${device.is_active ? 'text-green-400' : 'text-gray-500'}">${device.is_active ? '已激活' : '已解绑'}</span>
+            </td>
+            <td class="py-3 px-2 text-gray-400">${new Date(device.last_seen_at * 1000).toLocaleString()}</td>
+            <td class="py-3 px-2">
+              ${device.is_active ? `
+                <button onclick="deactivateDevice('${device.id}')" class="px-2 py-1 text-xs bg-red-600/20 text-red-400 hover:bg-red-600/40 rounded">解绑</button>
+              ` : ''}
+            </td>
+          </tr>
+        `).join('');
+
+        if (pagination) {
+          renderPagination('devices-pagination', pagination, loadDevices);
+        }
+      } catch (err) {
+        console.error('加载设备失败:', err);
+      }
+    }
+
+    async function deactivateDevice(deviceId) {
+      if (!confirm('确定要解绑此设备吗？')) return;
+
+      try {
+        const res = await fetch(`/api/admin/devices/${deviceId}/deactivate`, {
+          method: 'POST',
+          headers: { 'X-Admin-Key': adminKey }
+        });
+        const result = await res.json();
+        if (result.success) {
+          loadDevices(devicesPage);
+          loadStats();
+        } else {
+          alert(result.error || '解绑失败');
+        }
+      } catch (err) {
+        alert('解绑失败: ' + err.message);
+      }
+    }
+
+    function renderPagination(containerId, pagination, loadFn) {
+      const container = document.getElementById(containerId);
+      if (!pagination || pagination.totalPages <= 1) {
+        container.innerHTML = '';
+        return;
+      }
+
+      const { page, totalPages } = pagination;
+      let html = '';
+
+      // 上一页
+      if (page > 1) {
+        html += `<button onclick="${loadFn.name}(${page - 1})" class="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm">上一页</button>`;
+      }
+
+      // 页码
+      const startPage = Math.max(1, page - 2);
+      const endPage = Math.min(totalPages, page + 2);
+
+      if (startPage > 1) {
+        html += `<button onclick="${loadFn.name}(1)" class="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm">1</button>`;
+        if (startPage > 2) html += '<span class="px-2 text-gray-500">...</span>';
+      }
+
+      for (let i = startPage; i <= endPage; i++) {
+        const isActive = i === page;
+        html += `<button onclick="${loadFn.name}(${i})" class="px-3 py-1 ${isActive ? 'bg-blue-600' : 'bg-gray-700 hover:bg-gray-600'} rounded text-sm">${i}</button>`;
+      }
+
+      if (endPage < totalPages) {
+        if (endPage < totalPages - 1) html += '<span class="px-2 text-gray-500">...</span>';
+        html += `<button onclick="${loadFn.name}(${totalPages})" class="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm">${totalPages}</button>`;
+      }
+
+      // 下一页
+      if (page < totalPages) {
+        html += `<button onclick="${loadFn.name}(${page + 1})" class="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm">下一页</button>`;
+      }
+
+      container.innerHTML = html;
+    }
+  </script>
+</body>
+</html>

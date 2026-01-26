@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>支付结果 - WhatyTerm</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); min-height: 100vh; }
+    .glass { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
+  </style>
+</head>
+<body class="text-gray-100 flex items-center justify-center min-h-screen">
+  <div class="glass rounded-2xl p-8 max-w-md w-full mx-4 text-center">
+    <div id="loading" class="py-8">
+      <div class="animate-spin h-12 w-12 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-4"></div>
+      <p class="text-gray-400">正在查询支付结果...</p>
+    </div>
+
+    <div id="success" class="hidden">
+      <div class="text-6xl mb-4">✅</div>
+      <h1 class="text-2xl font-bold text-green-400 mb-4">支付成功！</h1>
+      <div class="text-left mb-6 p-4 bg-gray-800/50 rounded-lg">
+        <div class="flex justify-between mb-2">
+          <span class="text-gray-400">订阅计划</span>
+          <span id="plan-name" class="font-medium"></span>
+        </div>
+        <div class="flex justify-between mb-2">
+          <span class="text-gray-400">支付金额</span>
+          <span id="amount" class="font-medium"></span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-gray-400">到期时间</span>
+          <span id="expires-at" class="font-medium"></span>
+        </div>
+      </div>
+      <div class="mb-6">
+        <p class="text-gray-400 text-sm mb-2">您的许可证密钥：</p>
+        <div class="p-4 bg-gray-800 rounded-lg">
+          <code id="license-key" class="text-lg font-mono text-green-400 break-all"></code>
+        </div>
+      </div>
+      <button onclick="copyLicenseKey()" class="w-full py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-medium mb-4">
+        复制许可证密钥
+      </button>
+      <p class="text-gray-500 text-sm">请在 WhatyTerm 应用中使用此密钥激活订阅</p>
+      <a href="/" class="inline-block mt-4 text-blue-400 hover:underline">返回首页</a>
+    </div>
+
+    <div id="pending" class="hidden">
+      <div class="text-6xl mb-4">⏳</div>
+      <h1 class="text-2xl font-bold text-yellow-400 mb-4">等待支付</h1>
+      <p class="text-gray-400 mb-6">订单尚未完成支付，请完成支付后刷新页面。</p>
+      <button onclick="location.reload()" class="w-full py-3 bg-yellow-600 hover:bg-yellow-700 rounded-lg font-medium mb-4">
+        刷新页面
+      </button>
+      <a href="/" class="inline-block text-blue-400 hover:underline">返回首页</a>
+    </div>
+
+    <div id="error" class="hidden">
+      <div class="text-6xl mb-4">❌</div>
+      <h1 class="text-2xl font-bold text-red-400 mb-4">查询失败</h1>
+      <p id="error-message" class="text-gray-400 mb-6"></p>
+      <a href="/" class="inline-block py-3 px-6 bg-gray-700 hover:bg-gray-600 rounded-lg font-medium">返回首页</a>
+    </div>
+  </div>
+
+  <script>
+    const urlParams = new URLSearchParams(window.location.search);
+    const orderNo = urlParams.get('orderNo');
+
+    async function checkPaymentResult() {
+      if (!orderNo) {
+        showError('缺少订单号');
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/payment/status/${orderNo}`);
+        const result = await res.json();
+
+        document.getElementById('loading').classList.add('hidden');
+
+        if (result.status === 'paid') {
+          document.getElementById('success').classList.remove('hidden');
+          document.getElementById('plan-name').textContent = result.order.planName;
+          document.getElementById('amount').textContent = `¥${(result.order.amount / 100).toFixed(2)}`;
+          document.getElementById('expires-at').textContent = new Date(result.license.expiresAt).toLocaleDateString();
+          document.getElementById('license-key').textContent = result.license.key;
+        } else if (result.status === 'pending') {
+          document.getElementById('pending').classList.remove('hidden');
+        } else {
+          showError(result.error || '订单状态异常');
+        }
+      } catch (err) {
+        showError('网络错误，请稍后重试');
+      }
+    }
+
+    function showError(message) {
+      document.getElementById('loading').classList.add('hidden');
+      document.getElementById('error').classList.remove('hidden');
+      document.getElementById('error-message').textContent = message;
+    }
+
+    function copyLicenseKey() {
+      const key = document.getElementById('license-key').textContent;
+      navigator.clipboard.writeText(key);
+      alert('许可证密钥已复制');
+    }
+
+    checkPaymentResult();
+  </script>
+</body>
+</html>

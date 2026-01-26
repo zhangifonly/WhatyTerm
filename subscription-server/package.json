@@ -1,0 +1,27 @@
+{
+  "name": "whatyterm-subscription",
+  "version": "1.0.0",
+  "description": "WhatyTerm 订阅管理系统",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "db:init": "node scripts/init-db.js",
+    "db:seed": "node scripts/seed-db.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "express": "^4.21.0",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "uuid": "^10.0.0",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "express-rate-limit": "^7.4.0",
+    "alipay-sdk": "^3.6.1",
+    "wechatpay-node-v3": "^2.1.5",
+    "qrcode": "^1.5.3",
+    "nodemailer": "^6.9.0"
+  }
+}
