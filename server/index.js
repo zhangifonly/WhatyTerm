@@ -1302,6 +1302,64 @@ app.post('/api/auth/login', (req, res) => {
   }
 });
 
+// 在线登录（使用订阅系统账户）
+app.post('/api/auth/online-login', async (req, res) => {
+  const { email, password } = req.body;
+  const ip = req.ip || req.connection.remoteAddress;
+
+  // 检查是否被锁定
+  if (authService.isLocked(ip)) {
+    console.log(`[在线登录] IP ${ip} 已被锁定`);
+    return res.status(429).json({
+      success: false,
+      error: '登录尝试次数过多，请 15 分钟后再试'
+    });
+  }
+
+  if (!email || !password) {
+    return res.status(400).json({ success: false, error: '邮箱和密码必填' });
+  }
+
+  try {
+    // 调用订阅服务器验证凭据
+    const result = await authService.verifyOnlineCredentials(email, password);
+
+    if (result.valid) {
+      // 验证成功，创建会话
+      authService.clearAttempts(ip);
+      req.session.authenticated = true;
+      req.session.username = email;
+      req.session.userId = result.userId;
+      req.session.onlineAuth = true;  // 标记为在线认证
+      req.session.hasValidLicense = result.hasValidLicense;
+
+      console.log(`[在线登录] 成功: ${email} (IP: ${ip})`);
+
+      res.json({
+        success: true,
+        user: {
+          email: result.email,
+          name: result.name,
+          hasValidLicense: result.hasValidLicense
+        }
+      });
+    } else {
+      // 验证失败，记录尝试次数
+      const remaining = authService.recordFailedAttempt(ip);
+      console.log(`[在线登录] 失败: ${email} (IP: ${ip}, 剩余尝试: ${remaining})`);
+
+      res.status(401).json({
+        success: false,
+        error: result.error || '邮箱或密码错误',
+        remainingAttempts: remaining
+      });
+    }
+  } catch (err) {
+    console.error('[在线登录] 错误:', err);
+    res.status(500).json({ success: false, error: '登录服务暂时不可用' });
+  }
+});
+
 app.post('/api/auth/logout', (req, res) => {
   req.session.destroy();
   res.json({ success: true });
@@ -3458,7 +3516,9 @@ setTimeout(() => {
 // 后台 AI 状态分析：定期分析所有会话的状态（不依赖前端请求）
 const aiStatusCache = new Map(); // 缓存每个会话的最新 AI 状态
 const aiContentHashCache = new Map(); // 缓存每个会话的终端内容哈希，用于检测内容变化
+const aiNoChangeStartTime = new Map(); // 记录内容开始无变化的时间
 const AI_ANALYSIS_INTERVAL = 30000; // 30秒
+const AI_NO_CHANGE_FORCE_ANALYZE_TIME = 2 * 60 * 1000; // 内容无变化 2 分钟后强制 AI 分析
 
 // 扩展 cleanupSessionCache 函数，清理所有会话相关缓存
 function cleanupAllSessionCache(sessionId) {
@@ -3466,6 +3526,7 @@ function cleanupAllSessionCache(sessionId) {
   sessionCheckState.delete(sessionId);
   aiStatusCache.delete(sessionId);
   aiContentHashCache.delete(sessionId);
+  aiNoChangeStartTime.delete(sessionId);
 }
 let nextAiAnalysisTime = Date.now() + AI_ANALYSIS_INTERVAL; // 下次分析时间
 
@@ -4341,13 +4402,31 @@ io.on('connection', (socket) => {
     socket.data.currentSessionId = sessionId;
 
     // 客户端连接时 attach PTY
+    const attachStart = Date.now();
     session.attach();
+    const attachTime = Date.now() - attachStart;
 
     // 获取 tmux 面板当前可见内容和光标位置
+    const captureStart = Date.now();
     const paneContent = session.capturePane();
-    const fullContent = session.captureFullPane(); // 包含滚动历史
+    const paneTime = Date.now() - captureStart;
+
+    const fullStart = Date.now();
+    let fullContent = session.captureFullPane(); // 包含滚动历史
+    const fullTime = Date.now() - fullStart;
+
+    // 限制 fullContent 大小，避免传输过大内容导致卡顿
+    // 前端 scrollback 为 5000 行，但写入大量内容会导致卡顿
+    // 限制为 100KB 以保证流畅的切换体验
+    const MAX_CONTENT_SIZE = 100 * 1024;
+    if (fullContent && fullContent.length > MAX_CONTENT_SIZE) {
+      // 保留最后 MAX_CONTENT_SIZE 字符
+      fullContent = fullContent.slice(-MAX_CONTENT_SIZE);
+      console.log(`[session:attach] fullContent 过大 (${(fullContent.length / 1024).toFixed(1)}KB)，已截断为 ${MAX_CONTENT_SIZE / 1024}KB`);
+    }
+
     const cursorPos = session.getCursorPosition();
-    console.log(`[session:attach] paneContent长度: ${paneContent?.length || 0}, fullContent长度: ${fullContent?.length || 0}`);
+    console.log(`[session:attach] 性能: attach=${attachTime}ms, pane=${paneTime}ms, full=${fullTime}ms, paneLen=${paneContent?.length || 0}, fullLen=${fullContent?.length || 0}`);
 
     // 如果面板有内容且历史为空，记录初始状态
     const existingHistory = historyLogger.getHistory(sessionId, 1);

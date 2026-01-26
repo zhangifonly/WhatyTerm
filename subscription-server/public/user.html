@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>用户中心 - WhatyTerm</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); min-height: 100vh; }
+    .glass { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
+    .tab-active { border-bottom: 2px solid #3b82f6; color: #3b82f6; }
+  </style>
+</head>
+<body class="text-gray-100">
+  <div id="app" class="container mx-auto px-4 py-8 max-w-4xl">
+    <!-- 头部 -->
+    <header class="flex justify-between items-center mb-8">
+      <a href="/" class="text-2xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
+        WhatyTerm
+      </a>
+      <div id="user-info" class="hidden">
+        <span id="user-email" class="text-gray-400 mr-4"></span>
+        <button onclick="logout()" class="px-4 py-2 text-sm text-gray-400 hover:text-white">退出登录</button>
+      </div>
+    </header>
+
+    <!-- 未登录：登录/注册表单 -->
+    <div id="auth-section" class="glass rounded-xl p-8 max-w-md mx-auto">
+      <!-- 标签切换 -->
+      <div class="flex border-b border-gray-700 mb-6">
+        <button id="tab-login" onclick="switchTab('login')" class="flex-1 py-3 text-center tab-active">登录</button>
+        <button id="tab-register" onclick="switchTab('register')" class="flex-1 py-3 text-center text-gray-400 hover:text-white">注册</button>
+      </div>
+
+      <!-- 登录表单 -->
+      <form id="login-form" onsubmit="handleLogin(event)">
+        <div class="mb-4">
+          <label class="block text-sm text-gray-400 mb-2">邮箱</label>
+          <input type="email" id="login-email" required
+            class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500">
+        </div>
+        <div class="mb-6">
+          <label class="block text-sm text-gray-400 mb-2">密码</label>
+          <input type="password" id="login-password" required
+            class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500">
+        </div>
+        <button type="submit" class="w-full py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-medium">
+          登录
+        </button>
+        <div class="mt-4 text-center">
+          <a href="/reset-password.html" class="text-sm text-gray-400 hover:text-blue-400">忘记密码？</a>
+        </div>
+        <div id="login-error" class="mt-4 text-red-400 text-sm hidden"></div>
+      </form>
+
+      <!-- 注册表单 -->
+      <form id="register-form" class="hidden" onsubmit="handleRegister(event)">
+        <div class="mb-4">
+          <label class="block text-sm text-gray-400 mb-2">邮箱</label>
+          <input type="email" id="register-email" required
+            class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500">
+        </div>
+        <div class="mb-4">
+          <label class="block text-sm text-gray-400 mb-2">密码</label>
+          <input type="password" id="register-password" required minlength="6"
+            class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500">
+        </div>
+        <div class="mb-6">
+          <label class="block text-sm text-gray-400 mb-2">确认密码</label>
+          <input type="password" id="register-confirm" required
+            class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500">
+        </div>
+        <button type="submit" class="w-full py-3 bg-green-600 hover:bg-green-700 rounded-lg font-medium">
+          注册
+        </button>
+        <div id="register-error" class="mt-4 text-red-400 text-sm hidden"></div>
+      </form>
+    </div>
+
+    <!-- 已登录：用户中心 -->
+    <div id="dashboard-section" class="hidden">
+      <!-- 兑换激活码 -->
+      <section class="glass rounded-xl p-6 mb-6">
+        <h2 class="text-xl font-semibold mb-4">兑换激活码</h2>
+        <div class="flex gap-3">
+          <input type="text" id="redeem-code" placeholder="输入激活码 (如: WT-XXXXXXXX)"
+            class="flex-1 px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500">
+          <button onclick="redeemCode()" class="px-6 py-3 bg-green-600 hover:bg-green-700 rounded-lg font-medium">
+            兑换
+          </button>
+        </div>
+        <div id="redeem-result" class="mt-4 hidden"></div>
+      </section>
+
+      <!-- 许可证列表 -->
+      <section class="glass rounded-xl p-6 mb-6">
+        <h2 class="text-xl font-semibold mb-4">我的许可证</h2>
+        <div id="licenses-list" class="space-y-4">
+          <p class="text-gray-400">加载中...</p>
+        </div>
+      </section>
+
+      <!-- 设备管理 -->
+      <section class="glass rounded-xl p-6">
+        <h2 class="text-xl font-semibold mb-4">已激活设备</h2>
+        <div id="devices-list" class="space-y-4">
+          <p class="text-gray-400">加载中...</p>
+        </div>
+      </section>
+    </div>
+
+    <!-- 页脚 -->
+    <footer class="text-center text-gray-500 text-sm mt-12">
+      <p>© 2025 WhatyTerm. All rights reserved.</p>
+      <p class="mt-2">
+        <a href="/" class="text-blue-400 hover:underline">返回首页</a>
+        <span class="mx-2">|</span>
+        <a href="mailto:support@whatyterm.com" class="text-blue-400 hover:underline">support@whatyterm.com</a>
+      </p>
+    </footer>
+  </div>
+
+  <script>
+    // 状态
+    let token = localStorage.getItem('token');
+    let user = null;
+
+    // 初始化
+    if (token) {
+      checkAuth();
+    }
+
+    // 切换标签
+    function switchTab(tab) {
+      const loginTab = document.getElementById('tab-login');
+      const registerTab = document.getElementById('tab-register');
+      const loginForm = document.getElementById('login-form');
+      const registerForm = document.getElementById('register-form');
+
+      if (tab === 'login') {
+        loginTab.classList.add('tab-active');
+        loginTab.classList.remove('text-gray-400');
+        registerTab.classList.remove('tab-active');
+        registerTab.classList.add('text-gray-400');
+        loginForm.classList.remove('hidden');
+        registerForm.classList.add('hidden');
+      } else {
+        registerTab.classList.add('tab-active');
+        registerTab.classList.remove('text-gray-400');
+        loginTab.classList.remove('tab-active');
+        loginTab.classList.add('text-gray-400');
+        registerForm.classList.remove('hidden');
+        loginForm.classList.add('hidden');
+      }
+    }
+
+    // 登录
+    async function handleLogin(e) {
+      e.preventDefault();
+      const email = document.getElementById('login-email').value;
+      const password = document.getElementById('login-password').value;
+      const errorDiv = document.getElementById('login-error');
+
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+
+        const result = await res.json();
+
+        if (result.success) {
+          token = result.token;
+          user = result.user;
+          localStorage.setItem('token', token);
+          showDashboard();
+        } else {
+          errorDiv.textContent = result.error || '登录失败';
+          errorDiv.classList.remove('hidden');
+        }
+      } catch (err) {
+        errorDiv.textContent = '网络错误，请稍后重试';
+        errorDiv.classList.remove('hidden');
+      }
+    }
+
+    // 注册
+    async function handleRegister(e) {
+      e.preventDefault();
+      const email = document.getElementById('register-email').value;
+      const password = document.getElementById('register-password').value;
+      const confirm = document.getElementById('register-confirm').value;
+      const errorDiv = document.getElementById('register-error');
+
+      if (password !== confirm) {
+        errorDiv.textContent = '两次输入的密码不一致';
+        errorDiv.classList.remove('hidden');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+
+        const result = await res.json();
+
+        if (result.success) {
+          token = result.token;
+          user = result.user;
+          localStorage.setItem('token', token);
+          showDashboard();
+        } else {
+          errorDiv.textContent = result.error || '注册失败';
+          errorDiv.classList.remove('hidden');
+        }
+      } catch (err) {
+        errorDiv.textContent = '网络错误，请稍后重试';
+        errorDiv.classList.remove('hidden');
+      }
+    }
+
+    // 检查登录状态
+    async function checkAuth() {
+      try {
+        const res = await fetch('/api/user/licenses', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+
+        if (res.ok) {
+          showDashboard();
+        } else {
+          localStorage.removeItem('token');
+          token = null;
+        }
+      } catch (err) {
+        localStorage.removeItem('token');
+        token = null;
+      }
+    }
+
+    // 显示用户中心
+    function showDashboard() {
+      document.getElementById('auth-section').classList.add('hidden');
+      document.getElementById('dashboard-section').classList.remove('hidden');
+      document.getElementById('user-info').classList.remove('hidden');
+
+      // 从 token 解析用户信息
+      try {
+        const payload = JSON.parse(atob(token.split('.')[1]));
+        document.getElementById('user-email').textContent = payload.email;
+      } catch (e) {}
+
+      loadLicenses();
+      loadDevices();
+    }
+
+    // 退出登录
+    function logout() {
+      localStorage.removeItem('token');
+      token = null;
+      user = null;
+      location.reload();
+    }
+
+    // 加载许可证
+    async function loadLicenses() {
+      const container = document.getElementById('licenses-list');
+
+      try {
+        const res = await fetch('/api/user/licenses', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+
+        const licenses = await res.json();
+
+        if (licenses.length === 0) {
+          container.innerHTML = '<p class="text-gray-400">暂无许可证，请先兑换激活码</p>';
+          return;
+        }
+
+        container.innerHTML = licenses.map(license => {
+          const expiresAt = new Date(license.expires_at * 1000);
+          const isExpired = expiresAt < new Date();
+          const statusClass = isExpired ? 'text-red-400' : 'text-green-400';
+          const statusText = isExpired ? '已过期' : '有效';
+
+          return `
+            <div class="p-4 bg-gray-800/50 rounded-lg">
+              <div class="flex justify-between items-start mb-2">
+                <div>
+                  <span class="font-medium">${license.plan_name}</span>
+                  <span class="ml-2 px-2 py-1 text-xs rounded ${statusClass} bg-gray-700">${statusText}</span>
+                </div>
+                <span class="text-sm text-gray-400">${license.activations?.length || 0}/${license.max_devices} 设备</span>
+              </div>
+              <div class="text-sm text-gray-400">
+                <p>许可证密钥: <code class="bg-gray-700 px-2 py-1 rounded">${license.license_key}</code></p>
+                <p class="mt-1">到期时间: ${expiresAt.toLocaleDateString()}</p>
+              </div>
+            </div>
+          `;
+        }).join('');
+      } catch (err) {
+        container.innerHTML = '<p class="text-red-400">加载失败</p>';
+      }
+    }
+
+    // 加载设备
+    async function loadDevices() {
+      const container = document.getElementById('devices-list');
+
+      try {
+        const res = await fetch('/api/user/devices', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+
+        const devices = await res.json();
+
+        if (devices.length === 0) {
+          container.innerHTML = '<p class="text-gray-400">暂无已激活设备</p>';
+          return;
+        }
+
+        container.innerHTML = devices.map(device => {
+          const activatedAt = new Date(device.activated_at * 1000);
+          const lastSeen = new Date(device.last_seen_at * 1000);
+          const isActive = device.is_active === 1;
+
+          return `
+            <div class="p-4 bg-gray-800/50 rounded-lg flex justify-between items-center">
+              <div>
+                <div class="font-medium">${device.hostname || '未知设备'}</div>
+                <div class="text-sm text-gray-400">
+                  <span>${device.platform || ''} ${device.arch || ''}</span>
+                  <span class="mx-2">|</span>
+                  <span>激活于 ${activatedAt.toLocaleDateString()}</span>
+                </div>
+                <div class="text-xs text-gray-500 mt-1">
+                  机器 ID: ${device.machine_id.slice(0, 16)}...
+                </div>
+              </div>
+              ${isActive ? `
+                <button onclick="deactivateDevice('${device.id}')"
+                  class="px-4 py-2 text-sm bg-red-600/20 text-red-400 hover:bg-red-600/40 rounded-lg">
+                  解绑
+                </button>
+              ` : `
+                <span class="px-4 py-2 text-sm text-gray-500">已解绑</span>
+              `}
+            </div>
+          `;
+        }).join('');
+      } catch (err) {
+        container.innerHTML = '<p class="text-red-400">加载失败</p>';
+      }
+    }
+
+    // 解绑设备
+    async function deactivateDevice(deviceId) {
+      if (!confirm('确定要解绑此设备吗？解绑后可在其他设备上激活。')) {
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/user/devices/${deviceId}/deactivate`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+
+        const result = await res.json();
+
+        if (result.success) {
+          alert('设备已解绑');
+          loadDevices();
+          loadLicenses();
+        } else {
+          alert(result.error || '解绑失败');
+        }
+      } catch (err) {
+        alert('网络错误，请稍后重试');
+      }
+    }
+
+    // 兑换激活码
+    async function redeemCode() {
+      const code = document.getElementById('redeem-code').value.trim();
+      const resultDiv = document.getElementById('redeem-result');
+
+      if (!code) {
+        resultDiv.className = 'mt-4 p-4 bg-red-900/50 text-red-400 rounded-lg';
+        resultDiv.textContent = '请输入激活码';
+        resultDiv.classList.remove('hidden');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/user/redeem', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({ code })
+        });
+
+        const result = await res.json();
+
+        if (result.success) {
+          resultDiv.className = 'mt-4 p-4 bg-green-900/50 text-green-400 rounded-lg';
+          resultDiv.innerHTML = `
+            <div class="font-medium mb-2">兑换成功！</div>
+            <div class="text-sm">
+              <p>许可证密钥: <code class="bg-gray-800 px-2 py-1 rounded">${result.license.key}</code></p>
+              <p class="mt-1">到期时间: ${new Date(result.license.expires_at * 1000).toLocaleDateString()}</p>
+            </div>
+          `;
+          document.getElementById('redeem-code').value = '';
+          loadLicenses();
+        } else {
+          resultDiv.className = 'mt-4 p-4 bg-red-900/50 text-red-400 rounded-lg';
+          resultDiv.textContent = result.error || '兑换失败';
+        }
+
+        resultDiv.classList.remove('hidden');
+      } catch (err) {
+        resultDiv.className = 'mt-4 p-4 bg-red-900/50 text-red-400 rounded-lg';
+        resultDiv.textContent = '网络错误，请稍后重试';
+        resultDiv.classList.remove('hidden');
+      }
+    }
+  </script>
+</body>
+</html>

@@ -43,6 +43,7 @@ function useAuth() {
     }
   };
 
+  // 本地登录（用户名+密码）
   const login = async (username, password) => {
     const res = await fetch('/api/auth/login', {
       method: 'POST',
@@ -55,6 +56,21 @@ function useAuth() {
       return { success: true };
     }
     return { success: false, error: data.error };
+  };
+
+  // 在线登录（邮箱+密码，使用订阅系统账户）
+  const onlineLogin = async (email, password) => {
+    const res = await fetch('/api/auth/online-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    const data = await res.json();
+    if (data.success) {
+      await checkAuth();
+      return { success: true, user: data.user };
+    }
+    return { success: false, error: data.error, remainingAttempts: data.remainingAttempts };
   };
 
   const logout = async () => {
@@ -75,7 +91,7 @@ function useAuth() {
     return data;
   };
 
-  return { ...authStatus, login, logout, setupAuth, checkAuth };
+  return { ...authStatus, login, onlineLogin, logout, setupAuth, checkAuth };
 }
 
 // 光标同步防抖和位置缓存（模块级变量）
@@ -272,6 +288,7 @@ export default function App() {
     });
 
     socket.on('session:attached', (data) => {
+      const attachedTime = performance.now();
       // 使用 fullContent（包含滚动历史）以支持向上翻页
       // screenContent 只有当前屏幕内容，会丢失历史
       const fullLen = data.fullContent?.length || 0;
@@ -279,6 +296,7 @@ export default function App() {
       const fullLines = data.fullContent?.split('\n').length || 0;
       console.log('[session:attached] 收到内容:', {
         fullContentLength: fullLen,
+        fullContentKB: (fullLen / 1024).toFixed(1) + 'KB',
         screenContentLength: screenLen,
         fullContentLines: fullLines
       });
@@ -720,14 +738,15 @@ export default function App() {
     return () => clearInterval(countdownInterval);
   }, [nextAnalysisTime, currentSession?.autoActionEnabled]);
 
-  // 初始化终端（只初始化一次）
+  // 初始化终端（复用终端实例，避免每次切换会话都重建）
   useEffect(() => {
     if (!terminalRef.current) return;
 
-    // 如果已有终端实例，先清理
+    // 如果已有终端实例，复用它（不销毁）
     if (terminalInstance.current) {
-      terminalInstance.current.dispose();
-      terminalInstance.current = null;
+      // 终端已存在，只需要标记为就绪
+      setTerminalReady(true);
+      return;
     }
 
     const term = new Terminal({
@@ -839,14 +858,20 @@ export default function App() {
       }
       // 重置 IME 状态
       isComposing = false;
-      // 清理终端实例（会自动清理 onData 监听器）
-      if (terminalInstance.current) {
-        terminalInstance.current.dispose();
-        terminalInstance.current = null;
-      }
-      setTerminalReady(false); // 标记终端已销毁
+      // 注意：不在这里销毁终端实例，让它在切换会话时复用
+      // 终端实例只在组件真正卸载（currentSession 变为 null）时才销毁
+      setTerminalReady(false);
     };
-  }, [currentSession?.id]); // 需要依赖 currentSession，因为终端容器是条件渲染的
+  }, [currentSession?.id]); // 依赖 currentSession?.id 以便在会话变化时重新设置事件监听
+
+  // 当 currentSession 变为 null 时，销毁终端实例
+  useEffect(() => {
+    if (!currentSession && terminalInstance.current) {
+      console.log('[Terminal] 会话关闭，销毁终端实例');
+      terminalInstance.current.dispose();
+      terminalInstance.current = null;
+    }
+  }, [currentSession]);
 
   // 处理缓存的屏幕内容
   useEffect(() => {
@@ -878,6 +903,7 @@ export default function App() {
 
       // 调试：检查写入前的内容
       const contentLines = content.split(/\r?\n/).length;
+      const writeStartTime = performance.now();
       console.log('[Terminal] 准备写入内容:', {
         contentLength: content.length,
         contentLines: contentLines,
@@ -894,9 +920,11 @@ export default function App() {
 
       // 写入内容，使用 callback 确保写入完成后再滚动到底部
       term.write(content, () => {
+        const writeTime = performance.now() - writeStartTime;
         // 调试：检查 buffer 状态
         const buffer = term.buffer.active;
-        console.log('[Terminal] 写入完成后 buffer 状态:', {
+        console.log('[Terminal] 写入完成:', {
+          writeTime: `${writeTime.toFixed(1)}ms`,
           length: buffer.length,
           baseY: buffer.baseY,
           viewportY: buffer.viewportY,
@@ -4326,41 +4354,32 @@ function QRCodeWidget({ url, onClose }) {
 // 登录页面组件
 function LoginPage({ auth }) {
   const { t } = useTranslation();
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [remainingAttempts, setRemainingAttempts] = useState(null);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
     setLoading(true);
 
-    const result = await auth.login(username, password);
+    // 使用在线登录（邮箱+密码）
+    const result = await auth.onlineLogin(email, password);
     if (!result.success) {
       setError(result.error || t('auth.loginFailed'));
+      if (result.remainingAttempts !== undefined) {
+        setRemainingAttempts(result.remainingAttempts);
+      }
     }
     setLoading(false);
   };
 
-  // 远程访问但未设置密码，显示提示信息
+  // 远程访问但未设置密码，现在改为显示在线登录
+  // 不再要求本机设置密码，直接允许使用在线账户登录
   if (auth.requirePasswordSetup) {
-    return (
-      <div className="login-page">
-        <div className="login-card">
-          <h1>WhatyTerm</h1>
-          <p className="login-subtitle">AI 自动化终端管理工具</p>
-          <div className="password-setup-notice">
-            <div className="notice-icon">🔒</div>
-            <h2>需要设置管理员密码</h2>
-            <p>为了安全起见，远程访问需要先在本机设置管理员密码。</p>
-            <p className="notice-instruction">
-              请在本机打开 WhatyTerm，进入 <strong>设置 → 安全</strong> 页面设置密码。
-            </p>
-          </div>
-        </div>
-      </div>
-    );
+    // 继续显示登录表单，使用在线认证
   }
 
   return (
@@ -4368,15 +4387,19 @@ function LoginPage({ auth }) {
       <div className="login-card">
         <h1>WhatyTerm</h1>
         <p className="login-subtitle">AI 自动化终端管理工具</p>
+        <p style={{ fontSize: '13px', color: '#888', marginBottom: '20px' }}>
+          使用您在 term.whaty.org 注册的账户登录
+        </p>
         <form onSubmit={handleSubmit}>
           <div className="form-group">
-            <label>用户名</label>
+            <label>邮箱</label>
             <input
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="admin"
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="your@email.com"
               autoFocus
+              required
             />
           </div>
           <div className="form-group">
@@ -4386,13 +4409,42 @@ function LoginPage({ auth }) {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder={t('auth.enterPassword')}
+              required
             />
           </div>
-          {error && <div className="login-error">{error}</div>}
+          {error && (
+            <div className="login-error">
+              {error}
+              {remainingAttempts !== null && remainingAttempts > 0 && (
+                <span style={{ display: 'block', fontSize: '12px', marginTop: '4px' }}>
+                  剩余尝试次数: {remainingAttempts}
+                </span>
+              )}
+            </div>
+          )}
           <button type="submit" className="btn btn-primary btn-block" disabled={loading}>
             {loading ? t('auth.loggingIn') : t('auth.login')}
           </button>
         </form>
+        <div style={{ marginTop: '16px', textAlign: 'center' }}>
+          <a
+            href="https://term.whaty.org"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: '#4a9eff', fontSize: '13px', textDecoration: 'none' }}
+          >
+            还没有账户？立即注册
+          </a>
+          <span style={{ margin: '0 8px', color: '#555' }}>|</span>
+          <a
+            href="https://term.whaty.org/forgot-password"
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: '#4a9eff', fontSize: '13px', textDecoration: 'none' }}
+          >
+            忘记密码？
+          </a>
+        </div>
       </div>
     </div>
   );
