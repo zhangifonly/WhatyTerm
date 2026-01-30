@@ -56,7 +56,8 @@ nodeGypRebuild: false
 mac:
   category: public.app-category.developer-tools
   # icon: build/icon.icns
-  identity: null
+  identity: "Beijing Youxun Online Technolog Co., Ltd. (75JRAR2YKZ)"
+  notarize: true
   target:
     - target: dmg
       arch:
