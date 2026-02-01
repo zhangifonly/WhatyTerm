@@ -66,10 +66,11 @@ jobs:
 
           VERSION="v${{ needs.get-version.outputs.version }}"
           REMOTE_PATH="${{ env.DOWNLOAD_PATH }}/$VERSION"
+          RELEASES_PATH="/var/www/downloads/releases"
 
           # 创建目录
           ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
-            "mkdir -p $REMOTE_PATH"
+            "mkdir -p $REMOTE_PATH $RELEASES_PATH"
 
           # 上传 macOS 构建产物
           for file in release/*.dmg release/*.zip; do
@@ -79,6 +80,13 @@ jobs:
                 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:$REMOTE_PATH/
             fi
           done
+
+          # 上传 latest-mac.yml（用于自动更新）
+          if [ -f "release/latest-mac.yml" ]; then
+            echo "Uploading latest-mac.yml for auto-updater"
+            scp -o StrictHostKeyChecking=no "release/latest-mac.yml" \
+              ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:$RELEASES_PATH/
+          fi
 
   # Windows 构建
   build-windows:
@@ -120,10 +128,11 @@ jobs:
 
           VERSION="v${{ needs.get-version.outputs.version }}"
           REMOTE_PATH="${{ env.DOWNLOAD_PATH }}/$VERSION"
+          RELEASES_PATH="/var/www/downloads/releases"
 
           # 创建目录
           ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
-            "mkdir -p $REMOTE_PATH"
+            "mkdir -p $REMOTE_PATH $RELEASES_PATH"
 
           # 上传 Windows 构建产物
           for file in release/*.exe; do
@@ -133,6 +142,13 @@ jobs:
                 ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:$REMOTE_PATH/
             fi
           done
+
+          # 上传 latest.yml（用于自动更新）
+          if [ -f "release/latest.yml" ]; then
+            echo "Uploading latest.yml for auto-updater"
+            scp -o StrictHostKeyChecking=no "release/latest.yml" \
+              ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:$RELEASES_PATH/
+          fi
 
   # Linux 构建
   build-linux:
