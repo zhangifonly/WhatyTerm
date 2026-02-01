@@ -8,7 +8,9 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "db:init": "node scripts/init-db.js",
-    "db:seed": "node scripts/seed-db.js"
+    "db:seed": "node scripts/seed-db.js",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "backup": "bash scripts/backup.sh"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0",
@@ -22,6 +24,13 @@
     "alipay-sdk": "^3.6.1",
     "wechatpay-node-v3": "^2.1.5",
     "qrcode": "^1.5.3",
-    "nodemailer": "^6.9.0"
+    "nodemailer": "^6.9.0",
+    "winston": "^3.11.0",
+    "winston-daily-rotate-file": "^4.7.1",
+    "@sentry/node": "^8.0.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "supertest": "^6.3.4"
   }
 }
