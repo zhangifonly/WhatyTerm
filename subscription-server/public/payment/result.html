@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>支付结果 - WhatyTerm</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); min-height: 100vh; }
+    .glass { background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
+    .loading { animation: pulse 2s infinite; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+  </style>
+</head>
+<body class="text-gray-100">
+  <div class="container mx-auto px-4 py-8 max-w-lg">
+    <!-- 头部 -->
+    <header class="text-center mb-8">
+      <a href="/" class="text-3xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
+        WhatyTerm
+      </a>
+    </header>
+
+    <!-- 加载中 -->
+    <div id="loading" class="glass rounded-xl p-8 text-center">
+      <div class="text-6xl mb-4 loading">⏳</div>
+      <h2 class="text-xl font-bold mb-2">正在查询支付结果...</h2>
+      <p class="text-gray-400">请稍候</p>
+    </div>
+
+    <!-- 支付成功 -->
+    <div id="success" class="glass rounded-xl p-8 text-center hidden">
+      <div class="text-6xl mb-4">✅</div>
+      <h2 class="text-xl font-bold text-green-400 mb-2">支付成功！</h2>
+      <p class="text-gray-400 mb-6">感谢您的购买</p>
+
+      <div id="license-info" class="mb-6 hidden">
+        <p class="text-gray-400 mb-2">您的许可证密钥：</p>
+        <div class="p-4 bg-gray-800 rounded-lg mb-4">
+          <code id="license-key" class="text-lg font-mono text-green-400 break-all"></code>
+        </div>
+        <button onclick="copyLicenseKey()" class="px-6 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg">
+          复制许可证密钥
+        </button>
+      </div>
+
+      <div class="space-y-3">
+        <a href="/user.html" class="block w-full py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-medium">
+          前往用户中心
+        </a>
+        <a href="/" class="block w-full py-3 bg-gray-700 hover:bg-gray-600 rounded-lg font-medium">
+          返回首页
+        </a>
+      </div>
+    </div>
+
+    <!-- 支付失败/待支付 -->
+    <div id="pending" class="glass rounded-xl p-8 text-center hidden">
+      <div class="text-6xl mb-4">⏳</div>
+      <h2 class="text-xl font-bold text-yellow-400 mb-2">支付处理中</h2>
+      <p class="text-gray-400 mb-6">订单正在处理，请稍后刷新页面查看结果</p>
+
+      <div class="space-y-3">
+        <button onclick="location.reload()" class="w-full py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-medium">
+          刷新页面
+        </button>
+        <a href="/" class="block w-full py-3 bg-gray-700 hover:bg-gray-600 rounded-lg font-medium">
+          返回首页
+        </a>
+      </div>
+    </div>
+
+    <!-- 支付失败 -->
+    <div id="failed" class="glass rounded-xl p-8 text-center hidden">
+      <div class="text-6xl mb-4">❌</div>
+      <h2 class="text-xl font-bold text-red-400 mb-2">支付失败</h2>
+      <p id="error-message" class="text-gray-400 mb-6">订单不存在或已过期</p>
+
+      <div class="space-y-3">
+        <a href="/" class="block w-full py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-medium">
+          重新购买
+        </a>
+        <p class="text-sm text-gray-500">
+          如有问题，请联系 <a href="mailto:support@whaty.org" class="text-blue-400">support@whaty.org</a>
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let licenseKey = '';
+
+    async function checkPaymentResult() {
+      // 从 URL 获取订单号
+      const urlParams = new URLSearchParams(window.location.search);
+      const orderNo = urlParams.get('orderNo') || urlParams.get('out_trade_no') || urlParams.get('outTradeNo');
+
+      if (!orderNo) {
+        showFailed('未找到订单信息');
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/payment/status/${orderNo}`);
+        const data = await res.json();
+
+        if (data.status === 'paid' || data.status === 'PAYED') {
+          showSuccess(data.licenseKey);
+        } else if (data.status === 'pending' || data.status === 'WAIT_TO_PAY') {
+          showPending();
+          // 5秒后自动刷新
+          setTimeout(() => location.reload(), 5000);
+        } else {
+          showFailed(data.message || '支付未完成');
+        }
+      } catch (err) {
+        console.error('查询支付结果失败:', err);
+        showFailed('查询支付结果失败，请稍后重试');
+      }
+    }
+
+    function showSuccess(key) {
+      document.getElementById('loading').classList.add('hidden');
+      document.getElementById('success').classList.remove('hidden');
+
+      if (key) {
+        licenseKey = key;
+        document.getElementById('license-key').textContent = key;
+        document.getElementById('license-info').classList.remove('hidden');
+      }
+    }
+
+    function showPending() {
+      document.getElementById('loading').classList.add('hidden');
+      document.getElementById('pending').classList.remove('hidden');
+    }
+
+    function showFailed(message) {
+      document.getElementById('loading').classList.add('hidden');
+      document.getElementById('failed').classList.remove('hidden');
+      if (message) {
+        document.getElementById('error-message').textContent = message;
+      }
+    }
+
+    function copyLicenseKey() {
+      navigator.clipboard.writeText(licenseKey).then(() => {
+        alert('许可证密钥已复制到剪贴板');
+      }).catch(() => {
+        // 降级方案
+        const textarea = document.createElement('textarea');
+        textarea.value = licenseKey;
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+        alert('许可证密钥已复制到剪贴板');
+      });
+    }
+
+    // 页面加载时检查支付结果
+    checkPaymentResult();
+  </script>
+</body>
+</html>

@@ -163,7 +163,7 @@
     <footer class="text-center text-gray-500 text-sm mt-12">
       <p>© 2025 WhatyTerm. All rights reserved.</p>
       <p class="mt-2">
-        <a href="mailto:support@whatyterm.com" class="text-blue-400 hover:underline">support@whatyterm.com</a>
+        <a href="mailto:support@whaty.org" class="text-blue-400 hover:underline">support@whaty.org</a>
       </p>
     </footer>
   </div>
@@ -190,6 +190,15 @@
           <span class="text-gray-400">支付金额</span>
           <span id="order-amount" class="font-bold text-green-400"></span>
         </div>
+      </div>
+
+      <!-- 邮箱输入 -->
+      <div id="email-section" class="mb-6">
+        <label class="block text-gray-400 text-sm mb-2">接收许可证的邮箱 <span class="text-red-400">*</span></label>
+        <input type="email" id="payment-email" required
+          class="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:border-blue-500"
+          placeholder="请输入您的邮箱地址">
+        <p class="text-gray-500 text-xs mt-2">支付成功后，许可证将发送到此邮箱，也可用于登录用户中心查看订单</p>
       </div>
 
       <!-- 支付方式选择 -->
@@ -345,14 +354,29 @@
         const res = await fetch('/api/payment/methods');
         const methods = await res.json();
 
-        document.getElementById('btn-alipay').style.display = methods.find(m => m.id === 'alipay') ? 'block' : 'none';
-        document.getElementById('btn-wechat').style.display = methods.find(m => m.id === 'wechat') ? 'block' : 'none';
+        // 检查是否有支付宝和微信支付（包括 CBB 和直连）
+        const hasAlipay = methods.find(m => m.id === 'alipay' || m.id === 'cbb_alipay');
+        const hasWechat = methods.find(m => m.id === 'wechat' || m.id === 'cbb_wechat');
+
+        document.getElementById('btn-alipay').style.display = hasAlipay ? 'block' : 'none';
+        document.getElementById('btn-wechat').style.display = hasWechat ? 'block' : 'none';
+
+        // 保存支付方式映射
+        window.paymentMethodMap = {};
+        methods.forEach(m => {
+          if (m.id === 'cbb_alipay' || m.id === 'alipay') {
+            window.paymentMethodMap['alipay'] = m.id;
+          }
+          if (m.id === 'cbb_wechat' || m.id === 'wechat') {
+            window.paymentMethodMap['wechat'] = m.id;
+          }
+        });
 
         if (methods.length === 0) {
           document.getElementById('payment-methods').innerHTML = `
             <div class="text-center text-yellow-400 p-4">
               <p>支付功能暂未配置</p>
-              <p class="text-sm text-gray-400 mt-2">请联系 support@whatyterm.com 获取激活码</p>
+              <p class="text-sm text-gray-400 mt-2">请联系 support@whaty.org 获取激活码</p>
             </div>
           `;
         }
@@ -363,6 +387,23 @@
 
     // 选择支付方式
     async function selectPaymentMethod(method) {
+      // 验证邮箱
+      const emailInput = document.getElementById('payment-email');
+      const email = emailInput.value.trim();
+      if (!email) {
+        emailInput.focus();
+        emailInput.classList.add('border-red-500');
+        alert('请输入邮箱地址');
+        return;
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        emailInput.focus();
+        emailInput.classList.add('border-red-500');
+        alert('请输入有效的邮箱地址');
+        return;
+      }
+      emailInput.classList.remove('border-red-500');
+
       // 更新按钮样式
       document.querySelectorAll('.payment-method-btn').forEach(btn => {
         btn.classList.remove('border-blue-500', 'border-green-500');
@@ -374,6 +415,9 @@
       document.getElementById(btnId).classList.remove('border-gray-700');
       document.getElementById(btnId).classList.add(borderColor);
 
+      // 获取实际的支付方式 ID（可能是 cbb_alipay 或 alipay）
+      const actualMethod = window.paymentMethodMap[method] || method;
+
       // 创建订单
       try {
         const res = await fetch('/api/payment/create', {
@@ -382,8 +426,9 @@
           body: JSON.stringify({
             planId: currentPlan,
             period: currentPeriod,
-            paymentMethod: method,
-            machineId: machineId || null
+            paymentMethod: actualMethod,
+            machineId: machineId || null,
+            email: email
           })
         });
 
@@ -397,18 +442,59 @@
         currentOrderNo = result.orderNo;
         expireTime = Date.now() + (result.expireMinutes * 60 * 1000);
 
-        // 显示二维码
-        document.getElementById('payment-method-name').textContent = method === 'alipay' ? '支付宝' : '微信';
-        document.getElementById('qr-code-img').src = result.qrCodeImage;
-        document.getElementById('display-order-no').textContent = result.orderNo;
-        document.getElementById('qr-section').classList.remove('hidden');
-        document.getElementById('payment-status').classList.remove('hidden');
+        // 判断是 CBB 支付（跳转）还是直连支付（二维码）
+        if (result.payUrl) {
+          // CBB 支付：跳转到支付页面
+          document.getElementById('payment-method-name').textContent = method === 'alipay' ? '支付宝' : '微信';
+          document.getElementById('display-order-no').textContent = result.orderNo;
 
-        // 开始倒计时
-        startCountdown();
+          // 显示跳转提示
+          document.getElementById('qr-section').innerHTML = `
+            <div class="text-center mb-4">
+              <p class="text-gray-400 text-sm mb-4">即将跳转到 <span class="text-white font-medium">${method === 'alipay' ? '支付宝' : '微信'}</span> 支付页面</p>
+              <a href="${result.payUrl}" target="_blank"
+                class="inline-block px-8 py-3 bg-${method === 'alipay' ? 'blue' : 'green'}-600 hover:bg-${method === 'alipay' ? 'blue' : 'green'}-700 rounded-lg font-medium">
+                立即支付
+              </a>
+              <p class="text-gray-500 text-sm mt-4">支付完成后请返回此页面</p>
+            </div>
+            <div class="text-center text-gray-400 text-sm">
+              <p>订单号: <span id="display-order-no">${result.orderNo}</span></p>
+              <p class="mt-1">支付有效期: <span id="expire-countdown"></span></p>
+            </div>
+          `;
+          document.getElementById('qr-section').classList.remove('hidden');
+          document.getElementById('payment-status').classList.remove('hidden');
 
-        // 开始轮询支付状态
-        startStatusCheck();
+          // 自动打开支付页面
+          window.open(result.payUrl, '_blank');
+
+          // 开始倒计时和状态检查
+          startCountdown();
+          startStatusCheck();
+        } else if (result.qrCodeImage) {
+          // 直连支付：显示二维码
+          document.getElementById('qr-section').innerHTML = `
+            <div class="text-center mb-4">
+              <p class="text-gray-400 text-sm mb-2">请使用 <span id="payment-method-name">${method === 'alipay' ? '支付宝' : '微信'}</span> 扫描二维码</p>
+              <div class="qr-container inline-block p-4 bg-white rounded-lg">
+                <img id="qr-code-img" src="${result.qrCodeImage}" alt="支付二维码" class="w-48 h-48">
+              </div>
+            </div>
+            <div class="text-center text-gray-400 text-sm">
+              <p>订单号: <span id="display-order-no">${result.orderNo}</span></p>
+              <p class="mt-1">支付有效期: <span id="expire-countdown"></span></p>
+            </div>
+          `;
+          document.getElementById('qr-section').classList.remove('hidden');
+          document.getElementById('payment-status').classList.remove('hidden');
+
+          // 开始倒计时
+          startCountdown();
+
+          // 开始轮询支付状态
+          startStatusCheck();
+        }
       } catch (err) {
         console.error('创建订单失败:', err);
         alert('创建订单失败，请稍后重试');

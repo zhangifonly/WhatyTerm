@@ -10,10 +10,16 @@ import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
 import QRCode from 'qrcode';
-import { paymentConfig, checkAlipayConfig, checkWechatConfig } from './config/payment.js';
+import { paymentConfig, checkAlipayConfig, checkWechatConfig, checkCBBConfig } from './config/payment.js';
 import { initAlipay, createAlipayOrder, queryAlipayOrder, verifyAlipayNotify, closeAlipayOrder } from './services/alipay.js';
 import { initWechatPay, createWechatOrder, queryWechatOrder, verifyWechatNotify, closeWechatOrder } from './services/wechat.js';
-import { sendPasswordResetEmail, sendOrderConfirmationEmail, sendLicenseExpiryReminder } from './services/EmailService.js';
+import CBBPayClient from './services/CBBPayClient.js';
+import { sendPasswordResetEmail, sendOrderConfirmationEmail, sendWelcomeEmail, sendLicenseExpiryReminder } from './services/EmailService.js';
+import log, { requestLogger, errorLogger } from './services/Logger.js';
+import * as sentry from './services/Sentry.js';
+
+// CBB 支付客户端实例
+let cbbClient = null;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -144,6 +150,15 @@ db.exec(`
 // 初始化默认计划
 const defaultPlans = [
   {
+    id: 'test',
+    name: '测试版',
+    description: '支付测试专用（1分钱）',
+    price_monthly: 1,
+    price_yearly: 1,
+    max_devices: 1,
+    features: JSON.stringify(['all-plugins', 'email-support'])
+  },
+  {
     id: 'personal',
     name: '个人版',
     description: '适合个人开发者',
@@ -184,6 +199,9 @@ for (const plan of defaultPlans) {
 // 创建 Express 应用
 const app = express();
 
+// 初始化 Sentry 错误监控
+sentry.init(app);
+
 // 中间件
 app.use(helmet({
   contentSecurityPolicy: false
@@ -191,6 +209,9 @@ app.use(helmet({
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// 请求日志中间件
+app.use(requestLogger());
 
 // 速率限制
 const limiter = rateLimit({
@@ -278,7 +299,7 @@ app.post('/api/auth/register', async (req, res) => {
       VALUES (?, ?, ?, ?, 'active', ?, 1)
     `).run(licenseId, id, planId, licenseKey, expiresAt);
 
-    console.log(`[注册赠送] 用户 ${email} 获得一个月 Pro 试用，许可证: ${licenseKey}`);
+    log.auth('用户注册赠送试用', { email, licenseKey });
 
     const token = jwt.sign({ id, email }, JWT_SECRET, { expiresIn: '7d' });
 
@@ -294,7 +315,7 @@ app.post('/api/auth/register', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('注册失败:', err);
+    log.error('注册失败', { error: err.message });
     res.status(500).json({ error: '注册失败' });
   }
 });
@@ -322,7 +343,7 @@ app.post('/api/auth/login', async (req, res) => {
 
     res.json({ success: true, token, user: { id: user.id, email: user.email, name: user.name } });
   } catch (err) {
-    console.error('登录失败:', err);
+    log.error('登录失败', { error: err.message });
     res.status(500).json({ error: '登录失败' });
   }
 });
@@ -339,13 +360,13 @@ app.post('/api/auth/verify-credentials', async (req, res) => {
   try {
     const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
     if (!user) {
-      console.log(`[验证凭据] 用户不存在: ${email}`);
+      log.auth('验证凭据失败：用户不存在', { email });
       return res.json({ valid: false, error: '邮箱或密码错误' });
     }
 
     const valid = await bcrypt.compare(password, user.password_hash);
     if (!valid) {
-      console.log(`[验证凭据] 密码错误: ${email}`);
+      log.auth('验证凭据失败：密码错误', { email });
       return res.json({ valid: false, error: '邮箱或密码错误' });
     }
 
@@ -359,7 +380,7 @@ app.post('/api/auth/verify-credentials', async (req, res) => {
 
     const hasValidLicense = licenses.length > 0;
 
-    console.log(`[验证凭据] 用户验证成功: ${email}, 有效许可证: ${hasValidLicense}`);
+    log.auth('验证凭据成功', { email, hasValidLicense });
 
     res.json({
       valid: true,
@@ -376,7 +397,7 @@ app.post('/api/auth/verify-credentials', async (req, res) => {
       }))
     });
   } catch (err) {
-    console.error('[验证凭据] 验证失败:', err);
+    log.error('验证凭据失败', { error: err.message });
     res.status(500).json({ valid: false, error: '验证失败' });
   }
 });
@@ -410,12 +431,12 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       UPDATE users SET reset_token = ?, reset_token_expires = ? WHERE id = ?
     `).run(resetToken, resetTokenExpires, user.id);
 
-    console.log(`[密码重置] 用户 ${email} 请求重置密码`);
+    log.auth('请求密码重置', { email });
 
     // 发送密码重置邮件
     const emailSent = await sendPasswordResetEmail(email, resetToken, user.name);
     if (!emailSent) {
-      console.warn(`[密码重置] 邮件发送失败，用户: ${email}`);
+      log.warn('密码重置邮件发送失败', { email });
     }
 
     res.json({
@@ -428,7 +449,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       })
     });
   } catch (err) {
-    console.error('忘记密码处理失败:', err);
+    log.error('忘记密码处理失败', { error: err.message });
     res.status(500).json({ error: '处理失败，请稍后重试' });
   }
 });
@@ -464,14 +485,14 @@ app.post('/api/auth/reset-password', async (req, res) => {
       WHERE id = ?
     `).run(passwordHash, user.id);
 
-    console.log(`[密码重置] 用户 ${user.email} 密码重置成功`);
+    log.auth('密码重置成功', { email: user.email });
 
     res.json({
       success: true,
       message: '密码重置成功，请使用新密码登录'
     });
   } catch (err) {
-    console.error('重置密码失败:', err);
+    log.error('重置密码失败', { error: err.message });
     res.status(500).json({ error: '重置失败，请稍后重试' });
   }
 });
@@ -499,7 +520,7 @@ app.get('/api/auth/verify-reset-token', (req, res) => {
       email: user.email.replace(/(.{2}).*(@.*)/, '$1***$2') // 隐藏部分邮箱
     });
   } catch (err) {
-    console.error('验证令牌失败:', err);
+    log.error('验证令牌失败', { error: err.message });
     res.status(500).json({ valid: false, error: '验证失败' });
   }
 });
@@ -587,7 +608,7 @@ app.post('/api/license/activate', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error('激活失败:', err);
+    log.error('激活失败', { error: err.message });
     res.status(500).json({ success: false, message: '激活失败' });
   }
 });
@@ -646,7 +667,7 @@ app.post('/api/license/verify', (req, res) => {
       }
     });
   } catch (err) {
-    console.error('验证失败:', err);
+    log.error('验证失败', { error: err.message });
     res.status(500).json({ success: false, message: '验证失败' });
   }
 });
@@ -677,7 +698,7 @@ app.post('/api/license/deactivate', (req, res) => {
       res.json({ success: false, message: '未找到激活记录' });
     }
   } catch (err) {
-    console.error('停用失败:', err);
+    log.error('停用失败', { error: err.message });
     res.status(500).json({ success: false, message: '停用失败' });
   }
 });
@@ -711,7 +732,7 @@ app.get('/api/user/licenses', authMiddleware, (req, res) => {
 
     res.json(result);
   } catch (err) {
-    console.error('获取许可证失败:', err);
+    log.error('获取许可证失败', { error: err.message });
     res.status(500).json({ error: '获取失败' });
   }
 });
@@ -770,7 +791,7 @@ app.post('/api/user/redeem', authMiddleware, (req, res) => {
       }
     });
   } catch (err) {
-    console.error('兑换失败:', err);
+    log.error('兑换失败', { error: err.message });
     res.status(500).json({ error: '兑换失败' });
   }
 });
@@ -789,7 +810,7 @@ app.get('/api/user/devices', authMiddleware, (req, res) => {
 
     res.json(devices);
   } catch (err) {
-    console.error('获取设备失败:', err);
+    log.error('获取设备失败', { error: err.message });
     res.status(500).json({ error: '获取失败' });
   }
 });
@@ -815,7 +836,7 @@ app.post('/api/user/devices/:id/deactivate', authMiddleware, (req, res) => {
 
     res.json({ success: true, message: '设备已解绑' });
   } catch (err) {
-    console.error('解绑失败:', err);
+    log.error('解绑失败', { error: err.message });
     res.status(500).json({ error: '解绑失败' });
   }
 });
@@ -858,7 +879,7 @@ app.post('/api/admin/codes/generate', adminMiddleware, (req, res) => {
 
     res.json({ success: true, codes });
   } catch (err) {
-    console.error('生成激活码失败:', err);
+    log.error('生成激活码失败', { error: err.message });
     res.status(500).json({ error: '生成失败' });
   }
 });
@@ -877,7 +898,7 @@ app.get('/api/admin/stats', adminMiddleware, (req, res) => {
 
     res.json(stats);
   } catch (err) {
-    console.error('获取统计失败:', err);
+    log.error('获取统计失败', { error: err.message });
     res.status(500).json({ error: '获取失败' });
   }
 });
@@ -928,7 +949,7 @@ app.get('/api/admin/orders', adminMiddleware, (req, res) => {
       }
     });
   } catch (err) {
-    console.error('获取订单失败:', err);
+    log.error('获取订单失败', { error: err.message });
     res.status(500).json({ error: '获取失败' });
   }
 });
@@ -973,7 +994,7 @@ app.get('/api/admin/users', adminMiddleware, (req, res) => {
       }
     });
   } catch (err) {
-    console.error('获取用户失败:', err);
+    log.error('获取用户失败', { error: err.message });
     res.status(500).json({ error: '获取失败' });
   }
 });
@@ -1004,7 +1025,7 @@ app.get('/api/admin/users/:id', adminMiddleware, (req, res) => {
 
     res.json({ user, licenses, devices });
   } catch (err) {
-    console.error('获取用户详情失败:', err);
+    log.error('获取用户详情失败', { error: err.message });
     res.status(500).json({ error: '获取失败' });
   }
 });
@@ -1061,7 +1082,7 @@ app.get('/api/admin/devices', adminMiddleware, (req, res) => {
       }
     });
   } catch (err) {
-    console.error('获取设备失败:', err);
+    log.error('获取设备失败', { error: err.message });
     res.status(500).json({ error: '获取失败' });
   }
 });
@@ -1076,7 +1097,7 @@ app.post('/api/admin/devices/:id/deactivate', adminMiddleware, (req, res) => {
       res.status(404).json({ error: '设备不存在' });
     }
   } catch (err) {
-    console.error('解绑设备失败:', err);
+    log.error('解绑设备失败', { error: err.message });
     res.status(500).json({ error: '解绑失败' });
   }
 });
@@ -1106,7 +1127,7 @@ app.post('/api/admin/licenses/:id/extend', adminMiddleware, (req, res) => {
       newExpiresAt: newExpiry
     });
   } catch (err) {
-    console.error('延期许可证失败:', err);
+    log.error('延期许可证失败', { error: err.message });
     res.status(500).json({ error: '延期失败' });
   }
 });
@@ -1129,7 +1150,7 @@ app.post('/api/admin/licenses/:id/toggle', adminMiddleware, (req, res) => {
       status: newStatus
     });
   } catch (err) {
-    console.error('切换许可证状态失败:', err);
+    log.error('切换许可证状态失败', { error: err.message });
     res.status(500).json({ error: '操作失败' });
   }
 });
@@ -1149,7 +1170,7 @@ app.delete('/api/admin/codes/:id', adminMiddleware, (req, res) => {
     db.prepare('DELETE FROM activation_codes WHERE id = ?').run(req.params.id);
     res.json({ success: true, message: '激活码已删除' });
   } catch (err) {
-    console.error('删除激活码失败:', err);
+    log.error('删除激活码失败', { error: err.message });
     res.status(500).json({ error: '删除失败' });
   }
 });
@@ -1200,7 +1221,7 @@ app.get('/api/admin/codes', adminMiddleware, (req, res) => {
       }
     });
   } catch (err) {
-    console.error('获取激活码失败:', err);
+    log.error('获取激活码失败', { error: err.message });
     res.status(500).json({ error: '获取失败' });
   }
 });
@@ -1258,7 +1279,7 @@ app.get('/api/admin/licenses', adminMiddleware, (req, res) => {
       }
     });
   } catch (err) {
-    console.error('获取许可证失败:', err);
+    log.error('获取许可证失败', { error: err.message });
     res.status(500).json({ error: '获取失败' });
   }
 });
@@ -1340,7 +1361,7 @@ app.post('/api/admin/config/alipay', adminMiddleware, (req, res) => {
 
     res.json({ success: true, message: '支付宝配置已保存' });
   } catch (err) {
-    console.error('保存支付宝配置失败:', err);
+    log.error('保存支付宝配置失败', { error: err.message });
     res.status(500).json({ error: '保存失败' });
   }
 });
@@ -1368,7 +1389,7 @@ app.post('/api/admin/config/wechat', adminMiddleware, (req, res) => {
 
     res.json({ success: true, message: '微信支付配置已保存' });
   } catch (err) {
-    console.error('保存微信支付配置失败:', err);
+    log.error('保存微信支付配置失败', { error: err.message });
     res.status(500).json({ error: '保存失败' });
   }
 });
@@ -1389,22 +1410,41 @@ function generateOrderNo() {
 app.get('/api/payment/methods', (req, res) => {
   const methods = [];
 
-  if (checkAlipayConfig()) {
+  // 优先使用 CBB 聚合支付（支持支付宝和微信）
+  if (checkCBBConfig()) {
     methods.push({
-      id: 'alipay',
+      id: 'cbb_alipay',
       name: '支付宝',
       icon: 'alipay',
-      enabled: true
+      enabled: true,
+      provider: 'cbb'
     });
-  }
-
-  if (checkWechatConfig()) {
     methods.push({
-      id: 'wechat',
+      id: 'cbb_wechat',
       name: '微信支付',
       icon: 'wechat',
-      enabled: true
+      enabled: true,
+      provider: 'cbb'
     });
+  } else {
+    // 回退到直连支付
+    if (checkAlipayConfig()) {
+      methods.push({
+        id: 'alipay',
+        name: '支付宝',
+        icon: 'alipay',
+        enabled: true
+      });
+    }
+
+    if (checkWechatConfig()) {
+      methods.push({
+        id: 'wechat',
+        name: '微信支付',
+        icon: 'wechat',
+        enabled: true
+      });
+    }
   }
 
   res.json(methods);
@@ -1422,7 +1462,9 @@ app.post('/api/payment/create', async (req, res) => {
     return res.status(400).json({ error: '无效的订阅周期' });
   }
 
-  if (!['alipay', 'wechat'].includes(paymentMethod)) {
+  // 支持 CBB 和直连支付方式
+  const validMethods = ['alipay', 'wechat', 'cbb_alipay', 'cbb_wechat'];
+  if (!validMethods.includes(paymentMethod)) {
     return res.status(400).json({ error: '无效的支付方式' });
   }
 
@@ -1480,44 +1522,104 @@ app.post('/api/payment/create', async (req, res) => {
     // 订单描述
     const subject = `WhatyTerm ${plan.name} - ${period === 'monthly' ? '月付' : '年付'}`;
 
-    // 调用支付接口
-    let paymentResult;
-    if (paymentMethod === 'alipay') {
-      paymentResult = await createAlipayOrder(orderNo, amount, subject);
-    } else {
-      paymentResult = await createWechatOrder(orderNo, amount, subject);
-    }
+    // 判断是否使用 CBB 支付
+    const isCBB = paymentMethod.startsWith('cbb_');
 
-    if (!paymentResult.success) {
-      // 更新订单状态为失败
-      db.prepare("UPDATE orders SET status = 'failed' WHERE id = ?").run(orderId);
-      return res.status(500).json({ error: paymentResult.error || '创建支付订单失败' });
-    }
-
-    // 生成二维码图片
-    const qrCodeDataUrl = await QRCode.toDataURL(paymentResult.qrCode, {
-      width: 256,
-      margin: 2
-    });
-
-    res.json({
-      success: true,
-      orderNo: orderNo,
-      orderId: orderId,
-      amount: amount,
-      qrCode: paymentResult.qrCode,
-      qrCodeImage: qrCodeDataUrl,
-      paymentMethod: paymentMethod,
-      expireMinutes: paymentConfig.order.expireMinutes,
-      plan: {
-        id: plan.id,
-        name: plan.name,
-        period: period,
-        durationDays: durationDays
+    if (isCBB) {
+      // 使用 CBB 聚合支付
+      if (!cbbClient || !cbbClient.isConfigured()) {
+        db.prepare("UPDATE orders SET status = 'failed' WHERE id = ?").run(orderId);
+        return res.status(500).json({ error: 'CBB 支付未配置' });
       }
-    });
+
+      // 计算过期时间（UTC 格式）
+      const expireTime = new Date(Date.now() + paymentConfig.order.expireMinutes * 60 * 1000).toISOString();
+
+      // 创建 CBB 订单
+      const cbbResult = await cbbClient.createTrade({
+        goodName: subject,
+        amount: (amount / 100).toFixed(2), // 分转元
+        outTradeNo: orderNo,
+        expireTime: expireTime,
+        businessParams: JSON.stringify({ userId, planId, period, durationDays })
+      });
+
+      if (!cbbResult.success) {
+        db.prepare("UPDATE orders SET status = 'failed' WHERE id = ?").run(orderId);
+        return res.status(500).json({ error: cbbResult.errorMsg || cbbResult.message || '创建 CBB 订单失败' });
+      }
+
+      const tradeNo = cbbResult.data.tradeNo;
+
+      // 保存 CBB 订单号到订单记录（用于后续查询）
+      db.prepare('UPDATE orders SET payment_id = ? WHERE id = ?').run(`${orderNo}|${tradeNo}`, orderId);
+
+      // 构建支付页面 URL（带订单号参数）
+      const isMobile = req.headers['user-agent']?.toLowerCase().includes('mobile');
+      const returnUrl = `${paymentConfig.cbb.returnUrl}?orderNo=${orderNo}`;
+      let payUrl;
+
+      if (isMobile) {
+        payUrl = cbbClient.buildWapPayUrl(tradeNo, returnUrl, returnUrl);
+      } else {
+        payUrl = cbbClient.buildPcPayUrl(tradeNo, returnUrl);
+      }
+
+      res.json({
+        success: true,
+        orderNo: orderNo,
+        orderId: orderId,
+        amount: amount,
+        payUrl: payUrl,
+        tradeNo: tradeNo,
+        paymentMethod: paymentMethod,
+        expireMinutes: paymentConfig.order.expireMinutes,
+        plan: {
+          id: plan.id,
+          name: plan.name,
+          period: period,
+          durationDays: durationDays
+        }
+      });
+    } else {
+      // 使用直连支付（支付宝/微信）
+      let paymentResult;
+      if (paymentMethod === 'alipay') {
+        paymentResult = await createAlipayOrder(orderNo, amount, subject);
+      } else {
+        paymentResult = await createWechatOrder(orderNo, amount, subject);
+      }
+
+      if (!paymentResult.success) {
+        db.prepare("UPDATE orders SET status = 'failed' WHERE id = ?").run(orderId);
+        return res.status(500).json({ error: paymentResult.error || '创建支付订单失败' });
+      }
+
+      // 生成二维码图片
+      const qrCodeDataUrl = await QRCode.toDataURL(paymentResult.qrCode, {
+        width: 256,
+        margin: 2
+      });
+
+      res.json({
+        success: true,
+        orderNo: orderNo,
+        orderId: orderId,
+        amount: amount,
+        qrCode: paymentResult.qrCode,
+        qrCodeImage: qrCodeDataUrl,
+        paymentMethod: paymentMethod,
+        expireMinutes: paymentConfig.order.expireMinutes,
+        plan: {
+          id: plan.id,
+          name: plan.name,
+          period: period,
+          durationDays: durationDays
+        }
+      });
+    }
   } catch (err) {
-    console.error('创建支付订单失败:', err);
+    log.error('创建支付订单失败', { error: err.message });
     res.status(500).json({ error: '创建订单失败' });
   }
 });
@@ -1533,8 +1635,8 @@ app.get('/api/payment/status/:orderNo', async (req, res) => {
       FROM orders o
       JOIN plans p ON o.plan_id = p.id
       JOIN users u ON o.user_id = u.id
-      WHERE o.payment_id = ?
-    `).get(orderNo);
+      WHERE o.payment_id LIKE ?
+    `).get(`${orderNo}%`);
 
     if (!order) {
       return res.status(404).json({ error: '订单不存在' });
@@ -1562,16 +1664,128 @@ app.get('/api/payment/status/:orderNo', async (req, res) => {
       });
     }
 
-    // 查询支付平台订单状态
-    let paymentStatus;
-    if (order.payment_method === 'alipay') {
-      paymentStatus = await queryAlipayOrder(orderNo);
-    } else {
-      paymentStatus = await queryWechatOrder(orderNo);
-    }
+    // 判断是否是 CBB 订单
+    const isCBB = order.payment_method?.startsWith('cbb_');
 
-    if (!paymentStatus.success) {
-      return res.json({
+    if (isCBB) {
+      // 从 payment_id 中提取 CBB tradeNo
+      const parts = order.payment_id.split('|');
+      const tradeNo = parts[1];
+
+      if (!tradeNo || !cbbClient) {
+        return res.json({
+          success: true,
+          status: order.status,
+          order: {
+            orderNo: orderNo,
+            amount: order.amount,
+            planName: order.plan_name
+          }
+        });
+      }
+
+      // 查询 CBB 订单状态
+      const cbbResult = await cbbClient.queryTrade(tradeNo);
+
+      if (!cbbResult.success) {
+        return res.json({
+          success: true,
+          status: order.status,
+          order: {
+            orderNo: orderNo,
+            amount: order.amount,
+            planName: order.plan_name
+          }
+        });
+      }
+
+      // CBB 支付状态：PAYED 表示已支付
+      const isPaid = cbbResult.data?.payStatus === 'PAYED';
+
+      if (isPaid && order.status !== 'paid') {
+        // 处理支付成功
+        await handlePaymentSuccess(order, { tradeNo: tradeNo });
+
+        const license = db.prepare(`
+          SELECT * FROM licenses WHERE user_id = ? ORDER BY created_at DESC LIMIT 1
+        `).get(order.user_id);
+
+        return res.json({
+          success: true,
+          status: 'paid',
+          order: {
+            orderNo: orderNo,
+            amount: order.amount,
+            planName: order.plan_name,
+            paidAt: Math.floor(Date.now() / 1000)
+          },
+          license: license ? {
+            key: license.license_key,
+            expiresAt: new Date(license.expires_at * 1000).toISOString()
+          } : null
+        });
+      }
+
+      res.json({
+        success: true,
+        status: order.status,
+        order: {
+          orderNo: orderNo,
+          amount: order.amount,
+          planName: order.plan_name
+        }
+      });
+    } else {
+      // 查询直连支付平台订单状态
+      let paymentStatus;
+      if (order.payment_method === 'alipay') {
+        paymentStatus = await queryAlipayOrder(orderNo);
+      } else {
+        paymentStatus = await queryWechatOrder(orderNo);
+      }
+
+      if (!paymentStatus.success) {
+        return res.json({
+          success: true,
+          status: order.status,
+          order: {
+            orderNo: orderNo,
+            amount: order.amount,
+            planName: order.plan_name
+          }
+        });
+      }
+
+      // 检查是否已支付
+      const isPaid = order.payment_method === 'alipay'
+        ? paymentStatus.tradeStatus === 'TRADE_SUCCESS'
+        : paymentStatus.tradeState === 'SUCCESS';
+
+      if (isPaid && order.status !== 'paid') {
+        // 处理支付成功
+        await handlePaymentSuccess(order, paymentStatus);
+
+        const license = db.prepare(`
+          SELECT * FROM licenses WHERE user_id = ? ORDER BY created_at DESC LIMIT 1
+        `).get(order.user_id);
+
+        return res.json({
+          success: true,
+          status: 'paid',
+          order: {
+            orderNo: orderNo,
+            amount: order.amount,
+            planName: order.plan_name,
+            paidAt: Math.floor(Date.now() / 1000)
+          },
+          license: license ? {
+            key: license.license_key,
+            expiresAt: new Date(license.expires_at * 1000).toISOString()
+          } : null
+        });
+      }
+
+      res.json({
         success: true,
         status: order.status,
         order: {
@@ -1581,47 +1795,8 @@ app.get('/api/payment/status/:orderNo', async (req, res) => {
         }
       });
     }
-
-    // 检查是否已支付
-    const isPaid = order.payment_method === 'alipay'
-      ? paymentStatus.tradeStatus === 'TRADE_SUCCESS'
-      : paymentStatus.tradeState === 'SUCCESS';
-
-    if (isPaid && order.status !== 'paid') {
-      // 处理支付成功
-      await handlePaymentSuccess(order, paymentStatus);
-
-      const license = db.prepare(`
-        SELECT * FROM licenses WHERE user_id = ? ORDER BY created_at DESC LIMIT 1
-      `).get(order.user_id);
-
-      return res.json({
-        success: true,
-        status: 'paid',
-        order: {
-          orderNo: orderNo,
-          amount: order.amount,
-          planName: order.plan_name,
-          paidAt: Math.floor(Date.now() / 1000)
-        },
-        license: license ? {
-          key: license.license_key,
-          expiresAt: new Date(license.expires_at * 1000).toISOString()
-        } : null
-      });
-    }
-
-    res.json({
-      success: true,
-      status: order.status,
-      order: {
-        orderNo: orderNo,
-        amount: order.amount,
-        planName: order.plan_name
-      }
-    });
   } catch (err) {
-    console.error('查询订单状态失败:', err);
+    log.error('查询订单状态失败', { error: err.message });
     res.status(500).json({ error: '查询失败' });
   }
 });
@@ -1649,12 +1824,40 @@ async function handlePaymentSuccess(order, paymentStatus) {
     VALUES (?, ?, ?, ?, ?, ?)
   `).run(licenseId, order.user_id, order.plan_id, licenseKey, expiresAt, plan.max_devices);
 
-  console.log(`订单 ${order.payment_id} 支付成功，已创建许可证 ${licenseKey}`);
+  log.payment('订单支付成功', { orderId: order.payment_id, licenseKey });
 
-  // 发送订单确认邮件
+  // 获取用户信息
+  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(order.user_id);
+  if (!user || !user.email || user.email.includes('@whatyterm.local')) {
+    return; // 设备用户或访客用户，不发送邮件
+  }
+
+  // 检查是否是新用户（支付时创建的，还没设置密码）
+  const isNewUser = user.password_hash === 'pending-payment';
+
   try {
-    const user = db.prepare('SELECT email FROM users WHERE id = ?').get(order.user_id);
-    if (user && user.email && !user.email.includes('@whatyterm.local')) {
+    if (isNewUser) {
+      // 新用户：生成设置密码的令牌
+      const resetToken = crypto.randomBytes(32).toString('hex');
+      const resetExpires = now + 7 * 24 * 60 * 60; // 7天有效期
+
+      db.prepare(`
+        UPDATE users SET reset_token = ?, reset_token_expires = ? WHERE id = ?
+      `).run(resetToken, resetExpires, user.id);
+
+      // 发送欢迎邮件（包含设置密码链接和许可证信息）
+      await sendWelcomeEmail(user.email, {
+        orderId: order.payment_id,
+        planName: plan.name,
+        period: order.amount === plan.price_monthly ? 'monthly' : 'yearly',
+        amount: order.amount,
+        expiresAt: new Date(expiresAt * 1000).toISOString(),
+        licenseKey: licenseKey,
+        resetToken: resetToken
+      });
+      log.auth('新用户欢迎邮件已发送', { email: user.email });
+    } else {
+      // 老用户：发送订单确认邮件
       await sendOrderConfirmationEmail(user.email, {
         orderId: order.payment_id,
         planName: plan.name,
@@ -1665,18 +1868,18 @@ async function handlePaymentSuccess(order, paymentStatus) {
       });
     }
   } catch (emailErr) {
-    console.error('发送订单确认邮件失败:', emailErr.message);
+    log.error('发送邮件失败', { error: emailErr.message });
   }
 }
 
 // 支付宝异步通知
 app.post('/api/payment/alipay/notify', express.urlencoded({ extended: true }), async (req, res) => {
-  console.log('收到支付宝回调:', req.body);
+  log.payment('收到支付宝回调', req.body);
 
   try {
     // 验证签名
     if (!verifyAlipayNotify(req.body)) {
-      console.error('支付宝签名验证失败');
+      log.error('支付宝签名验证失败');
       return res.send('fail');
     }
 
@@ -1691,7 +1894,7 @@ app.post('/api/payment/alipay/notify', express.urlencoded({ extended: true }), a
     `).get(out_trade_no);
 
     if (!order) {
-      console.error('订单不存在:', out_trade_no);
+      log.error('订单不存在', { orderNo: out_trade_no });
       return res.send('fail');
     }
 
@@ -1704,14 +1907,14 @@ app.post('/api/payment/alipay/notify', express.urlencoded({ extended: true }), a
 
     res.send('success');
   } catch (err) {
-    console.error('处理支付宝回调失败:', err);
+    log.error('处理支付宝回调失败', { error: err.message });
     res.send('fail');
   }
 });
 
 // 微信支付异步通知
 app.post('/api/payment/wechat/notify', express.raw({ type: 'application/json' }), async (req, res) => {
-  console.log('收到微信支付回调');
+  log.payment('收到微信支付回调');
 
   try {
     const body = JSON.parse(req.body.toString());
@@ -1719,7 +1922,7 @@ app.post('/api/payment/wechat/notify', express.raw({ type: 'application/json' })
     // 验证签名并解密
     const verifyResult = verifyWechatNotify(req.headers, body);
     if (!verifyResult.success) {
-      console.error('微信支付签名验证失败:', verifyResult.error);
+      log.error('微信支付签名验证失败', { error: verifyResult.error });
       return res.status(400).json({ code: 'FAIL', message: verifyResult.error });
     }
 
@@ -1734,7 +1937,7 @@ app.post('/api/payment/wechat/notify', express.raw({ type: 'application/json' })
     `).get(out_trade_no);
 
     if (!order) {
-      console.error('订单不存在:', out_trade_no);
+      log.error('订单不存在', { orderNo: out_trade_no });
       return res.status(404).json({ code: 'FAIL', message: '订单不存在' });
     }
 
@@ -1747,8 +1950,49 @@ app.post('/api/payment/wechat/notify', express.raw({ type: 'application/json' })
 
     res.json({ code: 'SUCCESS', message: '成功' });
   } catch (err) {
-    console.error('处理微信支付回调失败:', err);
+    log.error('处理微信支付回调失败', { error: err.message });
     res.status(500).json({ code: 'FAIL', message: '处理失败' });
+  }
+});
+
+// CBB 聚合支付异步通知
+app.post('/api/payment/cbb/notify', express.json(), async (req, res) => {
+  log.payment('收到 CBB 支付回调', req.body);
+
+  try {
+    // 验证签名
+    if (cbbClient && !cbbClient.verifyCallback(req.body)) {
+      log.error('CBB 签名验证失败');
+      return res.send('FAIL');
+    }
+
+    const { outTradeNo, tradeNo, payStatus, totalNumber } = req.body;
+
+    // 查询订单（outTradeNo 是我们的订单号）
+    const order = db.prepare(`
+      SELECT o.*, p.max_devices
+      FROM orders o
+      JOIN plans p ON o.plan_id = p.id
+      WHERE o.payment_id LIKE ?
+    `).get(`${outTradeNo}%`);
+
+    if (!order) {
+      log.error('订单不存在', { orderNo: outTradeNo });
+      return res.send('FAIL');
+    }
+
+    // 检查支付状态（CBB 使用 PAYED 表示已支付）
+    if (payStatus === 'PAYED') {
+      if (order.status !== 'paid') {
+        log.payment('CBB 订单支付成功', { orderNo: outTradeNo, tradeNo });
+        await handlePaymentSuccess(order, { tradeNo: tradeNo });
+      }
+    }
+
+    res.send('SUCCESS');
+  } catch (err) {
+    log.error('处理 CBB 回调失败', { error: err.message });
+    res.send('FAIL');
   }
 });
 
@@ -1775,7 +2019,7 @@ app.post('/api/payment/cancel/:orderNo', async (req, res) => {
 
     res.json({ success: true, message: '订单已取消' });
   } catch (err) {
-    console.error('取消订单失败:', err);
+    log.error('取消订单失败', { error: err.message });
     res.status(500).json({ error: '取消失败' });
   }
 });
@@ -1802,9 +2046,119 @@ loadPaymentConfigFromDB();
 initAlipay();
 initWechatPay();
 
+// 初始化 CBB 支付客户端
+if (checkCBBConfig()) {
+  cbbClient = new CBBPayClient({
+    clientId: paymentConfig.cbb.clientId,
+    clientSecret: paymentConfig.cbb.clientSecret,
+    customerCode: paymentConfig.cbb.customerCode,
+    gatewayUrl: paymentConfig.cbb.gatewayUrl,
+    privateKey: paymentConfig.cbb.privateKey,
+    publicKey: paymentConfig.cbb.publicKey
+  });
+  log.info('CBB 聚合支付已初始化');
+}
+
+// 支付结果页面路由
+app.get('/payment/result', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'payment', 'result.html'));
+});
+
+// ============================================
+// 定时任务
+// ============================================
+
+/**
+ * 检查并发送许可证到期提醒
+ * 提前 7 天和 1 天发送提醒
+ */
+async function checkLicenseExpiry() {
+  const now = Math.floor(Date.now() / 1000);
+  const sevenDaysLater = now + 7 * 24 * 60 * 60;
+  const oneDayLater = now + 24 * 60 * 60;
+
+  // 查找 7 天内到期的许可证（排除已发送过提醒的）
+  const expiringLicenses = db.prepare(`
+    SELECT l.*, u.email, u.name as user_name, p.name as plan_name
+    FROM licenses l
+    JOIN users u ON l.user_id = u.id
+    JOIN plans p ON l.plan_id = p.id
+    WHERE l.status = 'active'
+      AND l.expires_at > ?
+      AND l.expires_at < ?
+      AND u.email NOT LIKE '%@whatyterm.local'
+  `).all(now, sevenDaysLater);
+
+  for (const license of expiringLicenses) {
+    const daysLeft = Math.ceil((license.expires_at - now) / (24 * 60 * 60));
+
+    // 只在 7 天和 1 天时发送提醒
+    if (daysLeft === 7 || daysLeft === 1) {
+      try {
+        await sendLicenseExpiryReminder(license.email, {
+          planName: license.plan_name,
+          expiresAt: new Date(license.expires_at * 1000).toISOString()
+        });
+        log.cron('已发送到期提醒', { email: license.email, daysLeft });
+      } catch (err) {
+        log.error('发送到期提醒失败', { error: err.message });
+      }
+    }
+  }
+}
+
+/**
+ * 取消超时订单
+ * 超过 30 分钟未支付的订单自动取消
+ */
+function cancelExpiredOrders() {
+  const thirtyMinutesAgo = Math.floor(Date.now() / 1000) - 30 * 60;
+
+  const expiredOrders = db.prepare(`
+    SELECT id, payment_id FROM orders
+    WHERE status = 'pending'
+      AND created_at < ?
+  `).all(thirtyMinutesAgo);
+
+  for (const order of expiredOrders) {
+    db.prepare("UPDATE orders SET status = 'expired' WHERE id = ?").run(order.id);
+    log.cron('订单超时自动取消', { orderId: order.payment_id });
+  }
+
+  if (expiredOrders.length > 0) {
+    log.cron('超时订单批量取消', { count: expiredOrders.length });
+  }
+}
+
+// 启动定时任务
+function startScheduledTasks() {
+  // 每小时检查一次许可证到期
+  setInterval(() => {
+    checkLicenseExpiry().catch(err => {
+      log.error('检查许可证到期失败', { error: err.message });
+    });
+  }, 60 * 60 * 1000); // 1 小时
+
+  // 每 5 分钟检查一次超时订单
+  setInterval(() => {
+    cancelExpiredOrders();
+  }, 5 * 60 * 1000); // 5 分钟
+
+  log.cron('定时任务已启动', { tasks: ['许可证到期提醒（每小时）', '订单超时取消（每5分钟）'] });
+}
+
+// Sentry 错误处理中间件（必须在所有路由之后）
+app.use(sentry.errorHandler());
+
 // 启动服务器
 app.listen(PORT, () => {
-  console.log(`WhatyTerm 订阅服务器运行在 http://localhost:${PORT}`);
-  console.log(`支付宝支付: ${checkAlipayConfig() ? '已启用' : '未配置'}`);
-  console.log(`微信支付: ${checkWechatConfig() ? '已启用' : '未配置'}`);
+  log.info(`WhatyTerm 订阅服务器已启动`, {
+    port: PORT,
+    cbb: checkCBBConfig() ? '已启用' : '未配置',
+    alipay: checkAlipayConfig() ? '已启用' : '未配置',
+    wechat: checkWechatConfig() ? '已启用' : '未配置'
+  });
+
+  // 启动定时任务
+  startScheduledTasks();
 });
