@@ -1,5 +1,34 @@
 # WebTmux 开发规则
 
+## 网站与服务
+
+### term.whaty.org（综合门户）
+
+**重要**：term.whaty.org 是 WhatyTerm 的综合门户网站，包含以下功能：
+- **产品介绍**：功能特性、使用说明
+- **下载链接**：各平台安装包下载
+- **订阅服务**：付费计划、支付、许可证管理
+- **用户中心**：登录、注册、激活码兑换
+
+**服务器配置**：
+- 服务器：US-LAX02
+- 后端端口：3100（Docker 容器 whatyterm-subscription）
+- nginx 反向代理：`/var/www/downloads/` 静态文件 + API 转发
+
+**安装包目录**：`/var/www/downloads/whatyterm/v版本号/`
+
+**更新下载页面**：
+```bash
+# 上传安装包
+ssh us-lax02 "mkdir -p /var/www/downloads/whatyterm/v新版本"
+scp release/WhatyTerm-新版本.dmg us-lax02:/var/www/downloads/whatyterm/v新版本/
+scp release/WhatyTerm-新版本-arm64.dmg us-lax02:/var/www/downloads/whatyterm/v新版本/
+scp "release/WhatyTerm Setup 新版本.exe" us-lax02:/var/www/downloads/whatyterm/v新版本/
+
+# 更新订阅服务器首页的下载链接（如需要）
+# 编辑 subscription-server/public/index.html
+```
+
 ## 服务端口配置
 
 - **默认端口**: `3928`
@@ -189,20 +218,7 @@ scp "release/WhatyTerm Setup x.x.x.exe" us-lax02:/var/www/downloads/whatyterm/vx
 
 ### 4. 更新下载页面
 
-```bash
-# 更新 ai.whaty.org 下载页面的版本号
-ssh us-lax02 "sed -i 's/v旧版本/v新版本/g; s/旧版本/新版本/g' /var/www/downloads/index.html"
-
-# 验证更新
-ssh us-lax02 "grep -E 'v[0-9]+\.[0-9]+\.[0-9]+' /var/www/downloads/index.html | head -5"
-```
-
-### 下载页面信息
-
-- **网站地址**: https://ai.whaty.org/
-- **服务器**: US-LAX02
-- **HTML 文件**: `/var/www/downloads/index.html`
-- **安装包目录**: `/var/www/downloads/whatyterm/v版本号/`
+更新 term.whaty.org 订阅服务器首页的下载链接（subscription-server/public/index.html），然后同步到服务器。
 
 ## 网络请求规则（重要！）
 
