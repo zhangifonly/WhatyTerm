@@ -234,6 +234,110 @@ async function sendOrderConfirmationEmail(email, order) {
 }
 
 /**
+ * 发送新用户欢迎邮件（包含设置密码链接和许可证信息）
+ * @param {string} email - 收件人邮箱
+ * @param {Object} order - 订单信息
+ * @returns {Promise<boolean>}
+ */
+async function sendWelcomeEmail(email, order) {
+  const setPasswordUrl = `${BASE_URL}/reset-password.html?token=${order.resetToken}`;
+  const displayName = email.split('@')[0];
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #333; }
+    .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+    .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 8px 8px 0 0; }
+    .content { background: #f8f9fa; padding: 30px; border-radius: 0 0 8px 8px; }
+    .order-info { background: white; padding: 20px; border-radius: 8px; margin: 20px 0; }
+    .order-info table { width: 100%; border-collapse: collapse; }
+    .order-info td { padding: 10px 0; border-bottom: 1px solid #eee; }
+    .order-info td:last-child { text-align: right; font-weight: bold; }
+    .total { font-size: 18px; color: #28a745; }
+    .footer { text-align: center; color: #666; font-size: 12px; margin-top: 20px; }
+    .button { display: inline-block; background: #667eea; color: white; padding: 12px 30px; text-decoration: none; border-radius: 6px; margin: 10px 5px; }
+    .button-green { background: #28a745; }
+    .important-box { background: #e7f3ff; border: 1px solid #b3d7ff; padding: 20px; border-radius: 8px; margin: 20px 0; }
+    .license-key { word-break: break-all; background: #e9ecef; padding: 15px; border-radius: 4px; font-family: monospace; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>欢迎使用 WhatyTerm！</h1>
+      <p>您的订阅已激活</p>
+    </div>
+    <div class="content">
+      <p>您好，${displayName}！</p>
+      <p>感谢您购买 WhatyTerm 订阅！您的订单已支付成功。</p>
+
+      <div class="important-box">
+        <h3 style="margin-top: 0; color: #0066cc;">⚠️ 重要：请设置您的登录密码</h3>
+        <p>为了能够登录用户中心管理您的订阅和设备，请点击下方按钮设置密码：</p>
+        <p style="text-align: center;">
+          <a href="${setPasswordUrl}" class="button">设置密码</a>
+        </p>
+        <p style="font-size: 12px; color: #666;">此链接 7 天内有效。设置密码后，您可以使用邮箱 ${email} 登录。</p>
+      </div>
+
+      <div class="order-info">
+        <h3 style="margin-top: 0;">订单详情</h3>
+        <table>
+          <tr>
+            <td>订单号</td>
+            <td>${order.orderId}</td>
+          </tr>
+          <tr>
+            <td>订阅方案</td>
+            <td>${order.planName}</td>
+          </tr>
+          <tr>
+            <td>订阅周期</td>
+            <td>${order.period === 'yearly' ? '年付' : '月付'}</td>
+          </tr>
+          <tr>
+            <td>有效期至</td>
+            <td>${new Date(order.expiresAt).toLocaleDateString('zh-CN')}</td>
+          </tr>
+          <tr>
+            <td>支付金额</td>
+            <td class="total">¥${(order.amount / 100).toFixed(2)}</td>
+          </tr>
+        </table>
+      </div>
+
+      ${order.licenseKey ? `
+      <p><strong>许可证密钥：</strong></p>
+      <p class="license-key">${order.licenseKey}</p>
+      <p style="color: #666; font-size: 12px;">请妥善保管此密钥，在 WhatyTerm 客户端激活时需要使用。</p>
+      ` : ''}
+
+      <p style="text-align: center; margin-top: 30px;">
+        <a href="${setPasswordUrl}" class="button">设置密码</a>
+        <a href="${BASE_URL}/user.html" class="button button-green">用户中心</a>
+      </p>
+    </div>
+    <div class="footer">
+      <p>如有问题，请联系 support@whaty.org</p>
+      <p>&copy; ${new Date().getFullYear()} WhatyTerm. All rights reserved.</p>
+    </div>
+  </div>
+</body>
+</html>
+`;
+
+  return sendEmail({
+    to: email,
+    subject: `[WhatyTerm] 欢迎！请设置您的登录密码`,
+    html
+  });
+}
+
+/**
  * 发送许可证即将过期提醒
  * @param {string} email - 收件人邮箱
  * @param {Object} license - 许可证信息
@@ -306,5 +410,6 @@ export {
   sendEmail,
   sendPasswordResetEmail,
   sendOrderConfirmationEmail,
+  sendWelcomeEmail,
   sendLicenseExpiryReminder
 };

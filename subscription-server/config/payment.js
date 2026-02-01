@@ -38,6 +38,26 @@ export const paymentConfig = {
     notifyUrl: process.env.WECHAT_NOTIFY_URL || 'https://term.whaty.org/api/payment/wechat/notify'
   },
 
+  // CBB 聚合支付配置
+  cbb: {
+    // 网关地址
+    gatewayUrl: process.env.CBB_GATEWAY_URL || 'https://api.webtrn.cn',
+    // 应用客户端 ID
+    clientId: process.env.CBB_CLIENT_ID || '',
+    // 应用客户端密钥
+    clientSecret: process.env.CBB_CLIENT_SECRET || '',
+    // 客户编号
+    customerCode: process.env.CBB_CUSTOMER_CODE || '',
+    // RSA 私钥（页面服务签名用，Base64 编码）
+    privateKey: process.env.CBB_PRIVATE_KEY || '',
+    // RSA 公钥（回调验签用，Base64 编码）
+    publicKey: process.env.CBB_PUBLIC_KEY || '',
+    // 回调地址
+    notifyUrl: process.env.CBB_NOTIFY_URL || 'https://term.whaty.org/api/payment/cbb/notify',
+    // 支付成功跳转地址
+    returnUrl: process.env.CBB_RETURN_URL || 'https://term.whaty.org/payment/result'
+  },
+
   // 订单配置
   order: {
     // 订单超时时间（分钟）
@@ -56,4 +76,9 @@ export function checkAlipayConfig() {
 export function checkWechatConfig() {
   const { mchid, apiKey, serialNo, privateKey } = paymentConfig.wechat;
   return !!(mchid && apiKey && serialNo && privateKey);
+}
+
+export function checkCBBConfig() {
+  const { clientId, clientSecret, customerCode } = paymentConfig.cbb;
+  return !!(clientId && clientSecret && customerCode);
 }
