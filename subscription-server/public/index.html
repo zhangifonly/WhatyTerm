@@ -25,12 +25,45 @@
         <h1 class="text-4xl font-bold mb-2 bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
           WhatyTerm
         </h1>
-        <p class="text-gray-400">AI 智能终端管理工具 - 订阅服务</p>
+        <p class="text-gray-400">AI 智能终端管理工具</p>
       </div>
-      <a href="/user.html" class="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-medium">
-        登录 / 用户中心
-      </a>
+      <div class="flex gap-3">
+        <a href="#download" class="px-6 py-3 bg-green-600 hover:bg-green-700 rounded-lg font-medium">
+          下载客户端
+        </a>
+        <a href="/user.html" class="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-medium">
+          登录 / 用户中心
+        </a>
+      </div>
     </header>
+
+    <!-- 下载区域 -->
+    <section id="download" class="glass rounded-xl p-6 mb-8">
+      <h2 class="text-xl font-semibold mb-4">下载 WhatyTerm <span class="text-sm text-gray-400 font-normal">v1.0.56</span></h2>
+      <div class="grid md:grid-cols-3 gap-4">
+        <a href="/whatyterm/v1.0.56/WhatyTerm-1.0.56.dmg" class="flex items-center gap-3 p-4 bg-gray-800/50 rounded-lg hover:bg-gray-700/50 transition">
+          <span class="text-3xl">🍎</span>
+          <div>
+            <p class="font-medium">macOS (Intel)</p>
+            <p class="text-sm text-gray-400">适用于 Intel 芯片 Mac</p>
+          </div>
+        </a>
+        <a href="/whatyterm/v1.0.56/WhatyTerm-1.0.56-arm64.dmg" class="flex items-center gap-3 p-4 bg-gray-800/50 rounded-lg hover:bg-gray-700/50 transition">
+          <span class="text-3xl">🍎</span>
+          <div>
+            <p class="font-medium">macOS (Apple Silicon)</p>
+            <p class="text-sm text-gray-400">适用于 M1/M2/M3 芯片 Mac</p>
+          </div>
+        </a>
+        <a href="/whatyterm/v1.0.56/WhatyTerm%20Setup%201.0.56.exe" class="flex items-center gap-3 p-4 bg-gray-800/50 rounded-lg hover:bg-gray-700/50 transition">
+          <span class="text-3xl">🪟</span>
+          <div>
+            <p class="font-medium">Windows</p>
+            <p class="text-sm text-gray-400">适用于 Windows 10/11</p>
+          </div>
+        </a>
+      </div>
+    </section>
 
     <!-- 机器 ID 显示 -->
     <div id="machine-info" class="glass rounded-xl p-6 mb-8 hidden">
