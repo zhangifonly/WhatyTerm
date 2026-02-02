@@ -2,6 +2,11 @@
 /**
  * 下载 Windows 预编译原生模块
  * 用于在 macOS 上构建 Windows 版本
+ *
+ * 注意：此脚本仅用于紧急情况。正常构建应使用 GitHub Actions，
+ * 它会在目标平台上运行 electron-rebuild 来编译原生模块。
+ *
+ * node-pty 没有预构建版本，必须在 Windows 上编译。
  */
 
 const { execSync } = require('child_process');
