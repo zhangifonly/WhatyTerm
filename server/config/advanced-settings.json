@@ -1,7 +1,7 @@
 {
   "healthCheck": {
-    "timeoutSecs": 45,
-    "maxRetries": 2,
+    "timeoutSecs": 15,
+    "maxRetries": 1,
     "degradedThresholdMs": 6000,
     "testModels": {
       "claude": "claude-haiku-4-5-20251001",

@@ -146,11 +146,36 @@ class HealthCheckScheduler {
   }
 
   /**
-   * 执行健康检查
+   * 并发限制执行器
+   * @param {Array} tasks - 任务数组，每个任务是一个返回 Promise 的函数
+   * @param {number} concurrency - 并发数限制
+   */
+  async _runWithConcurrency(tasks, concurrency = 5) {
+    const results = [];
+    const executing = new Set();
+
+    for (const task of tasks) {
+      const promise = task().then(result => {
+        executing.delete(promise);
+        return result;
+      });
+      executing.add(promise);
+      results.push(promise);
+
+      if (executing.size >= concurrency) {
+        await Promise.race(executing);
+      }
+    }
+
+    return Promise.all(results);
+  }
+
+  /**
+   * 执行健康检查（并行版本）
    */
   async runCheck() {
     const startTime = Date.now();
-    console.log('[HealthCheckScheduler] 开始批量健康检查');
+    console.log('[HealthCheckScheduler] 开始批量健康检查（并行模式）');
 
     const results = {
       total: 0,
@@ -160,63 +185,67 @@ class HealthCheckScheduler {
       details: []
     };
 
-    // 检查所有应用类型
+    // 收集所有供应商检查任务
+    const tasks = [];
     const appTypes = ['claude', 'codex', 'gemini'];
 
     for (const appType of appTypes) {
       try {
         const providers = this._getProvidersByAppType(appType);
+        if (providers.length === 0) continue;
 
-        if (providers.length === 0) {
-          continue;
-        }
-
-        console.log(`[HealthCheckScheduler] 检查 ${appType} 供应商，共 ${providers.length} 个`);
+        console.log(`[HealthCheckScheduler] 准备检查 ${appType} 供应商，共 ${providers.length} 个`);
 
         for (const provider of providers) {
-          results.total++;
-
-          try {
-            const result = await this.healthCheck.checkWithRetry(appType, provider);
-
-            // 保存日志
-            this.healthCheck.saveLog(appType, provider.id, provider.name, result);
-
-            // 统计结果
-            if (result.success) {
-              if (result.status === 'degraded') {
-                results.degraded++;
-              } else {
-                results.success++;
-              }
-            } else {
-              results.failed++;
+          tasks.push(async () => {
+            try {
+              const result = await this.healthCheck.checkWithRetry(appType, provider);
+              this.healthCheck.saveLog(appType, provider.id, provider.name, result);
+              return { appType, provider, result, error: null };
+            } catch (error) {
+              return {
+                appType,
+                provider,
+                result: {
+                  status: 'failed',
+                  success: false,
+                  message: error.message,
+                  testedAt: Date.now()
+                },
+                error
+              };
             }
-
-            results.details.push({
-              appType,
-              id: provider.id,
-              name: provider.name,
-              result
-            });
-          } catch (error) {
-            results.failed++;
-            results.details.push({
-              appType,
-              id: provider.id,
-              name: provider.name,
-              result: {
-                status: 'failed',
-                success: false,
-                message: error.message,
-                testedAt: Date.now()
-              }
-            });
-          }
+          });
         }
       } catch (error) {
-        console.error(`[HealthCheckScheduler] 检查 ${appType} 时发生错误:`, error);
+        console.error(`[HealthCheckScheduler] 获取 ${appType} 供应商列表失败:`, error);
       }
+    }
+
+    results.total = tasks.length;
+    console.log(`[HealthCheckScheduler] 开始并行检查 ${tasks.length} 个供应商（并发数: 5）`);
+
+    // 并行执行，限制并发数为 5
+    const checkResults = await this._runWithConcurrency(tasks, 5);
+
+    // 汇总结果
+    for (const { appType, provider, result } of checkResults) {
+      if (result.success) {
+        if (result.status === 'degraded') {
+          results.degraded++;
+        } else {
+          results.success++;
+        }
+      } else {
+        results.failed++;
+      }
+
+      results.details.push({
+        appType,
+        id: provider.id,
+        name: provider.name,
+        result
+      });
     }
 
     const duration = Date.now() - startTime;

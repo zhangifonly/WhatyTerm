@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} - CBB 支付演示</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+               background: #f5f5f5; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        h1 { color: #333; margin-bottom: 20px; }
+        .card { background: white; border-radius: 8px; padding: 20px; margin-bottom: 20px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .card h2 { color: #666; font-size: 16px; margin-bottom: 15px; border-bottom: 1px solid #eee;
+                   padding-bottom: 10px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; color: #333; font-weight: 500; }
+        input, select { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px;
+                        font-size: 14px; }
+        button { background: #1890ff; color: white; border: none; padding: 12px 24px;
+                 border-radius: 4px; cursor: pointer; font-size: 14px; margin-right: 10px; }
+        button:hover { background: #40a9ff; }
+        button.secondary { background: #52c41a; }
+        .result { background: #f6ffed; border: 1px solid #b7eb8f; padding: 15px;
+                  border-radius: 4px; margin-top: 15px; white-space: pre-wrap; font-size: 13px; }
+        .error { background: #fff2f0; border-color: #ffccc7; }
+        .orders-list { margin-top: 15px; }
+        .order-item { background: #fafafa; padding: 10px; margin-bottom: 10px; border-radius: 4px;
+                      display: flex; justify-content: space-between; align-items: center; }
+        .order-info { flex: 1; }
+        .order-actions button { padding: 6px 12px; font-size: 12px; }
+        .status { padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+        .status-created { background: #e6f7ff; color: #1890ff; }
+        .status-paid { background: #f6ffed; color: #52c41a; }
+        .status-paying { background: #fffbe6; color: #faad14; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎯 CBB 聚合支付演示</h1>
+
+        <div class="card">
+            <h2>创建订单</h2>
+            <div class="form-group">
+                <label>商品名称</label>
+                <input type="text" id="goodName" value="测试商品" placeholder="请输入商品名称">
+            </div>
+            <div class="form-group">
+                <label>金额（元）</label>
+                <input type="text" id="amount" value="0.01" placeholder="请输入金额">
+            </div>
+            <button onclick="createOrder()">创建订单</button>
+            <div id="createResult" class="result" style="display:none;"></div>
+        </div>
+
+        <div class="card">
+            <h2>订单列表</h2>
+            <button onclick="loadOrders()">刷新列表</button>
+            <div id="ordersList" class="orders-list"></div>
+        </div>
+
+        <div class="card" id="syncResultCard" style="display:none;">
+            <h2>同步结果</h2>
+            <button onclick="closeSyncResult()" style="float:right;background:#ff4d4f;">关闭</button>
+            <div id="syncResult" class="result"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = '';
+
+        async function createOrder() {
+            const goodName = document.getElementById('goodName').value;
+            const amount = document.getElementById('amount').value;
+            const resultDiv = document.getElementById('createResult');
+
+            try {
+                const resp = await fetch(`${API_BASE}/orders/`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ good_name: goodName, amount: amount })
+                });
+                const data = await resp.json();
+                resultDiv.style.display = 'block';
+                resultDiv.className = resp.ok ? 'result' : 'result error';
+                resultDiv.textContent = JSON.stringify(data, null, 2);
+                if (resp.ok) loadOrders();
+            } catch (e) {
+                resultDiv.style.display = 'block';
+                resultDiv.className = 'result error';
+                resultDiv.textContent = '请求失败: ' + e.message;
+            }
+        }
+
+        async function loadOrders() {
+            const listDiv = document.getElementById('ordersList');
+            try {
+                const resp = await fetch(`${API_BASE}/orders/`);
+                const data = await resp.json();
+                if (data.orders && data.orders.length > 0) {
+                    listDiv.innerHTML = data.orders.map(o => `
+                        <div class="order-item">
+                            <div class="order-info">
+                                <strong>${o.good_name}</strong> - ¥${o.amount}
+                                <span class="status status-${o.status}">${o.status}</span>
+                                <br><small>订单号: ${o.order_id} | CBB: ${o.trade_no || '-'}</small>
+                            </div>
+                            <div class="order-actions">
+                                <button onclick="payOrder('${o.order_id}')">去支付</button>
+                                <button onclick="syncOrder('${o.order_id}')" class="secondary">同步状态</button>
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    listDiv.innerHTML = '<p style="color:#999;">暂无订单</p>';
+                }
+            } catch (e) {
+                listDiv.innerHTML = '<p style="color:red;">加载失败</p>';
+            }
+        }
+
+        async function payOrder(orderId) {
+            window.open(`${API_BASE}/orders/${orderId}/pay/redirect?pay_type=pc`, '_blank');
+        }
+
+        async function syncOrder(orderId) {
+            const resultCard = document.getElementById('syncResultCard');
+            const resultDiv = document.getElementById('syncResult');
+            try {
+                const resp = await fetch(`${API_BASE}/orders/${orderId}/sync`);
+                const data = await resp.json();
+                resultCard.style.display = 'block';
+                resultDiv.className = resp.ok ? 'result' : 'result error';
+                resultDiv.textContent = JSON.stringify(data, null, 2);
+                if (resp.ok) loadOrders();
+            } catch (e) {
+                resultCard.style.display = 'block';
+                resultDiv.className = 'result error';
+                resultDiv.textContent = '同步失败: ' + e.message;
+            }
+        }
+
+        function closeSyncResult() {
+            document.getElementById('syncResultCard').style.display = 'none';
+        }
+
+        // 页面加载时获取订单列表
+        loadOrders();
+    </script>
+</body>
+</html>

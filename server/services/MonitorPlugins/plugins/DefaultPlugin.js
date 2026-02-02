@@ -269,6 +269,8 @@ class DefaultPlugin extends BasePlugin {
   analyzeStatus(terminalContent, phase, context) {
     const config = this.getPhaseConfig(phase);
     const lastLines = terminalContent.split('\n').slice(-30).join('\n');
+    // 清除 ANSI 转义序列，用于文本匹配
+    const cleanLastLines = lastLines.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1B\][^\x07]*\x07/g, '');
 
     // accept_edits 阶段：发送 "继续" 命令让 Claude Code 继续工作
     // Claude Code 在等待接受编辑时，底部显示 "accept edits on"
@@ -287,7 +289,7 @@ class DefaultPlugin extends BasePlugin {
     // 确认界面：根据类型选择合适的选项
     if (phase === 'confirmation') {
       // 检测 y/n 确认
-      if (/\(y\/n\)|\[Y\/n\]|\[yes\/no\]/i.test(lastLines)) {
+      if (/\(y\/n\)|\[Y\/n\]|\[yes\/no\]/i.test(cleanLastLines)) {
         return {
           needsAction: true,
           actionType: 'single_char',
@@ -302,14 +304,14 @@ class DefaultPlugin extends BasePlugin {
       // 支持多种选项格式：
       // - 1. Yes / 2. No
       // - 1. Yes / 2. Yes, allow... / 3. No
-      const hasDoYouWantToProceed = /Do you want to proceed\?/i.test(lastLines);
-      const hasOption1Yes = /1\.\s*Yes/i.test(lastLines);
-      const hasOption2Or3No = /[23]\.\s*No/i.test(lastLines);
+      const hasDoYouWantToProceed = /Do you want to proceed\?/i.test(cleanLastLines);
+      const hasOption1Yes = /1\.\s*Yes/i.test(cleanLastLines);
+      const hasOption2Or3No = /[23]\.\s*No/i.test(cleanLastLines);
 
       if (hasDoYouWantToProceed && hasOption1Yes) {
         // 如果有 "2. Yes, allow" 选项，选择 2（允许本项目）
         // 否则选择 1（Yes）
-        const hasOption2Allow = /2\.\s*Yes,\s*allow/i.test(lastLines);
+        const hasOption2Allow = /2\.\s*Yes,\s*allow/i.test(cleanLastLines);
         return {
           needsAction: true,
           actionType: 'select',
@@ -323,8 +325,8 @@ class DefaultPlugin extends BasePlugin {
       }
 
       // 检测数字选择（Claude Code 权限确认：Allow once / Allow for this session / Deny）
-      if (/\[1\].*\[2\].*\[3\]/i.test(lastLines) ||
-          /Allow once.*Allow for this session/i.test(lastLines)) {
+      if (/\[1\].*\[2\].*\[3\]/i.test(cleanLastLines) ||
+          /Allow once.*Allow for this session/i.test(cleanLastLines)) {
         return {
           needsAction: true,
           actionType: 'select',
@@ -335,14 +337,14 @@ class DefaultPlugin extends BasePlugin {
         };
       }
 
-      // 默认选择选项 2（适用于其他未知确认界面）
+      // 默认选择选项 1（Yes）- 更安全的默认值
       return {
         needsAction: true,
         actionType: 'select',
-        suggestedAction: '2',
+        suggestedAction: '1',
         phase,
         phaseConfig: config,
-        message: '检测到确认界面，自动选择选项 2'
+        message: '检测到确认界面，自动选择选项 1'
       };
     }
 
