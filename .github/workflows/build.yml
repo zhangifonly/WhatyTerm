@@ -44,7 +44,7 @@ jobs:
         run: npm ci
 
       - name: Rebuild native modules for Electron
-        run: npx electron-rebuild -f -w better-sqlite3 -w node-pty
+        run: npx electron-rebuild -f -w better-sqlite3,node-pty
 
       - name: Build frontend
         run: npm run build
@@ -105,7 +105,7 @@ jobs:
         run: npm ci
 
       - name: Rebuild native modules for Electron
-        run: npx electron-rebuild -f -w better-sqlite3 -w node-pty
+        run: npx electron-rebuild -f -w better-sqlite3,node-pty
 
       - name: Build frontend
         run: npm run build
@@ -170,7 +170,7 @@ jobs:
         run: npm ci
 
       - name: Rebuild native modules for Electron
-        run: npx electron-rebuild -f -w better-sqlite3 -w node-pty
+        run: npx electron-rebuild -f -w better-sqlite3,node-pty
 
       - name: Build frontend
         run: npm run build
