@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>支付结果 - CBB 支付演示</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+               background: #f5f5f5; padding: 20px; min-height: 100vh;
+               display: flex; align-items: center; justify-content: center; }
+        .card { background: white; border-radius: 8px; padding: 40px; text-align: center;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1); max-width: 400px; width: 100%; }
+        .icon { font-size: 64px; margin-bottom: 20px; }
+        .icon.success { color: #52c41a; }
+        .icon.pending { color: #faad14; }
+        h1 { color: #333; font-size: 24px; margin-bottom: 10px; }
+        p { color: #666; margin-bottom: 20px; }
+        .order-info { background: #f5f5f5; padding: 15px; border-radius: 4px;
+                      margin-bottom: 20px; text-align: left; }
+        .order-info p { margin-bottom: 5px; font-size: 14px; }
+        button { background: #1890ff; color: white; border: none; padding: 12px 24px;
+                 border-radius: 4px; cursor: pointer; font-size: 14px; }
+        button:hover { background: #40a9ff; }
+        a { color: #1890ff; text-decoration: none; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon pending" id="icon">⏳</div>
+        <h1 id="title">支付处理中</h1>
+        <p id="message">正在查询支付结果...</p>
+
+        <div class="order-info" id="orderInfo" style="display:none;">
+            <p><strong>订单号:</strong> <span id="orderId">-</span></p>
+            <p><strong>商品:</strong> <span id="goodName">-</span></p>
+            <p><strong>金额:</strong> ¥<span id="amount">-</span></p>
+            <p><strong>状态:</strong> <span id="status">-</span></p>
+        </div>
+
+        <button onclick="location.href='/'">返回首页</button>
+    </div>
+
+    <script>
+        const orderId = new URLSearchParams(window.location.search).get('order_id');
+
+        async function checkOrder() {
+            if (!orderId) {
+                document.getElementById('title').textContent = '参数错误';
+                document.getElementById('message').textContent = '缺少订单号参数';
+                document.getElementById('icon').textContent = '❌';
+                return;
+            }
+
+            try {
+                // 先尝试同步状态
+                const syncResp = await fetch(`/orders/${orderId}/sync`);
+
+                if (syncResp.ok) {
+                    // 同步成功，显示订单信息
+                    const syncData = await syncResp.json();
+                    const order = syncData.order;
+                    showOrderInfo(order);
+                } else if (syncResp.status === 404) {
+                    // 本地订单不存在，显示错误
+                    document.getElementById('icon').textContent = '⚠️';
+                    document.getElementById('title').textContent = '订单不存在';
+                    document.getElementById('message').textContent =
+                        '本地未找到该订单记录。可能是服务重启导致数据丢失，请返回首页重新查询。';
+                } else {
+                    const errData = await syncResp.json();
+                    throw new Error(errData.detail || '查询失败');
+                }
+            } catch (e) {
+                document.getElementById('title').textContent = '查询失败';
+                document.getElementById('message').textContent = e.message;
+                document.getElementById('icon').textContent = '❌';
+            }
+        }
+
+        function showOrderInfo(order) {
+            document.getElementById('orderInfo').style.display = 'block';
+            document.getElementById('orderId').textContent = order.order_id || '-';
+            document.getElementById('goodName').textContent = order.good_name || '-';
+            document.getElementById('amount').textContent = order.amount || '-';
+            document.getElementById('status').textContent = order.status || '-';
+
+            if (order.status === 'paid') {
+                document.getElementById('icon').textContent = '✅';
+                document.getElementById('icon').className = 'icon success';
+                document.getElementById('title').textContent = '支付成功';
+                document.getElementById('message').textContent = '感谢您的购买！';
+            } else if (order.status === 'paying') {
+                document.getElementById('title').textContent = '等待支付';
+                document.getElementById('message').textContent = '订单尚未完成支付';
+            } else {
+                document.getElementById('title').textContent = '订单状态: ' + order.status;
+                document.getElementById('message').textContent = '';
+            }
+        }
+
+        checkOrder();
+    </script>
+</body>
+</html>

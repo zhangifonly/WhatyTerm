@@ -1,0 +1,19 @@
+# CBB Pay Demo - Python Web Project
+# FastAPI Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# HTTP Client
+httpx==0.25.2
+
+# Environment Variables
+python-dotenv==1.0.0
+
+# Cryptography for RSA
+cryptography==41.0.7
+
+# Jinja2 Templates
+jinja2==3.1.2
+
+# Form Data Parsing
+python-multipart==0.0.6

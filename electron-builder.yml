@@ -96,12 +96,15 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
+  allowElevation: true
   deleteAppDataOnUninstall: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: WhatyTerm
   include: build/installer.nsh
   guid: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  # 禁用默认的应用运行检测，由 installer.nsh 中的 customCheckAppRunning 处理
+  runAfterFinish: true
 
 linux:
   icon: build/icons

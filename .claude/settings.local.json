@@ -178,7 +178,30 @@
       "Bash(# 检查 WebOffice 终端的当前状态 tmux capture-pane -t \"\"webtmux-3eacc95a\"\" -p)",
       "Bash(# 手动测试：查看 Claude Code 文档中关于 accept edits 的说明 # 从显示的 \"\"shift+tab to cycle\"\" 和 \"\"accept edits on\"\" 来看 # 可能需要发送 ''a'' 来接受所有编辑 # 先暂停自动操作 curl -X POST \"\"http://127.0.0.1:3928/api/sessions/3eacc95a-cc71-4db8-a734-91dd0d196d86/auto-action\"\" \\\\ -H \"\"Content-Type: application/json\"\" \\\\ -d ''{\"\"enabled\"\": false}'' echo \"\"自动操作已暂停\"\" # 查看终端当前状态 tmux capture-pane -t \"\"webtmux-3eacc95a\"\" -p)",
       "Bash(# 等待一段时间 sleep 30 # 检查终端状态 echo \"\"=== 当前终端状态 ===\"\" tmux capture-pane -t \"\"webtmux-3eacc95a\"\" -p)",
-      "Bash(npm run build:client)"
+      "Bash(npm run build:client)",
+      "Bash(pnpm install)",
+      "Bash(pnpm build:renderer)",
+      "Bash(BUILD_TARGET=web pnpm build:renderer)",
+      "Bash(security find-identity:*)",
+      "Bash(open:*)",
+      "Bash(security add-trusted-cert:*)",
+      "Bash(sudo security add-trusted-cert:*)",
+      "Bash(security import:*)",
+      "Bash(security find-certificate:*)",
+      "Bash(# 检查证书的颁发者链 security find-certificate -c \"\"Beijing Youxun\"\" -p | openssl x509 -noout -text)",
+      "Bash(openssl x509:*)",
+      "Bash(# 列出所有 Developer ID CA 证书并检查 OU security find-certificate -c \"\"Developer ID Certification Authority\"\" -a -p)",
+      "Bash(while read -r line)",
+      "Bash(do)",
+      "Bash(then)",
+      "Bash(cert=\"\")",
+      "Bash(fi)",
+      "Bash(codesign:*)",
+      "Bash(APPLE_API_KEY_ID=6JFQJ96FA4 APPLE_API_ISSUER=49f7b81e-75e4-4ec4-b88c-4caccf8be65d APPLE_API_KEY=~/.private_keys/AuthKey_6JFQJ96FA4.p8 npm run electron:build:mac)",
+      "Bash(APPLE_API_KEY_ID=6JFQJ96FA4 APPLE_API_ISSUER=49f7b81e-75e4-4ec4-b88c-4caccf8be65d APPLE_API_KEY=\"$HOME/.private_keys/AuthKey_6JFQJ96FA4.p8\" npm run electron:build:mac)",
+      "Bash(hdiutil info:*)",
+      "Bash(xargs:*)",
+      "Bash(npm version:*)"
     ]
   }
 }
