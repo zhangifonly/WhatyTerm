@@ -157,24 +157,14 @@ class PluginManager {
     if (forcedPluginId && forcedPluginId !== 'auto') {
       const plugin = this.plugins.get(forcedPluginId);
       if (plugin) {
-        // 检查订阅状态
-        if (!this.isPluginAvailable(forcedPluginId)) {
-          console.warn(`[PluginManager] 插件 ${forcedPluginId} 需要订阅，回退到默认插件`);
-          return this.defaultPlugin;
-        }
         return plugin;
       }
       console.warn(`[PluginManager] 指定的插件 ${forcedPluginId} 不存在，使用自动选择`);
     }
 
-    // 自动选择：遍历所有非默认插件，找到第一个匹配且可用的
+    // 自动选择：遍历所有非默认插件，找到第一个匹配的
     for (const plugin of this.plugins.values()) {
       if (plugin.id !== 'default' && plugin.matches(projectContext)) {
-        // 检查订阅状态
-        if (!this.isPluginAvailable(plugin.id)) {
-          console.log(`[PluginManager] 插件 ${plugin.name} 匹配但需要订阅，跳过`);
-          continue;
-        }
         console.log(`[PluginManager] 自动选择插件: ${plugin.name} (${plugin.id})`);
         return plugin;
       }

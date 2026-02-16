@@ -47,6 +47,10 @@ class TeamManager {
         blocked_by TEXT,
         priority INTEGER DEFAULT 0,
         result TEXT,
+        expected_files TEXT DEFAULT '[]',
+        files_modified TEXT DEFAULT '[]',
+        assigned_at TEXT,
+        completed_at TEXT,
         created_at TEXT,
         updated_at TEXT
       )
@@ -63,6 +67,19 @@ class TeamManager {
         created_at TEXT
       )
     `);
+
+    // 迁移：为已有数据库添加新列
+    const migrateCols = [
+      ['team_tasks', 'expected_files', "TEXT DEFAULT '[]'"],
+      ['team_tasks', 'files_modified', "TEXT DEFAULT '[]'"],
+      ['team_tasks', 'assigned_at', 'TEXT'],
+      ['team_tasks', 'completed_at', 'TEXT'],
+    ];
+    for (const [table, col, type] of migrateCols) {
+      try {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+      } catch { /* 列已存在，忽略 */ }
+    }
   }
 
   // ==================== Team 生命周期 ====================
@@ -132,10 +149,14 @@ class TeamManager {
     this._decomposeGoal(team).catch(err => {
       console.error(`[TeamManager] 目标分解失败:`, err.message);
       // 创建一个默认任务
-      this.createTask(teamId, {
-        subject: goal,
-        description: `完成目标: ${goal}`
-      });
+      try {
+        this.createTask(teamId, {
+          subject: goal,
+          description: `完成目标: ${goal}`
+        });
+      } catch (createErr) {
+        console.error(`[TeamManager] 创建回退任务失败:`, createErr.message);
+      }
     });
 
     // 5. 记录创建消息
@@ -275,10 +296,14 @@ class TeamManager {
     // 4. AI 分解目标为子任务
     this._decomposeGoal(team).catch(err => {
       console.error(`[TeamManager] 目标分解失败:`, err.message);
-      this.createTask(teamId, {
-        subject: goal,
-        description: `完成目标: ${goal}`
-      });
+      try {
+        this.createTask(teamId, {
+          subject: goal,
+          description: `完成目标: ${goal}`
+        });
+      } catch (createErr) {
+        console.error(`[TeamManager] 创建回退任务失败:`, createErr.message);
+      }
     });
 
     // 5. 记录消息
@@ -337,19 +362,20 @@ class TeamManager {
   /**
    * 创建任务
    */
-  createTask(teamId, { subject, description = '', priority = 0, blockedBy = [] }) {
+  createTask(teamId, { subject, description = '', priority = 0, blockedBy = [], expectedFiles = [] }) {
     const taskId = uuidv4();
     const now = new Date().toISOString();
 
     this.db.prepare(`
-      INSERT INTO team_tasks (id, team_id, subject, description, status, assignee_session_id, blocked_by, priority, result, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'pending', NULL, ?, ?, NULL, ?, ?)
-    `).run(taskId, teamId, subject, description, JSON.stringify(blockedBy), priority, now, now);
+      INSERT INTO team_tasks (id, team_id, subject, description, status, assignee_session_id, blocked_by, priority, result, expected_files, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'pending', NULL, ?, ?, NULL, ?, ?, ?)
+    `).run(taskId, teamId, subject, description, JSON.stringify(blockedBy), priority, JSON.stringify(expectedFiles), now, now);
 
     const task = {
       id: taskId, teamId, subject, description,
       status: 'pending', assigneeSessionId: null,
       blockedBy, priority, result: null,
+      expectedFiles,
       createdAt: now, updatedAt: now
     };
 
@@ -374,6 +400,10 @@ class TeamManager {
     if (updates.priority !== undefined) { fields.push('priority = ?'); values.push(updates.priority); }
     if (updates.result !== undefined) { fields.push('result = ?'); values.push(updates.result); }
     if (updates.blockedBy !== undefined) { fields.push('blocked_by = ?'); values.push(JSON.stringify(updates.blockedBy)); }
+    if (updates.expectedFiles !== undefined) { fields.push('expected_files = ?'); values.push(JSON.stringify(updates.expectedFiles)); }
+    if (updates.filesModified !== undefined) { fields.push('files_modified = ?'); values.push(JSON.stringify(updates.filesModified)); }
+    if (updates.assignedAt !== undefined) { fields.push('assigned_at = ?'); values.push(updates.assignedAt); }
+    if (updates.completedAt !== undefined) { fields.push('completed_at = ?'); values.push(updates.completedAt); }
 
     if (fields.length === 0) return task;
 
@@ -411,7 +441,8 @@ class TeamManager {
 
     this.updateTask(taskId, {
       status: 'in_progress',
-      assigneeSessionId: sessionId
+      assigneeSessionId: sessionId,
+      assignedAt: new Date().toISOString()
     });
 
     // 向 Teammate 终端发送任务指令
@@ -442,7 +473,8 @@ class TeamManager {
 
     this.updateTask(taskId, {
       status: 'completed',
-      result
+      result,
+      completedAt: new Date().toISOString()
     });
 
     // 解锁被此任务阻塞的其他任务
@@ -511,44 +543,11 @@ class TeamManager {
 
   async _coordinateTeam(team) {
     const tasks = this.getTasksByTeam(team.id);
-    const pendingTasks = tasks.filter(t =>
-      t.status === 'pending' &&
-      (!t.blockedBy || t.blockedBy.length === 0 ||
-        t.blockedBy.every(bid => {
-          const bt = this.getTask(bid);
-          return bt && bt.status === 'completed';
-        }))
-    );
 
-    if (pendingTasks.length === 0) {
-      // 检查是否所有任务都完成了
-      const allCompleted = tasks.length > 0 && tasks.every(t => t.status === 'completed');
-      if (allCompleted) {
-        this._updateTeamStatus(team.id, 'completed');
-        this.sendMessage(team.id, null, null, '所有任务已完成，团队工作结束', 'info');
-      }
-      return;
-    }
-
-    // 查找空闲的 Teammate（没有正在执行的任务）
-    const busySessionIds = new Set(
-      tasks.filter(t => t.status === 'in_progress' && t.assigneeSessionId)
-        .map(t => t.assigneeSessionId)
-    );
-
-    const idleMembers = team.memberSessionIds.filter(sid => {
-      if (busySessionIds.has(sid)) return false;
-      const session = this.sessionManager.getSession(sid);
-      return session && session.status === 'running';
-    });
-
-    // 分配任务给空闲成员
-    for (let i = 0; i < Math.min(pendingTasks.length, idleMembers.length); i++) {
-      try {
-        await this.assignTask(pendingTasks[i].id, idleMembers[i]);
-      } catch (err) {
-        console.error(`[TeamManager] 分配任务失败:`, err.message);
-      }
+    // 只检查是否所有任务完成（任务分配已由 TaskOrchestrator 接管）
+    if (tasks.length > 0 && tasks.every(t => t.status === 'completed')) {
+      this._updateTeamStatus(team.id, 'completed');
+      this.sendMessage(team.id, null, null, '所有任务已完成，团队工作结束', 'info');
     }
   }
 
@@ -569,9 +568,10 @@ class TeamManager {
 2. 如果有依赖关系，用 blockedBy 数组标注（引用其他任务的序号，从 0 开始）
 3. 任务数量应该合理（不超过 Agent 数量的 3 倍）
 4. 每个任务的描述要具体、可操作
+5. expectedFiles 列出该任务预计会修改的文件路径（用于冲突检测）
 
 请严格返回 JSON 数组格式（不要包含其他文字）:
-[{"subject":"任务标题","description":"详细描述","blockedBy":[],"priority":0}]
+[{"subject":"任务标题","description":"详细描述","expectedFiles":["src/file1.js","src/file2.js"],"blockedBy":[],"priority":0}]
 
 priority: 0=普通, 1=高优先级`;
 
@@ -580,13 +580,25 @@ priority: 0=普通, 1=高优先级`;
       throw new Error('AI 返回空结果');
     }
 
-    // 提取 JSON 数组
-    const jsonMatch = result.match(/\[[\s\S]*\]/);
+    // 提取 JSON 数组（使用非贪婪匹配，避免匹配到多余内容）
+    let jsonMatch = null;
+    const matches = result.match(/\[[\s\S]*?\]/g);
+    if (matches) {
+      for (const match of matches) {
+        try {
+          const parsed = JSON.parse(match);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            jsonMatch = match;
+            break;
+          }
+        } catch { /* 继续尝试下一个匹配 */ }
+      }
+    }
     if (!jsonMatch) {
       throw new Error('AI 返回格式不正确');
     }
 
-    const taskDefs = JSON.parse(jsonMatch[0]);
+    const taskDefs = JSON.parse(jsonMatch);
     if (!Array.isArray(taskDefs) || taskDefs.length === 0) {
       throw new Error('AI 返回的任务列表为空');
     }
@@ -601,6 +613,7 @@ priority: 0=普通, 1=高优先级`;
         subject: def.subject || `任务 ${i + 1}`,
         description: def.description || '',
         priority: def.priority || 0,
+        expectedFiles: def.expectedFiles || [],
         blockedBy: [] // 先创建，后设置依赖
       });
       idMap.set(i, task.id);
@@ -608,10 +621,12 @@ priority: 0=普通, 1=高优先级`;
     }
 
     // 设置依赖关系
-    for (const { task, def } of createdTasks) {
+    for (let idx = 0; idx < createdTasks.length; idx++) {
+      const { task, def } = createdTasks[idx];
       if (def.blockedBy && def.blockedBy.length > 0) {
         const blockedByIds = def.blockedBy
-          .map(idx => idMap.get(idx))
+          .filter(i => typeof i === 'number' && i >= 0 && i < idx) // 只能依赖序号更小的任务
+          .map(i => idMap.get(i))
           .filter(Boolean);
         if (blockedByIds.length > 0) {
           this.updateTask(task.id, { blockedBy: blockedByIds });
@@ -651,6 +666,10 @@ priority: 0=普通, 1=高优先级`;
       blockedBy: JSON.parse(row.blocked_by || '[]'),
       priority: row.priority,
       result: row.result,
+      expectedFiles: JSON.parse(row.expected_files || '[]'),
+      filesModified: JSON.parse(row.files_modified || '[]'),
+      assignedAt: row.assigned_at,
+      completedAt: row.completed_at,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };

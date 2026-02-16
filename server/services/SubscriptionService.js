@@ -548,18 +548,14 @@ class SubscriptionService {
 
   /**
    * 检查插件是否可用
+   * 监控策略不再限制，所有插件对所有用户开放
    * @param {string} pluginId - 插件 ID
    * @returns {boolean} 是否可用
    */
   isPluginAvailable(pluginId) {
-    // 免费插件始终可用
-    if (FREE_PLUGINS.includes(pluginId)) {
+    // 所有已知插件均可用（监控策略不区分付费/免费）
+    if (FREE_PLUGINS.includes(pluginId) || PREMIUM_PLUGINS.includes(pluginId)) {
       return true;
-    }
-
-    // 高级插件需要有效订阅
-    if (PREMIUM_PLUGINS.includes(pluginId)) {
-      return this.licenseValid;
     }
 
     // 未知插件默认不可用
@@ -571,10 +567,7 @@ class SubscriptionService {
    * @returns {Array<string>} 可用插件 ID 列表
    */
   getAvailablePlugins() {
-    if (this.licenseValid) {
-      return [...FREE_PLUGINS, ...PREMIUM_PLUGINS];
-    }
-    return [...FREE_PLUGINS];
+    return [...FREE_PLUGINS, ...PREMIUM_PLUGINS];
   }
 
   /**
