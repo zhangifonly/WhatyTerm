@@ -12,3 +12,7 @@ release/
 *.AppImage
 *.deb
 data/
+
+# 敏感文件
+CLAUDE.md
+.claude/settings.local.json
