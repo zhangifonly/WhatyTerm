@@ -150,40 +150,22 @@ db.exec(`
 // 初始化默认计划
 const defaultPlans = [
   {
-    id: 'test',
-    name: '测试版',
-    description: '支付测试专用（1分钱）',
-    price_monthly: 1,
-    price_yearly: 1,
-    max_devices: 1,
-    features: JSON.stringify(['all-plugins', 'email-support'])
-  },
-  {
     id: 'personal',
     name: '个人版',
-    description: '适合个人开发者',
-    price_monthly: 2900,
-    price_yearly: 29900,
-    max_devices: 1,
-    features: JSON.stringify(['all-plugins', 'email-support'])
-  },
-  {
-    id: 'professional',
-    name: '专业版',
-    description: '适合小型团队',
-    price_monthly: 9900,
-    price_yearly: 99900,
-    max_devices: 5,
-    features: JSON.stringify(['all-plugins', 'priority-support', 'team-management'])
+    description: '开源免费，适合个人开发者',
+    price_monthly: 0,
+    price_yearly: 0,
+    max_devices: 3,
+    features: JSON.stringify(['all-plugins', 'community-support', 'open-source'])
   },
   {
     id: 'enterprise',
     name: '企业版',
-    description: '适合企业用户',
+    description: '适合企业团队，提供专属中转服务器和技术支持',
     price_monthly: 29900,
     price_yearly: 299900,
     max_devices: 999,
-    features: JSON.stringify(['all-plugins', 'dedicated-support', 'custom-features', 'sla'])
+    features: JSON.stringify(['all-plugins', 'relay-server', 'dedicated-support', 'custom-features', 'sla'])
   }
 ];
 
