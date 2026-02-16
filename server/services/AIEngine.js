@@ -1442,6 +1442,64 @@ ${historyText || '(空)'}
     // 检测运行的 CLI 工具（优先使用进程检测）
     const detectedCLI = this.detectRunningCLI(terminalContent, tmuxSession);
 
+    // === 高优先级：在插件分析之前，先检测确认界面 ===
+    // 确认界面（Do you want to proceed? / Do you want to run?）必须优先于插件分析
+    // 否则插件可能误匹配终端内容中的关键词（如 "error"）而跳过确认界面检测
+    const earlyCleanContent = terminalContent.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+    const cliNameEarly = getCliName(aiType);
+
+    // 检测 "Do you want to ..." 确认界面（只检查最后 3000 字符，避免匹配历史内容）
+    const earlyLast3000 = earlyCleanContent.slice(-3000);
+    const isEditConfirmEarly = /Do you want to (make this edit|create|delete|run)/i.test(earlyLast3000);
+    const isProceedConfirmEarly = /Do you want to proceed\?/i.test(earlyLast3000);
+    const hasOption1YesEarly = /1\.\s*Yes/i.test(earlyLast3000);
+    const hasOption2YesEarly = /2\.\s*Yes/i.test(earlyLast3000);
+
+    if ((isEditConfirmEarly || isProceedConfirmEarly) && hasOption1YesEarly) {
+      const selectOption = hasOption2YesEarly ? '2' : '1';
+      console.log(`[AIEngine] [高优先级] 检测到确认界面（插件分析前），选择选项 ${selectOption}`);
+      return {
+        currentState: `${cliNameEarly}确认界面`,
+        workingDir: '未显示',
+        recentAction: '等待确认',
+        needsAction: true,
+        actionType: 'select',
+        suggestedAction: selectOption,
+        actionReason: hasOption2YesEarly ? '选择"允许本次会话"以自动化流程' : '选择"Yes"继续执行',
+        suggestion: null,
+        updatedAt: new Date().toISOString(),
+        preAnalyzed: true,
+        detectedCLI,
+        ...pluginInfo
+      };
+    }
+
+    // 高优先级：检测 accept edits 等待状态（插件分析前）
+    // 注意：确认界面也可能包含 "shift+tab"，所以只在非确认界面时才检测
+    // 重要：如果终端最后几行有空闲提示符（❯ 或 >），说明 Claude Code 已完成任务，
+    // 底部状态栏的 "accept edits on" 只是提示，不需要发 Tab
+    const earlyLast500 = earlyCleanContent.slice(-500);
+    const hasIdlePromptEarly = /^[❯>]\s*$/m.test(earlyLast500) || /\n[❯>]\s*$/m.test(earlyLast500);
+    const isWaitingForAcceptEarly = !isEditConfirmEarly && !isProceedConfirmEarly && !hasIdlePromptEarly &&
+      (/accept edits on/i.test(earlyLast3000) || /shift\+tab to cycle/i.test(earlyLast3000));
+    if (isWaitingForAcceptEarly) {
+      console.log(`[AIEngine] [高优先级] 检测到等待接受编辑（插件分析前），发送 Tab`);
+      return {
+        currentState: `${cliNameEarly}等待接受编辑`,
+        workingDir: '未显示',
+        recentAction: '等待接受编辑',
+        needsAction: true,
+        actionType: 'single_char',
+        suggestedAction: '\t',
+        actionReason: '检测到编辑等待接受，发送 Tab 接受全部编辑',
+        suggestion: null,
+        updatedAt: new Date().toISOString(),
+        preAnalyzed: true,
+        detectedCLI,
+        ...pluginInfo
+      };
+    }
+
     // 尝试使用插件系统分析（如果有项目上下文）
     // 注意：默认插件也需要执行分析，以支持免费用户的自动化操作
     if (projectContext || forcedPluginId) {
@@ -1568,7 +1626,9 @@ ${historyText || '(空)'}
                             /1\.\s*Yes/i.test(cleanContent);
 
     // 检查是否有 accept edits 等待状态（Claude Code 完成任务后等待用户接受编辑）
-    const isWaitingForAccept = /accept edits on|shift\+tab to cycle/i.test(cleanContent);
+    // 重要：如果有空闲提示符（❯ 或 >），说明 Claude Code 已完成，底部状态栏的 accept edits 只是提示
+    const hasIdlePromptForAccept = /^[❯>]\s*$/m.test(cleanContent) || /\n[❯>]\s*$/m.test(cleanContent);
+    const isWaitingForAccept = !hasIdlePromptForAccept && /accept edits on|shift\+tab to cycle/i.test(cleanContent);
     // 检查是否有 Brewed for（任务完成标志）
     const hasBrewedFor = /Brewed for \d+m\s*\d+s/i.test(cleanContent);
 
@@ -1850,21 +1910,21 @@ ${historyText || '(空)'}
       };
     }
 
-    // 2.7 检测 Claude Code 空闲状态
-    // 当显示 "> " 单箭头提示符时，说明 Claude Code 处于空闲状态，等待用户输入
-    // 注意："accept edits on" 底部状态栏是正常状态，但 ">> accept edits" 双箭头是编辑确认界面
-    // 重要：必须排除 ">> accept edits" 和 "shift+tab to cycle" 的情况
-    const hasPrompt = /^>\s*$/m.test(cleanContent) || /\n>\s*$/m.test(cleanContent);
+    // 2.7 检测 Claude Code 空闲状态（有提示符 + accept edits 状态栏）
+    // 底部状态栏的 "accept edits on" 只是提示，不需要按 Tab
+    // 空闲状态下应该自动发送"继续"让 Claude Code 继续开发
+    const hasPrompt = /^[❯>]\s*$/m.test(cleanContent) || /\n[❯>]\s*$/m.test(cleanContent);
     const isEditConfirmMode = />>.*accept edits/i.test(cleanContent) || /shift\+tab to cycle/i.test(cleanContent);
     if (hasPrompt && /accept edits/i.test(cleanContent) && !isEditConfirmMode) {
+      console.log(`[AIEngine] 检测到 ${cliName} 空闲（有 accept edits 状态栏），自动发送继续`);
       return {
-        currentState: `${cliName}空闲中`,
+        currentState: `${cliName}空闲`,
         workingDir: '未显示',
-        recentAction: '等待用户输入',
-        needsAction: false,
-        actionType: 'none',
-        suggestedAction: null,
-        actionReason: `${cliName}已完成任务，等待用户输入新指令`,
+        recentAction: '等待输入',
+        needsAction: true,
+        actionType: 'text_input',
+        suggestedAction: '继续',
+        actionReason: '空闲状态，自动继续开发',
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
@@ -1876,7 +1936,7 @@ ${historyText || '(空)'}
     // 2.8 检测 Claude Code 空闲状态下的中文问句
     // 检测 > 提示符（可能带有空格或光标）
     // 支持多种格式：行首 >、> 后有光标、行尾 >、独立的 > 字符
-    const hasInputPrompt = /^>\s*$/m.test(cleanLast800) || />\s*\|/.test(cleanLast800) || /\n>\s*$/.test(cleanLast800) || /─>─/.test(cleanLast800);
+    const hasInputPrompt = /^[❯>]\s*$/m.test(cleanLast800) || /[❯>]\s*\|/.test(cleanLast800) || /\n[❯>]\s*$/.test(cleanLast800) || /─>─/.test(cleanLast800);
 
     if (hasInputPrompt) {
       // 检测"是否继续"类问题 - 应该自动回答"继续"
@@ -1920,8 +1980,9 @@ ${historyText || '(空)'}
       }
 
       // 优先检测部署/脚本阶段（npm run、启动服务、localhost 等）
+      // 只检查最近内容（最后800字符），避免历史内容中的关键词误判
       // 这种情况下不应该自动发送"继续"，而是提醒用户检查
-      const isDeploymentContext = /(npm run|yarn start|启动服务|localhost:\d+|server.*running|deployment)/i.test(terminalContent);
+      const isDeploymentContext = /(npm run|yarn start|启动服务|server.*running|deployment)/i.test(cleanLast800);
       if (isDeploymentContext) {
         console.log('[AIEngine] 部署/脚本阶段但有输入提示符，返回建议供执行');
         return {
@@ -1941,26 +2002,24 @@ ${historyText || '(空)'}
         };
       }
 
-      // 检测开发阶段空闲状态 - 有 > 提示符，刚完成操作，应该发送"继续"
-      // 检查最近内容是否涉及开发工作（代码、文件、翻译等）
-      const isDevelopmentContext = /(添加|创建|修改|删除|实现|完成|翻译|编写|更新|修复|重构|优化|\.ts|\.js|\.tsx|\.jsx|\.py|\.java|\.cpp|\.c|\.h|function|class|const|let|var|import|export)/i.test(cleanLast800);
-      if (isDevelopmentContext) {
-        console.log('[AIEngine] 检测到开发阶段空闲状态，自动发送继续');
-        return {
-          currentState: `${cliName}空闲`,
-          workingDir: '未显示',
-          recentAction: '等待输入',
-          needsAction: true,
-          actionType: 'text_input',
-          suggestedAction: '继续',
-          actionReason: '开发阶段空闲，自动继续',
-          suggestion: null,
-          updatedAt: new Date().toISOString(),
-          preAnalyzed: true,
-          detectedCLI,
-          ...pluginInfo
-        };
-      }
+      // 检测开发阶段空闲状态 - 有 > 或 ❯ 提示符，刚完成操作，应该发送"继续"
+      // 策略：只要 Claude Code 空闲且自动操作开启，默认发送"继续"
+      // 不再依赖关键词匹配，因为各种语言/框架的关键词太多无法穷举
+      console.log('[AIEngine] 检测到空闲状态（❯ 提示符），自动发送继续');
+      return {
+        currentState: `${cliName}空闲`,
+        workingDir: '未显示',
+        recentAction: '等待输入',
+        needsAction: true,
+        actionType: 'text_input',
+        suggestedAction: '继续',
+        actionReason: '空闲状态，自动继续开发',
+        suggestion: null,
+        updatedAt: new Date().toISOString(),
+        preAnalyzed: true,
+        detectedCLI,
+        ...pluginInfo
+      };
     }
 
     // 注意：底部状态栏的 "accept edits on" 只是提示，不需要任何操作

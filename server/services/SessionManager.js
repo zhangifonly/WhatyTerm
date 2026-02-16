@@ -17,6 +17,9 @@ const __dirname = dirname(__filename);
 // Windows/WSL 兼容层
 const isWindows = process.platform === 'win32';
 
+// 清除 CLAUDECODE 环境变量，避免 tmux 会话中的 Claude Code 检测到嵌套会话
+delete process.env.CLAUDECODE;
+
 // mux-server 模式（新架构，支持会话持久化）
 let useMuxServerMode = false;
 let muxClient = null;
@@ -165,6 +168,8 @@ export class Session {
     this.autoMode = options.autoMode ?? false;
     this.autoActionEnabled = options.autoActionEnabled ?? false;  // 后台自动操作开关
     this.monitorPluginId = options.monitorPluginId || 'auto';  // 监控策略插件 ID，默认自动选择
+    this.teamId = options.teamId || null;       // 所属团队 ID
+    this.teamRole = options.teamRole || null;   // 团队角色: 'lead' | 'member' | null
     this.status = 'running';
     this.createdAt = options.createdAt || new Date();
     this.updatedAt = new Date();
@@ -218,8 +223,13 @@ export class Session {
       if (isNew) {
         // 创建新的 tmux 会话
         execSync(`${tmuxCmd} new-session -d -s "${this.tmuxSessionName}" -x 80 -y 24`, {
-          stdio: 'ignore'
+          stdio: 'ignore',
+          env: { ...process.env, CLAUDECODE: undefined }
         });
+        // 清除 CLAUDECODE 环境变量，避免 Claude Code 检测到嵌套会话
+        try {
+          execSync(`${tmuxCmd} set-environment -t "${this.tmuxSessionName}" -u CLAUDECODE`, { stdio: 'ignore' });
+        } catch {}
         console.log(`创建 tmux 会话: ${this.tmuxSessionName}`);
         this._attachToTmux();
       } else {
@@ -250,8 +260,12 @@ export class Session {
       execSync(`${tmuxCmd} set-option -t "${this.tmuxSessionName}" history-limit 10000`, {
         stdio: 'ignore'
       });
-      // 启用鼠标模式，支持鼠标滚轮滚动
-      execSync(`${tmuxCmd} set-option -t "${this.tmuxSessionName}" mouse on`, {
+      // 关闭 tmux 鼠标模式，让终端前端直接处理鼠标选中文字
+      execSync(`${tmuxCmd} set-option -t "${this.tmuxSessionName}" mouse off`, {
+        stdio: 'ignore'
+      });
+      // 清除 CLAUDECODE 环境变量，避免 Claude Code 检测到嵌套会话
+      execSync(`${tmuxCmd} set-environment -t "${this.tmuxSessionName}" -u CLAUDECODE`, {
         stdio: 'ignore'
       });
     } catch (err) {
@@ -761,6 +775,8 @@ export class Session {
       autoMode: this.autoMode,
       autoActionEnabled: this.autoActionEnabled,
       monitorPluginId: this.monitorPluginId || 'auto',  // 监控策略插件 ID
+      teamId: this.teamId || null,
+      teamRole: this.teamRole || null,
       status: this.status,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
@@ -959,6 +975,13 @@ export class SessionManager {
     try {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN project_desc TEXT`);
     } catch {}
+    // 添加团队字段
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN team_id TEXT`);
+    } catch {}
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN team_role TEXT`);
+    } catch {}
     // 修复旧数据：如果 original_goal 为空但 goal 有值，则复制 goal 到 original_goal
     try {
       this.db.exec(`UPDATE sessions SET original_goal = goal WHERE original_goal IS NULL AND goal IS NOT NULL AND goal <> ''`);
@@ -1094,6 +1117,10 @@ export class SessionManager {
       session.projectName = row.project_name || '';
       session.projectDesc = row.project_desc || '';
 
+      // 恢复团队信息
+      session.teamId = row.team_id || null;
+      session.teamRole = row.team_role || null;
+
       this.sessions.set(session.id, session);
       console.log(`恢复会话: ${session.name} (tmux: ${session.tmuxSessionName}, AI: ${session.aiType}, 自动操作: ${session.autoActionEnabled ? '开' : '关'}, 工作目录: ${session.workingDir || '未知'})`);
     }
@@ -1164,6 +1191,10 @@ export class SessionManager {
           session.workingDir = row.working_dir || '';
           session.projectName = row.project_name || '';
           session.projectDesc = row.project_desc || '';
+
+          // 恢复团队信息
+          session.teamId = row.team_id || null;
+          session.teamRole = row.team_role || null;
 
           // 设置输出回调
           this._setupMuxSessionHandlers(session);
@@ -1340,8 +1371,8 @@ export class SessionManager {
     const stats = session.stats || { total: 0, success: 0, failed: 0, aiAnalyzed: 0, preAnalyzed: 0 };
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO sessions
-      (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, status, created_at, updated_at, ai_type, claude_provider, codex_provider, gemini_provider, stats_total, stats_success, stats_failed, stats_ai_analyzed, stats_pre_analyzed, working_dir, project_name, project_desc)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, status, created_at, updated_at, ai_type, claude_provider, codex_provider, gemini_provider, stats_total, stats_success, stats_failed, stats_ai_analyzed, stats_pre_analyzed, working_dir, project_name, project_desc, team_id, team_role)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       session.id,
@@ -1367,7 +1398,9 @@ export class SessionManager {
       stats.preAnalyzed,
       session.workingDir || '',
       session.projectName || '',
-      session.projectDesc || ''
+      session.projectDesc || '',
+      session.teamId || null,
+      session.teamRole || null
     );
   }
 
