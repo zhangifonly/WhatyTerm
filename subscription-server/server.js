@@ -672,6 +672,72 @@ app.post('/api/license/verify', (req, res) => {
   }
 });
 
+// 获取付费服务配置（FRP 服务器等）
+app.post('/api/license/config', (req, res) => {
+  const { code, machineId } = req.body;
+
+  if (!code || !machineId) {
+    return res.status(400).json({ success: false, message: '缺少参数' });
+  }
+
+  try {
+    // 验证许可证有效性
+    const license = db.prepare(`
+      SELECT l.* FROM licenses l
+      WHERE l.license_key = ? AND l.status = 'active'
+    `).get(code);
+
+    if (!license || license.expires_at < Math.floor(Date.now() / 1000)) {
+      return res.json({ success: false, message: '许可证无效或已过期' });
+    }
+
+    // 验证设备已激活
+    const activation = db.prepare(`
+      SELECT id FROM activations WHERE license_id = ? AND machine_id = ? AND is_active = 1
+    `).get(license.id, machineId);
+
+    if (!activation) {
+      return res.json({ success: false, message: '此设备未激活' });
+    }
+
+    // 返回 FRP 服务器配置
+    res.json({
+      success: true,
+      config: {
+        frpServers: [
+          {
+            name: 'US-KC01',
+            addr: 'REDACTED_SERVER_IP_1',
+            frpPort: 7000,
+            token: 'REDACTED_FRP_TOKEN',
+            domain: 'frp-kc01.whaty.org',
+            useTls: true
+          },
+          {
+            name: 'US-LAX01',
+            addr: 'REDACTED_SERVER_IP_2',
+            frpPort: 7000,
+            token: 'REDACTED_FRP_TOKEN',
+            domain: 'frp-lax01.whaty.org',
+            useTls: false
+          },
+          {
+            name: 'US-LAX02',
+            addr: 'REDACTED_SERVER_IP_3',
+            frpPort: 7000,
+            token: 'REDACTED_FRP_TOKEN',
+            domain: 'frp.whaty.org',
+            useTls: false
+          }
+        ]
+      }
+    });
+  } catch (err) {
+    log.error('获取配置失败', { error: err.message });
+    res.status(500).json({ success: false, message: '获取配置失败' });
+  }
+});
+
 // 停用许可证（解绑设备）
 app.post('/api/license/deactivate', (req, res) => {
   const { code, machineId } = req.body;

@@ -266,19 +266,18 @@ class FullStackDevPlugin extends BasePlugin {
       }
     }
 
-    // 开发阶段：检测任务完成
+    // 开发阶段：检测任务完成或错误
     if (phase === 'development') {
-      // 检测编译/构建错误
+      // 检测编译/构建错误 → 自动修复
       if (/error|Error|ERROR|failed|Failed|FAILED/i.test(lastLines) &&
           !/error handling|on error|catch/i.test(lastLines)) {
         return {
-          needsAction: false,
-          actionType: 'error',
-          suggestedAction: null,
+          needsAction: true,
+          actionType: 'text_input',
+          suggestedAction: '请修复上述错误，然后继续开发',
           phase,
           phaseConfig: config,
-          message: '检测到错误，需要分析和修复',
-          requireConfirmation: true
+          message: '检测到编译/构建错误，自动修复'
         };
       }
 
@@ -294,18 +293,17 @@ class FullStackDevPlugin extends BasePlugin {
       }
     }
 
-    // 测试阶段：检测 bug
+    // 测试阶段：检测 bug/错误 → 自动修复
     if (phase === 'testing') {
       if (/bug|Bug|BUG|error|Error|failed|Failed|测试失败/i.test(lastLines) &&
           !/no bug|no error|0 failed/i.test(lastLines)) {
         return {
-          needsAction: false,
-          actionType: 'error',
-          suggestedAction: null,
+          needsAction: true,
+          actionType: 'text_input',
+          suggestedAction: '请修复失败的测试，确保所有测试通过后继续',
           phase,
           phaseConfig: config,
-          message: '检测到 bug/错误，需要修复后继续（不要跳过）',
-          requireConfirmation: true
+          message: '检测到测试失败，自动修复'
         };
       }
 

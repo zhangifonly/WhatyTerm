@@ -47,7 +47,12 @@ export function setupRoutes(app, getSessionManager, historyLogger, io = null, ai
       frpTunnel.init(io, port);
       cloudflareTunnel.init(io, port);
 
-      const frpInstalled = await frpTunnel.checkInstalled();
+      // 从订阅服务器获取 FRP 配置
+      const licenseKey = subscriptionService.licenseInfo?.code;
+      const machineId = subscriptionService.machineId;
+      const hasConfig = await frpTunnel.fetchServersConfig(licenseKey, machineId);
+
+      const frpInstalled = hasConfig && await frpTunnel.checkInstalled();
       const results = await Promise.all([
         frpInstalled ? frpTunnel.start() : Promise.resolve(null),
         cloudflareTunnel.start()

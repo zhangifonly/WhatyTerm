@@ -80,6 +80,7 @@ import cliLearner from './services/CliLearner.js';
 import tokenStatsService from './services/TokenStatsService.js';
 import builtinProviderDB from './services/BuiltinProviderDB.js';
 import configService from './services/ConfigService.js';
+import TeamManager from './services/TeamManager.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -689,6 +690,7 @@ const authService = new AuthService();
 const providerService = new ProviderService(io);
 const healthCheckScheduler = new HealthCheckScheduler(io);
 const scheduleManager = new ScheduleManager();
+let teamManager = null; // TeamManager 在 SessionManager 初始化后创建
 
 // 异步初始化 SessionManager
 let sessionManagerReady = false;
@@ -697,12 +699,16 @@ let sessionManagerReady = false;
     sessionManager = await SessionManager.create();
     sessionManagerReady = true;
     console.log('[Server] SessionManager 初始化完成');
+    // 初始化 TeamManager（复用 SessionManager 的数据库）
+    teamManager = new TeamManager(sessionManager.db, sessionManager, aiEngine);
+    console.log('[Server] TeamManager 初始化完成');
   } catch (err) {
     console.error('[Server] SessionManager 初始化失败:', err);
     // 回退到同步创建（不使用 mux-server 模式）
     sessionManager = new SessionManager();
     await sessionManager.init().catch(e => console.error('[Server] SessionManager.init() 失败:', e));
     sessionManagerReady = true;
+    teamManager = new TeamManager(sessionManager.db, sessionManager, aiEngine);
   }
 })();
 
@@ -2385,18 +2391,31 @@ function updateCheckState(sessionId, hadAction, status) {
   } else {
     // 正常模式，无操作时逐步增加间隔
     state.noActionCount++;
-    // 根据上次操作时间决定增长速度
-    const timeSinceLastAction = now - (state.lastActionTime || 0);
-    if (timeSinceLastAction < 60000) {
-      // 1分钟内有过操作，保持快速模式
-      state.interval = CHECK_INTERVALS.FAST;
-    } else if (timeSinceLastAction < 5 * 60000) {
-      // 5分钟内有过操作，使用最小间隔
+
+    // 检查是否是 auto-action 会话（所有调用方都在 autoActionEnabled 循环内）
+    // 如果 status 显示 needsAction: true（但因冷却被跳过），保持短间隔
+    const statusNeedsAction = status && status.needsAction;
+
+    if (statusNeedsAction) {
+      // 需要操作但被冷却跳过，保持快速检测以便冷却结束后立即重试
       state.interval = CHECK_INTERVALS.MIN;
+      console.log(`[检测周期] 会话 ${sessionId}: 需要操作但被冷却跳过，保持 ${state.interval / 1000}秒 间隔`);
     } else {
-      // 超过5分钟无操作，间隔翻倍
-      state.interval = Math.min(state.interval * 2, CHECK_INTERVALS.MAX);
+      // 根据上次操作时间决定增长速度
+      const timeSinceLastAction = now - (state.lastActionTime || 0);
+      if (timeSinceLastAction < 60000) {
+        // 1分钟内有过操作，保持快速模式
+        state.interval = CHECK_INTERVALS.FAST;
+      } else if (timeSinceLastAction < 5 * 60000) {
+        // 5分钟内有过操作，使用最小间隔
+        state.interval = CHECK_INTERVALS.MIN;
+      } else {
+        // 超过5分钟无操作，间隔翻倍，但 auto-action 会话上限为 DEFAULT（30秒）
+        // 因为 auto-action 会话需要持续监控，不能等太久
+        state.interval = Math.min(state.interval * 2, CHECK_INTERVALS.DEFAULT);
+      }
     }
+
     const intervalStr = state.interval >= 60000
       ? `${(state.interval / 60000).toFixed(1)}分钟`
       : `${state.interval / 1000}秒`;
@@ -3148,7 +3167,7 @@ async function runBackgroundAutoAction() {
 
           // 对于选项选择操作，使用更短的冷却时间（3秒）
           // 因为如果内容没变化，可能是操作没成功，需要重试
-          const cooldownTime = status.actionType === 'select' ? 3000 : 30000;
+          const cooldownTime = (status.actionType === 'select' || status.actionType === 'single_char') ? 3000 : 30000;
 
           if (lastAction && lastAction.action === action && lastAction.contentHash === contentHash && (now - lastAction.time) < cooldownTime) {
             console.log(`[后台自动操作] 会话 ${session.name}: 跳过重复操作 \"${action}\" (冷却${cooldownTime/1000}秒)`);
@@ -3186,6 +3205,22 @@ async function runBackgroundAutoAction() {
             setTimeout(() => {
               session.write('\r');
             }, 200);
+          } else if (status.actionType === 'single_char') {
+            // 单字符特殊按键（如 Tab、Escape）：通过 tmux send-keys 发送更可靠
+            const tmuxSession = session.tmuxSessionName;
+            const tmuxKeyMap = { '\t': 'Tab', '\x1b': 'Escape', '\r': 'Enter' };
+            const tmuxKey = tmuxKeyMap[action];
+            if (tmuxKey && tmuxSession) {
+              console.log(`[后台自动操作] 会话 ${session.name}: 通过 tmux send-keys 发送 ${tmuxKey} (preAnalyze)`);
+              try {
+                execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" ${tmuxKey}`);
+              } catch (e) {
+                console.error(`[后台自动操作] tmux send-keys ${tmuxKey} 失败:`, e.message);
+                session.write(action);
+              }
+            } else {
+              session.write(action);
+            }
           } else {
             // 单个字符（如 y/n）：不加回车，直接发送
             console.log(`[后台自动操作] 会话 ${session.name}: 发送单字符 "${action}"`);
@@ -3290,7 +3325,7 @@ async function runBackgroundAutoAction() {
         const lastAction = lastActionMap.get(session.id);
         const now = Date.now();
         const contentHash = computeContentHash(terminalContent, 500);
-        const cooldownTime = status.actionType === 'select' ? 3000 : 30000;
+        const cooldownTime = (status.actionType === 'select' || status.actionType === 'single_char') ? 3000 : 30000;
 
         if (lastAction && lastAction.action === action && lastAction.contentHash === contentHash && (now - lastAction.time) < cooldownTime) {
           console.log(`[后台自动操作] 会话 ${session.name}: 跳过重复操作 "${action}" (冷却${cooldownTime/1000}秒，剩余 ${Math.ceil((cooldownTime - (now - lastAction.time)) / 1000)}秒)`);
@@ -3343,6 +3378,24 @@ async function runBackgroundAutoAction() {
           setTimeout(() => {
             session.write('\r');
           }, 200);
+        } else if (status.actionType === 'single_char') {
+          // 单字符特殊按键（如 Tab、Escape）：通过 tmux send-keys 发送更可靠
+          const tmuxSession = session.tmuxSessionName;
+          // 将控制字符映射为 tmux send-keys 的按键名
+          const tmuxKeyMap = { '\t': 'Tab', '\x1b': 'Escape', '\r': 'Enter' };
+          const tmuxKey = tmuxKeyMap[action];
+          if (tmuxKey && tmuxSession) {
+            console.log(`[后台自动操作] 会话 ${session.name}: 通过 tmux send-keys 发送 ${tmuxKey}`);
+            try {
+              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" ${tmuxKey}`);
+            } catch (e) {
+              console.error(`[后台自动操作] 会话 ${session.name}: tmux send-keys ${tmuxKey} 失败:`, e.message);
+              session.write(action);
+            }
+          } else {
+            console.log(`[后台自动操作] 会话 ${session.name}: 发送单字符 "${action}"`);
+            session.write(action);
+          }
         } else {
           // 单个字符（如 y/n）：不加回车，直接发送
           console.log(`[后台自动操作] 会话 ${session.name}: 发送单字符 "${action}"`);
@@ -3386,6 +3439,16 @@ async function runBackgroundAutoAction() {
 
 // 每 1 秒检查一次（实际检测由 sessionCheckState 控制，支持爆发模式的 3 秒间隔）
 setInterval(runBackgroundAutoAction, 1000);
+
+// Team 协调循环：每 5 秒检查空闲 Teammate 并分配任务
+setInterval(async () => {
+  if (!teamManager) return;
+  try {
+    await teamManager.runCoordination();
+  } catch (err) {
+    console.error('[TeamManager] 协调循环错误:', err.message);
+  }
+}, 5000);
 
 // 内存限制状态跟踪
 const memoryLimitState = new Map(); // sessionId -> { warned: boolean, limited: boolean }
@@ -4500,6 +4563,63 @@ io.on('connection', (socket) => {
     }, 100);
   });
 
+  // 终端鼠标滚轮滚动（tmux mouse off 时，通过 copy-mode 实现历史浏览）
+  socket.on('terminal:scroll', (data) => {
+    if (!sessionManagerReady || !sessionManager) return;
+    const session = sessionManager.getSession(data.sessionId);
+    if (!session || !session.tmuxSessionName) return;
+
+    const tmuxSession = session.tmuxSessionName;
+    const direction = data.direction; // 'up' or 'down'
+    const lines = data.lines || 3;
+
+    try {
+      // 检查是否已在 copy-mode
+      let inCopyMode = false;
+      try {
+        const modeOutput = execSync(
+          `${getTmuxPrefix()} display-message -t "${tmuxSession}" -p "#{pane_in_mode}"`,
+          { encoding: 'utf-8', timeout: 2000 }
+        ).trim();
+        inCopyMode = modeOutput === '1';
+      } catch (e) {
+        // 忽略
+      }
+
+      if (direction === 'up') {
+        if (!inCopyMode) {
+          // 进入 copy-mode
+          execSync(`${getTmuxPrefix()} copy-mode -t "${tmuxSession}"`, { stdio: 'ignore', timeout: 2000 });
+        }
+        // 向上滚动
+        for (let i = 0; i < lines; i++) {
+          execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" -X cursor-up`, { stdio: 'ignore', timeout: 2000 });
+        }
+      } else if (direction === 'down') {
+        if (inCopyMode) {
+          // 向下滚动
+          for (let i = 0; i < lines; i++) {
+            execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" -X cursor-down`, { stdio: 'ignore', timeout: 2000 });
+          }
+          // 检查是否已到底部，如果是则退出 copy-mode
+          try {
+            const scrollPos = execSync(
+              `${getTmuxPrefix()} display-message -t "${tmuxSession}" -p "#{scroll_position}"`,
+              { encoding: 'utf-8', timeout: 2000 }
+            ).trim();
+            if (scrollPos === '0') {
+              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" -X cancel`, { stdio: 'ignore', timeout: 2000 });
+            }
+          } catch (e) {
+            // 忽略
+          }
+        }
+      }
+    } catch (e) {
+      // 忽略滚动错误
+    }
+  });
+
   // 终端输入
   socket.on('terminal:input', async (data) => {
     // 等待 SessionManager 初始化完成
@@ -5284,9 +5404,273 @@ ${context.join('\n\n')}
     });
   });
 
+  // ==================== Team 事件 ====================
+
+  // 获取团队列表
+  socket.on('teams:list', async () => {
+    try {
+      await waitForSessionManager();
+      if (!teamManager) { socket.emit('teams:list', []); return; }
+      socket.emit('teams:list', teamManager.listTeams());
+    } catch (err) {
+      console.error('[teams:list] 错误:', err.message);
+      socket.emit('teams:list', []);
+    }
+  });
+
+  // 创建团队
+  socket.on('team:create', async (data, ack) => {
+    try {
+      await waitForSessionManager();
+      if (!teamManager) {
+        socket.emit('error', { message: 'TeamManager 未初始化' });
+        if (typeof ack === 'function') ack({ error: 'TeamManager 未初始化' });
+        return;
+      }
+      console.log('[team:create] 开始创建团队:', data.name);
+      const team = await teamManager.createTeam({
+        name: data.name,
+        goal: data.goal,
+        workingDir: data.workingDir || '',
+        memberCount: data.memberCount || 2
+      });
+      console.log('[team:create] 团队创建成功:', team.id);
+      socket.emit('team:created', team);
+      if (typeof ack === 'function') ack({ team });
+      io.emit('teams:updated', teamManager.listTeams());
+      io.emit('sessions:updated', sessionManager.listSessions());
+    } catch (err) {
+      console.error('[team:create] 错误:', err.message);
+      socket.emit('error', { message: `创建团队失败: ${err.message}` });
+      if (typeof ack === 'function') ack({ error: err.message });
+    }
+  });
+
+  // 从现有会话创建团队
+  socket.on('team:createFromSession', async (data, ack) => {
+    try {
+      await waitForSessionManager();
+      if (!teamManager) {
+        if (typeof ack === 'function') ack({ error: 'TeamManager 未初始化' });
+        return;
+      }
+
+      const { sessionId, goal, memberCount } = data;
+      if (!sessionId || !goal) {
+        if (typeof ack === 'function') ack({ error: '缺少必要参数: sessionId, goal' });
+        return;
+      }
+
+      const existingSession = sessionManager.getSession(sessionId);
+      if (!existingSession) {
+        if (typeof ack === 'function') ack({ error: '会话不存在' });
+        return;
+      }
+
+      if (existingSession.teamId) {
+        if (typeof ack === 'function') ack({ error: '该会话已属于一个团队' });
+        return;
+      }
+
+      console.log('[team:createFromSession] 从现有会话创建团队:', existingSession.name);
+
+      const team = await teamManager.createTeamFromSession(
+        existingSession,
+        { goal, memberCount: memberCount || 2 },
+        (memberSession) => {
+          registerBellCallback(memberSession);
+          registerExitCallback(memberSession);
+        }
+      );
+
+      console.log('[team:createFromSession] 团队创建成功:', team.id);
+      if (typeof ack === 'function') ack({ team });
+      io.emit('teams:updated', teamManager.listTeams());
+      io.emit('sessions:updated', sessionManager.listSessions());
+    } catch (err) {
+      console.error('[team:createFromSession] 错误:', err.message);
+      if (typeof ack === 'function') ack({ error: err.message });
+    }
+  });
+
+  // 进入 Team 视图（加入 room，监听所有成员输出）
+  socket.on('team:attach', async (teamId) => {
+    try {
+      await waitForSessionManager();
+      if (!teamManager) return;
+      const team = teamManager.getTeam(teamId);
+      if (!team) { socket.emit('error', { message: '团队不存在' }); return; }
+
+      socket.join(`team:${teamId}`);
+      socket.data.currentTeamId = teamId;
+
+      // 为每个成员注册输出转发
+      const allSessionIds = [team.leadSessionId, ...team.memberSessionIds];
+      const teamOutputCallbacks = {};
+
+      for (const sid of allSessionIds) {
+        const session = sessionManager.getSession(sid);
+        if (!session) continue;
+
+        const callback = (data) => {
+          socket.emit('team:terminalOutput', { sessionId: sid, data });
+        };
+        session.onOutput(callback);
+        teamOutputCallbacks[sid] = callback;
+
+        // 发送现有 buffer
+        if (session.outputBuffer) {
+          socket.emit('team:terminalOutput', { sessionId: sid, data: session.outputBuffer });
+        }
+      }
+
+      socket.data.teamOutputCallbacks = teamOutputCallbacks;
+
+      // 发送任务和消息
+      socket.emit('team:tasks', teamManager.getTasksByTeam(teamId));
+      socket.emit('team:messages', teamManager.getTeamMessages(teamId));
+    } catch (err) {
+      console.error('[team:attach] 错误:', err.message);
+    }
+  });
+
+  // 离开 Team 视图
+  socket.on('team:detach', () => {
+    const teamId = socket.data.currentTeamId;
+    if (!teamId) return;
+
+    // 清理输出回调
+    const callbacks = socket.data.teamOutputCallbacks || {};
+    for (const [sid, cb] of Object.entries(callbacks)) {
+      const session = sessionManager?.getSession(sid);
+      if (session) session.offOutput(cb);
+    }
+
+    socket.leave(`team:${teamId}`);
+    socket.data.currentTeamId = null;
+    socket.data.teamOutputCallbacks = null;
+  });
+
+  // 向指定成员终端输入
+  socket.on('team:terminalInput', async (data) => {
+    try {
+      await waitForSessionManager();
+      const { sessionId, input } = data;
+      const session = sessionManager.getSession(sessionId);
+      if (session) {
+        session.write(input);
+      }
+    } catch (err) {
+      console.error('[team:terminalInput] 错误:', err.message);
+    }
+  });
+
+  // 暂停团队
+  socket.on('team:pause', async (teamId) => {
+    try {
+      await waitForSessionManager();
+      if (!teamManager) return;
+      const team = teamManager.pauseTeam(teamId);
+      if (team) {
+        io.to(`team:${teamId}`).emit('team:updated', team);
+        io.emit('teams:updated', teamManager.listTeams());
+        io.emit('sessions:updated', sessionManager.listSessions());
+      }
+    } catch (err) {
+      console.error('[team:pause] 错误:', err.message);
+    }
+  });
+
+  // 恢复团队
+  socket.on('team:resume', async (teamId) => {
+    try {
+      await waitForSessionManager();
+      if (!teamManager) return;
+      const team = teamManager.resumeTeam(teamId);
+      if (team) {
+        io.to(`team:${teamId}`).emit('team:updated', team);
+        io.emit('teams:updated', teamManager.listTeams());
+        io.emit('sessions:updated', sessionManager.listSessions());
+      }
+    } catch (err) {
+      console.error('[team:resume] 错误:', err.message);
+    }
+  });
+
+  // 销毁团队
+  socket.on('team:destroy', async (teamId) => {
+    try {
+      await waitForSessionManager();
+      if (!teamManager) return;
+      const team = await teamManager.destroyTeam(teamId);
+      if (team) {
+        io.to(`team:${teamId}`).emit('team:updated', team);
+        io.emit('teams:updated', teamManager.listTeams());
+        io.emit('sessions:updated', sessionManager.listSessions());
+      }
+    } catch (err) {
+      console.error('[team:destroy] 错误:', err.message);
+    }
+  });
+
+  // 手动创建任务
+  socket.on('team:task:create', async (data) => {
+    try {
+      await waitForSessionManager();
+      if (!teamManager) return;
+      const task = teamManager.createTask(data.teamId, {
+        subject: data.subject,
+        description: data.description || '',
+        priority: data.priority || 0,
+        blockedBy: data.blockedBy || []
+      });
+      io.to(`team:${data.teamId}`).emit('team:taskUpdated', task);
+    } catch (err) {
+      console.error('[team:task:create] 错误:', err.message);
+    }
+  });
+
+  // 更新任务
+  socket.on('team:task:update', async (data) => {
+    try {
+      await waitForSessionManager();
+      if (!teamManager) return;
+      const task = teamManager.updateTask(data.taskId, data.updates || {});
+      if (task) {
+        io.to(`team:${task.teamId}`).emit('team:taskUpdated', task);
+      }
+    } catch (err) {
+      console.error('[team:task:update] 错误:', err.message);
+    }
+  });
+
+  // 发送团队消息
+  socket.on('team:message', async (data) => {
+    try {
+      await waitForSessionManager();
+      if (!teamManager) return;
+      const msg = teamManager.sendMessage(
+        data.teamId, data.fromSessionId || null,
+        data.toSessionId || null, data.content, data.type || 'info'
+      );
+      io.to(`team:${data.teamId}`).emit('team:messageReceived', msg);
+    } catch (err) {
+      console.error('[team:message] 错误:', err.message);
+    }
+  });
+
   // 断开连接
   socket.on('disconnect', () => {
     console.log(`客户端断开: ${socket.id}`);
+    // 清理 Team 输出回调
+    if (socket.data.currentTeamId) {
+      const callbacks = socket.data.teamOutputCallbacks || {};
+      for (const [sid, cb] of Object.entries(callbacks)) {
+        const session = sessionManager?.getSession(sid);
+        if (session) session.offOutput(cb);
+      }
+      socket.leave(`team:${socket.data.currentTeamId}`);
+    }
     if (socket.data.currentSessionId) {
       const session = sessionManager.getSession(socket.data.currentSessionId);
       if (session) {
@@ -5617,8 +6001,13 @@ async function startServer() {
           frpTunnel.init(io, currentPort);
           cloudflareTunnel.init(io, currentPort);
 
+          // 从订阅服务器获取 FRP 配置
+          const licenseKey = subscriptionService.licenseInfo?.code;
+          const machineId = subscriptionService.machineId;
+          const hasConfig = await frpTunnel.fetchServersConfig(licenseKey, machineId);
+
           // 并行测试两种隧道
-          const frpInstalled = await frpTunnel.checkInstalled();
+          const frpInstalled = hasConfig && await frpTunnel.checkInstalled();
           const results = await Promise.all([
             frpInstalled ? frpTunnel.start() : Promise.resolve(null),
             cloudflareTunnel.start()

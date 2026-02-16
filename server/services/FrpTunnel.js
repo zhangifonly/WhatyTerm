@@ -14,33 +14,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const SETTINGS_PATH = join(__dirname, '../db/ai-settings.json');
 
-// FRP 服务器列表 - 按优先级排序
-const FRP_SERVERS = [
-  {
-    name: 'US-KC01',
-    addr: 'REDACTED_SERVER_IP_1',
-    frpPort: 7000,
-    token: 'REDACTED_FRP_TOKEN',
-    domain: 'frp-kc01.whaty.org',
-    useTls: true  // KC01 已配置 TLS 证书
-  },
-  {
-    name: 'US-LAX01',
-    addr: 'REDACTED_SERVER_IP_2',
-    frpPort: 7000,
-    token: 'REDACTED_FRP_TOKEN',
-    domain: 'frp-lax01.whaty.org',
-    useTls: false  // LAX01 服务端未配置 TLS 证书
-  },
-  {
-    name: 'US-LAX02',
-    addr: 'REDACTED_SERVER_IP_3',
-    frpPort: 7000,
-    token: 'REDACTED_FRP_TOKEN',
-    domain: 'frp.whaty.org',
-    useTls: false  // LAX02 服务端未配置 TLS 证书
-  }
-];
+// FRP 服务器配置缓存路径
+const FRP_CONFIG_CACHE_PATH = join(os.homedir(), '.webtmux', 'frp-servers.json');
+const FRP_CONFIG_CACHE_TTL = 3600 * 1000; // 1 小时缓存
+
+// 订阅服务器地址
+const SUBSCRIPTION_SERVER = 'https://term.whaty.org';
+
+// 运行时服务器列表（从远程获取）
+let FRP_SERVERS = [];
 
 /**
  * FRP Tunnel 服务
@@ -75,6 +57,81 @@ class FrpTunnel {
     this.localPort = port;
     this.subdomain = this._generateSubdomain();
     this.configPath = join(os.homedir(), '.webtmux', 'frpc.toml');
+  }
+
+  /**
+   * 从订阅服务器获取 FRP 配置（需要有效许可证）
+   * 优先使用本地缓存，过期后重新获取
+   * @param {string} licenseKey - 许可证密钥
+   * @param {string} machineId - 机器 ID
+   * @returns {Promise<boolean>} 是否成功获取配置
+   */
+  async fetchServersConfig(licenseKey, machineId) {
+    // 1. 尝试读取本地缓存
+    try {
+      if (existsSync(FRP_CONFIG_CACHE_PATH)) {
+        const cached = JSON.parse(readFileSync(FRP_CONFIG_CACHE_PATH, 'utf-8'));
+        if (cached.timestamp && Date.now() - cached.timestamp < FRP_CONFIG_CACHE_TTL && cached.servers?.length > 0) {
+          FRP_SERVERS = cached.servers;
+          console.log(`[FrpTunnel] 使用缓存的 FRP 配置（${FRP_SERVERS.length} 台服务器）`);
+          return true;
+        }
+      }
+    } catch (err) {
+      // 缓存读取失败，继续从远程获取
+    }
+
+    // 2. 从订阅服务器获取
+    if (!licenseKey || !machineId) {
+      console.log('[FrpTunnel] 无许可证信息，无法获取 FRP 配置');
+      return false;
+    }
+
+    try {
+      console.log('[FrpTunnel] 从订阅服务器获取 FRP 配置...');
+      const response = await fetch(`${SUBSCRIPTION_SERVER}/api/license/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: licenseKey, machineId }),
+        signal: AbortSignal.timeout(10000)
+      });
+
+      const data = await response.json();
+      if (data.success && data.config?.frpServers?.length > 0) {
+        FRP_SERVERS = data.config.frpServers;
+
+        // 写入本地缓存
+        const configDir = dirname(FRP_CONFIG_CACHE_PATH);
+        if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true });
+        writeFileSync(FRP_CONFIG_CACHE_PATH, JSON.stringify({
+          timestamp: Date.now(),
+          servers: FRP_SERVERS
+        }));
+
+        console.log(`[FrpTunnel] 获取到 ${FRP_SERVERS.length} 台 FRP 服务器配置`);
+        return true;
+      } else {
+        console.log('[FrpTunnel] 订阅服务器未返回 FRP 配置:', data.message || '未知错误');
+        return false;
+      }
+    } catch (err) {
+      console.error('[FrpTunnel] 获取 FRP 配置失败:', err.message);
+
+      // 3. 回退到过期缓存（如果有的话）
+      try {
+        if (existsSync(FRP_CONFIG_CACHE_PATH)) {
+          const cached = JSON.parse(readFileSync(FRP_CONFIG_CACHE_PATH, 'utf-8'));
+          if (cached.servers?.length > 0) {
+            FRP_SERVERS = cached.servers;
+            console.log(`[FrpTunnel] 使用过期缓存（${FRP_SERVERS.length} 台服务器）`);
+            return true;
+          }
+        }
+      } catch (e) {
+        // 忽略
+      }
+      return false;
+    }
   }
 
   /**
@@ -281,6 +338,11 @@ subdomain = "${this.subdomain}"
   async start(progressCallback = null) {
     if (!this.enabled) {
       console.log('[FrpTunnel] 服务已禁用');
+      return null;
+    }
+
+    if (FRP_SERVERS.length === 0) {
+      console.log('[FrpTunnel] 无可用服务器配置，请先调用 fetchServersConfig');
       return null;
     }
 
