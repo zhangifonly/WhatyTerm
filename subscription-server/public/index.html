@@ -354,7 +354,7 @@
                 <p class="text-gray-400 text-sm mb-4">${plan.description}</p>
                 <div class="mb-4">
                   <span class="text-3xl font-bold">¥${(plan.price_monthly / 100).toFixed(0)}</span>
-                  <span class="text-gray-400">/月</span>
+                  <span class="text-gray-400">/人/月</span>
                 </div>
                 <div class="text-gray-400 text-sm mb-4">
                   或 ¥${(plan.price_yearly / 100).toFixed(0)}/年 (省 ${Math.round((1 - plan.price_yearly / (plan.price_monthly * 12)) * 100)}%)

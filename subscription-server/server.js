@@ -161,9 +161,9 @@ const defaultPlans = [
   {
     id: 'enterprise',
     name: '企业版',
-    description: '适合企业团队，提供专属中转服务器和技术支持',
-    price_monthly: 29900,
-    price_yearly: 299900,
+    description: '适合企业团队，每人每月 29 元，提供专属中转服务器和技术支持',
+    price_monthly: 2900,
+    price_yearly: 29000,
     max_devices: 999,
     features: JSON.stringify(['all-plugins', 'relay-server', 'dedicated-support', 'custom-features', 'sla'])
   }
