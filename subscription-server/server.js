@@ -170,9 +170,12 @@ const defaultPlans = [
 ];
 
 const insertPlan = db.prepare(`
-  INSERT OR IGNORE INTO plans (id, name, description, price_monthly, price_yearly, max_devices, features)
+  INSERT OR REPLACE INTO plans (id, name, description, price_monthly, price_yearly, max_devices, features)
   VALUES (?, ?, ?, ?, ?, ?, ?)
 `);
+
+// 清理已废弃的计划
+db.exec("DELETE FROM plans WHERE id NOT IN ('personal', 'enterprise')");
 
 for (const plan of defaultPlans) {
   insertPlan.run(plan.id, plan.name, plan.description, plan.price_monthly, plan.price_yearly, plan.max_devices, plan.features);
