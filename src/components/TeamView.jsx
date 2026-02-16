@@ -32,7 +32,8 @@ function TeamView({ team, socket, onSessionClick }) {
     socket.emit('team:attach', team.id);
 
     // 为每个成员创建终端
-    const cleanup = [];
+    const timers = [];
+    const dataDisposables = [];
     for (const sid of allSessionIds) {
       if (terminalsRef.current[sid]) continue;
 
@@ -58,17 +59,18 @@ function TeamView({ team, socket, onSessionClick }) {
       term.loadAddon(fitAddon);
       term.open(el);
 
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         try { fitAddon.fit(); } catch {}
       }, 100);
+      timers.push(timer);
 
       // 键盘输入转发
-      term.onData((data) => {
+      const disposable = term.onData((data) => {
         socket.emit('team:terminalInput', { sessionId: sid, input: data });
       });
+      dataDisposables.push(disposable);
 
       terminalsRef.current[sid] = { term, fitAddon, el };
-      cleanup.push(sid);
     }
 
     // 监听终端输出
@@ -83,6 +85,8 @@ function TeamView({ team, socket, onSessionClick }) {
     return () => {
       socket.off('team:terminalOutput', handleOutput);
       socket.emit('team:detach');
+      timers.forEach(t => clearTimeout(t));
+      dataDisposables.forEach(d => { try { d.dispose(); } catch {} });
       // 销毁终端实例
       for (const sid of Object.keys(terminalsRef.current)) {
         try {
@@ -158,6 +162,10 @@ function TeamView({ team, socket, onSessionClick }) {
               className={`team-terminal-pane ${focusedSession === sid ? 'focused' : ''}`}
               onClick={() => handlePaneFocus(sid)}
               onDoubleClick={() => toggleFullscreen(sid)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handlePaneFocus(sid); }}
+              role="button"
+              tabIndex={0}
+              aria-label={`${getRoleLabel(sid)} 终端`}
             >
               <div className="team-terminal-header">
                 <span className={`role-badge ${getRoleClass(sid)}`}>

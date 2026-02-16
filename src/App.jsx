@@ -420,7 +420,12 @@ export default function App() {
       setCurrentTeam(team);
     });
     socket.on('team:updated', (team) => {
-      setCurrentTeam(prev => prev?.id === team.id ? team : prev);
+      // 团队被销毁或完成时清除 currentTeam
+      if (team.status === 'destroyed' || team.status === 'completed') {
+        setCurrentTeam(prev => prev?.id === team.id ? null : prev);
+      } else {
+        setCurrentTeam(prev => prev?.id === team.id ? team : prev);
+      }
       setTeams(prev => prev.map(t => t.id === team.id ? team : t));
     });
     socket.emit('teams:list');
@@ -2368,8 +2373,9 @@ export default function App() {
               if (response?.team) {
                 setCurrentSession(null);
                 setCurrentTeam(response.team);
+                toast.success('团队创建成功');
               } else if (response?.error) {
-                console.error('创建团队失败:', response.error);
+                toast.error('创建团队失败: ' + response.error);
               }
             });
             setShowCreateTeamDialog(false);
@@ -2387,8 +2393,9 @@ export default function App() {
               if (response?.team) {
                 setCurrentSession(null);
                 setCurrentTeam(response.team);
+                toast.success('团队创建成功');
               } else if (response?.error) {
-                console.error('从会话创建团队失败:', response.error);
+                toast.error('从会话创建团队失败: ' + response.error);
               }
             });
             setShowStartTeamDialog(false);

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 /**
  * TeamPanel - 团队信息面板
@@ -9,12 +9,15 @@ function TeamPanel({ team, socket, onClose }) {
   const [messages, setMessages] = useState([]);
   const [newTaskSubject, setNewTaskSubject] = useState('');
   const [activeTab, setActiveTab] = useState('tasks'); // tasks | messages
+  const [confirmDestroy, setConfirmDestroy] = useState(false);
+  const destroyTimerRef = useRef(null);
 
   useEffect(() => {
     if (!socket || !team) return;
 
-    const handleTasks = (data) => setTasks(data);
+    const handleTasks = (data) => setTasks(Array.isArray(data) ? data : []);
     const handleTaskUpdated = (task) => {
+      if (!task?.id) return;
       setTasks(prev => {
         const idx = prev.findIndex(t => t.id === task.id);
         if (idx >= 0) {
@@ -22,10 +25,11 @@ function TeamPanel({ team, socket, onClose }) {
           next[idx] = task;
           return next;
         }
+        // 仅当确实不存在时才追加
         return [...prev, task];
       });
     };
-    const handleMessages = (data) => setMessages(data);
+    const handleMessages = (data) => setMessages(Array.isArray(data) ? data : []);
     const handleMessageReceived = (msg) => {
       setMessages(prev => [...prev, msg]);
     };
@@ -49,10 +53,11 @@ function TeamPanel({ team, socket, onClose }) {
   const progress = stats.total > 0 ? Math.round((stats.completed / stats.total) * 100) : 0;
 
   const handleAddTask = () => {
-    if (!newTaskSubject.trim() || !socket) return;
+    const subject = newTaskSubject.trim();
+    if (!subject || !socket || subject.length > 200) return;
     socket.emit('team:task:create', {
       teamId: team.id,
-      subject: newTaskSubject.trim()
+      subject
     });
     setNewTaskSubject('');
   };
@@ -60,10 +65,14 @@ function TeamPanel({ team, socket, onClose }) {
   const handlePause = () => socket?.emit('team:pause', team.id);
   const handleResume = () => socket?.emit('team:resume', team.id);
   const handleDestroy = () => {
-    if (confirm('确定要销毁团队？所有会话将被关闭。')) {
-      socket?.emit('team:destroy', team.id);
-      onClose?.();
+    if (!confirmDestroy) {
+      setConfirmDestroy(true);
+      destroyTimerRef.current = setTimeout(() => setConfirmDestroy(false), 3000);
+      return;
     }
+    clearTimeout(destroyTimerRef.current);
+    socket?.emit('team:destroy', team.id);
+    onClose?.();
   };
 
   const getStatusIcon = (status) => {
@@ -111,16 +120,22 @@ function TeamPanel({ team, socket, onClose }) {
       </div>
 
       {/* Tab 切换 */}
-      <div className="team-panel-tabs">
+      <div className="team-panel-tabs" role="tablist">
         <button
           className={`team-tab ${activeTab === 'tasks' ? 'active' : ''}`}
           onClick={() => setActiveTab('tasks')}
+          role="tab"
+          aria-selected={activeTab === 'tasks'}
+          aria-controls="team-tab-tasks"
         >
           任务 ({stats.total})
         </button>
         <button
           className={`team-tab ${activeTab === 'messages' ? 'active' : ''}`}
           onClick={() => setActiveTab('messages')}
+          role="tab"
+          aria-selected={activeTab === 'messages'}
+          aria-controls="team-tab-messages"
         >
           消息 ({messages.length})
         </button>
@@ -129,7 +144,7 @@ function TeamPanel({ team, socket, onClose }) {
       {/* 内容区 */}
       <div className="team-panel-content">
         {activeTab === 'tasks' && (
-          <div className="team-tasks-list">
+          <div className="team-tasks-list" id="team-tab-tasks" role="tabpanel">
             {tasks.map(task => (
               <div key={task.id} className={`team-task-item ${getStatusClass(task.status)}`}>
                 <span className="task-status-icon">{getStatusIcon(task.status)}</span>
@@ -155,13 +170,14 @@ function TeamPanel({ team, socket, onClose }) {
                 onKeyDown={(e) => e.key === 'Enter' && handleAddTask()}
                 placeholder="添加新任务..."
                 className="team-task-input"
+                aria-label="添加新任务"
               />
             </div>
           </div>
         )}
 
         {activeTab === 'messages' && (
-          <div className="team-messages-list">
+          <div className="team-messages-list" id="team-tab-messages" role="tabpanel">
             {messages.map(msg => (
               <div key={msg.id} className={`team-message-item ${msg.type}`}>
                 <span className="msg-time">{formatTime(msg.createdAt)}</span>
@@ -182,7 +198,9 @@ function TeamPanel({ team, socket, onClose }) {
         ) : team.status === 'paused' ? (
           <button className="team-action-btn resume" onClick={handleResume}>恢复</button>
         ) : null}
-        <button className="team-action-btn destroy" onClick={handleDestroy}>销毁</button>
+        <button className={`team-action-btn destroy ${confirmDestroy ? 'confirming' : ''}`} onClick={handleDestroy}>
+          {confirmDestroy ? '确认销毁？' : '销毁'}
+        </button>
       </div>
     </div>
   );

@@ -283,16 +283,9 @@ export default function SubscriptionManager({ onClose }) {
         <div className="mb-6">
           <h3 className="text-sm font-medium text-gray-400 mb-3">可用监控策略</h3>
           <div className="grid grid-cols-2 gap-2">
-            {status?.freePlugins?.map(id => (
+            {status?.availablePlugins?.map(id => (
               <div key={id} className="px-3 py-2 bg-gray-700/50 rounded text-sm text-green-400">
-                {id} (免费)
-              </div>
-            ))}
-            {status?.premiumPlugins?.map(id => (
-              <div key={id} className={`px-3 py-2 rounded text-sm ${
-                status?.valid ? 'bg-gray-700/50 text-green-400' : 'bg-gray-700/30 text-gray-500'
-              }`}>
-                {id} {!status?.valid && '(需订阅)'}
+                {id}
               </div>
             ))}
           </div>

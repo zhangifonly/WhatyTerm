@@ -116,6 +116,11 @@ export class AIEngine {
     this._failoverConfigLoaded = false;
     this._loadFailoverConfig();
 
+    // AI 调用并发控制（防止多 Agent 同时调用触发限流）
+    this._aiConcurrency = 0;
+    this._aiMaxConcurrency = 3;
+    this._aiQueue = [];
+
     // 初始化插件管理器
     this._initPluginManager();
   }
@@ -2372,18 +2377,48 @@ ${terminalContent || '(空)'}
   }
 
   /**
-   * 简单文本生成（不解析 JSON）
+   * 简单文本生成（不解析 JSON），带并发控制
    * @param {string} prompt - 提示词
    * @returns {Promise<string|null>} - 生成的文本
    */
   async generateText(prompt) {
-    try {
-      const content = await this._callApiWithFailover(prompt);
-      return content || null;
-    } catch (err) {
-      console.error('[AIEngine] 文本生成失败:', err.message);
-      return null;
-    }
+    return this._withConcurrencyLimit(async () => {
+      try {
+        const content = await this._callApiWithFailover(prompt);
+        return content || null;
+      } catch (err) {
+        console.error('[AIEngine] 文本生成失败:', err.message);
+        return null;
+      }
+    });
+  }
+
+  /**
+   * 并发控制包装器
+   */
+  _withConcurrencyLimit(fn) {
+    return new Promise((resolve, reject) => {
+      const run = async () => {
+        this._aiConcurrency++;
+        try {
+          resolve(await fn());
+        } catch (err) {
+          reject(err);
+        } finally {
+          this._aiConcurrency--;
+          if (this._aiQueue.length > 0) {
+            const next = this._aiQueue.shift();
+            next();
+          }
+        }
+      };
+
+      if (this._aiConcurrency < this._aiMaxConcurrency) {
+        run();
+      } else {
+        this._aiQueue.push(run);
+      }
+    });
   }
 
   /**
