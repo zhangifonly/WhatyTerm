@@ -137,4 +137,4 @@ npm run electron:build:all
 ## 联系
 
 - 官网：https://term.whaty.org
-- 邮箱：support@whatyterm.com
+- 邮箱：zhangzhen@gmail.com
