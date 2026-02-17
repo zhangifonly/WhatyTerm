@@ -273,18 +273,18 @@ app.post('/api/auth/register', async (req, res) => {
     db.prepare('INSERT INTO users (id, email, password_hash, name) VALUES (?, ?, ?, ?)')
       .run(id, email, passwordHash, name || null);
 
-    // 新用户注册赠送一个月 Pro 版本（个人版）
+    // 个人版永久免费，注册即获得永久许可证
     const licenseId = uuidv4();
     const licenseKey = generateLicenseKey();
-    const expiresAt = Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60; // 30天后过期
-    const planId = 'personal'; // 个人版
+    const expiresAt = Math.floor(Date.now() / 1000) + 100 * 365 * 24 * 60 * 60; // 100年（永久）
+    const planId = 'personal';
 
     db.prepare(`
       INSERT INTO licenses (id, user_id, plan_id, license_key, status, expires_at, max_devices)
-      VALUES (?, ?, ?, ?, 'active', ?, 1)
+      VALUES (?, ?, ?, ?, 'active', ?, 3)
     `).run(licenseId, id, planId, licenseKey, expiresAt);
 
-    log.auth('用户注册赠送试用', { email, licenseKey });
+    log.auth('用户注册获得个人版永久许可证', { email, licenseKey });
 
     const token = jwt.sign({ id, email }, JWT_SECRET, { expiresIn: '7d' });
 
@@ -292,11 +292,11 @@ app.post('/api/auth/register', async (req, res) => {
       success: true,
       token,
       user: { id, email, name },
-      trialLicense: {
+      license: {
         licenseKey,
         expiresAt: new Date(expiresAt * 1000).toISOString(),
         plan: 'personal',
-        message: '恭喜！您已获得一个月 Pro 版本免费试用'
+        message: '注册成功！个人版永久免费使用'
       }
     });
   } catch (err) {
@@ -1529,6 +1529,11 @@ app.post('/api/payment/create', async (req, res) => {
     // 计算金额
     const amount = period === 'monthly' ? plan.price_monthly : plan.price_yearly;
     const durationDays = period === 'monthly' ? 30 : 365;
+
+    // 免费计划不需要支付
+    if (amount === 0) {
+      return res.status(400).json({ error: '该计划免费，无需支付，请直接注册使用' });
+    }
 
     // 创建或获取用户
     let userId;

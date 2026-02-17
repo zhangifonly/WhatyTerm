@@ -37,7 +37,7 @@ POST /api/auth/register
 }
 ```
 
-**说明**: 新用户注册后自动赠送 30 天试用许可证。
+**说明**: 新用户注册后自动获得个人版永久免费许可证（3 台设备）。
 
 ---
 
@@ -159,7 +159,7 @@ POST /api/auth/verify-credentials
     "key": "WT-XXXXXXXX",
     "plan": "personal",
     "expiresAt": 1735689600,
-    "maxDevices": 1
+    "maxDevices": 3
   }
 }
 ```
@@ -180,20 +180,20 @@ GET /api/plans
   {
     "id": "personal",
     "name": "个人版",
-    "description": "适合个人开发者",
-    "price_monthly": 2900,
-    "price_yearly": 29900,
-    "max_devices": 1,
-    "features": ["all-plugins", "email-support"]
+    "description": "开源免费，适合个人开发者",
+    "price_monthly": 0,
+    "price_yearly": 0,
+    "max_devices": 3,
+    "features": ["all-plugins", "community-support", "open-source"]
   },
   {
-    "id": "professional",
-    "name": "专业版",
-    "description": "适合专业开发者和小团队",
-    "price_monthly": 4900,
-    "price_yearly": 49900,
-    "max_devices": 5,
-    "features": ["all-plugins", "priority-support", "team-features"]
+    "id": "enterprise",
+    "name": "企业版",
+    "description": "适合企业团队，每人每月 29 元",
+    "price_monthly": 2900,
+    "price_yearly": 29000,
+    "max_devices": 999,
+    "features": ["all-plugins", "relay-server", "dedicated-support", "custom-features", "sla"]
   }
 ]
 ```
@@ -235,13 +235,15 @@ POST /api/payment/create
 **请求体**:
 ```json
 {
-  "planId": "personal",
+  "planId": "enterprise",
   "period": "yearly",
   "paymentMethod": "cbb_alipay",
   "email": "user@example.com",
   "machineId": "optional-machine-id"
 }
 ```
+
+**注意**: 免费计划（个人版）无需支付，传入免费计划会返回 400 错误。
 
 **响应（CBB 支付）**:
 ```json
@@ -349,7 +351,7 @@ POST /api/license/activate
     "plan": "personal",
     "planName": "个人版",
     "expiresAt": 1735689600,
-    "maxDevices": 1,
+    "maxDevices": 3,
     "currentDevices": 1
   }
 }
@@ -430,7 +432,7 @@ GET /api/user/licenses
     "plan_id": "personal",
     "plan_name": "个人版",
     "expires_at": 1735689600,
-    "max_devices": 1,
+    "max_devices": 3,
     "status": "active",
     "activations": [
       {
