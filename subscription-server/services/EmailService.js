@@ -322,7 +322,7 @@ async function sendWelcomeEmail(email, order) {
       </p>
     </div>
     <div class="footer">
-      <p>如有问题，请联系 support@whaty.org</p>
+      <p>如有问题，请联系 zhangzhen@gmail.com</p>
       <p>&copy; ${new Date().getFullYear()} WhatyTerm. All rights reserved.</p>
     </div>
   </div>
