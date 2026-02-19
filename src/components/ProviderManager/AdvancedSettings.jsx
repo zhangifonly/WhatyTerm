@@ -4,6 +4,7 @@ import { toast } from '../Toast';
 // Claude 模型降级列表（与后端保持一致）
 const CLAUDE_MODEL_FALLBACK_LIST = [
   'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-6',
   'claude-sonnet-4-5-20250929',
 ];
 

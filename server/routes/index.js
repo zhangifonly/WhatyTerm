@@ -439,7 +439,7 @@ export function setupRoutes(app, getSessionManager, historyLogger, io = null, ai
             'Authorization': `Bearer ${config.apiKey || ''}`
           },
           body: JSON.stringify({
-            model: config.model || 'claude-sonnet-4-20250514',
+            model: config.model || 'claude-sonnet-4-6',
             max_tokens: 10,
             system: [{ type: 'text', text: CLAUDE_CODE_FAKE.systemPrompt }],
             messages: [{ role: 'user', content: 'Hi' }],

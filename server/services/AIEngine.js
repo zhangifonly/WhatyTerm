@@ -329,7 +329,7 @@ export class AIEngine {
           codex: {
             apiUrl: apiUrl,
             apiKey: apiKey,
-            model: model || 'gpt-5-codex'
+            model: model || 'gpt-5.2-codex'
           },
           openai: { apiUrl: '', apiKey: '', model: 'gpt-4o' },
           claude: { apiUrl: '', apiKey: '', model: DEFAULT_MODEL },
@@ -494,7 +494,7 @@ export class AIEngine {
           codex: {
             apiUrl: apiUrl,
             apiKey: apiKey,
-            model: model || 'gpt-5-codex'
+            model: model || 'gpt-5.2-codex'
           },
           openai: { apiUrl: '', apiKey: '', model: 'gpt-4o' },
           claude: { apiUrl: '', apiKey: '', model: DEFAULT_MODEL },
@@ -1024,7 +1024,7 @@ export class AIEngine {
     // 注意：不发送 instructions 字段，因为某些供应商（如 FoxCode）不接受自定义 instructions
     // 供应商会使用自己的默认 instructions
     const requestBody = {
-      model: config.model || 'gpt-5-codex',
+      model: config.model || 'gpt-5.2-codex',
       input: [
         {
           type: 'message',
@@ -1060,7 +1060,7 @@ export class AIEngine {
     // 如果是 SSE 流式响应，解析事件流
     if (contentType.includes('text/event-stream') || responseText.startsWith('event:')) {
       const { text, usage } = this._parseCodexSSE(responseText);
-      return { text, usage, model: config.model || 'gpt-5-codex' };
+      return { text, usage, model: config.model || 'gpt-5.2-codex' };
     }
 
     // 尝试解析为 JSON
@@ -1091,11 +1091,11 @@ export class AIEngine {
           input_tokens: data.usage.prompt_tokens || data.usage.input_tokens || 0,
           output_tokens: data.usage.completion_tokens || data.usage.output_tokens || 0
         } : null,
-        model: data.model || config.model || 'gpt-5-codex'
+        model: data.model || config.model || 'gpt-5.2-codex'
       };
     } catch (e) {
       console.error('[AIEngine] Codex 响应解析失败:', e);
-      return { text: null, usage: null, model: config.model || 'gpt-5-codex' };
+      return { text: null, usage: null, model: config.model || 'gpt-5.2-codex' };
     }
   }
 

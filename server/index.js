@@ -797,7 +797,7 @@ function getAIProviderInfo() {
   let defaultModel;
   if (apiType === 'codex') {
     config = settings?.codex || {};
-    defaultModel = 'gpt-5-codex';
+    defaultModel = 'gpt-5.2-codex';
   } else if (apiType === 'openai') {
     config = settings?.openai || {};
     defaultModel = 'gpt-4o';

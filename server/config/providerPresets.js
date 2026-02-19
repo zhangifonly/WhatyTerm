@@ -20,7 +20,7 @@ export const providerPresets = [
       claude: {
         apiUrl: 'https://api.anthropic.com/v1/messages',
         apiKey: '',
-        model: 'claude-sonnet-4-5-20250929'
+        model: 'claude-sonnet-4-6'
       },
       maxTokens: 8000,
       temperature: 0.7
@@ -354,7 +354,7 @@ export const providerPresets = [
       openai: {
         apiUrl: 'https://www.packyapi.com/v1/chat/completions',
         apiKey: '',
-        model: 'claude-sonnet-4-5-20250929'
+        model: 'claude-sonnet-4-6'
       },
       maxTokens: 8000,
       temperature: 0.7
@@ -380,7 +380,7 @@ export const providerPresets = [
       openai: {
         apiUrl: 'https://aihubmix.com/v1/chat/completions',
         apiKey: '',
-        model: 'claude-sonnet-4-5-20250929'
+        model: 'claude-sonnet-4-6'
       },
       maxTokens: 8000,
       temperature: 0.7
@@ -405,7 +405,7 @@ export const providerPresets = [
       openai: {
         apiUrl: 'https://www.dmxapi.cn/v1/chat/completions',
         apiKey: '',
-        model: 'claude-sonnet-4-5-20250929'
+        model: 'claude-sonnet-4-6'
       },
       maxTokens: 8000,
       temperature: 0.7
@@ -430,7 +430,7 @@ export const providerPresets = [
       openai: {
         apiUrl: 'https://openrouter.ai/api/v1/chat/completions',
         apiKey: '',
-        model: 'anthropic/claude-sonnet-4.5'
+        model: 'anthropic/claude-sonnet-4.6'
       },
       maxTokens: 8000,
       temperature: 0.7

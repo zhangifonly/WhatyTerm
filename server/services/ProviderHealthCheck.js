@@ -24,7 +24,7 @@ export class ProviderHealthCheck {
       degradedThresholdMs: config.degradedThresholdMs || 6000,
       testModels: config.testModels || {
         claude: HEALTH_CHECK_MODELS.claude,
-        codex: 'gpt-5.1-codex@low',
+        codex: 'gpt-5.2-codex@low',
         gemini: 'gemini-3-pro-preview'
       }
     };

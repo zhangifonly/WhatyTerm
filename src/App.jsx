@@ -3050,19 +3050,20 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
   // 预设模型列表
   const MODEL_OPTIONS = {
     claude: [
-      { id: 'claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5 (推荐)' },
-      { id: 'claude-opus-4-5-20251101', name: 'Claude Opus 4.5 (旗舰)' },
+      { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (推荐)' },
+      { id: 'claude-opus-4-6', name: 'Claude Opus 4.6 (最新旗舰)' },
+      { id: 'claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5' },
+      { id: 'claude-opus-4-5-20251101', name: 'Claude Opus 4.5' },
       { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5 (快速)' },
       { id: 'claude-opus-4-1-20250805', name: 'Claude Opus 4.1' },
       { id: 'claude-sonnet-4-20250514', name: 'Claude Sonnet 4.0' },
-      { id: 'claude-opus-4-20250514', name: 'Claude Opus 4.0' },
-      { id: 'claude-3-7-sonnet-20250219', name: 'Claude 3.7 Sonnet' },
-      { id: 'claude-3-5-haiku-20241022', name: 'Claude 3.5 Haiku' },
     ],
     codex: [
-      { id: 'gpt-5.1-codex-max', name: 'GPT-5.1 Codex Max (旗舰深度推理)' },
-      { id: 'gpt-5.1-codex-mini', name: 'GPT-5.1 Codex Mini (快速精简)' },
-      { id: 'gpt-5.2', name: 'GPT-5.2 (最新前沿模型)' },
+      { id: 'gpt-5.2', name: 'GPT-5.2 (最新前沿)' },
+      { id: 'gpt-5.2-codex', name: 'GPT-5.2 Codex (推荐)' },
+      { id: 'gpt-5.1-codex-max', name: 'GPT-5.1 Codex Max (深度推理)' },
+      { id: 'gpt-5.1-codex-mini', name: 'GPT-5.1 Codex Mini (快速)' },
+      { id: 'gpt-5-codex', name: 'GPT-5 Codex' },
     ],
     gemini: [
       { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (默认)' },
