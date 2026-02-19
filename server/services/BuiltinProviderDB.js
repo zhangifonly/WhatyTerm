@@ -97,7 +97,7 @@ class BuiltinProviderDB {
           env: {
             ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
             ANTHROPIC_AUTH_TOKEN: '',
-            ANTHROPIC_MODEL: 'claude-sonnet-4-20250514'
+            ANTHROPIC_MODEL: 'claude-sonnet-4-6'
           }
         }),
         website_url: 'https://console.anthropic.com/',

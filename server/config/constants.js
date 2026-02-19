@@ -28,14 +28,16 @@ const GEMINI_VERSION = getLocalVersion('gemini --version', '0.21.3');
 
 // 默认模型（选择最便宜的 Haiku）
 // 当 Anthropic 发布新版本时，只需修改这里
-export const DEFAULT_MODEL = 'claude-sonnet-4-5-20250929';
+export const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
 // Claude 模型降级列表（按优先级排序，从便宜到贵）
 // 当一个模型不可用时（503 model_not_found），自动尝试下一个
 export const CLAUDE_MODEL_FALLBACK_LIST = [
   'claude-haiku-4-5-20251001',      // 最便宜，优先使用
+  'claude-sonnet-4-6',              // Sonnet 4.6（最新）
   'claude-sonnet-4-5-20250929',     // Sonnet 4.5
-  'claude-opus-4-5-20251101',       // Opus 4.5（某些供应商如 Owly 只支持此模型）
+  'claude-opus-4-6',                // Opus 4.6（最新旗舰）
+  'claude-opus-4-5-20251101',       // Opus 4.5
 ];
 
 // Claude Code 伪装配置
