@@ -4761,6 +4761,39 @@ io.on('connection', (socket) => {
     }
   });
 
+  // 图片/文件拖入终端 - 保存到临时目录并以 bracketed paste 方式发送路径
+  socket.on('terminal:dropFile', async (data, callback) => {
+    try {
+      const session = sessionManager?.getSession(data.sessionId);
+      if (!session) {
+        return callback?.({ error: '会话不存在' });
+      }
+
+      const { fileName, fileData } = data; // fileData 是 base64
+      const ext = path.extname(fileName).toLowerCase();
+      const tmpDir = path.join(os.tmpdir(), 'webtmux-uploads');
+      mkdirSync(tmpDir, { recursive: true });
+
+      // 保存文件
+      const safeName = `${Date.now()}-${fileName.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+      const filePath = path.join(tmpDir, safeName);
+      const buffer = Buffer.from(fileData, 'base64');
+      writeFileSync(filePath, buffer);
+
+      console.log(`[DropFile] 保存文件: ${filePath} (${buffer.length} bytes)`);
+
+      // 以 bracketed paste 模式发送文件路径到终端
+      // Claude Code 会检测 bracketed paste 中的图片路径并自动读取
+      const bracketedPaste = `\x1b[200~${filePath}\x1b[201~`;
+      session.write(bracketedPaste);
+
+      callback?.({ success: true, filePath });
+    } catch (err) {
+      console.error('[DropFile] 错误:', err);
+      callback?.({ error: err.message });
+    }
+  });
+
   // 调整终端大小
   socket.on('terminal:resize', (data) => {
     const session = sessionManager.getSession(data.sessionId);
