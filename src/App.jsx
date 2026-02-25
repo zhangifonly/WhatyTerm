@@ -159,6 +159,7 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [creatingProjectPaths, setCreatingProjectPaths] = useState(new Set()); // 正在创建会话的项目路径
   const [aiPanelCollapsed, setAiPanelCollapsed] = useState(false);
+  const [isDragOver, setIsDragOver] = useState(false);
   const [aiSettings, setAiSettings] = useState({
     model: 'sonnet',
     apiUrl: 'https://agent-ai.webtrn.cn/v1/chat/completions',
@@ -1139,6 +1140,52 @@ export default function App() {
     return <LoginPage auth={auth} />;
   }
 
+  // 处理文件拖入终端
+  const handleTerminalDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(true);
+  };
+
+  const handleTerminalDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // 只在离开 terminal-wrapper 时取消高亮
+    if (!e.currentTarget.contains(e.relatedTarget)) {
+      setIsDragOver(false);
+    }
+  };
+
+  const handleTerminalDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+
+    if (!currentSession || !socket) return;
+
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+
+    Array.from(files).forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = reader.result.split(',')[1]; // 去掉 data:xxx;base64, 前缀
+        socket.emit('terminal:dropFile', {
+          sessionId: currentSession.id,
+          fileName: file.name,
+          fileData: base64,
+        }, (response) => {
+          if (response?.error) {
+            console.error('[DropFile] 上传失败:', response.error);
+          } else {
+            console.log('[DropFile] 文件已发送到终端:', response?.filePath);
+          }
+        });
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
   return (
     <ToastContainer>
     <div className="app">
@@ -1333,13 +1380,24 @@ export default function App() {
         ) : currentSession ? (
           <div className="terminal-container">
             <div
-              className="terminal-wrapper"
+              className={`terminal-wrapper${isDragOver ? ' drag-over' : ''}`}
               ref={terminalRef}
               onMouseDown={() => terminalInstance.current?.focus()}
+              onDragOver={handleTerminalDragOver}
+              onDragLeave={handleTerminalDragLeave}
+              onDrop={handleTerminalDrop}
             >
               <span className="terminal-selection-tip">
                 按住 Shift 或 Option 键选择文字
               </span>
+              {isDragOver && (
+                <div className="drop-overlay">
+                  <div className="drop-overlay-content">
+                    <span style={{ fontSize: '2rem' }}>📎</span>
+                    <span>拖放文件到终端</span>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* AI 建议卡片 - 仅在开启建议显示、非自动模式下显示，且 AI 状态允许操作 */}
