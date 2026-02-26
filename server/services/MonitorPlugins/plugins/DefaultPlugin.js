@@ -312,7 +312,7 @@ class DefaultPlugin extends BasePlugin {
         // 如果有 "2. Yes, allow" 选项且不是永久允许某命令模式，选择 2（允许本项目）
         // "2. Yes, and don't ask again for: 具体命令" 是永久允许，应选 1
         const hasOption2Allow = /2\.\s*Yes,\s*allow/i.test(cleanLastLines);
-        const isOption2Permanent = /2\.\s*Yes,\s*and\s+don't\s+ask\s+again\s+for:/i.test(cleanLastLines);
+        const isOption2Permanent = /2\.\s*Yes,\s*and\s+don.t\s+ask\s+again\s+for:/i.test(cleanLastLines);
         const selectOpt = (hasOption2Allow && !isOption2Permanent) ? '2' : '1';
         return {
           needsAction: true,
