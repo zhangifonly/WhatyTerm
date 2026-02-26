@@ -1461,7 +1461,7 @@ ${historyText || '(空)'}
     const hasOption2YesEarly = /2\.\s*Yes/i.test(earlyLast3000);
     // 检测选项 2 是否是"永久允许某命令模式"（don't ask again for: 具体命令）
     // 这种情况不应自动选 2，因为会永久跳过该命令的确认
-    const isOption2PermanentAllowEarly = /2\.\s*Yes,\s*and\s+don't\s+ask\s+again\s+for:/i.test(earlyLast3000);
+    const isOption2PermanentAllowEarly = /2\.\s*Yes,\s*and\s+don.t\s+ask\s+again\s+for:/i.test(earlyLast3000);
 
     if ((isEditConfirmEarly || isProceedConfirmEarly) && hasOption1YesEarly) {
       // 如果选项 2 是永久允许某命令模式，选 1（仅本次允许）
@@ -1738,7 +1738,7 @@ ${historyText || '(空)'}
 
     if (isEditConfirm && hasOption1Yes) {
       // 检测选项 2 是否是"永久允许某命令模式"
-      const isOption2PermanentAllow = /2\.\s*Yes,\s*and\s+don't\s+ask\s+again\s+for:/i.test(cleanContent);
+      const isOption2PermanentAllow = /2\.\s*Yes,\s*and\s+don.t\s+ask\s+again\s+for:/i.test(cleanContent);
       // 有选项2且不是永久允许时选2（允许本次会话），否则选1
       const selectOption = (hasOption2Yes && !isOption2PermanentAllow) ? '2' : '1';
       console.log(`[AIEngine] 检测到 ${cliName} 确认界面，选择选项 ${selectOption}${isOption2PermanentAllow ? '（跳过永久允许）' : ''}`);
