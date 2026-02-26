@@ -1459,10 +1459,14 @@ ${historyText || '(空)'}
     const isProceedConfirmEarly = /Do you want to proceed\?/i.test(earlyLast3000);
     const hasOption1YesEarly = /1\.\s*Yes/i.test(earlyLast3000);
     const hasOption2YesEarly = /2\.\s*Yes/i.test(earlyLast3000);
+    // 检测选项 2 是否是"永久允许某命令模式"（don't ask again for: 具体命令）
+    // 这种情况不应自动选 2，因为会永久跳过该命令的确认
+    const isOption2PermanentAllowEarly = /2\.\s*Yes,\s*and\s+don't\s+ask\s+again\s+for:/i.test(earlyLast3000);
 
     if ((isEditConfirmEarly || isProceedConfirmEarly) && hasOption1YesEarly) {
-      const selectOption = hasOption2YesEarly ? '2' : '1';
-      console.log(`[AIEngine] [高优先级] 检测到确认界面（插件分析前），选择选项 ${selectOption}`);
+      // 如果选项 2 是永久允许某命令模式，选 1（仅本次允许）
+      const selectOption = (hasOption2YesEarly && !isOption2PermanentAllowEarly) ? '2' : '1';
+      console.log(`[AIEngine] [高优先级] 检测到确认界面（插件分析前），选择选项 ${selectOption}${isOption2PermanentAllowEarly ? '（跳过永久允许）' : ''}`);
       return {
         currentState: `${cliNameEarly}确认界面`,
         workingDir: '未显示',
@@ -1470,7 +1474,7 @@ ${historyText || '(空)'}
         needsAction: true,
         actionType: 'select',
         suggestedAction: selectOption,
-        actionReason: hasOption2YesEarly ? '选择"允许本次会话"以自动化流程' : '选择"Yes"继续执行',
+        actionReason: (hasOption2YesEarly && !isOption2PermanentAllowEarly) ? '选择"允许本次会话"以自动化流程' : '选择"Yes"继续执行',
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
@@ -1733,9 +1737,11 @@ ${historyText || '(空)'}
     const hasOption2Yes = /2\.\s*Yes/i.test(cleanContent);
 
     if (isEditConfirm && hasOption1Yes) {
-      // 有选项2时选2（允许本次会话），否则选1
-      const selectOption = hasOption2Yes ? '2' : '1';
-      console.log(`[AIEngine] 检测到 ${cliName} 确认界面，选择选项 ${selectOption}`);
+      // 检测选项 2 是否是"永久允许某命令模式"
+      const isOption2PermanentAllow = /2\.\s*Yes,\s*and\s+don't\s+ask\s+again\s+for:/i.test(cleanContent);
+      // 有选项2且不是永久允许时选2（允许本次会话），否则选1
+      const selectOption = (hasOption2Yes && !isOption2PermanentAllow) ? '2' : '1';
+      console.log(`[AIEngine] 检测到 ${cliName} 确认界面，选择选项 ${selectOption}${isOption2PermanentAllow ? '（跳过永久允许）' : ''}`);
       return {
         currentState: `${cliName}确认界面`,
         workingDir: '未显示',
@@ -1869,19 +1875,21 @@ ${historyText || '(空)'}
     }
 
     // 5. 检测普通确认界面（Do you want to proceed?）
-    // 如果有选项 2，选择 2（允许本次会话不再询问）；否则选择 1
+    // 如果有选项 2 且不是永久允许某命令模式，选择 2；否则选择 1
     if (/Do you want to proceed\?/i.test(cleanContent) &&
         /1\.\s*Yes/i.test(cleanContent)) {
       const hasOption2 = /2\.\s*Yes/i.test(cleanContent);
-      console.log(`[AIEngine] 检测到普通确认界面，选择选项 ${hasOption2 ? '2' : '1'}`);
+      const isOption2Permanent = /2\.\s*Yes,\s*and\s+don't\s+ask\s+again\s+for:/i.test(cleanContent);
+      const selectOpt = (hasOption2 && !isOption2Permanent) ? '2' : '1';
+      console.log(`[AIEngine] 检测到普通确认界面，选择选项 ${selectOpt}${isOption2Permanent ? '（跳过永久允许）' : ''}`);
       return {
         currentState: '确认界面',
         workingDir: '未显示',
         recentAction: '等待确认',
         needsAction: true,
         actionType: 'select',
-        suggestedAction: hasOption2 ? '2' : '1',
-        actionReason: hasOption2 ? '选择"允许本次会话"以自动化流程' : '选择"Yes"继续执行',
+        suggestedAction: selectOpt,
+        actionReason: (hasOption2 && !isOption2Permanent) ? '选择"允许本次会话"以自动化流程' : '选择"Yes"继续执行',
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
