@@ -3185,7 +3185,7 @@ async function runBackgroundAutoAction() {
 
           // 对于选项选择操作，使用更短的冷却时间（3秒）
           // 因为如果内容没变化，可能是操作没成功，需要重试
-          const cooldownTime = (status.actionType === 'select' || status.actionType === 'single_char') ? 3000 : 30000;
+          const cooldownTime = (status.actionType === 'select') ? 15000 : (status.actionType === 'single_char') ? 3000 : 30000;
 
           if (lastAction && lastAction.action === action && lastAction.contentHash === contentHash && (now - lastAction.time) < cooldownTime) {
             console.log(`[后台自动操作] 会话 ${session.name}: 跳过重复操作 \"${action}\" (冷却${cooldownTime/1000}秒)`);
@@ -3343,7 +3343,7 @@ async function runBackgroundAutoAction() {
         const lastAction = lastActionMap.get(session.id);
         const now = Date.now();
         const contentHash = computeContentHash(terminalContent, 500);
-        const cooldownTime = (status.actionType === 'select' || status.actionType === 'single_char') ? 3000 : 30000;
+        const cooldownTime = (status.actionType === 'select') ? 15000 : (status.actionType === 'single_char') ? 3000 : 30000;
 
         if (lastAction && lastAction.action === action && lastAction.contentHash === contentHash && (now - lastAction.time) < cooldownTime) {
           console.log(`[后台自动操作] 会话 ${session.name}: 跳过重复操作 "${action}" (冷却${cooldownTime/1000}秒，剩余 ${Math.ceil((cooldownTime - (now - lastAction.time)) / 1000)}秒)`);

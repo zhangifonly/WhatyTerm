@@ -309,16 +309,18 @@ class DefaultPlugin extends BasePlugin {
       const hasOption2Or3No = /[23]\.\s*No/i.test(cleanLastLines);
 
       if (hasDoYouWantToProceed && hasOption1Yes) {
-        // 如果有 "2. Yes, allow" 选项，选择 2（允许本项目）
-        // 否则选择 1（Yes）
+        // 如果有 "2. Yes, allow" 选项且不是永久允许某命令模式，选择 2（允许本项目）
+        // "2. Yes, and don't ask again for: 具体命令" 是永久允许，应选 1
         const hasOption2Allow = /2\.\s*Yes,\s*allow/i.test(cleanLastLines);
+        const isOption2Permanent = /2\.\s*Yes,\s*and\s+don't\s+ask\s+again\s+for:/i.test(cleanLastLines);
+        const selectOpt = (hasOption2Allow && !isOption2Permanent) ? '2' : '1';
         return {
           needsAction: true,
           actionType: 'select',
-          suggestedAction: hasOption2Allow ? '2' : '1',
+          suggestedAction: selectOpt,
           phase,
           phaseConfig: config,
-          message: hasOption2Allow
+          message: (hasOption2Allow && !isOption2Permanent)
             ? '检测到 Claude Code 项目权限确认，自动选择选项 2（允许本项目）'
             : '检测到 Bash 命令确认，自动选择选项 1（Yes）'
         };
