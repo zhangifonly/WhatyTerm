@@ -1,8 +1,6 @@
-; 自定义 NSIS 安装脚本 - 安装前强制关闭运行中的程序
+; 自定义 NSIS 安装脚本 - 安装前强制关闭运行中的程序并卸载旧版本
 
 ; 覆盖默认的应用运行检测
-; 定义此宏会完全替代默认的 _CHECK_APP_RUNNING 宏
-; 我们先尝试关闭进程，然后直接继续安装（不检测是否成功）
 !macro customCheckAppRunning
   ; 强制终止所有相关进程（忽略错误）
   nsExec::ExecToStack 'taskkill /F /T /IM WhatyTerm.exe'
@@ -17,16 +15,11 @@
   nsExec::ExecToStack 'taskkill /F /IM node.exe'
   Pop $0
   Pop $1
-
-  ; 等待进程退出
   Sleep 2000
-
-  ; 不做任何检测，直接继续安装
-  ; 如果文件被锁定，NSIS 会在复制文件时处理
 !macroend
 
 !macro customInit
-  ; 安装初始化时也尝试关闭
+  ; 关闭运行中的程序
   nsExec::ExecToStack 'taskkill /F /T /IM WhatyTerm.exe'
   Pop $0
   Pop $1
@@ -40,6 +33,21 @@
   Pop $0
   Pop $1
   Sleep 1000
+
+  ; 自动卸载旧版本 - 检查注册表中的卸载程序
+  ; GUID 与 electron-builder.yml 中的 nsis.guid 一致
+  ReadRegStr $R0 HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\a1b2c3d4-e5f6-7890-abcd-ef1234567890" "QuietUninstallString"
+  ${If} $R0 == ""
+    ReadRegStr $R0 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\a1b2c3d4-e5f6-7890-abcd-ef1234567890" "QuietUninstallString"
+  ${EndIf}
+
+  ${If} $R0 != ""
+    MessageBox MB_YESNO|MB_ICONQUESTION "检测到已安装的旧版本 WhatyTerm，需要先卸载才能继续安装。$\n$\n是否自动卸载旧版本？" IDYES +2
+    Abort
+    ; 执行静默卸载（QuietUninstallString 已包含 /S 参数）
+    ExecWait '$R0 --force-run'
+    Sleep 3000
+  ${EndIf}
 !macroend
 
 !macro customUnInit
