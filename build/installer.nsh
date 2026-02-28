@@ -1,6 +1,8 @@
 ; 自定义 NSIS 安装脚本 - 安装前自动卸载旧版本
 ; 参考: https://nsis.sourceforge.io/Auto-uninstall_old_before_installing_new
 
+!include "FileFunc.nsh"
+
 ; 关闭相关进程
 !macro KillProcesses
   nsExec::ExecToStack 'taskkill /F /T /IM WhatyTerm.exe'
@@ -45,16 +47,13 @@
     !insertmacro KillProcesses
 
     ; 从 UninstallString 提取卸载程序路径（去掉引号）
-    ; UninstallString 格式: "C:\path\to\Uninstall WhatyTerm.exe" 或不带引号
     StrCpy $R1 $R0 1
     StrCmp $R1 '"' 0 +3
       StrCpy $R0 $R0 "" 1  ; 去掉开头引号
       StrCpy $R0 $R0 -1    ; 去掉结尾引号
 
-    ; 获取安装目录（卸载程序的父目录）
-    Push $R0
-    Call GetParent
-    Pop $R1
+    ; 获取安装目录（使用内置的 GetParent）
+    ${GetParent} $R0 $R1
 
     ; 使用 _?= 参数同步执行卸载，等待完成
     ExecWait '"$R0" /S _?=$R1' $R2
@@ -76,29 +75,3 @@
 !macro customUnInit
   !insertmacro KillProcesses
 !macroend
-
-; 获取父目录的函数
-Function GetParent
-  Exch $R0
-  Push $R1
-  Push $R2
-  Push $R3
-
-  StrCpy $R1 0
-  StrLen $R2 $R0
-
-  loop:
-    IntOp $R1 $R1 + 1
-    IntCmp $R1 $R2 get 0 get
-    StrCpy $R3 $R0 1 -$R1
-    StrCmp $R3 "\" get
-    Goto loop
-
-  get:
-    StrCpy $R0 $R0 -$R1
-
-  Pop $R3
-  Pop $R2
-  Pop $R1
-  Exch $R0
-FunctionEnd
