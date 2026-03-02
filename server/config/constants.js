@@ -4,6 +4,12 @@
  */
 
 import { execSync } from 'child_process';
+import { readFileSync, existsSync, watchFile } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // 动态获取本机 CLI 版本号
 function getLocalVersion(command, fallback) {
@@ -21,24 +27,64 @@ function getLocalVersion(command, fallback) {
   }
 }
 
+// 从 JSON 文件加载模型配置
+const modelsConfigPath = join(__dirname, 'models.json');
+let modelsConfig = null;
+
+function loadModelsConfig() {
+  try {
+    if (existsSync(modelsConfigPath)) {
+      const content = readFileSync(modelsConfigPath, 'utf-8');
+      modelsConfig = JSON.parse(content);
+      console.log('[Constants] 已加载模型配置:', modelsConfigPath, '更新时间:', modelsConfig.lastUpdated);
+    }
+  } catch (err) {
+    console.error('[Constants] 加载模型配置失败:', err.message);
+  }
+}
+
+// 初始加载
+loadModelsConfig();
+
+// 监听文件变化，热更新
+if (existsSync(modelsConfigPath)) {
+  watchFile(modelsConfigPath, { interval: 5000 }, () => {
+    console.log('[Constants] 检测到模型配置变化，重新加载...');
+    loadModelsConfig();
+  });
+}
+
 // 启动时读取本机版本（带回退默认值）
 const CLAUDE_VERSION = getLocalVersion('claude --version', '2.0.76');
 const CODEX_VERSION = getLocalVersion('codex --version', '0.77.0');
 const GEMINI_VERSION = getLocalVersion('gemini --version', '0.21.3');
 
-// 默认模型（选择最便宜的 Haiku）
-// 当 Anthropic 发布新版本时，只需修改这里
-export const DEFAULT_MODEL = 'claude-sonnet-4-6';
+// 默认模型（从配置文件读取，回退到硬编码值）
+export const DEFAULT_MODEL = modelsConfig?.claude?.default || 'claude-sonnet-4-6';
 
-// Claude 模型降级列表（按优先级排序，从便宜到贵）
-// 当一个模型不可用时（503 model_not_found），自动尝试下一个
-export const CLAUDE_MODEL_FALLBACK_LIST = [
-  'claude-haiku-4-5-20251001',      // 最便宜，优先使用
-  'claude-sonnet-4-6',              // Sonnet 4.6（最新）
-  'claude-sonnet-4-5-20250929',     // Sonnet 4.5
-  'claude-opus-4-6',                // Opus 4.6（最新旗舰）
-  'claude-opus-4-5-20251101',       // Opus 4.5
+// Claude 模型降级列表（从配置文件读取）
+export const CLAUDE_MODEL_FALLBACK_LIST = modelsConfig?.claude?.fallback || [
+  'claude-haiku-4-5-20251001',
+  'claude-sonnet-4-6',
+  'claude-sonnet-4-5-20250929',
+  'claude-opus-4-6',
+  'claude-opus-4-5-20251101',
 ];
+
+// 获取最新的模型配置（支持热更新）
+export function getModelsConfig() {
+  return modelsConfig;
+}
+
+// 获取指定类型的模型列表
+export function getModelList(type = 'claude') {
+  return modelsConfig?.[type]?.fallback || [];
+}
+
+// 获取模型显示名称
+export function getModelDisplayName(type, modelId) {
+  return modelsConfig?.[type]?.display?.[modelId] || modelId;
+}
 
 // Claude Code 伪装配置
 export const CLAUDE_CODE_FAKE = {
