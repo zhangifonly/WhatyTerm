@@ -10,7 +10,7 @@ import configService from './ConfigService.js';
 import processDetector from './ProcessDetector.js';
 import tokenStatsService from './TokenStatsService.js';
 import pluginManager from './MonitorPlugins/index.js';
-import { DEFAULT_MODEL, CLAUDE_CODE_FAKE, CODEX_FAKE, CLAUDE_MODEL_FALLBACK_LIST } from '../config/constants.js';
+import { DEFAULT_MODEL, CLAUDE_CODE_FAKE, CODEX_FAKE, CLAUDE_MODEL_FALLBACK_LIST, getModelsConfig } from '../config/constants.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -210,15 +210,16 @@ export class AIEngine {
               if (savedSettings?.tunnelUrl) {
                 result.tunnelUrl = savedSettings.tunnelUrl;
               }
-              // 保留用户选择的模型（如果有）
-              if (savedSettings?.claude?.model && result.claude) {
-                result.claude.model = savedSettings.claude.model;
+              // 使用 models.json 中的默认模型（跟随最新模型变化）
+              const modelsConf = getModelsConfig();
+              if (result.claude) {
+                result.claude.model = modelsConf?.claude?.default || DEFAULT_MODEL;
               }
-              if (savedSettings?.openai?.model && result.openai) {
-                result.openai.model = savedSettings.openai.model;
+              if (result.openai) {
+                result.openai.model = modelsConf?.openai?.default || result.openai.model;
               }
-              if (savedSettings?.codex?.model && result.codex) {
-                result.codex.model = savedSettings.codex.model;
+              if (result.codex) {
+                result.codex.model = modelsConf?.openai?.default || result.codex.model;
               }
               return result;
             }
@@ -244,15 +245,16 @@ export class AIEngine {
                 if (savedSettings?.tunnelUrl) {
                   result.tunnelUrl = savedSettings.tunnelUrl;
                 }
-                // 保留用户选择的模型（如果有）
-                if (savedSettings?.claude?.model && result.claude) {
-                  result.claude.model = savedSettings.claude.model;
+                // 使用 models.json 中的默认模型（跟随最新模型变化）
+                const modelsConf2 = getModelsConfig();
+                if (result.claude) {
+                  result.claude.model = modelsConf2?.claude?.default || DEFAULT_MODEL;
                 }
-                if (savedSettings?.openai?.model && result.openai) {
-                  result.openai.model = savedSettings.openai.model;
+                if (result.openai) {
+                  result.openai.model = modelsConf2?.openai?.default || result.openai.model;
                 }
-                if (savedSettings?.codex?.model && result.codex) {
-                  result.codex.model = savedSettings.codex.model;
+                if (result.codex) {
+                  result.codex.model = modelsConf2?.openai?.default || result.codex.model;
                 }
                 return result;
               }
