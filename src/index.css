@@ -718,7 +718,134 @@ body {
   font-weight: 500;
 }
 
-/* AI 建议卡片 */
+/* 语音输入按钮 */
+.voice-input-wrap {
+  position: relative;
+}
+
+.voice-input-btn-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 4px 8px;
+  gap: 8px;
+}
+
+.voice-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid #444;
+  background: #2a2a2a;
+  color: #aaa;
+  cursor: pointer;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.voice-btn:hover:not(:disabled) {
+  background: #333;
+  color: #fff;
+  border-color: #666;
+}
+
+.voice-btn.recording {
+  background: #c0392b;
+  border-color: #e74c3c;
+  color: #fff;
+  animation: voice-pulse 1s infinite;
+}
+
+.voice-btn.transcribing {
+  background: #2a2a2a;
+  border-color: hsl(var(--primary));
+  color: hsl(var(--primary));
+}
+
+.voice-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@keyframes voice-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(231, 76, 60, 0); }
+}
+
+.voice-loading-tip {
+  font-size: 11px;
+  color: #888;
+  white-space: nowrap;
+}
+
+.voice-error-tip {
+  font-size: 14px;
+  cursor: help;
+}
+
+/* 语音确认弹窗 */
+.voice-confirm-popup {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  width: 320px;
+  background: #1e1e1e;
+  border: 1px solid #444;
+  border-radius: 10px;
+  padding: 12px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  z-index: 200;
+}
+
+.voice-confirm-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: #ccc;
+}
+
+.voice-confirm-close {
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.voice-confirm-close:hover { color: #fff; }
+
+.voice-confirm-text {
+  width: 100%;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 13px;
+  padding: 8px;
+  resize: vertical;
+  font-family: inherit;
+  box-sizing: border-box;
+  outline: none;
+}
+
+.voice-confirm-text:focus { border-color: hsl(var(--primary)); }
+
+.voice-confirm-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  justify-content: flex-end;
+}
+
+
 .ai-suggestion {
   background: hsl(var(--card) / 0.9);
   backdrop-filter: blur(8px);

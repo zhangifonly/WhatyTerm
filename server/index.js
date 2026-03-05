@@ -4903,6 +4903,35 @@ ${context.join('\n\n')}
     }
   });
 
+  // 语音识别结果 AI 修正
+  socket.on('voice:correct', async (data, callback) => {
+    const { text, sessionId } = data;
+    if (!text) return callback?.({ corrected: text });
+    try {
+      const session = sessionManager.getSession(sessionId);
+      const terminalContext = session?.outputBuffer?.slice(-500) || '';
+      const prompt = `你是终端命令修正助手。用户通过语音输入了以下文字（可能有识别错误）：
+
+"${text}"
+
+当前终端最近输出（上下文参考）：
+${terminalContext ? terminalContext : '（无）'}
+
+请修正语音识别错误，输出最可能的正确文字或命令。
+规则：
+1. 只输出修正后的文字，不要解释
+2. 如果是终端命令，修正为正确的命令格式
+3. 如果是中文对话，修正错别字和语音识别错误
+4. 如果原文已经正确，原样返回`;
+
+      const corrected = await aiEngine.generateText(prompt);
+      callback?.({ corrected: corrected?.trim() || text });
+    } catch (err) {
+      console.error('[voice:correct] 修正失败:', err.message);
+      callback?.({ corrected: text });
+    }
+  });
+
   // 切换自动模式
   socket.on('ai:toggleAuto', (data) => {
     const session = sessionManager.getSession(data.sessionId);
