@@ -16,6 +16,7 @@ import StorageManager from './components/StorageManager';
 import AdvancedSettings from './components/ProviderManager/AdvancedSettings';
 import TeamView from './components/TeamView';
 import TeamPanel from './components/TeamPanel';
+import VoiceInput from './components/VoiceInput';
 
 const socket = io();
 
@@ -166,7 +167,9 @@ export default function App() {
     maxTokens: 500,
     temperature: 0.7,
     showSuggestions: false,  // 默认关闭 AI 建议弹窗
-    confirmCloseSession: true  // 默认开启关闭会话确认
+    confirmCloseSession: true,  // 默认开启关闭会话确认
+    voiceInputEnabled: false,  // 默认关闭语音输入
+    voiceMode: 'confirm'  // confirm=确认后发送, auto=直接发送
   });
   // 关闭会话确认对话框状态
   const [closeSessionConfirm, setCloseSessionConfirm] = useState({ show: false, session: null });
@@ -1399,6 +1402,14 @@ export default function App() {
                 </div>
               )}
             </div>
+
+            {/* 语音输入按钮 */}
+            <VoiceInput
+              socket={socket}
+              sessionId={currentSession?.id}
+              enabled={aiSettings.voiceInputEnabled}
+              voiceMode={aiSettings.voiceMode || 'confirm'}
+            />
 
             {/* AI 建议卡片 - 仅在开启建议显示、非自动模式下显示，且 AI 状态允许操作 */}
             {suggestion && aiSettings.showSuggestions && !currentSession.autoActionEnabled &&
@@ -4064,6 +4075,70 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
               </label>
             </div>
 
+            <div className="form-group" style={{ marginTop: '24px' }}>
+              <h3 style={{ margin: '0 0 12px 0', fontSize: '16px', color: '#fff' }}>
+                语音输入
+              </h3>
+              <small style={{ color: '#888', fontSize: '12px', display: 'block', marginBottom: '16px' }}>
+                使用本地 Whisper 模型识别语音并输入到终端（首次使用需下载约 150MB 模型）
+              </small>
+              <label style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+                cursor: 'pointer',
+                padding: '12px 16px',
+                background: '#2a2a2a',
+                borderRadius: '8px',
+                border: '1px solid #444'
+              }}>
+                <input
+                  type="checkbox"
+                  checked={settings.voiceInputEnabled || false}
+                  onChange={(e) => {
+                    onChange({ ...settings, voiceInputEnabled: e.target.checked });
+                    onSave();
+                  }}
+                  style={{ width: '18px', height: '18px', cursor: 'pointer' }}
+                />
+                <span style={{ color: '#fff', fontSize: '14px' }}>
+                  {settings.voiceInputEnabled ? '已启用（麦克风按钮显示在终端右下角）' : '已禁用'}
+                </span>
+              </label>
+
+              {/* 识别后行为 */}
+              {settings.voiceInputEnabled && (
+                <div style={{ marginTop: '12px' }}>
+                  <div style={{ color: '#aaa', fontSize: '12px', marginBottom: '8px' }}>识别后行为</div>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    {[
+                      { value: 'confirm', label: '确认后发送', desc: '弹窗确认，可 AI 修正' },
+                      { value: 'auto', label: '直接发送', desc: '识别完立即输入终端' },
+                    ].map(opt => (
+                      <label key={opt.value} style={{
+                        flex: 1, display: 'flex', flexDirection: 'column', gap: '4px',
+                        cursor: 'pointer', padding: '10px 12px', borderRadius: '8px',
+                        background: (settings.voiceMode || 'confirm') === opt.value ? 'hsl(var(--primary) / 0.15)' : '#2a2a2a',
+                        border: `1px solid ${(settings.voiceMode || 'confirm') === opt.value ? 'hsl(var(--primary))' : '#444'}`,
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <input
+                            type="radio"
+                            name="voiceMode"
+                            value={opt.value}
+                            checked={(settings.voiceMode || 'confirm') === opt.value}
+                            onChange={() => { onChange({ ...settings, voiceMode: opt.value }); onSave(); }}
+                          />
+                          <span style={{ color: '#fff', fontSize: '13px', fontWeight: 500 }}>{opt.label}</span>
+                        </div>
+                        <span style={{ color: '#888', fontSize: '11px', paddingLeft: '20px' }}>{opt.desc}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="modal-actions">
               <button type="button" className="btn btn-secondary" onClick={onClose}>
                 {t('common.close')}
@@ -4071,8 +4146,6 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
             </div>
           </div>
         )}
-
-        {activeTab === 'cli-tools' && (
           <CliToolsManager />
         )}
 
