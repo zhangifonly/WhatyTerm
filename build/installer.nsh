@@ -1,4 +1,9 @@
-; 自定义 NSIS 安装脚本 - 简化版，只处理卸载旧版本
+; 自定义 NSIS 安装脚本
+
+; 完全禁用应用运行检测
+!macro customCheckAppRunning
+  ; 什么都不做，跳过默认的应用运行检测
+!macroend
 
 !macro customInit
   ; electron-builder 注册表键格式：带花括号
