@@ -1457,7 +1457,7 @@ ${historyText || '(空)'}
 
     // 检测 "Do you want to ..." 确认界面（只检查最后 3000 字符，避免匹配历史内容）
     const earlyLast3000 = earlyCleanContent.slice(-3000);
-    const isEditConfirmEarly = /Do you want to (make this edit|create|delete|run)/i.test(earlyLast3000);
+    const isEditConfirmEarly = /Do you want to (make this edit|create|delete|run|allow)/i.test(earlyLast3000);
     const isProceedConfirmEarly = /Do you want to proceed\?/i.test(earlyLast3000);
     const hasOption1YesEarly = /1\.\s*Yes/i.test(earlyLast3000);
     const hasOption2YesEarly = /2\.\s*Yes/i.test(earlyLast3000);
