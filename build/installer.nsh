@@ -1,5 +1,9 @@
 ; 自定义 NSIS 安装脚本
 
+; 禁用 CRC 校验，解决 "无法关闭" 误报问题
+; 参考: https://github.com/electron-userland/electron-builder/issues/6409
+CRCCheck off
+
 ; 完全禁用应用运行检测
 !macro customCheckAppRunning
   ; 什么都不做，跳过默认的应用运行检测
