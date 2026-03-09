@@ -189,9 +189,9 @@ GET /api/plans
   {
     "id": "enterprise",
     "name": "企业版",
-    "description": "适合企业团队，每人每月 29 元",
-    "price_monthly": 2900,
-    "price_yearly": 29000,
+    "description": "适合企业团队，每人每月 99 元",
+    "price_monthly": 9900,
+    "price_yearly": 99000,
     "max_devices": 999,
     "features": ["all-plugins", "relay-server", "dedicated-support", "custom-features", "sla"]
   }
