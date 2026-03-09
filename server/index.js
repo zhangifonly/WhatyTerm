@@ -2123,7 +2123,7 @@ const CHECK_INTERVALS = {
   MIN: 15 * 1000,      // 最小 15 秒（正常模式）
   DEFAULT: 30 * 1000,  // 默认 30 秒
   MAX: 30 * 60 * 1000, // 最大 30 分钟
-  BURST_COUNT: 3       // 爆发模式持续次数（执行操作后连续快速检测3次）
+  BURST_COUNT: 10      // 爆发模式持续次数（执行操作后连续快速检测10次，共30秒）
 };
 
 // AI 服务健康状态跟踪
@@ -3216,13 +3216,13 @@ async function runBackgroundAutoAction() {
               session.write(action);
             }
           } else if (status.actionType === 'text_input' || status.actionType === 'suggestion' || action.length > 1) {
-            // Claude Code 文本输入模式：分两次发送，模拟人工输入
-            console.log(`[后台自动操作] 会话 ${session.name}: 分开发送文本 "${action}" + CR`);
+            // Claude Code 文本输入模式：分两次发送，延迟50ms发送回车
+            console.log(`[后台自动操作] 会话 ${session.name}: 发送文本 "${action}" + CR (延迟50ms)`);
             session.write(action);
-            // 延迟 200ms 后发送回车
+            // 延迟 50ms 后发送回车（缩短延迟确保及时发送）
             setTimeout(() => {
               session.write('\r');
-            }, 200);
+            }, 50);
           } else if (status.actionType === 'single_char') {
             // 单字符特殊按键（如 Tab、Escape）：通过 tmux send-keys 发送更可靠
             const tmuxSession = session.tmuxSessionName;

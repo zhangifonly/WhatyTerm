@@ -444,6 +444,12 @@ class DefaultPlugin extends BasePlugin {
       return false;
     }
 
+    // 排除 PowerShell 提示符（如 "PS D:\path>" 或 "(base) PS D:\path>"）
+    // 避免误判为 Claude Code 空闲提示符
+    if (/PS\s+[A-Z]:[\\\/].*>/i.test(lastLines) || /\(.*\)\s*PS\s+[A-Z]:[\\\/].*>/i.test(lastLines)) {
+      return false;
+    }
+
     // Claude Code 空闲提示符（更宽松的匹配）
     // 匹配单独的 > 提示符，允许前面有空格，后面可能有光标等
     // OpenCode 空闲提示符：@general、[build] 或 [plan] 后跟空行

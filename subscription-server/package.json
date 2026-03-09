@@ -1,6 +1,6 @@
 {
   "name": "whatyterm-subscription",
-  "version": "1.0.0",
+  "version": "1.0.80",
   "description": "WhatyTerm 订阅管理系统",
   "type": "module",
   "main": "server.js",
