@@ -1,3 +1,13 @@
+// 全局错误处理 - 必须在最顶部，防止任何未捕获异常导致进程崩溃
+process.on('uncaughtException', (err) => {
+  console.error(`[FATAL] 未捕获异常: ${err.message}`);
+  console.error(err.stack);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error(`[FATAL] 未处理的 Promise 拒绝:`, reason);
+});
+
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
@@ -3892,9 +3902,17 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
 
     emitStatus('READING', '读取供应商配置...', 20);
 
-    const db = new Database(ccSwitchDbPath, { readonly: true });
-    const targetProviderRow = db.prepare('SELECT * FROM providers WHERE id = ? AND app_type = ?').get(providerId, appType);
-    db.close();
+    let targetProviderRow;
+    try {
+      const db = new Database(ccSwitchDbPath, { readonly: true });
+      try {
+        targetProviderRow = db.prepare('SELECT * FROM providers WHERE id = ? AND app_type = ?').get(providerId, appType);
+      } finally {
+        db.close();
+      }
+    } catch (dbErr) {
+      throw new Error(`读取数据库失败: ${dbErr.message}`);
+    }
 
     if (!targetProviderRow) {
       throw new Error('目标供应商不存在');
@@ -4555,7 +4573,7 @@ io.on('connection', (socket) => {
 
     // 设置终端输出监听，保存回调引用以便后续移除
     const outputCallback = (data) => {
-      io.to(`session:${sessionId}`).emit('terminal:output', {
+      socket.emit('terminal:output', {
         sessionId,
         data
       });
@@ -5193,13 +5211,22 @@ ${terminalContext ? terminalContext : '（无）'}
         return;
       }
 
-      const db = new Database(ccSwitchDbPath, { readonly: true });
-      const row = db.prepare(`
-        SELECT id, name, app_type, settings_config
-        FROM providers
-        WHERE id = ? AND app_type = ?
-      `).get(providerId, appType);
-      db.close();
+      let row;
+      try {
+        const db = new Database(ccSwitchDbPath, { readonly: true });
+        try {
+          row = db.prepare(`
+            SELECT id, name, app_type, settings_config
+            FROM providers
+            WHERE id = ? AND app_type = ?
+          `).get(providerId, appType);
+        } finally {
+          db.close();
+        }
+      } catch (dbErr) {
+        socket.emit('settings:testResult', { success: false, message: `数据库读取失败: ${dbErr.message}` });
+        return;
+      }
 
       if (!row) {
         socket.emit('settings:testResult', { success: false, message: '供应商不存在' });
@@ -5207,7 +5234,13 @@ ${terminalContext ? terminalContext : '（无）'}
       }
 
       // 解析配置
-      const settingsConfig = JSON.parse(row.settings_config);
+      let settingsConfig;
+      try {
+        settingsConfig = JSON.parse(row.settings_config);
+      } catch (parseErr) {
+        socket.emit('settings:testResult', { success: false, message: `配置解析失败: ${parseErr.message}` });
+        return;
+      }
       let apiUrl = '';
       let apiKey = '';
       let model = '';
