@@ -260,8 +260,8 @@ export class Session {
       execSync(`${tmuxCmd} set-option -t "${this.tmuxSessionName}" history-limit 10000`, {
         stdio: 'ignore'
       });
-      // 关闭 tmux 鼠标模式，让终端前端直接处理鼠标选中文字
-      execSync(`${tmuxCmd} set-option -t "${this.tmuxSessionName}" mouse off`, {
+      // 开启 tmux 鼠标模式，支持鼠标滚轮翻页（进入 copy-mode）
+      execSync(`${tmuxCmd} set-option -t "${this.tmuxSessionName}" mouse on`, {
         stdio: 'ignore'
       });
       // 清除 CLAUDECODE 环境变量，避免 Claude Code 检测到嵌套会话
@@ -314,15 +314,19 @@ export class Session {
       });
 
       this.pty.onData((data) => {
-        this.outputBuffer += data;
-        if (this.outputBuffer.length > 100000) {
-          this.outputBuffer = this.outputBuffer.slice(-50000);
-        }
-        this.outputCallbacks.forEach(cb => cb(data));
+        try {
+          this.outputBuffer += data;
+          if (this.outputBuffer.length > 100000) {
+            this.outputBuffer = this.outputBuffer.slice(-50000);
+          }
+          this.outputCallbacks.forEach(cb => cb(data));
 
-        // 检测 bell 字符（\x07）- Claude Code 需要用户输入时会发送
-        if (data.includes('\x07')) {
-          this.bellCallbacks.forEach(cb => cb());
+          // 检测 bell 字符（\x07）- Claude Code 需要用户输入时会发送
+          if (data.includes('\x07')) {
+            this.bellCallbacks.forEach(cb => cb());
+          }
+        } catch (err) {
+          console.error(`[Session] onData 回调异常: ${err.message}`);
         }
       });
 
@@ -332,7 +336,11 @@ export class Session {
 
         // Windows 原生模式：PTY 退出表示用户执行了 exit，触发退出回调
         console.log(`[Session] Windows 原生模式会话退出: ${this.tmuxSessionName}`);
-        this.exitCallbacks.forEach(cb => cb(exitCode));
+        try {
+          this.exitCallbacks.forEach(cb => cb(exitCode));
+        } catch (err) {
+          console.error(`[Session] onExit 回调异常: ${err.message}`);
+        }
       });
 
       return;
@@ -344,27 +352,37 @@ export class Session {
       ? ['tmux', 'attach-session', '-t', this.tmuxSessionName]
       : ['attach-session', '-t', this.tmuxSessionName];
 
-    this.pty = pty.spawn(shell, args, {
-      name: 'xterm-256color',
-      cols: 80,
-      rows: 24,
-      cwd: isWindows ? undefined : process.env.HOME,
-      env: {
-        ...process.env,
-        TERM: 'xterm-256color'
-      }
-    });
+    try {
+      this.pty = pty.spawn(shell, args, {
+        name: 'xterm-256color',
+        cols: 80,
+        rows: 24,
+        cwd: isWindows ? undefined : process.env.HOME,
+        env: {
+          ...process.env,
+          TERM: 'xterm-256color'
+        }
+      });
+    } catch (err) {
+      console.error(`[Session] node-pty spawn 失败: ${err.message}，会话: ${this.tmuxSessionName}`);
+      this.pty = null;
+      return;
+    }
 
     this.pty.onData((data) => {
-      this.outputBuffer += data;
-      if (this.outputBuffer.length > 100000) {
-        this.outputBuffer = this.outputBuffer.slice(-50000);
-      }
-      this.outputCallbacks.forEach(cb => cb(data));
+      try {
+        this.outputBuffer += data;
+        if (this.outputBuffer.length > 100000) {
+          this.outputBuffer = this.outputBuffer.slice(-50000);
+        }
+        this.outputCallbacks.forEach(cb => cb(data));
 
-      // 检测 bell 字符（\x07）- Claude Code 需要用户输入时会发送
-      if (data.includes('\x07')) {
-        this.bellCallbacks.forEach(cb => cb());
+        // 检测 bell 字符（\x07）- Claude Code 需要用户输入时会发送
+        if (data.includes('\x07')) {
+          this.bellCallbacks.forEach(cb => cb());
+        }
+      } catch (err) {
+        console.error(`[Session] onData 回调异常: ${err.message}`);
       }
     });
 

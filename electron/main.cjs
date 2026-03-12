@@ -23,8 +23,8 @@ function setupAutoUpdater() {
     url: 'https://term.whaty.org/releases'
   });
 
-  // 禁用自动下载，让用户确认后再下载
-  autoUpdater.autoDownload = false;
+  // 自动下载更新
+  autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
   // 更新事件监听
