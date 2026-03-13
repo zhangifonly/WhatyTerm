@@ -42,16 +42,33 @@ class UpdateService {
       return this.currentVersion;
     }
 
-    try {
-      // 从 package.json 读取版本
-      const packagePath = path.join(__dirname, '../../package.json');
-      const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf-8'));
-      this.currentVersion = packageJson.version;
+    // 优先从环境变量获取（Electron 打包后通过 APP_VERSION 传递）
+    if (process.env.APP_VERSION) {
+      this.currentVersion = process.env.APP_VERSION;
       return this.currentVersion;
-    } catch (error) {
-      console.error('[UpdateService] 读取版本失败:', error.message);
-      return '0.0.0';
     }
+
+    // 尝试多个 package.json 路径
+    const candidates = [
+      path.join(__dirname, '../../package.json'),
+      path.join(__dirname, '../package.json'),
+      path.join(process.cwd(), 'package.json'),
+    ];
+
+    for (const pkgPath of candidates) {
+      try {
+        const packageJson = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+        if (packageJson.version) {
+          this.currentVersion = packageJson.version;
+          return this.currentVersion;
+        }
+      } catch {
+        // 继续尝试下一个路径
+      }
+    }
+
+    console.error('[UpdateService] 所有路径均无法读取版本');
+    return '0.0.0';
   }
 
   /**
@@ -109,27 +126,67 @@ class UpdateService {
   }
 
   /**
+   * 解析 electron-builder 的 yml 更新文件
+   */
+  parseYml(text) {
+    const result = {};
+    const lines = text.split('\n');
+    for (const line of lines) {
+      const match = line.match(/^(\w+):\s*'?([^']*)'?$/);
+      if (match) {
+        result[match[1]] = match[2].trim();
+      }
+    }
+    return result;
+  }
+
+  /**
    * 从自托管服务器检查更新
+   * 优先解析 latest-mac.yml（electron-builder 生成），备选 latest.json
    */
   async checkFromServer() {
-    const url = `${UPDATE_CONFIG.updateServerUrl}/latest.json`;
-
+    // 尝试解析 yml 文件
+    const ymlUrl = `${UPDATE_CONFIG.updateServerUrl}/releases/latest-mac.yml`;
     try {
-      const response = await fetch(url, {
-        headers: {
-          'User-Agent': 'WhatyTerm-Updater'
-        }
+      const response = await fetch(ymlUrl, {
+        headers: { 'User-Agent': 'WhatyTerm-Updater' }
       });
-
-      if (!response.ok) {
-        throw new Error(`服务器返回 ${response.status}`);
+      if (response.ok) {
+        const text = await response.text();
+        const parsed = this.parseYml(text);
+        if (parsed.version) {
+          return {
+            version: parsed.version,
+            notes: '',
+            pubDate: parsed.releaseDate || null,
+            htmlUrl: `${UPDATE_CONFIG.updateServerUrl}/releases/`,
+          };
+        }
       }
-
-      return await response.json();
     } catch (error) {
-      console.error('[UpdateService] 服务器检查失败:', error.message);
-      return null;
+      console.error('[UpdateService] yml 检查失败:', error.message);
     }
+
+    // 备选：latest.json
+    const jsonUrl = `${UPDATE_CONFIG.updateServerUrl}/releases/latest.json`;
+    try {
+      const response = await fetch(jsonUrl, {
+        headers: { 'User-Agent': 'WhatyTerm-Updater' }
+      });
+      if (response.ok) {
+        const json = await response.json();
+        return {
+          version: json.version,
+          notes: json.notes || '',
+          pubDate: json.releaseDate || null,
+          htmlUrl: `${UPDATE_CONFIG.updateServerUrl}/releases/`,
+        };
+      }
+    } catch (error) {
+      console.error('[UpdateService] latest.json 检查失败:', error.message);
+    }
+
+    return null;
   }
 
   /**
