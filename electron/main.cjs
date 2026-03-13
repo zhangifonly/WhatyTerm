@@ -677,7 +677,8 @@ function startServer() {
     NODE_ENV: 'production',
     PORT: '3928',  // 与服务器默认端口保持一致
     NODE_PATH: nodePath,
-    ELECTRON_RUN_AS_NODE: '1'  // 让 Electron 以 Node.js 模式运行
+    ELECTRON_RUN_AS_NODE: '1',  // 让 Electron 以 Node.js 模式运行
+    APP_VERSION: app.getVersion()  // 传递版本号给服务端
   };
 
   if (isWindows) {
