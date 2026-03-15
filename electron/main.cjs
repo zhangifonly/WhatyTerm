@@ -218,6 +218,29 @@ async function installTmuxMac() {
   });
 }
 
+// 安装 Homebrew (macOS, 非交互式)
+async function installHomebrewMac() {
+  return new Promise((resolve, reject) => {
+    const script = '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"';
+    const install = spawn('/bin/bash', ['-c', script], {
+      env: { ...process.env, NONINTERACTIVE: '1' },
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    let output = '';
+    install.stdout.on('data', (data) => { output += data.toString(); });
+    install.stderr.on('data', (data) => { output += data.toString(); });
+
+    install.on('close', (code) => {
+      if (code === 0) {
+        resolve(output);
+      } else {
+        reject(new Error(`Homebrew 安装失败，退出码: ${code}\n${output}`));
+      }
+    });
+  });
+}
+
 // ==================== Windows WSL2 依赖检查 ====================
 
 // 检查 WSL2 是否安装
@@ -318,8 +341,8 @@ function showProgressWindow(title, message) {
   progressWindow.loadURL(`data:text/html;charset=utf-8,
     <html>
     <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 20px; background: #1a1a2e; color: #eee;">
-      <h3 style="margin: 0 0 10px 0;">${title}</h3>
-      <p style="color: #888; font-size: 12px;">${message}</p>
+      <h3 id="title" style="margin: 0 0 10px 0;">${title}</h3>
+      <p id="msg" style="color: #888; font-size: 12px;">${message}</p>
       <div style="background: #333; border-radius: 4px; height: 6px; margin-top: 20px;">
         <div style="background: #4CAF50; height: 100%; width: 30%; border-radius: 4px; animation: progress 2s infinite;"></div>
       </div>
@@ -330,74 +353,51 @@ function showProgressWindow(title, message) {
     </html>
   `);
 
+  progressWindow.updateMessage = (msg, newTitle) => {
+    if (progressWindow.isDestroyed()) return;
+    const js = newTitle
+      ? `document.getElementById('title').innerText=${JSON.stringify(newTitle)};document.getElementById('msg').innerText=${JSON.stringify(msg)};`
+      : `document.getElementById('msg').innerText=${JSON.stringify(msg)};`;
+    progressWindow.webContents.executeJavaScript(js).catch(() => {});
+  };
+
   return progressWindow;
 }
 
-// macOS 依赖检查对话框
+// macOS 依赖检查 - 自动静默安装
 async function showMacDependencyDialog() {
-  const hasTmux = checkTmux();
+  if (checkTmux()) return true;
 
-  if (hasTmux) {
-    return true;
-  }
+  const progressWindow = showProgressWindow('正在准备环境...', '检测系统依赖');
 
-  const hasHomebrew = checkHomebrew();
-
-  if (hasHomebrew) {
-    const result = await dialog.showMessageBox({
-      type: 'question',
-      title: '缺少依赖',
-      message: 'WhatyTerm 需要 tmux 才能运行',
-      detail: '检测到您的系统已安装 Homebrew，是否自动安装 tmux？\n\n这将执行: brew install tmux',
-      buttons: ['自动安装', '手动安装', '取消'],
-      defaultId: 0,
-      cancelId: 2
-    });
-
-    if (result.response === 0) {
-      const progressWindow = showProgressWindow('正在安装 tmux...', '请稍候，这可能需要几分钟');
-
-      try {
-        await installTmuxMac();
-        progressWindow.close();
-        await dialog.showMessageBox({
-          type: 'info',
-          title: '安装成功',
-          message: 'tmux 已成功安装！',
-          buttons: ['继续']
-        });
-        return true;
-      } catch (err) {
-        progressWindow.close();
-        await dialog.showMessageBox({
-          type: 'error',
-          title: '安装失败',
-          message: 'tmux 安装失败',
-          detail: err.message + '\n\n请尝试手动安装: brew install tmux',
-          buttons: ['确定']
-        });
-        return false;
+  try {
+    // 检测并安装 Homebrew
+    if (!checkHomebrew()) {
+      progressWindow.updateMessage('正在安装 Homebrew，首次安装可能需要几分钟...', '正在安装 Homebrew...');
+      await installHomebrewMac();
+      // 安装后再次检测确认
+      if (!checkHomebrew()) {
+        throw new Error('Homebrew 安装完成但无法检测到，请重启应用重试');
       }
-    } else if (result.response === 1) {
-      shell.openExternal('https://github.com/tmux/tmux/wiki/Installing');
-      return false;
-    } else {
-      return false;
     }
-  } else {
-    const result = await dialog.showMessageBox({
-      type: 'warning',
-      title: '缺少依赖',
-      message: 'WhatyTerm 需要 tmux 才能运行',
-      detail: '请先安装 Homebrew 和 tmux：\n\n1. 安装 Homebrew:\n/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"\n\n2. 安装 tmux:\nbrew install tmux',
-      buttons: ['打开安装指南', '取消'],
-      defaultId: 0,
-      cancelId: 1
-    });
 
-    if (result.response === 0) {
-      shell.openExternal('https://brew.sh/');
-    }
+    // 安装 tmux
+    progressWindow.updateMessage('正在通过 Homebrew 安装 tmux...', '正在安装 tmux...');
+    await installTmuxMac();
+
+    if (!progressWindow.isDestroyed()) progressWindow.close();
+    return true;
+  } catch (err) {
+    if (!progressWindow.isDestroyed()) progressWindow.close();
+    await dialog.showMessageBox({
+      type: 'error',
+      title: '自动安装失败',
+      message: '环境依赖安装失败',
+      detail: err.message + '\n\n请手动执行以下命令：\n1. /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"\n2. brew install tmux',
+      buttons: ['打开安装指南', '退出']
+    }).then(result => {
+      if (result.response === 0) shell.openExternal('https://brew.sh/');
+    });
     return false;
   }
 }
