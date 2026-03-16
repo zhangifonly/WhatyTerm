@@ -643,9 +643,25 @@ ${recentOutput}
   _autoConfirm(session, cleanContent) {
     const last3000 = cleanContent.slice(-3000);
     const hasOption2Yes = /2\.\s*Yes/i.test(last3000);
-    const option = hasOption2Yes ? '2' : '1';
-    console.log(`[TaskOrchestrator] ${session.name}: 自动确认，选择选项 ${option}`);
-    session.write(option);
+    const optionNum = hasOption2Yes ? 2 : 1;
+    console.log(`[TaskOrchestrator] ${session.name}: 自动确认，选择选项 ${optionNum}（方向键+回车）`);
+    // Claude Code Ink SelectInput 不接受数字，用方向键导航+回车
+    const tmuxSession = session.tmuxSessionName;
+    try {
+      const { execSync } = require('child_process');
+      const tmuxPrefix = process.env.TMUX_PATH ? `"${process.env.TMUX_PATH}"` : 'tmux';
+      if (optionNum > 1) {
+        for (let i = 1; i < optionNum; i++) {
+          execSync(`${tmuxPrefix} send-keys -t "${tmuxSession}" Down`);
+        }
+      }
+      setTimeout(() => {
+        try { execSync(`${tmuxPrefix} send-keys -t "${tmuxSession}" Enter`); }
+        catch (e) { session.write('\r'); }
+      }, 100);
+    } catch (e) {
+      session.write('\r');
+    }
   }
 
   // ==================== 通用辅助 ====================

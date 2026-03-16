@@ -3219,9 +3219,23 @@ async function runBackgroundAutoAction() {
             session.write(keyMap[action]);
           } else if (status.actionType === 'select' && /^[1-9]$/.test(action)) {
             const tmuxSession = session.tmuxSessionName;
+            const optionNum = parseInt(action);
             console.log(`[后台自动操作] 会话 ${session.name}: 选项菜单选择第${action}项`);
             try {
-              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" "${action}"`);
+              // Claude Code 的 Ink SelectInput 不接受数字，需要方向键+回车
+              // 先发数字尝试，如果是 Ink 界面则用方向键导航到目标选项再按回车
+              if (optionNum > 1) {
+                for (let i = 1; i < optionNum; i++) {
+                  execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" Down`);
+                }
+              }
+              setTimeout(() => {
+                try {
+                  execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" Enter`);
+                } catch (e2) {
+                  session.write('\r');
+                }
+              }, 100);
             } catch (e) {
               session.write(action);
             }
