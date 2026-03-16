@@ -218,14 +218,13 @@ async function installTmuxMac() {
   });
 }
 
-// 安装 Homebrew (macOS, 非交互式)
+// 安装 Homebrew (macOS, 通过 osascript 获取管理员权限)
 async function installHomebrewMac() {
   return new Promise((resolve, reject) => {
-    const script = '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"';
-    const install = spawn('/bin/bash', ['-c', script], {
-      env: { ...process.env, NONINTERACTIVE: '1' },
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
+    const cmd = 'NONINTERACTIVE=1 /bin/bash -c \\"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\\"';
+    const install = spawn('osascript', ['-e',
+      `do shell script "${cmd}" with administrator privileges`
+    ], { stdio: ['pipe', 'pipe', 'pipe'] });
 
     let output = '';
     install.stdout.on('data', (data) => { output += data.toString(); });
