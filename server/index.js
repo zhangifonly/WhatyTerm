@@ -4978,22 +4978,36 @@ ${terminalContext ? terminalContext : '（无）'}
     }
   });
 
-  // 切换后台自动操作开关
+  // 切换后台自动操作开关（带去抖，防止多客户端/快速切换导致状态循环）
+  const autoActionToggleTimers = new Map();
   socket.on('ai:toggleAutoAction', (data) => {
     const session = sessionManager.getSession(data.sessionId);
     if (session) {
-      session.updateSettings({ autoActionEnabled: data.enabled });
-      sessionManager.updateSession(session);
+      // 如果状态没变化，忽略
+      if (session.autoActionEnabled === data.enabled) return;
 
-      io.to(`session:${data.sessionId}`).emit('session:updated', session.toJSON());
-      io.emit('sessions:updated', sessionManager.listSessions());
+      // 去抖：300ms 内的重复切换只执行最后一次
+      const timerId = autoActionToggleTimers.get(data.sessionId);
+      if (timerId) clearTimeout(timerId);
 
-      historyLogger.log(data.sessionId, {
-        type: 'system',
-        content: `后台自动操作${data.enabled ? '开启' : '关闭'}`
-      });
+      autoActionToggleTimers.set(data.sessionId, setTimeout(() => {
+        autoActionToggleTimers.delete(data.sessionId);
+        // 再次检查状态是否已经是目标值（可能已被其他请求处理）
+        if (session.autoActionEnabled === data.enabled) return;
 
-      console.log(`[自动操作] 会话 ${session.name}: ${data.enabled ? '开启' : '关闭'}`);
+        session.updateSettings({ autoActionEnabled: data.enabled });
+        sessionManager.updateSession(session);
+
+        io.to(`session:${data.sessionId}`).emit('session:updated', session.toJSON());
+        io.emit('sessions:updated', sessionManager.listSessions());
+
+        historyLogger.log(data.sessionId, {
+          type: 'system',
+          content: `后台自动操作${data.enabled ? '开启' : '关闭'}`
+        });
+
+        console.log(`[自动操作] 会话 ${session.name}: ${data.enabled ? '开启' : '关闭'}`);
+      }, 300));
     }
   });
 
