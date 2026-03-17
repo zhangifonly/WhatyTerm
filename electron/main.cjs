@@ -218,13 +218,48 @@ async function installTmuxMac() {
   });
 }
 
-// 安装 Homebrew (macOS, 通过 osascript 获取管理员权限)
-async function installHomebrewMac() {
+// 通过 osascript 弹窗获取管理员密码
+async function promptForPassword() {
   return new Promise((resolve, reject) => {
-    const cmd = 'NONINTERACTIVE=1 /bin/bash -c \\"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\\"';
-    const install = spawn('osascript', ['-e',
-      `do shell script "${cmd}" with administrator privileges`
-    ], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const script = `
+      set pwd to text returned of (display dialog "WhatyTerm 需要安装系统依赖，请输入管理员密码：" default answer "" with hidden answer with title "WhatyTerm 安装" buttons {"取消", "确定"} default button "确定")
+      return pwd`;
+    const proc = spawn('osascript', ['-e', script], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    proc.stdout.on('data', (d) => { out += d.toString(); });
+    proc.stderr.on('data', (d) => { err += d.toString(); });
+    proc.on('close', (code) => {
+      if (code === 0) resolve(out.trim());
+      else reject(new Error('用户取消了密码输入'));
+    });
+  });
+}
+
+// 用密码缓存 sudo 凭据
+async function cacheSudo(password) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('sudo', ['-S', '-v'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let err = '';
+    proc.stderr.on('data', (d) => { err += d.toString(); });
+    proc.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error('密码验证失败，请确认密码正确'));
+    });
+    proc.stdin.write(password + '\n');
+    proc.stdin.end();
+  });
+}
+
+// 安装 Homebrew (macOS, 以当前用户身份运行)
+async function installHomebrewMac() {
+  const password = await promptForPassword();
+  await cacheSudo(password);
+  return new Promise((resolve, reject) => {
+    const env = { ...process.env, NONINTERACTIVE: '1' };
+    const install = spawn('/bin/bash', ['-c',
+      'curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | /bin/bash'
+    ], { stdio: ['pipe', 'pipe', 'pipe'], env });
 
     let output = '';
     install.stdout.on('data', (data) => { output += data.toString(); });
