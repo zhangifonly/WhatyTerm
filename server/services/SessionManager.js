@@ -159,7 +159,7 @@ export class Session {
     this.id = options.id || uuidv4();
     this.name = options.name || `session-${Date.now()}`;
     // 验证 tmuxSessionName，防止命令注入
-    const rawTmuxName = options.tmuxSessionName || `webtmux-${this.id.slice(0, 8)}`;
+    const rawTmuxName = options.tmuxSessionName || `whatyterm-${this.id.slice(0, 8)}`;
     this.tmuxSessionName = sanitizeTmuxSessionName(rawTmuxName);
     this.goal = options.goal || '';
     this.originalGoal = options.originalGoal || options.goal || '';  // 保存原始目标
