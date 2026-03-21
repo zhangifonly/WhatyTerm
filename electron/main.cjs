@@ -236,30 +236,19 @@ async function promptForPassword() {
   });
 }
 
-// 用密码缓存 sudo 凭据
-async function cacheSudo(password) {
-  return new Promise((resolve, reject) => {
-    const proc = spawn('sudo', ['-S', '-v'], { stdio: ['pipe', 'pipe', 'pipe'] });
-    let err = '';
-    proc.stderr.on('data', (d) => { err += d.toString(); });
-    proc.on('close', (code) => {
-      if (code === 0) resolve();
-      else reject(new Error('密码验证失败，请确认密码正确'));
-    });
-    proc.stdin.write(password + '\n');
-    proc.stdin.end();
-  });
-}
-
 // 安装 Homebrew (macOS, 以当前用户身份运行)
+// 关键：sudo 缓存和 Homebrew 安装必须在同一个 shell 进程中，否则 sudo tty 缓存不共享
 async function installHomebrewMac() {
   const password = await promptForPassword();
-  await cacheSudo(password);
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, NONINTERACTIVE: '1' };
+    // 在同一个 shell 中先缓存 sudo，再运行 Homebrew 安装
     const install = spawn('/bin/bash', ['-c',
-      'curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | /bin/bash'
-    ], { stdio: ['pipe', 'pipe', 'pipe'], env });
+      'sudo -S -v 2>/dev/null && NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+    ], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+    // 通过 stdin 传递密码给 sudo -S
+    install.stdin.write(password + '\n');
+    install.stdin.end();
 
     let output = '';
     install.stdout.on('data', (data) => { output += data.toString(); });
