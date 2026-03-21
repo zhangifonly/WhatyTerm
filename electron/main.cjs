@@ -179,24 +179,44 @@ function checkTmux() {
     execSync('tmux -V', { stdio: 'pipe' });
     return true;
   } catch {
-    return false;
+    // 尝试完整路径
+    try {
+      execSync('/usr/local/bin/tmux -V', { stdio: 'pipe' });
+      return true;
+    } catch {
+      try {
+        execSync('/opt/homebrew/bin/tmux -V', { stdio: 'pipe' });
+        return true;
+      } catch {
+        return false;
+      }
+    }
   }
 }
 
 // 检查 Homebrew 是否安装
 function checkHomebrew() {
+  const brewPaths = ['/opt/homebrew/bin/brew', '/usr/local/bin/brew'];
+  for (const p of brewPaths) {
+    try {
+      execSync(`${p} --version`, { stdio: 'pipe' });
+      return p;
+    } catch {}
+  }
+  // 也试 PATH 里的
   try {
     execSync('brew --version', { stdio: 'pipe' });
-    return true;
+    return 'brew';
   } catch {
-    return false;
+    return null;
   }
 }
 
 // 安装 tmux (macOS)
-async function installTmuxMac() {
+async function installTmuxMac(brewPath) {
+  const brew = brewPath || '/opt/homebrew/bin/brew';
   return new Promise((resolve, reject) => {
-    const install = spawn('brew', ['install', 'tmux'], {
+    const install = spawn(brew, ['install', 'tmux'], {
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
@@ -395,18 +415,20 @@ async function showMacDependencyDialog() {
 
   try {
     // 检测并安装 Homebrew
-    if (!checkHomebrew()) {
+    let brewPath = checkHomebrew();
+    if (!brewPath) {
       progressWindow.updateMessage('正在安装 Homebrew，首次安装可能需要几分钟...', '正在安装 Homebrew...');
       await installHomebrewMac();
       // 安装后再次检测确认
-      if (!checkHomebrew()) {
+      brewPath = checkHomebrew();
+      if (!brewPath) {
         throw new Error('Homebrew 安装完成但无法检测到，请重启应用重试');
       }
     }
 
     // 安装 tmux
     progressWindow.updateMessage('正在通过 Homebrew 安装 tmux...', '正在安装 tmux...');
-    await installTmuxMac();
+    await installTmuxMac(brewPath);
 
     if (!progressWindow.isDestroyed()) progressWindow.close();
     return true;
