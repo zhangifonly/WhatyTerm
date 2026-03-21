@@ -257,17 +257,28 @@ async function promptForPassword() {
 }
 
 // 安装 Homebrew (macOS, 以当前用户身份运行)
-// 关键：sudo 缓存和 Homebrew 安装必须在同一个 shell 进程中，否则 sudo tty 缓存不共享
+// 使用 SUDO_ASKPASS 机制让 Homebrew 安装脚本内部的所有 sudo 调用都能自动获取密码
 async function installHomebrewMac() {
   const password = await promptForPassword();
   return new Promise((resolve, reject) => {
-    // 在同一个 shell 中先缓存 sudo，再运行 Homebrew 安装
-    const install = spawn('/bin/bash', ['-c',
-      'sudo -S -v 2>/dev/null && NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
-    ], { stdio: ['pipe', 'pipe', 'pipe'] });
-
-    // 通过 stdin 传递密码给 sudo -S
-    install.stdin.write(password + '\n');
+    // 通过环境变量传递密码，askpass 脚本从环境变量读取，避免命令注入
+    const shellCmd = `
+ASKPASS=$(mktemp /tmp/whatyterm-askpass.XXXXXX)
+cat > "$ASKPASS" << 'ASKEOF'
+#!/bin/bash
+echo "$WHATYTERM_SUDO_PWD"
+ASKEOF
+chmod +x "$ASKPASS"
+export SUDO_ASKPASS="$ASKPASS"
+sudo -A -v 2>/dev/null
+NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+EXIT_CODE=$?
+rm -f "$ASKPASS"
+exit $EXIT_CODE`;
+    const install = spawn('/bin/bash', ['-c', shellCmd], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, WHATYTERM_SUDO_PWD: password }
+    });
     install.stdin.end();
 
     let output = '';
