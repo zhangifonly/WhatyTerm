@@ -3016,13 +3016,28 @@ async function runBackgroundAutoAction() {
       };
 
       // 先尝试 preAnalyze（不需要 AI API）- 传入 tmuxSession 和项目上下文用于插件选择
-      const preResult = aiEngine.preAnalyzeStatus(
+      let preResult = aiEngine.preAnalyzeStatus(
         terminalContent,
         sessionData.aiType || 'claude',
         session.tmuxSessionName,
         projectContext,
         sessionData.monitorPluginId  // 强制使用的插件 ID
       );
+
+      // 循环检测：preResult 建议发送"继续"时，检查是否陷入死循环
+      if (preResult && preResult.needsAction && preResult.suggestedAction === '继续') {
+        const lastAction = lastActionMap.get(session.id);
+        const continueCount = (lastAction?.action === '继续') ? (lastAction.continueCount || 1) + 1 : 1;
+
+        if (continueCount >= 2) {
+          const lastReply = getLastClaudeReply(terminalContent);
+          if (lastReply.length < 20) {
+            console.log(`[循环检测] 会话 ${session.name}: 连续${continueCount}次"继续"且回复"${lastReply}"很短，交给AI判断`);
+            preResult = null; // 清除 preResult，走 AI 分析路径
+          }
+        }
+      }
+
       if (preResult) {
         console.log(`[后台自动操作] 会话 ${session.name}: 预判断成功 - ${preResult.currentState}`);
         // 使用预判断结果，跳过 AI 调用
@@ -3269,7 +3284,9 @@ async function runBackgroundAutoAction() {
             session.write(action);
           }
 
-          lastActionMap.set(session.id, { action, time: now, contentHash });
+          const prevAction = lastActionMap.get(session.id);
+          const continueCount = (action === '继续' && prevAction?.action === '继续') ? (prevAction.continueCount || 1) + 1 : (action === '继续' ? 1 : 0);
+          lastActionMap.set(session.id, { action, time: now, contentHash, continueCount });
           historyLogger.log(session.id, {
             type: 'ai_decision',
             content: `[预判断自动操作] ${action}`,
@@ -3445,7 +3462,9 @@ async function runBackgroundAutoAction() {
         }
 
         // 记录本次操作（包含内容哈希，用于检测终端内容变化）
-        lastActionMap.set(session.id, { action, time: now, contentHash });
+        const prevActionAi = lastActionMap.get(session.id);
+        const continueCountAi = (action === '继续' && prevActionAi?.action === '继续') ? (prevActionAi.continueCount || 1) + 1 : (action === '继续' ? 1 : 0);
+        lastActionMap.set(session.id, { action, time: now, contentHash, continueCount: continueCountAi });
 
         historyLogger.log(session.id, {
           type: 'ai_decision',
@@ -3635,6 +3654,33 @@ function cleanupAllSessionCache(sessionId) {
   aiNoChangeStartTime.delete(sessionId);
 }
 let nextAiAnalysisTime = Date.now() + AI_ANALYSIS_INTERVAL; // 下次分析时间
+
+// 提取终端中最后一条 Claude Code 回复内容（用于循环检测）
+function getLastClaudeReply(terminalContent) {
+  if (!terminalContent) return '';
+  const lines = terminalContent.split('\n');
+  const cleanLines = lines.map(l => l.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').trim()).filter(Boolean);
+  if (cleanLines.length === 0) return '';
+
+  // 从后往前找到最后一个 ">" 提示符
+  let promptIdx = -1;
+  for (let i = cleanLines.length - 1; i >= 0; i--) {
+    if (/^[❯>]\s*$/.test(cleanLines[i])) {
+      promptIdx = i;
+      break;
+    }
+  }
+  if (promptIdx <= 0) return '';
+
+  // 从提示符往前收集回复内容，遇到"继续"或上一个提示符停止
+  const replyLines = [];
+  for (let i = promptIdx - 1; i >= 0 && i >= promptIdx - 10; i--) {
+    const line = cleanLines[i];
+    if (/^[❯>]\s*$/.test(line) || line === '继续') break;
+    replyLines.unshift(line);
+  }
+  return replyLines.join('\n').trim();
+}
 
 // 计算内容哈希（用于检测终端内容是否变化）
 // sliceLength: 可选，截取最后 N 个字符计算哈希（用于快速检测）
