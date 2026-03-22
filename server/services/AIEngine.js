@@ -2284,6 +2284,7 @@ JSON格式：
 5. ${cliName}致命错误（"error/fatal/crashed"且卡住）→ needsAction:true, actionType:"text_input", suggestedAction:"/quit"
 6. Shell命令行（普通shell提示符$/%，非${cliName}的">"）→ needsAction:true, actionType:"shell_command", suggestedAction:"${cliCommand}"
 7. ${cliName}空闲（">"提示符，无运行标志）：
+   - 如果终端显示重复的"继续"→短回复（如"在。""好的""没有其他任务"等）循环模式 → needsAction:false, suggestion:"Claude Code 已完成任务，无需继续发送指令"
    - 开发阶段（代码/文件/翻译/文档/类型定义）→ needsAction:true, actionType:"text_input", suggestedAction:"继续"
    - 部署/脚本阶段（npm run/启动/测试/localhost）→ needsAction:false, suggestion:"提醒用户检查"
 8. 其他确认提示（[Y/n]、数字选项）→ needsAction:true, actionType:"confirm/select"
