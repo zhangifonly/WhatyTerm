@@ -232,7 +232,14 @@ async function installTmuxMac(brewPath) {
       if (code === 0) {
         resolve(output);
       } else {
-        reject(new Error(`安装失败，退出码: ${code}\n${output}`));
+        // macOS 12 等旧版本上 brew install 可能因 Tier 3 警告返回非零退出码
+        // 但 tmux 可能已经安装成功，检查 tmux 是否实际可用
+        if (checkTmux()) {
+          console.log(`brew install tmux 退出码 ${code}，但 tmux 已可用`);
+          resolve(output);
+        } else {
+          reject(new Error(`安装失败，退出码: ${code}\n${output}`));
+        }
       }
     });
   });
@@ -289,7 +296,15 @@ exit $EXIT_CODE`;
       if (code === 0) {
         resolve(output);
       } else {
-        reject(new Error(`Homebrew 安装失败，退出码: ${code}\n${output}`));
+        // macOS 12 等旧版本上 brew update 会返回非零退出码（Tier 3 警告）
+        // 但 Homebrew 可能已经安装成功，检查 brew 是否实际可用
+        const brewPath = checkHomebrew();
+        if (brewPath) {
+          console.log(`Homebrew 安装脚本退出码 ${code}，但 brew 已可用: ${brewPath}`);
+          resolve(output);
+        } else {
+          reject(new Error(`安装失败，退出码: ${code}\n${output}`));
+        }
       }
     });
   });
