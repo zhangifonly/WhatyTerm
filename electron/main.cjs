@@ -173,13 +173,21 @@ function getResourcesPath() {
 
 // ==================== macOS 依赖检查 ====================
 
+// 内置 tmux 释放路径
+const WEBTMUX_BIN_DIR = path.join(require('os').homedir(), '.webtmux', 'bin');
+const WEBTMUX_TMUX_PATH = path.join(WEBTMUX_BIN_DIR, 'tmux');
+
 // 检查 tmux 是否安装 (macOS/Linux)
 function checkTmux() {
+  // 优先检查内置释放的 tmux
+  try {
+    execSync(`"${WEBTMUX_TMUX_PATH}" -V`, { stdio: 'pipe' });
+    return true;
+  } catch {}
   try {
     execSync('tmux -V', { stdio: 'pipe' });
     return true;
   } catch {
-    // 尝试完整路径
     try {
       execSync('/usr/local/bin/tmux -V', { stdio: 'pipe' });
       return true;
@@ -191,6 +199,44 @@ function checkTmux() {
         return false;
       }
     }
+  }
+}
+
+// 从 app 内置文件释放 tmux 到 ~/.webtmux/bin/tmux
+function extractBundledTmux() {
+  const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+  const bundledName = `tmux-${arch}`;
+
+  // 查找内置二进制：打包环境 vs 开发环境
+  let bundledPath;
+  if (app.isPackaged) {
+    bundledPath = path.join(process.resourcesPath, 'server', 'bin', 'darwin', bundledName);
+  } else {
+    bundledPath = path.join(__dirname, '..', 'server', 'bin', 'darwin', bundledName);
+  }
+
+  if (!fs.existsSync(bundledPath)) {
+    console.log(`内置 tmux 不存在: ${bundledPath}`);
+    return false;
+  }
+
+  try {
+    // 确保目录存在
+    if (!fs.existsSync(WEBTMUX_BIN_DIR)) {
+      fs.mkdirSync(WEBTMUX_BIN_DIR, { recursive: true });
+    }
+
+    // 复制并设置可执行权限
+    fs.copyFileSync(bundledPath, WEBTMUX_TMUX_PATH);
+    fs.chmodSync(WEBTMUX_TMUX_PATH, 0o755);
+
+    // 验证
+    execSync(`"${WEBTMUX_TMUX_PATH}" -V`, { stdio: 'pipe' });
+    console.log(`内置 tmux 释放成功: ${WEBTMUX_TMUX_PATH}`);
+    return true;
+  } catch (err) {
+    console.error(`释放内置 tmux 失败: ${err.message}`);
+    return false;
   }
 }
 
@@ -433,26 +479,27 @@ function showProgressWindow(title, message) {
   return progressWindow;
 }
 
-// macOS 依赖检查 - 自动静默安装
+// macOS 依赖检查 - 优先释放内置 tmux，fallback Homebrew
 async function showMacDependencyDialog() {
   if (checkTmux()) return true;
 
+  // 尝试释放内置 tmux（秒级完成）
+  if (extractBundledTmux()) return true;
+
+  // 内置 tmux 不可用，fallback 到 Homebrew
   const progressWindow = showProgressWindow('正在准备环境...', '检测系统依赖');
 
   try {
-    // 检测并安装 Homebrew
     let brewPath = checkHomebrew();
     if (!brewPath) {
       progressWindow.updateMessage('正在安装 Homebrew，首次安装可能需要几分钟...', '正在安装 Homebrew...');
       await installHomebrewMac();
-      // 安装后再次检测确认
       brewPath = checkHomebrew();
       if (!brewPath) {
         throw new Error('Homebrew 安装完成但无法检测到，请重启应用重试');
       }
     }
 
-    // 安装 tmux
     progressWindow.updateMessage('正在通过 Homebrew 安装 tmux...', '正在安装 tmux...');
     await installTmuxMac(brewPath);
 

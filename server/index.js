@@ -27,9 +27,18 @@ const isWindows = process.platform === 'win32';
 const useWSL = isWindows && process.env.WEBTMUX_USE_WSL === 'true';
 const useTmux = !isWindows || useWSL;  // 非 Windows 或 Windows+WSL 时使用 tmux
 
-// 获取 tmux 命令前缀（Windows 上通过 WSL）
+// 获取 tmux 命令前缀（Windows 上通过 WSL，macOS 优先使用内置 tmux）
 function getTmuxPrefix() {
-  return useWSL ? 'wsl tmux' : 'tmux';
+  if (useWSL) return 'wsl tmux';
+  // 优先使用 ~/.webtmux/bin/tmux
+  const webtmuxTmux = path.join(os.homedir(), '.webtmux', 'bin', 'tmux');
+  try {
+    if (existsSync(webtmuxTmux)) {
+      execSync(`"${webtmuxTmux}" -V`, { stdio: 'pipe' });
+      return `"${webtmuxTmux}"`;
+    }
+  } catch {}
+  return 'tmux';
 }
 
 // 从 PowerShell 终端输出中解析工作目录
@@ -668,7 +677,7 @@ const app = express();
 const server = createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: process.env.NODE_ENV === 'production' ? false : ['http://localhost:5173'],
+    origin: process.env.NODE_ENV === 'production' ? false : ['http://localhost:5050', 'http://localhost:5173'],
     methods: ['GET', 'POST']
   }
 });

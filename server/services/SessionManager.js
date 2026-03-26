@@ -103,9 +103,23 @@ function execTmux(command, options = {}) {
   });
 }
 
-// 获取 tmux 命令前缀
+// 获取 tmux 命令前缀（macOS 优先使用内置 tmux）
 function getTmuxPrefix() {
-  return useWSL ? 'wsl tmux' : 'tmux';
+  if (useWSL) return 'wsl tmux';
+  const tmuxPath = getLocalTmuxPath();
+  return tmuxPath ? `"${tmuxPath}"` : 'tmux';
+}
+
+// 获取本地 tmux 可执行文件路径（不带引号，用于 pty.spawn）
+function getLocalTmuxPath() {
+  const webtmuxTmux = path.join(os.homedir(), '.webtmux', 'bin', 'tmux');
+  try {
+    if (fs.existsSync(webtmuxTmux)) {
+      execSync(`"${webtmuxTmux}" -V`, { stdio: 'pipe' });
+      return webtmuxTmux;
+    }
+  } catch {}
+  return null;
 }
 
 // 获取当前激活的 API 供应商信息
@@ -347,13 +361,13 @@ export class Session {
     }
 
     // tmux 模式（Linux/macOS 或 Windows+WSL）
-    const shell = useWSL ? 'wsl' : 'tmux';
+    const tmuxBin = useWSL ? 'wsl' : (getLocalTmuxPath() || 'tmux');
     const args = useWSL
       ? ['tmux', 'attach-session', '-t', this.tmuxSessionName]
       : ['attach-session', '-t', this.tmuxSessionName];
 
     try {
-      this.pty = pty.spawn(shell, args, {
+      this.pty = pty.spawn(tmuxBin, args, {
         name: 'xterm-256color',
         cols: 80,
         rows: 24,

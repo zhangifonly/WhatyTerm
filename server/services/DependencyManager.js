@@ -1723,8 +1723,66 @@ class DependencyManager {
       throw new Error(`WSL Git 安装失败: ${err.message}`);
     }
   }
-}
 
-// 单例
+  /**
+   * 获取 tmux 可执行文件路径
+   * 优先级: ~/.webtmux/bin/tmux > 系统 tmux
+   */
+  getTmuxPath() {
+    const webtmuxTmux = path.join(this.binDir, 'tmux');
+    try {
+      if (fs.existsSync(webtmuxTmux)) {
+        execSync(`"${webtmuxTmux}" -V`, { stdio: 'pipe' });
+        return webtmuxTmux;
+      }
+    } catch {}
+
+    // 系统 tmux
+    const systemPaths = ['/usr/local/bin/tmux', '/opt/homebrew/bin/tmux'];
+    for (const p of systemPaths) {
+      try {
+        execSync(`"${p}" -V`, { stdio: 'pipe' });
+        return p;
+      } catch {}
+    }
+    try {
+      execSync('tmux -V', { stdio: 'pipe' });
+      return 'tmux';
+    } catch {}
+
+    return null;
+  }
+
+  /**
+   * 确保 tmux 可用（macOS）
+   * 优先从内置二进制释放，fallback 到系统 tmux
+   */
+  ensureTmux() {
+    // 已有可用 tmux
+    const existing = this.getTmuxPath();
+    if (existing) return existing;
+
+    // 尝试从内置二进制释放
+    if (this.isMac) {
+      const archLabel = this.arch === 'arm64' ? 'arm64' : 'x64';
+      const bundledPath = path.join(this.bundledBinDir, `tmux-${archLabel}`);
+      const targetPath = path.join(this.binDir, 'tmux');
+
+      if (fs.existsSync(bundledPath)) {
+        try {
+          fs.copyFileSync(bundledPath, targetPath);
+          fs.chmodSync(targetPath, 0o755);
+          execSync(`"${targetPath}" -V`, { stdio: 'pipe' });
+          console.log(`[DependencyManager] 内置 tmux 释放成功: ${targetPath}`);
+          return targetPath;
+        } catch (err) {
+          console.error(`[DependencyManager] 释放内置 tmux 失败: ${err.message}`);
+        }
+      }
+    }
+
+    return null;
+  }
+}
 const dependencyManager = new DependencyManager();
 export default dependencyManager;
