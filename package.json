@@ -16,7 +16,7 @@
   "type": "module",
   "scripts": {
     "dev": "concurrently \"npm run server:dev\" \"npm run client:dev\"",
-    "server:dev": "node --watch server/index.js",
+    "server:dev": "node server/index.js",
     "client:dev": "vite",
     "build": "vite build",
     "build:premium": "node scripts/build-premium.js",

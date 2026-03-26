@@ -12,6 +12,7 @@ release/
 *.AppImage
 *.deb
 data/
+.build-tmux/
 
 # 敏感文件
 CLAUDE.md
