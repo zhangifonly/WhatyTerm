@@ -4146,6 +4146,8 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
             </div>
           </div>
         )}
+
+        {activeTab === 'cli-tools' && (
           <CliToolsManager />
         )}
 
