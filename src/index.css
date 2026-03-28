@@ -2535,10 +2535,28 @@ body {
   color: hsl(var(--success));
 }
 
-/* 自动模式激活状态 */
+/* 自动模式激活状态 - 悬浮在终端底部 */
 .ai-suggestion.auto-mode-active {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  right: 12px;
+  margin-top: 0;
+  padding: 10px 16px;
   border-color: hsl(var(--success));
-  background: rgba(74, 222, 128, 0.1);
+  background: rgba(74, 222, 128, 0.15);
+  backdrop-filter: blur(12px);
+  z-index: 10;
+}
+
+.ai-suggestion.auto-mode-active .ai-suggestion-header {
+  margin-bottom: 0;
+}
+
+.ai-suggestion.auto-mode-active .ai-reasoning {
+  margin-bottom: 0;
+  margin-top: 4px;
+  font-size: 12px;
 }
 
 .ai-suggestion.auto-mode-active .ai-suggestion-title {

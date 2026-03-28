@@ -52,6 +52,7 @@ asar: true
 # 本地构建使用 npmRebuild: false，CI 构建前会先运行 electron-rebuild
 npmRebuild: false
 nodeGypRebuild: false
+afterPack: scripts/rebuild-native.cjs
 
 mac:
   category: public.app-category.developer-tools
