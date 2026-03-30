@@ -379,13 +379,24 @@ class DefaultPlugin extends BasePlugin {
 
     // 等待输入：发送继续指令
     if (phase === 'waiting') {
+      // Harness: 如果有结构化进度，用当前 feature 引导
+      let action = '继续';
+      let message = '检测到等待输入状态，发送"继续"指令';
+      if (context?.progress?.features?.length) {
+        const current = context.progress.features.find(f => f.status === 'in_progress')
+          || context.progress.features.find(f => f.status === 'pending');
+        if (current) {
+          action = `继续开发: ${current.name}`;
+          message = `Sprint 进度引导: ${current.name}`;
+        }
+      }
       return {
         needsAction: true,
         actionType: 'text_input',
-        suggestedAction: '继续',
+        suggestedAction: action,
         phase,
         phaseConfig: config,
-        message: '检测到等待输入状态，发送"继续"指令'
+        message
       };
     }
 

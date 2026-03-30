@@ -101,6 +101,9 @@ import builtinProviderDB from './services/BuiltinProviderDB.js';
 import configService from './services/ConfigService.js';
 import TeamManager from './services/TeamManager.js';
 import TaskOrchestrator from './services/TaskOrchestrator.js';
+import progressManager from './services/ProgressManager.js';
+import PlannerService from './services/PlannerService.js';
+import EvaluatorService from './services/EvaluatorService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -706,6 +709,8 @@ const historyLogger = new HistoryLogger();
 const terminalRecorder = getTerminalRecorder();
 const projectRecordingService = getProjectRecordingService();
 const aiEngine = new AIEngine();
+const plannerService = new PlannerService(aiEngine);
+const evaluatorService = new EvaluatorService(aiEngine);
 const authService = new AuthService();
 const providerService = new ProviderService(io);
 const healthCheckScheduler = new HealthCheckScheduler(io);
@@ -3021,7 +3026,8 @@ async function runBackgroundAutoAction() {
         projectPath: session.workingDir || sessionData.workingDir,
         projectDesc: session.projectDesc || sessionData.projectDesc,
         workingDir: session.workingDir || sessionData.workingDir,
-        goal: session.goal || sessionData.goal
+        goal: session.goal || sessionData.goal,
+        progress: progressManager.loadProgress(session.id)
       };
 
       // 先尝试 preAnalyze（不需要 AI API）- 传入 tmuxSession 和项目上下文用于插件选择
@@ -4493,6 +4499,43 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ==================== Harness 进度追踪 ====================
+
+  // 获取会话进度
+  socket.on('progress:get', (sessionId) => {
+    const progress = progressManager.loadProgress(sessionId);
+    socket.emit('progress:data', { sessionId, progress });
+  });
+
+  // 触发 Planner 规划
+  socket.on('progress:plan', async ({ sessionId, goal }) => {
+    try {
+      const session = sessionManager?.getSession(sessionId);
+      const projectContext = {
+        projectDesc: session?.projectDesc,
+        workingDir: session?.workingDir
+      };
+      const progress = await plannerService.expandGoal(sessionId, goal, projectContext);
+      socket.emit('progress:data', { sessionId, progress });
+      io.to(`session:${sessionId}`).emit('progress:updated', { sessionId, progress });
+    } catch (err) {
+      console.error('[Progress] 规划失败:', err.message);
+      socket.emit('progress:data', { sessionId, progress: null, error: err.message });
+    }
+  });
+
+  // 切换 Evaluator 开关
+  socket.on('evaluator:toggle', ({ sessionId, enabled }) => {
+    evaluatorService.setEnabled(sessionId, enabled);
+    socket.emit('evaluator:status', { sessionId, enabled });
+  });
+
+  // 获取进度摘要
+  socket.on('progress:summary', (sessionId) => {
+    const summary = progressManager.getSummary(sessionId);
+    socket.emit('progress:summary', { sessionId, summary });
+  });
+
   // 获取关闭的会话列表
   socket.on('closedSessions:get', () => {
     const closedSessions = sessionManager.getClosedSessions();
@@ -4905,6 +4948,20 @@ io.on('connection', (socket) => {
 
       io.to(`session:${data.sessionId}`).emit('session:updated', session.toJSON());
       io.emit('sessions:updated', sessionManager.listSessions());
+
+      // Harness: goal 更新时异步触发 Planner 规划
+      if (data.goal && data.goal.length > 5) {
+        plannerService.expandGoal(data.sessionId, data.goal, {
+          projectDesc: session.projectDesc,
+          workingDir: session.workingDir
+        }).then(progress => {
+          if (progress) {
+            io.to(`session:${data.sessionId}`).emit('progress:updated', {
+              sessionId: data.sessionId, progress
+            });
+          }
+        }).catch(err => console.error('[Planner] 自动规划失败:', err.message));
+      }
     }
   });
 
