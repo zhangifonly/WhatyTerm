@@ -2293,7 +2293,7 @@ JSON格式：
 ---
 ${terminalContent || '(空)'}
 ---
-
+${this._buildProgressContext(projectContext)}
 直接返回JSON，以{开头：`;
 
     try {
@@ -2311,6 +2311,20 @@ ${terminalContent || '(空)'}
       console.error('AI 状态分析错误:', err);
       throw err;
     }
+  }
+
+  /** 构建进度上下文（注入到 AI 分析 prompt） */
+  _buildProgressContext(projectContext) {
+    if (!projectContext?.progress?.features?.length) return '';
+    const p = projectContext.progress;
+    const current = p.features.find(f => f.status === 'in_progress')
+      || p.features.find(f => f.status === 'pending');
+    if (!current) return '';
+    const done = p.features.filter(f => f.status === 'completed').length;
+    return `\n当前 Sprint 进度: ${done}/${p.features.length} 完成
+当前任务: ${current.name}
+任务描述: ${current.description}
+注意: 判断"继续"时应聚焦于当前任务是否完成\n`;
   }
 
   _parseStatusResponse(content) {
