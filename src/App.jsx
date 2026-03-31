@@ -17,6 +17,7 @@ import AdvancedSettings from './components/ProviderManager/AdvancedSettings';
 import TeamView from './components/TeamView';
 import TeamPanel from './components/TeamPanel';
 import VoiceInput from './components/VoiceInput';
+import SprintProgress from './components/SprintProgress';
 
 const socket = io();
 
@@ -1401,25 +1402,6 @@ export default function App() {
                   </div>
                 </div>
               )}
-              {/* 自动模式运行状态提示 - 悬浮在终端底部 */}
-              {currentSession.autoActionEnabled && (
-                <div className="ai-suggestion auto-mode-active">
-                  <div className="ai-suggestion-header">
-                    <span className="ai-suggestion-title">
-                      <span>🤖</span> {t('controls.autoRunning')}
-                    </span>
-                    <button
-                      className="btn btn-secondary btn-small"
-                      onClick={() => toggleAutoAction(currentSession.id, false)}
-                    >
-                      {t('controls.pause')}
-                    </button>
-                  </div>
-                  <div className="ai-reasoning">
-                    {t('aiPanel.aiMonitoring')}
-                  </div>
-                </div>
-              )}
             </div>
 
             {/* 语音输入按钮 */}
@@ -1488,6 +1470,26 @@ export default function App() {
                     </div>
                   </>
                 )}
+              </div>
+            )}
+
+            {/* 自动模式运行状态提示 */}
+            {currentSession.autoActionEnabled && (
+              <div className="ai-suggestion auto-mode-active">
+                <div className="ai-suggestion-header">
+                  <span className="ai-suggestion-title">
+                    <span>🤖</span> {t('controls.autoRunning')}
+                  </span>
+                  <button
+                    className="btn btn-secondary btn-small"
+                    onClick={() => toggleAutoAction(currentSession.id, false)}
+                  >
+                    {t('controls.pause')}
+                  </button>
+                </div>
+                <div className="ai-reasoning">
+                  {t('aiPanel.aiMonitoring')}
+                </div>
               </div>
             )}
 
@@ -1610,6 +1612,10 @@ export default function App() {
                 )}
               </div>
             </div>
+
+            {/* Harness Sprint 进度面板 */}
+            {currentSession && <SprintProgress socket={socket} sessionId={currentSession.id} goal={currentSession.goal} />}
+
           </div>
         ) : (
           <div className="empty-state welcome-page">
