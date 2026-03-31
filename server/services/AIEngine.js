@@ -1523,10 +1523,20 @@ ${historyText || '(空)'}
         // 使用插件分析状态（包括默认插件）
         const pluginResult = plugin.analyzeStatus(terminalContent, phase, projectContext || {});
         if (pluginResult) {
+          // Harness: 统一注入 Sprint progress 引导（所有插件通用）
+          // 当有 progress 且操作是"继续"类指令时，用当前 feature 覆盖
+          if (pluginResult.needsAction && pluginResult.actionType === 'text_input'
+              && pluginResult.suggestedAction?.startsWith('继续')
+              && projectContext?.progress?.features?.length) {
+            const cur = projectContext.progress.features.find(f => f.status === 'in_progress')
+              || projectContext.progress.features.find(f => f.status === 'pending');
+            if (cur) {
+              pluginResult.suggestedAction = `继续开发: ${cur.name}`;
+            }
+          }
           console.log(`[AIEngine] 插件 ${plugin.name} 分析结果: ${pluginResult.message || pluginResult.actionType}`);
           return {
             ...pluginResult,
-            // 确保 currentState 字段存在（前端显示用）
             currentState: pluginResult.currentState || pluginResult.message || pluginResult.actionType,
             plugin: plugin.id,
             pluginName: plugin.name,

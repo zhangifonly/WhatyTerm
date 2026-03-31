@@ -74,17 +74,24 @@ class ProgressManager {
   setFeatures(sessionId, features, sprintContract) {
     const progress = this.loadProgress(sessionId);
     if (!progress) return false;
-    progress.features = features.map((f, i) => ({
-      id: f.id || `feat-${String(i + 1).padStart(3, '0')}`,
-      name: f.name,
-      description: f.description || '',
-      priority: f.priority || i + 1,
-      status: 'pending',
-      passes: { implemented: false, compiles: false, tested: false },
-      startedAt: null,
-      completedAt: null,
-      evaluations: []
-    }));
+    progress.features = features.map((f, i) => {
+      const isCompleted = f.status === 'completed';
+      return {
+        id: f.id || `feat-${String(i + 1).padStart(3, '0')}`,
+        name: f.name,
+        description: f.description || '',
+        priority: f.priority || i + 1,
+        status: isCompleted ? 'completed' : 'pending',
+        passes: {
+          implemented: isCompleted,
+          compiles: isCompleted,
+          tested: isCompleted
+        },
+        startedAt: isCompleted ? new Date().toISOString() : null,
+        completedAt: isCompleted ? new Date().toISOString() : null,
+        evaluations: []
+      };
+    });
     progress.sprint = {
       name: 'Sprint 1',
       startedAt: new Date().toISOString(),

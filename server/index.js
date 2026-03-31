@@ -2573,8 +2573,24 @@ async function updateAllSessionsProjectInfo() {
     // 尝试读取项目目标
     const projectGoal = await extractProjectGoal(workingDir);
     if (projectGoal && (session.goal.startsWith('Continue ') || !session.goal)) {
+      const goalChanged = session.goal !== projectGoal;
       session.goal = projectGoal;
       session.originalGoal = projectGoal;
+
+      // Harness: goal 变化时自动触发 Planner（仅当无现有进度时）
+      if (goalChanged && !progressManager.loadProgress(session.id)) {
+        plannerService.expandGoal(session.id, projectGoal, {
+          projectDesc: session.projectDesc,
+          workingDir: session.workingDir
+        }).then(progress => {
+          if (progress) {
+            io.to(`session:${session.id}`).emit('progress:updated', {
+              sessionId: session.id, progress
+            });
+            console.log(`[Planner] 自动规划完成: ${progress.features.length} 个 feature`);
+          }
+        }).catch(err => console.error('[Planner] 自动规划失败:', err.message));
+      }
     }
 
     console.log(`[会话信息] ${session.name}: 项目=${projectName}, 说明=${session.projectDesc || '无'}`);
@@ -2642,6 +2658,55 @@ function isAutoActionPausedByUserInput(sessionId) {
 }
 
 // 后台自动操作：定时检查所有启用了自动操作的会话
+// Harness: 检测终端输出中的 feature 完成信号并推进 Sprint
+// 只在终端空闲（非运行中）时检测，避免 Claude 运行中误判
+const featureCompletionCount = new Map(); // sessionId -> count
+
+function checkAndAdvanceFeature(sessionId, terminalContent, status) {
+  // 只在空闲状态下检测，运行中不检测
+  if (status?.currentState?.includes('运行中') || status?.currentState?.includes('running')) return;
+
+  const progress = progressManager.loadProgress(sessionId);
+  if (!progress?.features?.length || progress.status !== 'in_progress') return;
+
+  const current = progress.features.find(f => f.status === 'in_progress');
+  if (!current) {
+    const next = progressManager.advanceToNext(sessionId);
+    if (next) {
+      io.to(`session:${sessionId}`).emit('progress:updated', {
+        sessionId, progress: progressManager.loadProgress(sessionId)
+      });
+    }
+    return;
+  }
+
+  // 检测完成信号（需要连续 2 次检测到才推进，防止误判）
+  const lastLines = (terminalContent || '').split('\n').slice(-15).join('\n');
+  const completionPatterns = [
+    /已完成.*feature|feature.*已完成/i,
+    /功能.*实现完毕|开发完成/,
+    /all.*tests.*pass/i,
+  ];
+
+  const hasCompletion = completionPatterns.some(p => p.test(lastLines));
+  if (!hasCompletion) {
+    featureCompletionCount.delete(sessionId);
+    return;
+  }
+
+  const count = (featureCompletionCount.get(sessionId) || 0) + 1;
+  featureCompletionCount.set(sessionId, count);
+  if (count < 2) return; // 需要连续 2 次检测到
+
+  featureCompletionCount.delete(sessionId);
+  progressManager.updateFeatureStatus(sessionId, current.id, { status: 'completed' });
+  const next = progressManager.advanceToNext(sessionId);
+  const updated = progressManager.loadProgress(sessionId);
+
+  console.log(`[Harness] Feature 完成: ${current.name}${next ? `, 下一个: ${next.name}` : '，全部完成'}`);
+  io.to(`session:${sessionId}`).emit('progress:updated', { sessionId, progress: updated });
+}
+
 async function runBackgroundAutoAction() {
   // 等待 SessionManager 初始化完成
   if (!sessionManagerReady || !sessionManager) {
@@ -3316,6 +3381,8 @@ async function runBackgroundAutoAction() {
           });
           updateCheckState(sessionData.id, true, status);
         } else {
+          // 无操作时检查 feature 完成信号（传入 status 判断运行状态）
+          checkAndAdvanceFeature(session.id, terminalContent, status);
           updateCheckState(sessionData.id, false, status);
         }
 

@@ -2,11 +2,52 @@
  * PlannerService - Harness Planner 角色
  * 将用户 goal 扩展为结构化的 feature list 和 Sprint Contract
  */
+import { execSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
 import progressManager from './ProgressManager.js';
 
 class PlannerService {
   constructor(aiEngine) {
     this.aiEngine = aiEngine;
+  }
+
+  /** 扫描项目现状 */
+  _scanProject(workingDir) {
+    if (!workingDir || !fs.existsSync(workingDir)) return '';
+
+    const parts = [];
+    // 文件结构（排除 node_modules 等）
+    try {
+      const tree = execSync(
+        'find . -maxdepth 3 -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/dist/*" -not -path "*/__pycache__/*" | head -60',
+        { cwd: workingDir, timeout: 5000, encoding: 'utf-8' }
+      ).trim();
+      if (tree) parts.push(`### 文件结构\n${tree}`);
+    } catch {}
+
+    // 最近 git 提交
+    try {
+      const gitLog = execSync(
+        'git log --oneline -10 2>/dev/null',
+        { cwd: workingDir, timeout: 3000, encoding: 'utf-8' }
+      ).trim();
+      if (gitLog) parts.push(`### 最近提交\n${gitLog}`);
+    } catch {}
+
+    // package.json 或 pyproject.toml 摘要
+    for (const f of ['package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod']) {
+      const fp = path.join(workingDir, f);
+      if (fs.existsSync(fp)) {
+        try {
+          const content = fs.readFileSync(fp, 'utf-8').substring(0, 500);
+          parts.push(`### ${f}\n${content}`);
+        } catch {}
+        break;
+      }
+    }
+
+    return parts.length ? '\n## 项目现状\n' + parts.join('\n\n') : '';
   }
 
   /**
@@ -22,7 +63,8 @@ class PlannerService {
     // 创建初始 progress
     progressManager.createProgress(sessionId, goal);
 
-    const prompt = this._buildPlannerPrompt(goal, projectContext);
+    const projectScan = this._scanProject(projectContext.workingDir);
+    const prompt = this._buildPlannerPrompt(goal, projectContext, projectScan);
 
     try {
       console.log(`[Planner] 开始规划: ${goal.substring(0, 50)}...`);
@@ -50,7 +92,7 @@ class PlannerService {
     }
   }
 
-  _buildPlannerPrompt(goal, ctx) {
+  _buildPlannerPrompt(goal, ctx, projectScan) {
     const projectInfo = ctx.projectDesc
       ? `\n项目背景: ${ctx.projectDesc}`
       : '';
@@ -58,18 +100,20 @@ class PlannerService {
       ? `\n工作目录: ${ctx.workingDir}`
       : '';
 
-    return `你是一个软件项目规划专家。请将以下需求拆解为可执行的 feature 列表。
+    return `你是一个软件项目规划专家。请根据用户需求和项目现状，拆解出剩余待完成的 feature 列表。
 ${projectInfo}${workDir}
+${projectScan}
 
 ## 用户需求
 ${goal}
 
 ## 要求
-1. 将需求拆解为 3-8 个独立的 feature
-2. 每个 feature 应该是可独立完成和验证的
-3. 按优先级和依赖关系排序（先做基础，再做上层）
-4. 每个 feature 包含清晰的完成标准
-5. 生成一个总体的 Sprint 完成标准
+1. 仔细分析项目现状（文件结构、git 提交、依赖配置）
+2. 根据现有代码判断哪些功能已经实现，哪些还未完成
+3. 只列出**尚未完成或需要改进**的 feature（3-8 个）
+4. 如果项目已有大量代码，聚焦于目标中**尚未实现的部分**
+5. 每个 feature 包含清晰的完成标准
+6. 如果有已完成的 feature，也列出并标记 status 为 "completed"
 
 ## 输出格式（严格 JSON）
 \`\`\`json
@@ -78,7 +122,8 @@ ${goal}
     {
       "id": "feat-001",
       "name": "feature 简短名称",
-      "description": "详细描述，包含完成标准"
+      "description": "详细描述，包含完成标准",
+      "status": "completed 或 pending"
     }
   ],
   "sprintContract": "整体完成标准描述"
