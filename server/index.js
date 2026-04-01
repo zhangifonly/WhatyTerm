@@ -447,44 +447,30 @@ function getSessionMemory(tmuxSessionName, workDir = '') {
     // 获取 pane PID
     const panePid = execSync(
       `${getTmuxPrefix()} list-panes -t "${tmuxSessionName}" -F "#{pane_pid}" 2>/dev/null | head -1`,
-      { encoding: 'utf-8' }
+      { encoding: 'utf-8', timeout: 3000 }
     ).trim();
 
     if (!panePid) return { memory: 0, processCount: 0 };
 
-    // 递归获取所有后代进程
-    const getAllDescendants = (pid) => {
-      const descendants = [];
-      try {
-        const children = execSync(`pgrep -P ${pid} 2>/dev/null`, { encoding: 'utf-8' }).trim();
-        if (children) {
-          for (const childPid of children.split('\n').filter(p => p)) {
-            descendants.push(childPid);
-            descendants.push(...getAllDescendants(childPid));
-          }
-        }
-      } catch {
-        // 没有子进程
+    // 使用单次 ps 命令获取所有后代进程（避免递归 execSync）
+    // pgrep -g 0 获取同进程组，或用 ps 的 ppid 过滤
+    let allPids = [panePid];
+    try {
+      const descendants = execSync(
+        `pgrep -P ${panePid} 2>/dev/null`,
+        { encoding: 'utf-8', timeout: 2000 }
+      ).trim();
+      if (descendants) {
+        allPids.push(...descendants.split('\n').filter(p => p));
       }
-      return descendants;
-    };
-
-    const childPids = getAllDescendants(panePid);
-    let allPids = [panePid, ...childPids];
-
-    // 获取工作目录匹配的孤儿进程（Claude Code Task tool 启动的后台进程）
-    if (workDir) {
-      const orphanPids = getOrphanProcessesByWorkDir(workDir);
-      // 合并并去重
-      allPids = [...new Set([...allPids, ...orphanPids])];
-    }
+    } catch {}
 
     const processCount = allPids.length;
 
     // 获取总内存（KB）
     const rssOutput = execSync(
       `ps -o rss= -p ${allPids.join(',')} 2>/dev/null`,
-      { encoding: 'utf-8' }
+      { encoding: 'utf-8', timeout: 2000 }
     );
 
     const totalKB = rssOutput.split('\n')
@@ -525,56 +511,40 @@ function getSessionProcessDetails(tmuxSessionName, workDir = '') {
   try {
     const panePid = execSync(
       `${getTmuxPrefix()} list-panes -t "${tmuxSessionName}" -F "#{pane_pid}" 2>/dev/null | head -1`,
-      { encoding: 'utf-8' }
+      { encoding: 'utf-8', timeout: 3000 }
     ).trim();
 
     if (!panePid) return [];
 
-    // 递归获取所有后代进程
-    const getAllDescendants = (pid) => {
-      const descendants = [];
-      try {
-        const children = execSync(`pgrep -P ${pid} 2>/dev/null`, { encoding: 'utf-8' }).trim();
-        if (children) {
-          for (const childPid of children.split('\n').filter(p => p)) {
-            descendants.push(childPid);
-            descendants.push(...getAllDescendants(childPid));
-          }
-        }
-      } catch {}
-      return descendants;
-    };
+    // 获取直接子进程（不递归，避免阻塞事件循环）
+    let allPids = [panePid];
+    try {
+      const children = execSync(`pgrep -P ${panePid} 2>/dev/null`, { encoding: 'utf-8', timeout: 2000 }).trim();
+      if (children) {
+        allPids.push(...children.split('\n').filter(p => p));
+      }
+    } catch {}
 
-    let allPids = [panePid, ...getAllDescendants(panePid)];
-
-    // 获取工作目录匹配的孤儿进程
-    if (workDir) {
-      const orphanPids = getOrphanProcessesByWorkDir(workDir);
-      allPids = [...new Set([...allPids, ...orphanPids])];
-    }
-
-    // 获取每个进程的详细信息
+    // 使用单次 ps 命令批量获取所有进程信息（避免逐个调用）
     const details = [];
-    for (const pid of allPids) {
-      try {
-        const info = execSync(
-          `ps -p ${pid} -o pid=,pcpu=,rss=,comm= 2>/dev/null`,
-          { encoding: 'utf-8' }
-        ).trim();
+    try {
+      const info = execSync(
+        `ps -o pid=,pcpu=,rss=,comm= -p ${allPids.join(',')} 2>/dev/null`,
+        { encoding: 'utf-8', timeout: 2000 }
+      ).trim();
 
-        if (info) {
-          const parts = info.split(/\s+/);
-          if (parts.length >= 4) {
-            details.push({
-              pid: parts[0],
-              cpu: parseFloat(parts[1]) || 0,
-              memory: Math.round((parseInt(parts[2]) || 0) / 1024),
-              command: parts.slice(3).join(' ')
-            });
-          }
+      for (const line of info.split('\n').filter(l => l.trim())) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length >= 4) {
+          details.push({
+            pid: parts[0],
+            cpu: parseFloat(parts[1]) || 0,
+            memory: Math.round((parseInt(parts[2]) || 0) / 1024),
+            command: parts.slice(3).join(' ')
+          });
         }
-      } catch {}
-    }
+      }
+    } catch {}
 
     return details;
   } catch {
@@ -3703,22 +3673,28 @@ function killSessionProcesses(tmuxSessionName) {
   }
 }
 
-// 会话内存监控：每 30 秒更新一次所有会话的内存占用
-setInterval(() => {
+// 会话内存监控：每 60 秒更新一次所有会话的内存占用（异步执行避免阻塞事件循环）
+setInterval(async () => {
   if (!io || !sessionManager) return;
-  const memoryMap = getAllSessionsMemory();
-  io.emit('sessions:memory', memoryMap);
+  try {
+    const memoryMap = getAllSessionsMemory();
+    io.emit('sessions:memory', memoryMap);
+    checkMemoryLimits(memoryMap);
+  } catch (err) {
+    console.error('[内存监控] 获取内存数据失败:', err.message);
+  }
+}, 60000);
 
-  // 检查内存限制
-  checkMemoryLimits(memoryMap);
-}, 30000);
-
-// 启动后 5 秒发送一次内存数据
+// 启动后 10 秒发送一次内存数据
 setTimeout(() => {
   if (!io || !sessionManager) return;
-  const memoryMap = getAllSessionsMemory();
-  io.emit('sessions:memory', memoryMap);
-}, 5000);
+  try {
+    const memoryMap = getAllSessionsMemory();
+    io.emit('sessions:memory', memoryMap);
+  } catch (err) {
+    console.error('[内存监控] 启动时获取内存数据失败:', err.message);
+  }
+}, 10000);
 
 // 后台 AI 状态分析：定期分析所有会话的状态（不依赖前端请求）
 const aiStatusCache = new Map(); // 缓存每个会话的最新 AI 状态
@@ -6189,8 +6165,8 @@ async function getPortProcess(port) {
   const execAsync = promisify(exec);
 
   try {
-    // macOS/Linux: 使用 lsof 获取占用端口的进程
-    const { stdout } = await execAsync(`lsof -i :${port} -t 2>/dev/null`);
+    // macOS/Linux: 使用 lsof 获取监听端口的进程（-sTCP:LISTEN 只匹配 LISTEN 状态）
+    const { stdout } = await execAsync(`lsof -i :${port} -sTCP:LISTEN -t 2>/dev/null`);
     const pid = parseInt(stdout.trim().split('\n')[0], 10);
     if (!pid) return null;
 
