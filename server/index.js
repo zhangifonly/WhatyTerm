@@ -700,6 +700,7 @@ let sessionManagerReady = false;
     console.log('[Server] TeamManager 初始化完成');
     taskOrchestrator = new TaskOrchestrator(teamManager, sessionManager, aiEngine);
     console.log('[Server] TaskOrchestrator 初始化完成');
+    teamManager.recoverStaleTeams();
   } catch (err) {
     console.error('[Server] SessionManager 初始化失败:', err);
     // 回退到同步创建（不使用 mux-server 模式）
@@ -708,6 +709,7 @@ let sessionManagerReady = false;
     sessionManagerReady = true;
     teamManager = new TeamManager(sessionManager.db, sessionManager, aiEngine);
     taskOrchestrator = new TaskOrchestrator(teamManager, sessionManager, aiEngine);
+    teamManager.recoverStaleTeams();
   }
 })();
 

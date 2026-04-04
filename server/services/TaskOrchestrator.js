@@ -31,6 +31,10 @@ class TaskOrchestrator {
     this.lastAiCheck = new Map(); // sessionId -> timestamp
     this.AI_CHECK_COOLDOWN = 15000; // 15 秒内不重复 AI 确认
 
+    // 全局 AI 调用限速：防止多 Agent 同时触发大量 AI 请求
+    this.globalAiCallLog = []; // 调用时间戳列表
+    this.MAX_AI_CALLS_PER_MINUTE = 4;
+
     // 卡住检测阈值
     this.STUCK_TIMEOUT = 10 * 60 * 1000; // 10 分钟
     this.MAX_RECOVERY_ATTEMPTS = 2;
@@ -189,11 +193,12 @@ class TaskOrchestrator {
     // 检测 Claude 是否空闲（可能完成了任务）
     if (this._isClaudeIdle(cleanContent)) {
       state.idleCount++;
-      // 连续 3 次检测到空闲（约 3 秒），转入完成检测
-      if (state.idleCount >= 3) {
+      // 连续 10 次检测到空闲（约 10 秒），转入完成检测
+      // 之前 3 秒太短：Claude Code 在处理步骤间会短暂停顿，容易误判
+      if (state.idleCount >= 10) {
         state.phase = 'possibly_done';
         state.completionCheckCount = 0;
-        console.log(`[TaskOrchestrator] ${session.name}: Claude 空闲，进入完成检测`);
+        console.log(`[TaskOrchestrator] ${session.name}: Claude 空闲 10s，进入完成检测`);
       }
       return;
     }
@@ -248,8 +253,15 @@ class TaskOrchestrator {
     const now = Date.now();
     const lastCheck = this.lastAiCheck.get(session.id) || 0;
     if (now - lastCheck < this.AI_CHECK_COOLDOWN) {
-      return; // 等待冷却
+      return; // 等待单 session 冷却
     }
+
+    // 全局限速：每分钟最多 MAX_AI_CALLS_PER_MINUTE 次 AI 调用
+    this.globalAiCallLog = this.globalAiCallLog.filter(t => now - t < 60000);
+    if (this.globalAiCallLog.length >= this.MAX_AI_CALLS_PER_MINUTE) {
+      return; // 全局调用太频繁，等下一轮
+    }
+    this.globalAiCallLog.push(now);
     this.lastAiCheck.set(session.id, now);
 
     console.log(`[TaskOrchestrator] ${session.name}: Tier 1 匹配成功，调用 AI 确认`);
@@ -361,11 +373,6 @@ class TaskOrchestrator {
       if (pattern.test(last2000)) {
         return { likelyDone: true, reason: `匹配模式: ${pattern}` };
       }
-    }
-
-    // 大量输出（>2000字符）后进入空闲，也可能是完成
-    if (outputDiff.length > 2000) {
-      return { likelyDone: true, reason: '大量输出后空闲' };
     }
 
     return { likelyDone: false, reason: '无匹配模式' };
@@ -553,7 +560,16 @@ ${recentOutput}
       return `- ${t.subject}: ${summary}`;
     }).join('\n');
 
-    const integrationPrompt = `所有团队子任务已完成！请整合检查：\n\n${results}\n\n请检查所有修改是否一致，运行测试确认没有冲突。如果一切正常，请总结整体完成情况。`;
+    // 附加 git 分支信息（如果有）
+    const memberBranches = team.memberBranches || {};
+    const branchLines = Object.entries(memberBranches)
+      .map(([sid, branch]) => `  git merge ${branch}`)
+      .join('\n');
+    const branchSection = branchLines
+      ? `\n\n各 Agent 工作分支（请在确认无误后合并）：\n${branchLines}\n如有冲突请手动解决后提交。`
+      : '';
+
+    const integrationPrompt = `所有团队子任务已完成！请整合检查：\n\n${results}${branchSection}\n\n请检查所有修改是否一致，运行测试确认没有冲突。如果一切正常，请总结整体完成情况。`;
 
     await this._notifyLead(team, integrationPrompt);
 
