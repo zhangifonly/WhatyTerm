@@ -683,6 +683,20 @@ app.post('/hooks', (req, res) => {
   res.status(200).end();
 });
 
+// 调试端点：查看最近收到的 hook 事件（无需 token，仅本地可访问）
+app.get('/hooks/status', (req, res) => {
+  if (!hookServer) return res.json({ status: 'not_initialized' });
+  const logs = hookServer.recentLogs(50);
+  const scriptPath = `${process.env.HOME}/.webtmux/hooks/pre-tool.sh`;
+  res.json({
+    status: 'ok',
+    port: hookServer.serverPort,
+    logFile: hookServer.logPath,
+    recentEvents: logs,
+    tip: `也可以运行: tail -f ${hookServer.logPath}`
+  });
+});
+
 /** 将 HookServer 事件接入 session 状态 + TaskOrchestrator */
 function _wireHookServer() {
   if (!hookServer) return;
