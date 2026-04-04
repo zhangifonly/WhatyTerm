@@ -37,7 +37,7 @@
     "startHint": "选择一个会话或点击「+」创建新会话开始"
   },
   "settings": {
-    "ai": "AI监控设置",
+    "ai": "AI 引擎",
     "api": "API 配置",
     "auth": "访问控制",
     "interface": "界面",
@@ -117,7 +117,7 @@
     "requests": "请求数"
   },
   "aiPanel": {
-    "title": "AI 状态监控",
+    "title": "会话状态监控",
     "expand": "展开 AI 面板",
     "collapse": "收起 AI 面板",
     "serviceNormal": "服务正常",
@@ -133,7 +133,7 @@
     "currentState": "当前状态",
     "workingDir": "工作目录",
     "recentAction": "最近操作",
-    "waitingAiAnalysis": "等待 AI 分析...",
+    "waitingAiAnalysis": "点击「立即分析」查看 Hook 活动",
     "needAction": "需要操作",
     "actionType": "类型",
     "suggestedAction": "建议操作",

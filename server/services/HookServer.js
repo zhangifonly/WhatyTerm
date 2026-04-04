@@ -28,14 +28,33 @@ class HookServer {
     this._logBuffer = [];
   }
 
-  /** 安装 hook 脚本并注入 Claude 配置，服务启动时调用一次 */
+  /** 安装所有 CLI 的 hook 脚本，服务启动时调用一次 */
   install() {
     try {
-      this._installHookScripts();
-      this._mergeClaudeSettings();
-      console.log(`[HookServer] Hook 安装完成，端口 ${this.serverPort}，日志: ${this.logPath}`);
+      this._installHookScripts();       // 公共 shell 脚本
+      this._mergeClaudeSettings();      // Claude Code
+      this._mergeGeminiSettings();      // Gemini CLI
+      this._mergeCodexSettings();       // Codex CLI
+      console.log(`[HookServer] Hooks 安装完成（claude/gemini/codex），端口 ${this.serverPort}`);
     } catch (err) {
       console.error('[HookServer] 安装失败:', err.message);
+    }
+  }
+
+  /**
+   * 部署 OpenCode TypeScript 监控插件到指定项目目录
+   * 在 OpenCode 会话启动时调用
+   */
+  deployOpenCodePlugin(workingDir) {
+    if (!workingDir) return;
+    try {
+      const pluginDir = join(workingDir, '.opencode', 'plugins');
+      const pluginPath = join(pluginDir, 'webtmux-monitor.ts');
+      mkdirSync(pluginDir, { recursive: true });
+      writeFileSync(pluginPath, this._buildOpenCodePlugin());
+      console.log(`[HookServer] OpenCode 插件已部署: ${pluginPath}`);
+    } catch (err) {
+      console.error('[HookServer] OpenCode 插件部署失败:', err.message);
     }
   }
 
@@ -46,7 +65,8 @@ class HookServer {
   }
 
   /** 分发收到的 hook 事件（由 HTTP 路由调用） */
-  dispatch(event) {
+  dispatch(rawEvent) {
+    const event = this._normalizeEvent(rawEvent);
     this._writeLog(event);
     const specific = this.handlers.get(event.hook_event_name) || [];
     const wildcard = this.handlers.get('*') || [];
@@ -106,6 +126,64 @@ exit 0
 `;
   }
 
+  _mergeGeminiSettings() {
+    const settingsPath = join(homedir(), '.gemini', 'settings.json');
+    let settings = {};
+    try { settings = JSON.parse(readFileSync(settingsPath, 'utf8')); } catch {}
+    if (!settings.hooks) settings.hooks = {};
+
+    const hookMap = {
+      BeforeTool: join(this.hooksDir, 'pre-tool.sh'),
+      AfterTool:  join(this.hooksDir, 'post-tool.sh'),
+      SessionEnd: join(this.hooksDir, 'stop.sh'),
+    };
+
+    for (const [event, scriptPath] of Object.entries(hookMap)) {
+      if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
+      settings.hooks[event] = settings.hooks[event].filter(h =>
+        !h.hooks?.some(c => c.command === scriptPath)
+      );
+      settings.hooks[event].push({
+        matcher: '.*',
+        hooks: [{ type: 'command', command: scriptPath, timeout: 5000 }],
+      });
+    }
+
+    mkdirSync(join(homedir(), '.gemini'), { recursive: true });
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+  }
+
+  _mergeCodexSettings() {
+    // hooks.json
+    const hooksPath = join(homedir(), '.codex', 'hooks.json');
+    let hooks = {};
+    try { hooks = JSON.parse(readFileSync(hooksPath, 'utf8')); } catch {}
+
+    const hookMap = {
+      pre_tool_call:  join(this.hooksDir, 'pre-tool.sh'),
+      post_tool_call: join(this.hooksDir, 'post-tool.sh'),
+      session_end:    join(this.hooksDir, 'stop.sh'),
+    };
+
+    for (const [event, scriptPath] of Object.entries(hookMap)) {
+      if (!Array.isArray(hooks[event])) hooks[event] = [];
+      hooks[event] = hooks[event].filter(h => h.command !== scriptPath);
+      hooks[event].push({ command: scriptPath, timeout: 5 });
+    }
+
+    mkdirSync(join(homedir(), '.codex'), { recursive: true });
+    writeFileSync(hooksPath, JSON.stringify(hooks, null, 2));
+
+    // config.toml - ensure hooks feature is enabled
+    const configPath = join(homedir(), '.codex', 'config.toml');
+    let config = '';
+    try { config = readFileSync(configPath, 'utf8'); } catch {}
+    if (!config.includes('enable_hooks')) {
+      config += '\nenable_hooks = true\n';
+      writeFileSync(configPath, config);
+    }
+  }
+
   _mergeClaudeSettings() {
     const settingsPath = join(homedir(), '.claude', 'settings.json');
     let settings = {};
@@ -130,6 +208,57 @@ exit 0
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
   }
 
+  /**
+   * 将不同 CLI 的事件格式统一为 Claude Code 格式：
+   *   hook_event_name: PreToolUse | PostToolUse | Stop
+   *   tool_name, tool_input, cwd
+   */
+  _normalizeEvent(event) {
+    // 已经是标准格式（Claude Code）
+    if (event.hook_event_name) return event;
+
+    // Gemini CLI: { eventName, toolName, arguments, workingDir }
+    if (event.eventName) {
+      const nameMap = { BeforeTool: 'PreToolUse', AfterTool: 'PostToolUse', SessionEnd: 'Stop' };
+      return {
+        hook_event_name: nameMap[event.eventName] || event.eventName,
+        tool_name: event.toolName,
+        tool_input: event.arguments || {},
+        cwd: event.workingDir,
+        _source: 'gemini',
+        _raw: event,
+      };
+    }
+
+    // Codex CLI: { event, tool, args, cwd }
+    if (event.event) {
+      const nameMap = { pre_tool_call: 'PreToolUse', post_tool_call: 'PostToolUse', session_end: 'Stop' };
+      return {
+        hook_event_name: nameMap[event.event] || event.event,
+        tool_name: event.tool,
+        tool_input: event.args || {},
+        cwd: event.cwd,
+        _source: 'codex',
+        _raw: event,
+      };
+    }
+
+    // OpenCode plugin: { type, toolName, params, workdir }
+    if (event.type) {
+      const nameMap = { PreToolUse: 'PreToolUse', PostToolUse: 'PostToolUse', SessionEnd: 'Stop' };
+      return {
+        hook_event_name: nameMap[event.type] || event.type,
+        tool_name: event.toolName,
+        tool_input: event.params || {},
+        cwd: event.workdir,
+        _source: 'opencode',
+        _raw: event,
+      };
+    }
+
+    return event; // fallback
+  }
+
   _writeLog(event) {
     const ts = new Date().toISOString();
     const ev = event.hook_event_name;
@@ -147,6 +276,43 @@ exit 0
         writeFileSync(this.logPath, lines.slice(-MAX_LOG_LINES).join('\n') + '\n');
       }
     } catch {}
+  }
+  _buildOpenCodePlugin() {
+    return `// WhatyTerm OpenCode monitor plugin - auto-generated
+import type { Plugin } from "@opencode-ai/sdk";
+
+const PORT = ${this.serverPort};
+const TOKEN = "${this.token}";
+
+async function postEvent(type: string, toolName?: string, params?: unknown, workdir?: string) {
+  try {
+    await fetch(\`http://127.0.0.1:\${PORT}/hooks\`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-WebtmuxToken": TOKEN,
+      },
+      body: JSON.stringify({ type, toolName, params, workdir }),
+      signal: AbortSignal.timeout(2000),
+    });
+  } catch {}
+}
+
+const plugin: Plugin = {
+  name: "webtmux-monitor",
+  async onPreToolUse({ tool, params, workdir }) {
+    await postEvent("PreToolUse", tool, params, workdir);
+  },
+  async onPostToolUse({ tool, params, workdir }) {
+    await postEvent("PostToolUse", tool, params, workdir);
+  },
+  async onSessionEnd({ workdir }) {
+    await postEvent("SessionEnd", undefined, undefined, workdir);
+  },
+};
+
+export default plugin;
+`;
   }
 }
 

@@ -239,7 +239,7 @@ export default function AdvancedSettings({ onClose, embedded = false }) {
 
       <div className="border-t border-gray-700 pt-4">
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm text-gray-300">Claude 监控模型</h3>
+          <h3 className="text-sm text-gray-300">AI 分析引擎模型</h3>
           <button
             onClick={handleTestClaudeModels}
             disabled={testingModels}
