@@ -156,7 +156,7 @@ export default function App() {
   const [goalInput, setGoalInput] = useState('');
   const [generatingGoal, setGeneratingGoal] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsDefaultTab, setSettingsDefaultTab] = useState('ai'); // 设置页面默认标签页
+  const [settingsDefaultTab, setSettingsDefaultTab] = useState('api'); // 设置页面默认标签页
   const [showScheduleManager, setShowScheduleManager] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [creatingProjectPaths, setCreatingProjectPaths] = useState(new Set()); // 正在创建会话的项目路径
@@ -181,6 +181,7 @@ export default function App() {
     return saved === 'true';
   });
   const [aiStatusMap, setAiStatusMap] = useState({});
+  const [hookStateMap, setHookStateMap] = useState({}); // sessionId -> { state, event, ts }
   const [monitorPlugins, setMonitorPlugins] = useState([]); // 监控策略插件列表
   const [sessionMemory, setSessionMemory] = useState({}); // 会话内存占用 {sessionId: {memory, processCount}}
   const [processDetails, setProcessDetails] = useState(null); // 进程详情弹窗 {sessionId, details, position}
@@ -675,6 +676,14 @@ export default function App() {
       } else if (data.status === 'healthy' && data.consecutiveErrors === 0) {
         addDebugLog('healthRecovered', { message: t('aiPanel.serviceRecovered') });
       }
+    });
+
+    // 监听 Hook 事件（官方 Hooks API）
+    socket.on('session:hookEvent', ({ sessionId, event }) => {
+      setHookStateMap(prev => ({
+        ...prev,
+        [sessionId]: { state: event === 'Stop' ? 'idle' : event === 'PreToolUse' ? 'working' : 'post', event, ts: Date.now() }
+      }));
     });
 
     // 监听下次 AI 分析时间
@@ -2252,35 +2261,27 @@ export default function App() {
                 {aiStatusLoading[currentSession.id] ? t('aiPanel.analyzing') : t('aiPanel.waitingAiAnalysis')}
               </div>
             )}
-            {/* 智能监控 API 供应商信息 - 始终在底部 */}
-            {aiStatusMap[currentSession.id]?.providerName && (
-              <div className="ai-provider-info" style={{
-                padding: '8px',
-                background: '#1a1a2e',
-                borderRadius: '6px',
-                fontSize: '11px',
-                color: '#888'
-              }}>
-                <div style={{ marginBottom: '4px' }}>
-                  <span style={{ color: '#aaa' }}>{t('aiPanel.monitoringProvider')}: </span>
-                  <span style={{ color: '#10b981', fontWeight: 'bold' }}>
-                    {aiStatusMap[currentSession.id].providerName}
-                  </span>
+            {/* Hook 状态信息 */}
+            {(() => {
+              const hk = hookStateMap[currentSession.id];
+              const stateColor = hk?.state === 'working' ? '#10b981' : hk?.state === 'idle' ? '#6b7280' : '#f59e0b';
+              const stateLabel = hk?.state === 'working' ? '工具执行中' : hk?.state === 'idle' ? '等待中' : hk?.state === 'post' ? '工具完成' : '未收到事件';
+              const lastEventLabel = hk?.event === 'PreToolUse' ? 'PreToolUse' : hk?.event === 'PostToolUse' ? 'PostToolUse' : hk?.event === 'Stop' ? 'Stop' : '-';
+              const lastTime = hk?.ts ? new Date(hk.ts).toLocaleTimeString() : '-';
+              return (
+                <div style={{ padding: '8px', background: '#1a1a2e', borderRadius: '6px', fontSize: '11px', color: '#888' }}>
+                  <div style={{ marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <span style={{ color: '#aaa' }}>Hooks 监控:</span>
+                    <span style={{ color: stateColor, fontWeight: 'bold' }}>{stateLabel}</span>
+                    {hk && <span style={{ color: '#444', fontSize: '10px' }}>({lastEventLabel})</span>}
+                  </div>
+                  <div>
+                    <span style={{ color: '#aaa' }}>最后事件: </span>
+                    <span style={{ color: '#6b7280', fontFamily: 'monospace' }}>{lastTime}</span>
+                  </div>
                 </div>
-                <div style={{ wordBreak: 'break-all', marginBottom: '4px' }}>
-                  <span style={{ color: '#aaa' }}>API URL: </span>
-                  <span style={{ color: '#6b7280', fontFamily: 'monospace', fontSize: '10px' }}>
-                    {aiStatusMap[currentSession.id].providerUrl}
-                  </span>
-                </div>
-                <div>
-                  <span style={{ color: '#aaa' }}>{t('aiPanel.model')}: </span>
-                  <span style={{ color: '#f59e0b', fontFamily: 'monospace', fontSize: '10px' }}>
-                    {aiStatusMap[currentSession.id].providerModel || defaultModel}
-                  </span>
-                </div>
-              </div>
-            )}
+              );
+            })()}
           </div>
           <div className="ai-panel-footer">
             <button
@@ -2298,7 +2299,18 @@ export default function App() {
             </button>
             <button
               className="btn btn-secondary btn-small"
-              onClick={() => socket.emit('ai:requestStatus', { sessionId: currentSession.id })}
+              onClick={async () => {
+                setAiStatusLoading(prev => ({ ...prev, [currentSession.id]: true }));
+                try {
+                  const res = await fetch(`/api/sessions/${currentSession.id}/hook-activity`);
+                  const data = await res.json();
+                  setAiStatusMap(prev => ({ ...prev, [currentSession.id]: data }));
+                } catch (e) {
+                  console.error('[立即分析] hook-activity 失败:', e);
+                } finally {
+                  setAiStatusLoading(prev => ({ ...prev, [currentSession.id]: false }));
+                }
+              }}
               disabled={aiStatusLoading[currentSession.id]}
             >
               {t('controls.analyzeNow')}
@@ -3100,7 +3112,7 @@ function SubscriptionPanel() {
   );
 }
 
-function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, onTunnelUrlChange, socket, defaultTab = 'ai', onPlayback }) {
+function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, onTunnelUrlChange, socket, defaultTab = 'api', onPlayback }) {
   const { t, language, setLanguage: changeLanguage } = useTranslation();
   const [activeTab, setActiveTab] = useState(defaultTab);
   const [authUsername, setAuthUsername] = useState(auth.username || 'admin');
@@ -3380,12 +3392,6 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
       <div className={`modal settings-modal ${activeTab === 'api' ? 'api-tab' : ''}`}>
         <div className="settings-tabs">
           <button
-            className={`tab-btn ${activeTab === 'ai' ? 'active' : ''}`}
-            onClick={() => setActiveTab('ai')}
-          >
-            {t('settings.ai')}
-          </button>
-          <button
             className={`tab-btn ${activeTab === 'api' ? 'active' : ''}`}
             onClick={() => setActiveTab('api')}
           >
@@ -3448,409 +3454,6 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
         </div>
 
         <div className="settings-content">
-        {activeTab === 'ai' && (
-          <form onSubmit={(e) => {
-            e.preventDefault();
-            onSave();
-            if (onTunnelUrlChange) {
-              onTunnelUrlChange(localTunnelUrl);
-            }
-          }}>
-            {/* 供应商选择 */}
-            <div className="form-group" style={{ marginBottom: '20px' }}>
-              <label>AI 供应商</label>
-
-              {/* Cli Only 警告提示 */}
-              <div style={{
-                background: 'rgba(127, 29, 29, 0.2)',
-                border: '1px solid rgba(239, 68, 68, 0.5)',
-                borderRadius: '6px',
-                padding: '12px',
-                marginBottom: '12px',
-                marginTop: '8px'
-              }}>
-                <p style={{
-                  color: '#f87171',
-                  fontSize: '13px',
-                  lineHeight: '1.6',
-                  margin: 0
-                }}>
-                  {t('provider.cliOnlyWarning')}
-                </p>
-              </div>
-
-              <select
-                value={selectedProviderId}
-                onChange={(e) => handleProviderSelect(e.target.value)}
-                size={Math.min(12, 1 + providers.length)}
-                style={{
-                  width: '100%',
-                  padding: '8px',
-                  background: '#2a2a2a',
-                  border: '1px solid #444',
-                  borderRadius: '4px',
-                  color: '#fff',
-                  minHeight: '120px',
-                  maxHeight: '240px',
-                  overflowY: 'auto'
-                }}
-              >
-                <option value="">-- 手动配置 --</option>
-                {providers.filter(p => p.appType === 'claude').length > 0 && (
-                  <optgroup label="Claude">
-                    {providers.filter(p => p.appType === 'claude').map(provider => (
-                      <option key={`${provider.appType}-${provider.id}`} value={`${provider.appType}:${provider.id}`}>
-                        {provider.name}{selectedProviderId === `${provider.appType}:${provider.id}` ? ' ✓' : ''}
-                      </option>
-                    ))}
-                  </optgroup>
-                )}
-                {providers.filter(p => p.appType === 'codex').length > 0 && (
-                  <optgroup label="Codex">
-                    {providers.filter(p => p.appType === 'codex').map(provider => (
-                      <option key={`${provider.appType}-${provider.id}`} value={`${provider.appType}:${provider.id}`}>
-                        {provider.name}{selectedProviderId === `${provider.appType}:${provider.id}` ? ' ✓' : ''}
-                      </option>
-                    ))}
-                  </optgroup>
-                )}
-                {providers.filter(p => p.appType === 'gemini').length > 0 && (
-                  <optgroup label="Gemini">
-                    {providers.filter(p => p.appType === 'gemini').map(provider => (
-                      <option key={`${provider.appType}-${provider.id}`} value={`${provider.appType}:${provider.id}`}>
-                        {provider.name}{selectedProviderId === `${provider.appType}:${provider.id}` ? ' ✓' : ''}
-                      </option>
-                    ))}
-                  </optgroup>
-                )}
-              </select>
-            </div>
-
-            {/* 供应商配置信息卡片 */}
-            {selectedProviderId && selectedProviderId !== '' && (() => {
-              const [appType, providerId] = selectedProviderId.split(':');
-              const provider = providers.find(p => p.appType === appType && p.id === providerId);
-
-              if (!provider) {
-                console.log('[SettingsModal] 找不到供应商:', { selectedProviderId, appType, providerId, providersCount: providers.length });
-                return null;
-              }
-
-              // 使用 API 返回的扁平字段（已从 CC Switch 格式转换）
-              const apiUrl = provider.url || '未配置';
-              const apiKey = provider.apiKey || '';
-              const apiType = provider.apiType || (appType === 'codex' ? 'openai' : 'claude');
-              // 根据 apiType 设置默认模型
-              const model = provider.model || (apiType === 'openai' ? 'gpt-4o' : defaultModel);
-
-              return (
-                <div style={{
-                  padding: '16px',
-                  background: '#1a1a1a',
-                  borderRadius: '8px',
-                  border: '2px solid #10b981',
-                  marginBottom: '16px'
-                }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
-                    <span style={{ fontSize: '14px', fontWeight: 'bold', color: '#10b981' }}>
-                      {provider.name}
-                    </span>
-                    <span style={{ fontSize: '11px', background: '#10b98120', color: '#10b981', padding: '2px 8px', borderRadius: '4px' }}>
-                      {appType.toUpperCase()}
-                    </span>
-                    <span style={{ fontSize: '11px', background: '#3b82f620', color: '#3b82f6', padding: '2px 8px', borderRadius: '4px' }}>
-                      {apiType === 'claude' ? 'Claude API' : 'OpenAI API'}
-                    </span>
-                  </div>
-                  <div style={{ fontSize: '12px', color: '#888', lineHeight: '1.6' }}>
-                    <div style={{ marginBottom: '6px' }}>
-                      <span style={{ color: '#aaa' }}>API URL: </span>
-                      <span style={{ color: '#fff', fontFamily: 'monospace', fontSize: '11px' }}>
-                        {apiUrl}
-                      </span>
-                    </div>
-                    <div style={{ marginBottom: '6px' }}>
-                      <span style={{ color: '#aaa' }}>API Key: </span>
-                      <span style={{ color: '#fff', fontFamily: 'monospace', fontSize: '11px' }}>
-                        {apiKey ? `${apiKey.substring(0, 8)}...` : '未配置'}
-                      </span>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span style={{ color: '#aaa' }}>模型: </span>
-                      <select
-                        value={testModel || model}
-                        onChange={(e) => {
-                          const newModel = e.target.value;
-                          setTestModel(newModel);
-                          // 同时更新 settings 中的模型配置
-                          if (appType === 'claude') {
-                            onChange(prev => ({
-                              ...prev,
-                              claude: { ...prev.claude, model: newModel }
-                            }));
-                          } else if (appType === 'codex') {
-                            onChange(prev => ({
-                              ...prev,
-                              openai: { ...prev.openai, model: newModel }
-                            }));
-                          }
-                        }}
-                        style={{
-                          padding: '4px 8px',
-                          background: '#2a2a2a',
-                          color: '#fff',
-                          border: '1px solid #444',
-                          borderRadius: '4px',
-                          fontSize: '11px',
-                          fontFamily: 'monospace',
-                          cursor: 'pointer',
-                          minWidth: '180px'
-                        }}
-                      >
-                        {/* 当前配置的模型（如果不在预设列表中） */}
-                        {model && !MODEL_OPTIONS[appType]?.find(m => m.id === model) && (
-                          <option value={model}>{model} (当前)</option>
-                        )}
-                        {/* 预设模型列表 */}
-                        {MODEL_OPTIONS[appType]?.map(m => (
-                          <option key={m.id} value={m.id}>
-                            {m.name}{m.id === model ? ' (当前)' : ''}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                  {/* 测试按钮和结果 */}
-                  <div style={{ marginTop: '12px', display: 'flex', alignItems: 'center', gap: '12px' }}>
-                    <button
-                      type="button"
-                      onClick={testSelectedProvider}
-                      disabled={providerTestStatus === 'testing'}
-                      style={{
-                        padding: '6px 16px',
-                        background: providerTestStatus === 'testing' ? '#4b5563' : '#3b82f6',
-                        color: '#fff',
-                        border: 'none',
-                        borderRadius: '4px',
-                        cursor: providerTestStatus === 'testing' ? 'not-allowed' : 'pointer',
-                        fontSize: '12px'
-                      }}
-                    >
-                      {providerTestStatus === 'testing' ? t('common.testing') : t('common.test')}
-                    </button>
-                    {providerTestStatus && providerTestStatus !== 'testing' && (
-                      <span style={{
-                        fontSize: '12px',
-                        color: providerTestStatus === 'success' ? '#10b981' : '#ef4444'
-                      }}>
-                        {providerTestMessage}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* 手动配置表单 */}
-            {selectedProviderId === '' && (
-              <>
-                <div className="form-group">
-                  <label>API 类型</label>
-                  <select
-                    value={settings.apiType || 'openai'}
-                    onChange={(e) => updateField('apiType', e.target.value)}
-                  >
-                    <option value="openai">OpenAI 兼容</option>
-                    <option value="claude">Claude 原生</option>
-                  </select>
-                </div>
-
-                {settings.apiType === 'openai' && (
-                  <fieldset style={{
-                    border: '2px solid #10b981',
-                    borderRadius: '8px',
-                    padding: '12px',
-                    marginBottom: '16px'
-                  }}>
-                    <legend style={{ color: '#10b981', fontSize: '13px', padding: '0 8px' }}>
-                      OpenAI 配置
-                    </legend>
-                    <div className="form-group">
-                      <label>API URL</label>
-                      <input
-                        type="text"
-                        value={settings.openai?.apiUrl || ''}
-                        onChange={(e) => updateField('openai', { ...settings.openai, apiUrl: e.target.value })}
-                        placeholder="https://api.openai.com/v1/chat/completions"
-                      />
-                    </div>
-                    <div className="form-group">
-                      <label>API Key（可选）</label>
-                      <input
-                        type="password"
-                        value={settings.openai?.apiKey || ''}
-                        onChange={(e) => updateField('openai', { ...settings.openai, apiKey: e.target.value })}
-                        placeholder="sk-... 或留空"
-                      />
-                    </div>
-                    <div className="form-group">
-                      <label>模型</label>
-                      <input
-                        type="text"
-                        value={settings.openai?.model || ''}
-                        onChange={(e) => updateField('openai', { ...settings.openai, model: e.target.value })}
-                        placeholder="opus / sonnet / gpt-4o 等"
-                      />
-                    </div>
-                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '12px' }}>
-                      <button
-                        type="button"
-                        onClick={() => testApi('openai')}
-                        disabled={testStatus.openai === 'testing'}
-                        style={{
-                          padding: '6px 12px',
-                          background: testStatus.openai === 'success' ? '#10b981' : testStatus.openai === 'error' ? '#ef4444' : '#3b82f6',
-                          color: '#fff',
-                          border: 'none',
-                          borderRadius: '4px',
-                          cursor: testStatus.openai === 'testing' ? 'wait' : 'pointer',
-                          fontSize: '12px'
-                        }}
-                      >
-                        {testStatus.openai === 'testing' ? t('common.testing') : t('common.test')}
-                      </button>
-                      {testMessage.openai && (
-                        <span style={{
-                          fontSize: '12px',
-                          color: testStatus.openai === 'success' ? '#10b981' : testStatus.openai === 'error' ? '#ef4444' : '#888'
-                        }}>
-                          {testMessage.openai}
-                        </span>
-                      )}
-                    </div>
-                  </fieldset>
-                )}
-
-                {settings.apiType === 'claude' && (
-                  <fieldset style={{
-                    border: '2px solid #8b5cf6',
-                    borderRadius: '8px',
-                    padding: '12px',
-                    marginBottom: '16px'
-                  }}>
-                    <legend style={{ color: '#8b5cf6', fontSize: '13px', padding: '0 8px' }}>
-                      Claude 配置{settings._providerName ? ` - ${settings._providerName}` : ''}
-                    </legend>
-                    <div className="form-group">
-                      <label>API URL</label>
-                      <input
-                        type="text"
-                        value={settings.claude?.apiUrl || ''}
-                        onChange={(e) => updateField('claude', { ...settings.claude, apiUrl: e.target.value })}
-                        placeholder="https://api.anthropic.com/v1/messages"
-                      />
-                    </div>
-                    <div className="form-group">
-                      <label>API Key</label>
-                      <input
-                        type="password"
-                        value={settings.claude?.apiKey || ''}
-                        onChange={(e) => updateField('claude', { ...settings.claude, apiKey: e.target.value })}
-                        placeholder="sk-..."
-                      />
-                    </div>
-                    <div className="form-group">
-                      <label>模型</label>
-                      <input
-                        type="text"
-                        value={settings.claude?.model || ''}
-                        onChange={(e) => updateField('claude', { ...settings.claude, model: e.target.value })}
-                        placeholder="claude-sonnet-4-5-20250929 等"
-                      />
-                    </div>
-                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginTop: '12px' }}>
-                      <button
-                        type="button"
-                        onClick={() => testApi('claude')}
-                        disabled={testStatus.claude === 'testing'}
-                        style={{
-                          padding: '6px 12px',
-                          background: testStatus.claude === 'success' ? '#10b981' : testStatus.claude === 'error' ? '#ef4444' : '#3b82f6',
-                          color: '#fff',
-                          border: 'none',
-                          borderRadius: '4px',
-                          cursor: testStatus.claude === 'testing' ? 'wait' : 'pointer',
-                          fontSize: '12px'
-                        }}
-                      >
-                        {testStatus.claude === 'testing' ? t('common.testing') : t('common.test')}
-                      </button>
-                      {testMessage.claude && (
-                        <span style={{
-                          fontSize: '12px',
-                          color: testStatus.claude === 'success' ? '#10b981' : testStatus.claude === 'error' ? '#ef4444' : '#888'
-                        }}>
-                          {testMessage.claude}
-                        </span>
-                      )}
-                    </div>
-                  </fieldset>
-                )}
-              </>
-            )}
-
-            {/* 通用设置 */}
-            <div className="form-row">
-              <div className="form-group half">
-                <label>Max Tokens</label>
-                <input
-                  type="number"
-                  value={settings.maxTokens || 500}
-                  onChange={(e) => updateField('maxTokens', parseInt(e.target.value) || 500)}
-                  min="100"
-                  max="4096"
-                />
-              </div>
-              <div className="form-group half">
-                <label>Temperature</label>
-                <input
-                  type="number"
-                  value={settings.temperature || 0.7}
-                  onChange={(e) => updateField('temperature', parseFloat(e.target.value) || 0.7)}
-                  min="0"
-                  max="1"
-                  step="0.1"
-                />
-              </div>
-            </div>
-
-            {/* AI 建议弹窗开关 */}
-            <div className="form-group" style={{ marginTop: '16px' }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
-                <input
-                  type="checkbox"
-                  checked={settings.showSuggestions || false}
-                  onChange={(e) => updateField('showSuggestions', e.target.checked)}
-                  style={{ width: '16px', height: '16px' }}
-                />
-                <span>显示 AI 建议弹窗</span>
-              </label>
-              <small style={{ color: '#888', fontSize: '12px', marginTop: '4px', display: 'block' }}>
-                关闭后，AI 分析结果仅在右侧面板显示，不会弹出建议卡片
-              </small>
-            </div>
-
-            <div className="modal-actions">
-              <button type="button" className="btn btn-secondary" onClick={onClose}>
-                取消
-              </button>
-              <button type="submit" className="btn btn-primary">
-                保存
-              </button>
-            </div>
-          </form>
-        )}
-
         {activeTab === 'api' && (
           <div style={{
             height: '600px',

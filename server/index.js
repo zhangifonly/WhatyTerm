@@ -697,6 +697,76 @@ app.get('/hooks/status', (req, res) => {
   });
 });
 
+// Hook 活动分析接口：替代 AI 截图分析，直接解析 hook 日志
+app.get('/api/sessions/:sessionId/hook-activity', (req, res) => {
+  const session = sessionManager.getSession(req.params.sessionId);
+  if (!session) return res.status(404).json({ error: 'session not found' });
+
+  const workingDir = session.workingDir || '';
+  const rawLog = hookServer ? hookServer.recentLogs(100) : '';
+  const lines = rawLog.split('\n').filter(Boolean);
+
+  // 解析日志行：`ISO_TS [EVENT] tool=X file=Y cwd=Z`
+  const events = lines.map(line => {
+    const m = line.match(/^(\S+) \[(\w+)\](?: tool=(\S+))?(?: file=(\S+))?(?: cwd=(.+))?$/);
+    if (!m) return null;
+    return { ts: m[1], event: m[2], tool: m[3], file: m[4], cwd: m[5] };
+  }).filter(Boolean);
+
+  // 过滤属于当前 session 的事件（cwd 前缀匹配）
+  const sessionEvents = workingDir
+    ? events.filter(e => e.cwd && e.cwd.startsWith(workingDir))
+    : events;
+
+  const last = sessionEvents[sessionEvents.length - 1];
+  const lastStop = [...sessionEvents].reverse().find(e => e.event === 'Stop');
+  const lastTool = [...sessionEvents].reverse().find(e => e.event === 'PostToolUse' && e.tool);
+
+  // 映射成面板字段
+  const toolLabel = { Edit: '编辑文件', Write: '写入文件', Bash: '执行命令',
+    Read: '读取文件', WebFetch: '网络请求', WebSearch: '网络搜索' };
+
+  let currentState = '无近期活动';
+  let recentAction = '无';
+  let needsAction = false;
+
+  if (!last) {
+    currentState = '尚未收到 Hook 事件';
+  } else if (last.event === 'Stop') {
+    currentState = 'Claude Code 已停止，等待指令';
+    needsAction = true;
+    recentAction = lastTool ? `${toolLabel[lastTool.tool] || lastTool.tool}${lastTool.file ? ': ' + lastTool.file.split('/').pop() : ''}` : '无';
+  } else if (last.event === 'PreToolUse') {
+    const tl = toolLabel[last.tool] || last.tool || '工具';
+    currentState = `正在${tl}${last.file ? '：' + last.file.split('/').pop() : ''}`;
+    recentAction = last.tool || '未知工具';
+  } else if (last.event === 'PostToolUse') {
+    const tl = toolLabel[last.tool] || last.tool || '工具';
+    currentState = `${tl}完成，继续处理中`;
+    recentAction = `${tl}${last.file ? '：' + last.file.split('/').pop() : ''}`;
+  }
+
+  // 最近 10 条工具调用（用于面板展示）
+  const recentTools = sessionEvents.filter(e => e.event === 'PostToolUse' && e.tool)
+    .slice(-10)
+    .map(e => ({ tool: e.tool, file: e.file, ts: e.ts }));
+
+  res.json({
+    sessionId: req.params.sessionId,
+    currentState,
+    recentAction,
+    needsAction,
+    actionType: needsAction ? 'wait' : null,
+    suggestedAction: null,
+    workingDir,
+    recentTools,
+    hookEventCount: sessionEvents.length,
+    lastEventTime: last?.ts || null,
+    updatedAt: Date.now(),
+    _source: 'hooks',
+  });
+});
+
 /** 将 HookServer 事件接入 session 状态 + TaskOrchestrator */
 function _wireHookServer() {
   if (!hookServer) return;
@@ -3160,33 +3230,17 @@ async function runBackgroundAutoAction() {
 
         // 检查是否需要 AI 错误分析（检测到 API 错误但需要判断类型）
         if (status.needsErrorAnalysis && status.errorContent) {
-          console.log(`[后台自动操作] 会话 ${session.name}: 需要 AI 分析错误类型`);
-          try {
-            const errorAnalysis = await aiEngine.analyzeApiError(status.errorContent);
-            console.log(`[后台自动操作] AI 错误分析结果: ${errorAnalysis.errorType} -> ${errorAnalysis.action}`);
-
-            // 合并分析结果到 status
-            status = {
-              ...status,
-              ...errorAnalysis,
-              needsAction: true,
-              actionType: 'auto_fix',
-              actionReason: `AI分析: ${errorAnalysis.reason}`,
-              suggestion: errorAnalysis.reason
-            };
-          } catch (err) {
-            console.error(`[后台自动操作] AI 错误分析失败:`, err.message);
-            // 分析失败时使用默认策略
-            status = {
-              ...status,
-              shouldAutoFix: true,
-              autoFixAction: 'wait_and_retry',
-              needsAction: true,
-              actionType: 'auto_fix',
-              actionReason: 'AI 分析失败，默认等待重试',
-              suggestion: '等待 60 秒后重试'
-            };
-          }
+          // 无 AI API，直接走默认错误处理策略
+          console.log(`[后台自动操作] 会话 ${session.name}: 检测到 API 错误，使用默认重试策略`);
+          status = {
+            ...status,
+            shouldAutoFix: true,
+            autoFixAction: 'wait_and_retry',
+            needsAction: true,
+            actionType: 'auto_fix',
+            actionReason: '检测到 API 错误，等待重试',
+            suggestion: '等待重试'
+          };
         }
 
         // 检查是否需要会话文件修复（thinking block 相关错误）
@@ -3424,32 +3478,28 @@ async function runBackgroundAutoAction() {
         continue;
       }
 
-      // preAnalyze 失败，需要 AI 分析
-      // 检查 AI 服务健康状态
-      if (shouldSkipAiRequest()) {
-        console.log(`[后台自动操作] 会话 ${session.name}: AI 服务故障，跳过分析`);
-        session.isAutoActioning = false;
-        continue;
-      }
-
+      // preAnalyze 失败 → 使用 Hook 状态作为 fallback（无需 AI API）
       // 跳过正在修复中的会话（修复逻辑已独立处理）
       if (session.isFixingClaudeError) {
         session.isAutoActioning = false;
         continue;
       }
 
-      console.log(`[后台自动操作] 会话 ${session.name}: 分析终端状态...`);
-      const status = await aiEngine.analyzeStatus(
-        terminalContent,
-        session.aiType || 'claude',
-        sessionData.id,
-        session.tmuxSessionName,
-        projectContext,
-        sessionData.monitorPluginId
-      );
-
-      // AI 分析成功，更新健康状态（区分AI判断和程序预判断）
-      updateAiHealthState(true, null, status?.preAnalyzed || false, sessionData.id);
+      const hookAge = session.lastHookEventAt ? Date.now() - session.lastHookEventAt : Infinity;
+      const hookState = session.hookState || 'unknown';
+      const status = {
+        currentState: hookState === 'working' ? '工具执行中（Hook 检测）'
+          : hookState === 'idle' ? '等待指令（Hook 检测）'
+          : '状态未知',
+        needsAction: hookState === 'idle' && hookAge > 5000,
+        actionType: hookState === 'idle' ? 'input' : null,
+        suggestedAction: hookState === 'idle' ? '继续' : null,
+        recentAction: hookState,
+        preAnalyzed: true,
+        _source: 'hook_fallback',
+      };
+      console.log(`[后台自动操作] 会话 ${session.name}: hook fallback - ${status.currentState}`);
+      updateAiHealthState(true, null, true, sessionData.id);
 
       // 更新会话信息（工作目录、名称、项目说明）
       // 获取当前工作目录
@@ -4976,6 +5026,11 @@ io.on('connection', (socket) => {
             io.emit('sessions:updated', sessionManager.listSessions());
             io.to(`session:${session.id}`).emit('session:updated', session.toJSON());
             console.log(`[CLI检测] 已更新 ${cliType} 供应商: ${provider.name}`);
+          }
+
+          // OpenCode：自动部署监控插件到项目目录
+          if (cliType === 'opencode' && hookServer && cliWorkingDir) {
+            hookServer.deployOpenCodePlugin(cliWorkingDir);
           }
         }
 

@@ -37,7 +37,7 @@
     "startHint": "Select a session or click '+' to create a new session to start"
   },
   "settings": {
-    "ai": "AI Monitoring",
+    "ai": "AI Engine",
     "api": "API Configuration",
     "auth": "Access Control",
     "interface": "Interface",
