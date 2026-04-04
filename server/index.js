@@ -3129,9 +3129,14 @@ async function runBackgroundAutoAction() {
     const session = sessionManager.getSession(sessionData.id);
     if (!session || session.isAutoActioning) continue;
 
-    // Hook 数据新鲜（30s内）且状态为 working → 跳过本轮，Claude 正在工作
+    // hookState === 'working' 表示 PreToolUse 已触发但 PostToolUse/Stop 尚未到来
+    // 工具可能执行几分钟（bash 命令等），不能用时间限制，直接跳过直到收到完成事件
+    if (session.hookState === 'working') {
+      continue;
+    }
+    // hookState === 'idle' 但事件很新（5s内），也跳过避免误判
     const hookAge = Date.now() - (session.lastHookEventAt || 0);
-    if (hookAge < 30000 && session.hookState === 'working') {
+    if (session.hookState === 'idle' && hookAge < 5000) {
       continue;
     }
 
