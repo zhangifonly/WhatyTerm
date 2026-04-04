@@ -95,6 +95,7 @@ import { getTerminalRecorder } from './services/TerminalRecorder.js';
 import subscriptionService from './services/SubscriptionService.js';
 import { getProjectRecordingService } from './services/ProjectRecordingService.js';
 import cliRegistry from './services/CliRegistry.js';
+import HookServer from './services/HookServer.js';
 import cliLearner from './services/CliLearner.js';
 import tokenStatsService from './services/TokenStatsService.js';
 import builtinProviderDB from './services/BuiltinProviderDB.js';
@@ -673,6 +674,40 @@ const sessionMiddleware = session({
 app.use(express.json());
 app.use(sessionMiddleware);
 
+// ── Claude Code 官方 Hooks 接收端点 ──────────────────────────────
+app.post('/hooks', (req, res) => {
+  if (!hookServer?.validateToken(req.headers['x-webtmuxtoken'])) {
+    return res.status(403).end();
+  }
+  try { hookServer.dispatch(req.body); } catch {}
+  res.status(200).end();
+});
+
+/** 将 HookServer 事件接入 session 状态 + TaskOrchestrator */
+function _wireHookServer() {
+  if (!hookServer) return;
+
+  hookServer.on('*', (event) => {
+    const { hook_event_name: ev, cwd, session_id: claudeId } = event;
+    // 找到对应 WhatyTerm session（按 workingDir 匹配）
+    const sessions = sessionManager?.listSessions() || [];
+    const session = sessions.find(s => s.workingDir && cwd?.startsWith(s.workingDir));
+    if (!session) return;
+
+    // 更新 session 的 hook 状态（供 runBackgroundAutoAction 使用）
+    session.lastHookEventAt = Date.now();
+    session.hookState = (ev === 'PreToolUse') ? 'working' : (ev === 'Stop' ? 'idle' : session.hookState);
+
+    // Team Member 事件转发给 TaskOrchestrator
+    if (session.teamRole === 'member' && taskOrchestrator) {
+      taskOrchestrator.onHookEvent(event, session);
+    }
+
+    // 广播给前端（可选，用于实时状态显示）
+    io.to(`session:${session.id}`).emit('session:hookEvent', { sessionId: session.id, event: ev });
+  });
+}
+
 // SessionManager 需要异步初始化（等待 mux-server 连接）
 let sessionManager = null;
 const historyLogger = new HistoryLogger();
@@ -687,6 +722,7 @@ const healthCheckScheduler = new HealthCheckScheduler(io);
 const scheduleManager = new ScheduleManager();
 let teamManager = null; // TeamManager 在 SessionManager 初始化后创建
 let taskOrchestrator = null; // TaskOrchestrator 在 TeamManager 初始化后创建
+let hookServer = null; // HookServer：Claude Code 官方 Hooks 集成
 
 // 异步初始化 SessionManager
 let sessionManagerReady = false;
@@ -701,6 +737,9 @@ let sessionManagerReady = false;
     taskOrchestrator = new TaskOrchestrator(teamManager, sessionManager, aiEngine);
     console.log('[Server] TaskOrchestrator 初始化完成');
     teamManager.recoverStaleTeams();
+    hookServer = new HookServer(currentPort);
+    hookServer.install();
+    _wireHookServer();
   } catch (err) {
     console.error('[Server] SessionManager 初始化失败:', err);
     // 回退到同步创建（不使用 mux-server 模式）
@@ -710,6 +749,9 @@ let sessionManagerReady = false;
     teamManager = new TeamManager(sessionManager.db, sessionManager, aiEngine);
     taskOrchestrator = new TaskOrchestrator(teamManager, sessionManager, aiEngine);
     teamManager.recoverStaleTeams();
+    hookServer = new HookServer(currentPort);
+    hookServer.install();
+    _wireHookServer();
   }
 })();
 
@@ -3002,6 +3044,12 @@ async function runBackgroundAutoAction() {
 
     const session = sessionManager.getSession(sessionData.id);
     if (!session || session.isAutoActioning) continue;
+
+    // Hook 数据新鲜（30s内）且状态为 working → 跳过本轮，Claude 正在工作
+    const hookAge = Date.now() - (session.lastHookEventAt || 0);
+    if (hookAge < 30000 && session.hookState === 'working') {
+      continue;
+    }
 
     // Team Member 会话交给 TaskOrchestrator 处理
     if (session.teamId && session.teamRole === 'member' && taskOrchestrator) {

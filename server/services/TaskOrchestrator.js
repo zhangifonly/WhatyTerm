@@ -47,6 +47,55 @@ class TaskOrchestrator {
     this.completedTeams = new Set();
   }
 
+  // ==================== 官方 Hook 事件接收 ====================
+
+  /**
+   * 由 _wireHookServer 调用，处理 Claude Code 官方 Hook 事件。
+   * 比 1 秒轮询更精确：PreToolUse = 正在工作，Stop = 已停止。
+   * @param {Object} event - hook payload
+   * @param {Object} session - WhatyTerm session 对象
+   */
+  onHookEvent(event, session) {
+    const state = this._getOrCreateState(session);
+    const { hook_event_name: ev, tool_name, tool_input } = event;
+
+    switch (ev) {
+      case 'PreToolUse':
+        // Claude 正在调用工具 → 肯定在工作，重置空闲计数
+        state.idleCount = 0;
+        state.lastActivityAt = Date.now();
+        if (state.phase === 'possibly_done') state.phase = 'working';
+        break;
+
+      case 'PostToolUse':
+        state.lastActivityAt = Date.now();
+        // 记录实际修改的文件（比 AI 猜测更准确）
+        if ((tool_name === 'Edit' || tool_name === 'Write') && tool_input?.file_path) {
+          if (!state.actualFilesModified) state.actualFilesModified = [];
+          if (!state.actualFilesModified.includes(tool_input.file_path)) {
+            state.actualFilesModified.push(tool_input.file_path);
+          }
+          // 更新文件锁为实际修改的文件
+          if (state.taskId) {
+            this.fileLocks.set(tool_input.file_path, {
+              sessionId: session.id, taskId: state.taskId, lockedAt: Date.now()
+            });
+          }
+        }
+        break;
+
+      case 'Stop':
+        // Claude 停下来了 → 直接进入完成检测，不等 idleCount 累积
+        if (state.phase === 'working' || state.phase === 'assigned') {
+          state.phase = 'possibly_done';
+          state.idleCount = 10; // 跳过等待，立即触发完成检测
+          state.completionCheckCount = 0;
+          console.log(`[TaskOrchestrator] ${session.name}: Stop 事件 → 进入完成检测`);
+        }
+        break;
+    }
+  }
+
   // ==================== 核心入口 ====================
 
   /**
