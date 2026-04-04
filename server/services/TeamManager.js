@@ -74,6 +74,7 @@ class TeamManager {
       ['team_tasks', 'files_modified', "TEXT DEFAULT '[]'"],
       ['team_tasks', 'assigned_at', 'TEXT'],
       ['team_tasks', 'completed_at', 'TEXT'],
+      ['teams', 'member_branches', "TEXT DEFAULT '{}'"],  // sessionId -> branchName 映射
     ];
     for (const [table, col, type] of migrateCols) {
       try {
@@ -108,6 +109,9 @@ class TeamManager {
 
     // 2. 创建 Teammate Sessions
     const memberSessionIds = [];
+    const memberBranches = {}; // sessionId -> branchName
+    const shortId = teamId.slice(0, 8);
+
     for (let i = 0; i < maxMembers; i++) {
       const memberSession = await this.sessionManager.createSession({
         name: `${name}-agent${i + 1}`,
@@ -120,6 +124,10 @@ class TeamManager {
       memberSession.autoActionEnabled = true;
       this.sessionManager.updateSession(memberSession);
       memberSessionIds.push(memberSession.id);
+
+      // 为每个 Member 分配独立 git 分支名
+      const branchName = `team-${shortId}-agent${i + 1}`;
+      memberBranches[memberSession.id] = branchName;
     }
 
     // 3. 保存 Team 到数据库
@@ -131,18 +139,19 @@ class TeamManager {
       status: 'active',
       leadSessionId: leadSession.id,
       memberSessionIds,
+      memberBranches,
       maxMembers,
       createdAt: now,
       updatedAt: now
     };
 
     this.db.prepare(`
-      INSERT INTO teams (id, name, goal, working_dir, status, lead_session_id, member_session_ids, max_members, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO teams (id, name, goal, working_dir, status, lead_session_id, member_session_ids, member_branches, max_members, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       team.id, team.name, team.goal, team.workingDir, team.status,
       team.leadSessionId, JSON.stringify(team.memberSessionIds),
-      team.maxMembers, team.createdAt, team.updatedAt
+      JSON.stringify(team.memberBranches), team.maxMembers, team.createdAt, team.updatedAt
     );
 
     // 4. AI 分解目标为子任务（异步执行，不阻塞团队创建）
@@ -247,6 +256,9 @@ class TeamManager {
 
     // 2. 创建 Teammate Sessions 并启动 Claude
     const memberSessionIds = [];
+    const memberBranches = {};
+    const shortId = teamId.slice(0, 8);
+
     for (let i = 0; i < maxMembers; i++) {
       const memberSession = await this.sessionManager.createSession({
         name: `${teamName}-agent${i + 1}`,
@@ -261,13 +273,17 @@ class TeamManager {
       this.sessionManager.updateSession(memberSession);
       memberSessionIds.push(memberSession.id);
 
+      // 为每个 Member 分配独立 git 分支名
+      const branchName = `team-${shortId}-agent${i + 1}`;
+      memberBranches[memberSession.id] = branchName;
+
       // 回调：让 server/index.js 注册 bell/exit 回调
       if (onSessionCreated) {
         onSessionCreated(memberSession);
       }
 
-      // 在 Teammate 中启动 Claude
-      this._launchClaudeInSession(memberSession, workingDir);
+      // 在 Teammate 中启动 Claude（含 git 分支切换）
+      this._launchClaudeInSession(memberSession, workingDir, branchName);
     }
 
     // 3. 保存 Team 到数据库
@@ -279,18 +295,19 @@ class TeamManager {
       status: 'active',
       leadSessionId: existingSession.id,
       memberSessionIds,
+      memberBranches,
       maxMembers,
       createdAt: now,
       updatedAt: now
     };
 
     this.db.prepare(`
-      INSERT INTO teams (id, name, goal, working_dir, status, lead_session_id, member_session_ids, max_members, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO teams (id, name, goal, working_dir, status, lead_session_id, member_session_ids, member_branches, max_members, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       team.id, team.name, team.goal, team.workingDir, team.status,
       team.leadSessionId, JSON.stringify(team.memberSessionIds),
-      team.maxMembers, team.createdAt, team.updatedAt
+      JSON.stringify(team.memberBranches), team.maxMembers, team.createdAt, team.updatedAt
     );
 
     // 4. AI 分解目标为子任务
@@ -315,14 +332,24 @@ class TeamManager {
   /**
    * 在会话中启动 Claude Code
    * 遵循 session:createAndResume 的时序模式
+   * @param {Object} session - 目标会话
+   * @param {string} workingDir - 工作目录
+   * @param {string} [branchName] - git 分支名，若有则自动 checkout
    */
-  _launchClaudeInSession(session, workingDir) {
+  _launchClaudeInSession(session, workingDir, branchName) {
     setTimeout(() => {
       if (workingDir) {
         session.write(`cd "${workingDir}"\r`);
       }
       setTimeout(() => {
-        session.write(`claude -c\r`);
+        if (branchName) {
+          // 尝试创建分支（已存在则直接切换），忽略非 git 目录的报错
+          // 用 && claude -c 确保分支操作后再启动 Claude
+          const gitCmd = `git checkout -b "${branchName}" 2>/dev/null || git checkout "${branchName}" 2>/dev/null; claude -c\r`;
+          session.write(gitCmd);
+        } else {
+          session.write(`claude -c\r`);
+        }
       }, 300);
     }, 500);
   }
@@ -649,6 +676,7 @@ priority: 0=普通, 1=高优先级`;
       status: row.status,
       leadSessionId: row.lead_session_id,
       memberSessionIds: JSON.parse(row.member_session_ids || '[]'),
+      memberBranches: JSON.parse(row.member_branches || '{}'), // sessionId -> branchName
       maxMembers: row.max_members,
       createdAt: row.created_at,
       updatedAt: row.updated_at
@@ -694,6 +722,47 @@ priority: 0=普通, 1=高优先级`;
   _updateTeamStatus(teamId, status) {
     this.db.prepare('UPDATE teams SET status = ?, updated_at = ? WHERE id = ?')
       .run(status, new Date().toISOString(), teamId);
+  }
+
+  /**
+   * 启动恢复：清理孤儿 Team（服务重启后 session 已消失的 active teams）
+   * 在服务启动时调用一次。
+   */
+  recoverStaleTeams() {
+    const activeTeams = this.db.prepare("SELECT * FROM teams WHERE status = 'active'").all();
+    let recovered = 0;
+
+    for (const row of activeTeams) {
+      const team = this._rowToTeam(row);
+      const leadExists = !!this.sessionManager.getSession(team.leadSessionId);
+      const membersExist = team.memberSessionIds.every(
+        sid => !!this.sessionManager.getSession(sid)
+      );
+
+      if (!leadExists && !membersExist) {
+        // 所有会话都消失了，标记为 abandoned
+        this.db.prepare("UPDATE teams SET status = 'abandoned', updated_at = ? WHERE id = ?")
+          .run(new Date().toISOString(), team.id);
+        console.log(`[TeamManager] 清理孤儿 Team: ${team.name} (${team.id})`);
+        recovered++;
+      } else if (!membersExist) {
+        // Lead 还在但 Member 会话消失，降级为普通会话
+        this.db.prepare("UPDATE teams SET status = 'abandoned', updated_at = ? WHERE id = ?")
+          .run(new Date().toISOString(), team.id);
+        const leadSession = this.sessionManager.getSession(team.leadSessionId);
+        if (leadSession) {
+          leadSession.teamId = null;
+          leadSession.teamRole = null;
+          this.sessionManager.updateSession(leadSession);
+        }
+        console.log(`[TeamManager] Team ${team.name} 的 Member 会话丢失，已恢复 Lead 为普通会话`);
+        recovered++;
+      }
+    }
+
+    if (recovered > 0) {
+      console.log(`[TeamManager] 重启恢复：清理了 ${recovered} 个孤儿 Team`);
+    }
   }
 }
 
