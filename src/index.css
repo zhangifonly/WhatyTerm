@@ -2472,6 +2472,7 @@ body {
 
 .suggested-action {
   margin: 8px 0;
+  overflow: hidden;
 }
 
 .suggested-action code {
@@ -2480,7 +2481,13 @@ body {
   border-radius: 4px;
   font-family: Monaco, Menlo, monospace;
   color: hsl(var(--success));
-  font-size: 14px;
+  font-size: 12px;
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-wrap: break-word;
+  max-height: 80px;
+  overflow-y: auto;
 }
 
 .action-reason {
