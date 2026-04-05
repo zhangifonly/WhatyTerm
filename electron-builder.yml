@@ -69,8 +69,7 @@ extraResources:
       - "!@huggingface/**"
       # ── 其他确认未使用的包 ──
       - "!libphonenumber-js/**"
-      # ── node-pty 跨平台预编译二进制（只保留当前目标平台）──
-      - "!node-pty/prebuilds/linux-*/**"
+      # ── node-pty 跨平台预编译二进制（由 afterPack 钩子按目标平台清理）──
       # ── better-sqlite3 编译中间产物（只需 Release/*.node）──
       - "!better-sqlite3/build/deps/**"
       - "!better-sqlite3/build/*.mk"
