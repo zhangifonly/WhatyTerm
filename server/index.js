@@ -105,6 +105,7 @@ import TaskOrchestrator from './services/TaskOrchestrator.js';
 import progressManager from './services/ProgressManager.js';
 import PlannerService from './services/PlannerService.js';
 import EvaluatorService from './services/EvaluatorService.js';
+import telemetryService from './services/TelemetryService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -4483,6 +4484,7 @@ io.on('connection', (socket) => {
         console.error('[Session创建] CLI 检测失败:', err.message);
       }
 
+      telemetryService.recordSession();
       socket.emit('session:created', session);
       io.emit('sessions:updated', sessionManager.listSessions());
     } catch (err) {
@@ -6408,6 +6410,9 @@ async function startServer() {
       } catch (err) {
         console.error('[Server] 启动健康检查调度器失败:', err);
       }
+
+      // 启动匿名遥测（每天上报一次使用统计）
+      telemetryService.start(subscriptionService);
 
       // 启动预约调度器
       scheduleManager.onScheduleTrigger((schedule) => {
