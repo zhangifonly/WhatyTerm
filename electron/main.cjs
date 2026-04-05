@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, shell, utilityProcess, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, Tray, dialog, shell, utilityProcess, ipcMain, nativeImage } = require('electron');
 const path = require('path');
 const { spawn, execSync } = require('child_process');
 const fs = require('fs');
@@ -7,6 +7,8 @@ const { autoUpdater } = require('electron-updater');
 let mainWindow;
 let serverProcess;
 let logStream;
+let tray = null;
+let forceQuit = false;  // 标记是否真正退出（区别于最小化到托盘）
 
 // 检查是否是开发模式
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
@@ -613,6 +615,85 @@ async function showDependencyDialog() {
 
 // ==================== 窗口和服务器管理 ====================
 
+function getServerUrl() {
+  return 'http://127.0.0.1:3928';
+}
+
+function openInBrowser() {
+  shell.openExternal(getServerUrl());
+}
+
+function createTray() {
+  if (!isWindows) return;  // 托盘常驻主要针对 Windows
+
+  // 内嵌 16x16 图标：蓝色背景 + W 字母
+  // 这是一个 16x16 PNG 的 base64，蓝底白字"W"
+  const TRAY_ICON_BASE64 =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAA' +
+    'CBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABmJLR0QA/wD/AP+gvaeTAAAAB3RJ' +
+    'TUUH6AQFCgonmkMsEQAAAKlJREFUOMvFkjEOwjAMRZ8jgVgqsXKEHqFH6IU4AktnFiZGxMTGxg3YkJAYuAEL' +
+    'AxNSB6SqSpM4UZH45Mh+z19OAgCcc0VEHoAFsAXmwBzYAUtgDRwBBQT2wAE4AXfgDVyBC3B2zv0AkiRJkiRJ' +
+    'kiRJkiRJkiRJkiRJkiRJkiRJ8t8OwIABGIABGIABGIABGIABGIABGIABGIABGIABGIABGIABGIABGIABGIAB' +
+    'GIAAAABJRU5ErkJggg==';
+
+  const trayIcon = nativeImage.createFromDataURL(TRAY_ICON_BASE64);
+
+  tray = new Tray(trayIcon);
+  tray.setToolTip('WhatyTerm - AI 终端管理器');
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: '显示主窗口',
+      click: () => {
+        if (mainWindow) {
+          mainWindow.show();
+          mainWindow.focus();
+        } else {
+          createWindow();
+        }
+      }
+    },
+    {
+      label: '在浏览器中打开',
+      click: openInBrowser
+    },
+    { type: 'separator' },
+    {
+      label: '退出 WhatyTerm',
+      click: () => {
+        forceQuit = true;
+        app.quit();
+      }
+    }
+  ]);
+
+  tray.setContextMenu(contextMenu);
+
+  // 双击托盘图标显示窗口
+  tray.on('double-click', () => {
+    if (mainWindow) {
+      mainWindow.show();
+      mainWindow.focus();
+    } else {
+      createWindow();
+    }
+  });
+
+  // 单击托盘图标也显示窗口（Windows 习惯）
+  tray.on('click', () => {
+    if (mainWindow) {
+      if (mainWindow.isVisible()) {
+        mainWindow.focus();
+      } else {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+    }
+  });
+
+  writeLog('[Electron] 系统托盘已创建');
+}
+
 function createWindow() {
   writeLog('[Electron] 开始创建窗口...');
 
@@ -683,6 +764,15 @@ function createWindow() {
     });
   }
 
+  // Windows: 关闭按钮最小化到托盘，而非退出
+  mainWindow.on('close', (event) => {
+    if (isWindows && !forceQuit) {
+      event.preventDefault();
+      mainWindow.hide();
+      writeLog('[Electron] 窗口最小化到系统托盘');
+    }
+  });
+
   mainWindow.on('closed', () => {
     writeLog('[Electron] 窗口已关闭');
     mainWindow = null;
@@ -718,7 +808,9 @@ function createWindow() {
           mainWindow?.webContents.executeJavaScript('window.openSettings && window.openSettings()');
         }},
         { type: 'separator' },
-        { label: '退出', accelerator: 'CmdOrCtrl+Q', click: () => app.quit() }
+        { label: '在浏览器中打开', accelerator: 'CmdOrCtrl+Shift+B', click: openInBrowser },
+        { type: 'separator' },
+        { label: '退出', accelerator: 'CmdOrCtrl+Q', click: () => { forceQuit = true; app.quit(); } }
       ]
     },
     {
@@ -891,6 +983,7 @@ app.whenReady().then(async () => {
   }
 
   startServer();
+  createTray();
   createWindow();
 
   // 延迟检查更新（启动后 3 秒）
@@ -911,6 +1004,8 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
+  // Windows: 窗口关闭不退出，常驻托盘
+  if (isWindows) return;
   stopServer();
   if (process.platform !== 'darwin') {
     app.quit();
