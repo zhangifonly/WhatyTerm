@@ -101,9 +101,25 @@ async function handleWin(appOutDir, arch) {
 
   const sqliteVersion = require('../node_modules/better-sqlite3/package.json').version;
   const electronPkg = require('../node_modules/electron/package.json');
-  // Electron ABI: 主版本号对应 ABI（如 Electron 39 -> v139）
-  const electronMajor = parseInt(electronPkg.version.split('.')[0]);
-  const abi = `${electronMajor + 100}`;
+
+  // 从 Electron 二进制读取真实 NODE_MODULE_VERSION，避免公式计算错误
+  let abi;
+  try {
+    const electronBin = require('../node_modules/electron');
+    const result = execSync(
+      `"${electronBin}" -e "process.stdout.write(process.versions.modules)"`,
+      { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, timeout: 10000 }
+    ).toString().trim();
+    abi = result;
+    console.log(`[rebuild-native] Electron ${electronPkg.version} -> ABI v${abi}`);
+  } catch (e) {
+    // fallback: 查表，已知映射
+    const major = parseInt(electronPkg.version.split('.')[0]);
+    const abiMap = { 36: 137, 37: 137, 38: 139, 39: 140, 40: 140 };
+    abi = abiMap[major] ?? (major + 101);
+    console.log(`[rebuild-native] ABI 查表: Electron ${major} -> v${abi}`);
+  }
+
   const tarName = `better-sqlite3-v${sqliteVersion}-electron-v${abi}-win32-${archName}.tar.gz`;
   const url = `https://github.com/WiseLibs/better-sqlite3/releases/download/v${sqliteVersion}/${tarName}`;
 
