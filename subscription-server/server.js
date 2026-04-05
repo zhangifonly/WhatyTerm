@@ -139,6 +139,23 @@ db.exec(`
     FOREIGN KEY (license_id) REFERENCES licenses(id)
   );
 
+  -- 匿名使用统计表
+  CREATE TABLE IF NOT EXISTS telemetry (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    app_version TEXT,
+    platform TEXT,
+    arch TEXT,
+    os_version TEXT,
+    session_count INTEGER DEFAULT 0,
+    is_pro INTEGER DEFAULT 0,
+    features TEXT,
+    reported_at INTEGER,
+    created_at INTEGER DEFAULT (strftime('%s', 'now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_telemetry_device ON telemetry(device_id);
+  CREATE INDEX IF NOT EXISTS idx_telemetry_reported ON telemetry(reported_at);
+
   -- 创建索引
   CREATE INDEX IF NOT EXISTS idx_licenses_user ON licenses(user_id);
   CREATE INDEX IF NOT EXISTS idx_licenses_key ON licenses(license_key);
@@ -2078,6 +2095,75 @@ app.post('/api/payment/cancel/:orderNo', async (req, res) => {
     log.error('取消订单失败', { error: err.message });
     res.status(500).json({ error: '取消失败' });
   }
+});
+
+// ── 匿名遥测接口 ──────────────────────────────────────────
+
+const insertTelemetry = db.prepare(`
+  INSERT INTO telemetry (device_id, app_version, platform, arch, os_version, session_count, is_pro, features, reported_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+// 客户端上报
+app.post('/api/telemetry', (req, res) => {
+  try {
+    const { deviceId, appVersion, platform, arch, osVersion, sessionCount, isPro, features, reportedAt } = req.body;
+    if (!deviceId || typeof deviceId !== 'string' || deviceId.length > 64) {
+      return res.status(400).json({ error: 'invalid' });
+    }
+    insertTelemetry.run(
+      deviceId.substring(0, 64),
+      String(appVersion || '').substring(0, 32),
+      String(platform || '').substring(0, 16),
+      String(arch || '').substring(0, 16),
+      String(osVersion || '').substring(0, 64),
+      Math.max(0, Math.min(9999, parseInt(sessionCount) || 0)),
+      isPro ? 1 : 0,
+      JSON.stringify(features || {}),
+      parseInt(reportedAt) || Math.floor(Date.now() / 1000)
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'server error' });
+  }
+});
+
+// 管理员查看遥测统计
+app.get('/api/admin/telemetry', adminMiddleware, (req, res) => {
+  const days = parseInt(req.query.days) || 30;
+  const since = Math.floor(Date.now() / 1000) - days * 86400;
+
+  const stats = db.prepare(`
+    SELECT
+      COUNT(DISTINCT device_id) AS active_devices,
+      COUNT(DISTINCT CASE WHEN is_pro = 1 THEN device_id END) AS pro_devices,
+      SUM(session_count) AS total_sessions,
+      COUNT(*) AS total_reports
+    FROM telemetry
+    WHERE created_at >= ?
+  `).get(since);
+
+  const byVersion = db.prepare(`
+    SELECT app_version, COUNT(DISTINCT device_id) AS devices
+    FROM telemetry WHERE created_at >= ?
+    GROUP BY app_version ORDER BY devices DESC LIMIT 10
+  `).all(since);
+
+  const byPlatform = db.prepare(`
+    SELECT platform || '-' || arch AS platform_arch, COUNT(DISTINCT device_id) AS devices
+    FROM telemetry WHERE created_at >= ?
+    GROUP BY platform, arch ORDER BY devices DESC
+  `).all(since);
+
+  const daily = db.prepare(`
+    SELECT date(created_at, 'unixepoch') AS day,
+           COUNT(DISTINCT device_id) AS active_devices,
+           SUM(session_count) AS sessions
+    FROM telemetry WHERE created_at >= ?
+    GROUP BY day ORDER BY day DESC LIMIT ?
+  `).all(since, days);
+
+  res.json({ period_days: days, stats, by_version: byVersion, by_platform: byPlatform, daily });
 });
 
 // 前端页面
