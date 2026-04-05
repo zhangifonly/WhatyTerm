@@ -670,17 +670,13 @@ function createTray() {
 
   // 使用应用图标作为托盘图标
   let trayIcon;
-  const icoPath = path.join(
-    app.isPackaged ? process.resourcesPath : path.join(__dirname, '..', 'build'),
-    app.isPackaged ? '..\\icon.ico' : 'icon.ico'
-  );
-  const icoPathAlt = path.join(__dirname, '..', 'build', 'icon.ico');
-  const resolvedIcoPath = fs.existsSync(icoPath) ? icoPath : icoPathAlt;
+  const resolvedIcoPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'icon.ico')
+    : path.join(__dirname, '..', 'build', 'icon.ico');
 
   if (fs.existsSync(resolvedIcoPath)) {
     trayIcon = nativeImage.createFromPath(resolvedIcoPath).resize({ width: 16, height: 16 });
   } else {
-    // fallback 内嵌图标
     trayIcon = nativeImage.createEmpty();
   }
 
@@ -743,12 +739,19 @@ function createTray() {
 function createWindow() {
   writeLog('[Electron] 开始创建窗口...');
 
+  // 运行时图标路径（extraResources 打包到 resources/ 目录）
+  const iconFile = isWindows ? 'icon.ico' : (isMac ? 'icon.icns' : 'icon.png');
+  const iconPath = app.isPackaged
+    ? path.join(process.resourcesPath, iconFile)
+    : path.join(__dirname, '..', 'build', isWindows ? 'icon.ico' : isMac ? 'icon.icns' : 'icons/512x512.png');
+
   const windowOptions = {
     width: 1400,
     height: 900,
     minWidth: 1000,
     minHeight: 600,
     title: 'WhatyTerm - AI 终端管理器',
+    icon: fs.existsSync(iconPath) ? iconPath : undefined,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true

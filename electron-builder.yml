@@ -22,6 +22,11 @@ files:
 
 # 服务端作为额外资源，不打入 asar
 extraResources:
+  # 应用图标（托盘、任务栏运行时使用）
+  - from: build/icon.ico
+    to: icon.ico
+  - from: build/icon.icns
+    to: icon.icns
   # 服务器代码
   - from: server
     to: server
