@@ -35,16 +35,49 @@ extraResources:
       - "**/*"
       - "!.cache/**"
       - "!.bin/**"
+      # ── 构建工具（绝对不应打入生产包）──
       - "!electron/**"
       - "!electron-builder/**"
+      - "!app-builder-bin/**"
+      - "!app-builder-lib/**"
+      - "!electron-winstaller/**"
+      - "!dmg-builder/**"
+      - "!7zip-bin/**"
+      - "!builder-util/**"
+      - "!builder-util-runtime/**"
+      - "!electron-publish/**"
+      # ── 前端构建工具 ──
       - "!vite/**"
       - "!@vitejs/**"
+      - "!esbuild/**"
+      - "!@esbuild/**"
+      - "!rollup/**"
       - "!postcss/**"
       - "!tailwindcss/**"
       - "!autoprefixer/**"
+      - "!lightningcss*/**"
+      - "!@lightningcss/**"
+      # ── 代码工具 ──
       - "!typescript/**"
       - "!eslint/**"
       - "!prettier/**"
+      - "!javascript-obfuscator/**"
+      - "!@babel/**"
+      # ── 未使用的 AI 推理引擎 ──
+      - "!onnxruntime-node/**"
+      - "!onnxruntime-web/**"
+      - "!@huggingface/**"
+      # ── 其他确认未使用的包 ──
+      - "!libphonenumber-js/**"
+      # ── node-pty 跨平台预编译二进制（只保留当前目标平台）──
+      - "!node-pty/prebuilds/linux-*/**"
+      # ── better-sqlite3 编译中间产物（只需 Release/*.node）──
+      - "!better-sqlite3/build/deps/**"
+      - "!better-sqlite3/build/*.mk"
+      - "!better-sqlite3/build/Makefile"
+      - "!better-sqlite3/build/gyp-mac-tool"
+      - "!better-sqlite3/build/binding.Makefile"
+      - "!better-sqlite3/build/config.gypi"
 
 asar: true
 # 原生模块配置

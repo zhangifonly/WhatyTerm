@@ -15,7 +15,29 @@ module.exports = async function (context) {
   } else if (electronPlatformName === 'win32') {
     await handleWin(appOutDir, arch);
   }
+
+  // 清理 node-pty 非目标平台预编译二进制
+  cleanNodePtyPrebuilds(appOutDir, electronPlatformName);
 };
+
+function cleanNodePtyPrebuilds(appOutDir, platform) {
+  const isWin = platform === 'win32';
+  const resourcesDir = isWin
+    ? path.join(appOutDir, 'resources')
+    : path.join(appOutDir, 'WhatyTerm.app', 'Contents', 'Resources');
+  const prebuildsDir = path.join(resourcesDir, 'node_modules', 'node-pty', 'prebuilds');
+
+  if (!fs.existsSync(prebuildsDir)) return;
+
+  const keepPrefix = isWin ? 'win32' : 'darwin';
+  for (const entry of fs.readdirSync(prebuildsDir)) {
+    if (!entry.startsWith(keepPrefix)) {
+      const fullPath = path.join(prebuildsDir, entry);
+      fs.rmSync(fullPath, { recursive: true, force: true });
+      console.log(`[rebuild-native] 清理无用预编译: node-pty/prebuilds/${entry}`);
+    }
+  }
+}
 
 async function handleMac(appOutDir, arch) {
   const archName = arch === 1 ? 'x64' : 'arm64';
