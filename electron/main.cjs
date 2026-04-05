@@ -626,17 +626,21 @@ function openInBrowser() {
 function createTray() {
   if (!isWindows) return;  // 托盘常驻主要针对 Windows
 
-  // 内嵌 16x16 图标：蓝色背景 + W 字母
-  // 这是一个 16x16 PNG 的 base64，蓝底白字"W"
-  const TRAY_ICON_BASE64 =
-    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAA' +
-    'CBjSFJNAAB6JgAAgIQAAPoAAACA6AAAdTAAAOpgAAA6mAAAF3CculE8AAAABmJLR0QA/wD/AP+gvaeTAAAAB3RJ' +
-    'TUUH6AQFCgonmkMsEQAAAKlJREFUOMvFkjEOwjAMRZ8jgVgqsXKEHqFH6IU4AktnFiZGxMTGxg3YkJAYuAEL' +
-    'AxNSB6SqSpM4UZH45Mh+z19OAgCcc0VEHoAFsAXmwBzYAUtgDRwBBQT2wAE4AXfgDVyBC3B2zv0AkiRJkiRJ' +
-    'kiRJkiRJkiRJkiRJkiRJkiRJ8t8OwIABGIABGIABGIABGIABGIABGIABGIABGIABGIABGIABGIABGIABGIAB' +
-    'GIAAAABJRU5ErkJggg==';
+  // 使用应用图标作为托盘图标
+  let trayIcon;
+  const icoPath = path.join(
+    app.isPackaged ? process.resourcesPath : path.join(__dirname, '..', 'build'),
+    app.isPackaged ? '..\\icon.ico' : 'icon.ico'
+  );
+  const icoPathAlt = path.join(__dirname, '..', 'build', 'icon.ico');
+  const resolvedIcoPath = fs.existsSync(icoPath) ? icoPath : icoPathAlt;
 
-  const trayIcon = nativeImage.createFromDataURL(TRAY_ICON_BASE64);
+  if (fs.existsSync(resolvedIcoPath)) {
+    trayIcon = nativeImage.createFromPath(resolvedIcoPath).resize({ width: 16, height: 16 });
+  } else {
+    // fallback 内嵌图标
+    trayIcon = nativeImage.createEmpty();
+  }
 
   tray = new Tray(trayIcon);
   tray.setToolTip('WhatyTerm - AI 终端管理器');

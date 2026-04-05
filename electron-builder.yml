@@ -89,7 +89,7 @@ afterPack: scripts/rebuild-native.cjs
 
 mac:
   category: public.app-category.developer-tools
-  # icon: build/icon.icns
+  icon: build/icon.icns
   identity: "Beijing Youxun Online Technolog Co., Ltd. (75JRAR2YKZ)"
   notarize: true
   target:
@@ -120,6 +120,7 @@ dmg:
 
 # Windows 版本需要 WSL2 来运行
 win:
+  icon: build/icon.ico
   target:
     - target: nsis
       arch:

@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- 品牌深蓝背景 -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0d1433"/>
+      <stop offset="100%" stop-color="#111a40"/>
+    </linearGradient>
+    <!-- 红色渐变（品牌色） -->
+    <linearGradient id="redGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff4444"/>
+      <stop offset="100%" stop-color="#cc0022"/>
+    </linearGradient>
+    <!-- 发光滤镜 -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="redglow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="12" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="subtleglow" x="-10%" y="-10%" width="120%" height="120%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- 背景 -->
+  <rect width="512" height="512" rx="90" fill="url(#bg)"/>
+
+  <!-- 微妙网格纹理 -->
+  <g opacity="0.04" stroke="#4488ff" stroke-width="1">
+    <line x1="0" y1="170" x2="512" y2="170"/>
+    <line x1="0" y1="340" x2="512" y2="340"/>
+    <line x1="170" y1="0" x2="170" y2="512"/>
+    <line x1="340" y1="0" x2="340" y2="512"/>
+  </g>
+
+  <!-- 终端窗口框架 -->
+  <rect x="52" y="120" width="408" height="280" rx="16"
+        fill="none" stroke="#ffffff" stroke-width="2.5" opacity="0.12"/>
+
+  <!-- 窗口顶部三个小圆点（macOS 风格）-->
+  <circle cx="90" cy="148" r="8" fill="#ff5f57" opacity="0.7"/>
+  <circle cx="118" cy="148" r="8" fill="#ffbd2e" opacity="0.7"/>
+  <circle cx="146" cy="148" r="8" fill="#28c840" opacity="0.7"/>
+  <!-- 窗口顶栏分隔线 -->
+  <line x1="52" y1="168" x2="460" y2="168" stroke="#ffffff" stroke-width="1.5" opacity="0.1"/>
+
+  <!-- 主内容区：终端提示符 "> " -->
+  <text x="82" y="248"
+        font-family="'Courier New', Courier, monospace"
+        font-size="62" font-weight="bold"
+        fill="#ffffff" opacity="0.9"
+        filter="url(#subtleglow)">›</text>
+
+  <!-- "AI" 文字主体（品牌红色） -->
+  <text x="134" y="248"
+        font-family="'Arial Black', 'Arial', sans-serif"
+        font-size="88" font-weight="900"
+        fill="url(#redGrad)"
+        filter="url(#redglow)">AI</text>
+
+  <!-- 光标闪烁块 -->
+  <rect x="310" y="176" width="36" height="62" rx="5"
+        fill="#ffffff" opacity="0.85" filter="url(#glow)"/>
+
+  <!-- 第二行：小字 "terminal" -->
+  <text x="82" y="330"
+        font-family="'Courier New', Courier, monospace"
+        font-size="28" font-weight="400"
+        fill="#4488ff" opacity="0.7"
+        letter-spacing="3">terminal</text>
+
+  <!-- AI 节点装饰（右下角神经网络感）-->
+  <g opacity="0.25" filter="url(#subtleglow)">
+    <circle cx="410" cy="330" r="5" fill="#ff3333"/>
+    <circle cx="440" cy="305" r="4" fill="#ff3333"/>
+    <circle cx="430" cy="355" r="3" fill="#ff3333"/>
+    <circle cx="455" cy="340" r="4" fill="#ff3333"/>
+    <line x1="410" y1="330" x2="440" y2="305" stroke="#ff3333" stroke-width="1.5"/>
+    <line x1="410" y1="330" x2="430" y2="355" stroke="#ff3333" stroke-width="1.5"/>
+    <line x1="440" y1="305" x2="455" y2="340" stroke="#ff3333" stroke-width="1.5"/>
+    <line x1="430" y1="355" x2="455" y2="340" stroke="#ff3333" stroke-width="1.5"/>
+  </g>
+</svg>
