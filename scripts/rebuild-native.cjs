@@ -22,14 +22,17 @@ module.exports = async function (context) {
 
 function cleanNodePtyPrebuilds(appOutDir, platform) {
   const isWin = platform === 'win32';
+  const isLinux = platform === 'linux';
   const resourcesDir = isWin
     ? path.join(appOutDir, 'resources')
-    : path.join(appOutDir, 'WhatyTerm.app', 'Contents', 'Resources');
+    : isLinux
+      ? path.join(appOutDir, 'resources')
+      : path.join(appOutDir, 'WhatyTerm.app', 'Contents', 'Resources');
   const prebuildsDir = path.join(resourcesDir, 'node_modules', 'node-pty', 'prebuilds');
 
   if (!fs.existsSync(prebuildsDir)) return;
 
-  const keepPrefix = isWin ? 'win32' : 'darwin';
+  const keepPrefix = isWin ? 'win32' : isLinux ? 'linux' : 'darwin';
   for (const entry of fs.readdirSync(prebuildsDir)) {
     if (!entry.startsWith(keepPrefix)) {
       const fullPath = path.join(prebuildsDir, entry);
