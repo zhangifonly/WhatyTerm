@@ -1524,14 +1524,17 @@ ${historyText || '(空)'}
         const pluginResult = plugin.analyzeStatus(terminalContent, phase, projectContext || {});
         if (pluginResult) {
           // Harness: 统一注入 Sprint progress 引导（所有插件通用）
-          // 当有 progress 且操作是"继续"类指令时，用当前 feature 覆盖
+          // 当有 progress 且操作是"继续"类指令时，注入当前 feature 上下文
           if (pluginResult.needsAction && pluginResult.actionType === 'text_input'
               && pluginResult.suggestedAction?.startsWith('继续')
               && projectContext?.progress?.features?.length) {
-            const cur = projectContext.progress.features.find(f => f.status === 'in_progress')
-              || projectContext.progress.features.find(f => f.status === 'pending');
+            const features = projectContext.progress.features;
+            const cur = features.find(f => f.status === 'in_progress')
+              || features.find(f => f.status === 'pending');
             if (cur) {
-              pluginResult.suggestedAction = `继续开发: ${cur.name}`;
+              const done = features.filter(f => f.status === 'completed').length;
+              const remaining = features.filter(f => f.status !== 'completed').map(f => f.name);
+              pluginResult.suggestedAction = `继续。当前Sprint进度${done}/${features.length}，正在开发: ${cur.name}（${cur.description || ''}）。完成后请继续下一个: ${remaining.slice(1, 3).join('、') || '无'}`;
             }
           }
           console.log(`[AIEngine] 插件 ${plugin.name} 分析结果: ${pluginResult.message || pluginResult.actionType}`);
