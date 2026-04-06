@@ -1,11 +1,17 @@
+// 延迟导入 crashReporter（ES module 顶层 import 在下方）
+let _crashReporter = null;
+const getCrashReporter = () => _crashReporter;
+
 // 全局错误处理 - 必须在最顶部，防止任何未捕获异常导致进程崩溃
 process.on('uncaughtException', (err) => {
   console.error(`[FATAL] 未捕获异常: ${err.message}`);
   console.error(err.stack);
+  getCrashReporter()?.report('uncaughtException', err).catch(() => {});
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error(`[FATAL] 未处理的 Promise 拒绝:`, reason);
+  getCrashReporter()?.report('unhandledRejection', reason instanceof Error ? reason : new Error(String(reason))).catch(() => {});
 });
 
 import express from 'express';
@@ -106,9 +112,13 @@ import progressManager from './services/ProgressManager.js';
 import PlannerService from './services/PlannerService.js';
 import EvaluatorService from './services/EvaluatorService.js';
 import telemetryService from './services/TelemetryService.js';
+import crashReporter from './services/CrashReporter.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// 绑定 crashReporter 到全局错误处理
+_crashReporter = crashReporter;
 
 // 初始化内置供应商数据库（优先使用 CC-Switch，不存在则创建内置数据库）
 builtinProviderDB.init();

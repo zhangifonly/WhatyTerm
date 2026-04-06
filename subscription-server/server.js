@@ -158,6 +158,27 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_telemetry_device ON telemetry(device_id);
   CREATE INDEX IF NOT EXISTS idx_telemetry_reported ON telemetry(reported_at);
 
+  -- 崩溃日志表
+  CREATE TABLE IF NOT EXISTS crash_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    app_version TEXT,
+    platform TEXT,
+    arch TEXT,
+    os_version TEXT,
+    type TEXT,
+    message TEXT,
+    stack TEXT,
+    recent_logs TEXT,
+    extra TEXT,
+    ip TEXT,
+    region TEXT,
+    client_time INTEGER,
+    created_at INTEGER DEFAULT (strftime('%s', 'now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_crash_device ON crash_reports(device_id);
+  CREATE INDEX IF NOT EXISTS idx_crash_created ON crash_reports(created_at);
+
   -- 创建索引
   CREATE INDEX IF NOT EXISTS idx_licenses_user ON licenses(user_id);
   CREATE INDEX IF NOT EXISTS idx_licenses_key ON licenses(license_key);
@@ -2208,6 +2229,77 @@ app.get('/api/admin/telemetry', adminMiddleware, (req, res) => {
   `).all(since);
 
   res.json({ period_days: days, stats, by_version: byVersion, by_platform: byPlatform, by_region: byRegion, daily, recent_devices: recentDevices });
+});
+
+// ── 崩溃日志接口 ──────────────────────────────────────────
+
+const insertCrash = db.prepare(`
+  INSERT INTO crash_reports (device_id, app_version, platform, arch, os_version, type, message, stack, recent_logs, extra, ip, region, client_time)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+// 客户端上报崩溃
+app.post('/api/crash-report', async (req, res) => {
+  try {
+    const b = req.body;
+    if (!b.deviceId || typeof b.deviceId !== 'string') {
+      return res.status(400).json({ error: 'invalid' });
+    }
+    const ip = getClientIp(req);
+    const region = await lookupRegion(ip);
+    insertCrash.run(
+      String(b.deviceId).substring(0, 64),
+      String(b.appVersion || '').substring(0, 32),
+      String(b.platform || '').substring(0, 16),
+      String(b.arch || '').substring(0, 16),
+      String(b.osVersion || '').substring(0, 64),
+      String(b.type || '').substring(0, 64),
+      String(b.message || '').substring(0, 500),
+      String(b.stack || '').substring(0, 5000),
+      String(b.recentLogs || '').substring(0, 10000),
+      String(b.extra || '').substring(0, 1000),
+      ip.substring(0, 45),
+      region.substring(0, 128),
+      parseInt(b.timestamp) || Date.now()
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'server error' });
+  }
+});
+
+// 管理员查看崩溃日志
+app.get('/api/admin/crash-reports', adminMiddleware, (req, res) => {
+  const days = parseInt(req.query.days) || 7;
+  const since = Math.floor(Date.now() / 1000) - days * 86400;
+
+  const stats = db.prepare(`
+    SELECT COUNT(*) AS total,
+           COUNT(DISTINCT device_id) AS affected_devices,
+           COUNT(DISTINCT type) AS error_types
+    FROM crash_reports WHERE created_at >= ?
+  `).get(since);
+
+  const byType = db.prepare(`
+    SELECT type, COUNT(*) AS count, COUNT(DISTINCT device_id) AS devices
+    FROM crash_reports WHERE created_at >= ?
+    GROUP BY type ORDER BY count DESC
+  `).all(since);
+
+  const recent = db.prepare(`
+    SELECT id, device_id, app_version, platform, arch, type, message, stack, recent_logs, ip, region, client_time, created_at
+    FROM crash_reports WHERE created_at >= ?
+    ORDER BY created_at DESC LIMIT 50
+  `).all(since);
+
+  res.json({ period_days: days, stats, by_type: byType, recent });
+});
+
+// 管理员查看单条崩溃详情
+app.get('/api/admin/crash-reports/:id', adminMiddleware, (req, res) => {
+  const report = db.prepare('SELECT * FROM crash_reports WHERE id = ?').get(req.params.id);
+  if (!report) return res.status(404).json({ error: 'not found' });
+  res.json(report);
 });
 
 // 前端页面
