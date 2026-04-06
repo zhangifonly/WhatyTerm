@@ -2690,7 +2690,8 @@ async function updateAllSessionsProjectInfo() {
       if (goalChanged && !progressManager.loadProgress(session.id)) {
         plannerService.expandGoal(session.id, projectGoal, {
           projectDesc: session.projectDesc,
-          workingDir: session.workingDir
+          workingDir: session.workingDir,
+          terminalOutput: session.getRecentOutput?.(80) || ''
         }).then(progress => {
           if (progress) {
             io.to(`session:${session.id}`).emit('progress:updated', {
@@ -4685,9 +4686,11 @@ io.on('connection', (socket) => {
   socket.on('progress:plan', async ({ sessionId, goal }) => {
     try {
       const session = sessionManager?.getSession(sessionId);
+      const terminalOutput = session?.getRecentOutput?.(80) || '';
       const projectContext = {
         projectDesc: session?.projectDesc,
-        workingDir: session?.workingDir
+        workingDir: session?.workingDir,
+        terminalOutput
       };
       const progress = await plannerService.expandGoal(sessionId, goal, projectContext);
       socket.emit('progress:data', { sessionId, progress });
@@ -5132,7 +5135,8 @@ io.on('connection', (socket) => {
       if (data.goal && data.goal.length > 5) {
         plannerService.expandGoal(data.sessionId, data.goal, {
           projectDesc: session.projectDesc,
-          workingDir: session.workingDir
+          workingDir: session.workingDir,
+          terminalOutput: session.getRecentOutput?.(80) || ''
         }).then(progress => {
           if (progress) {
             io.to(`session:${data.sessionId}`).emit('progress:updated', {
