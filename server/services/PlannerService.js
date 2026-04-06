@@ -13,38 +13,46 @@ class PlannerService {
   }
 
   /** 扫描项目现状 */
-  _scanProject(workingDir) {
-    if (!workingDir || !fs.existsSync(workingDir)) return '';
-
+  _scanProject(workingDir, terminalOutput) {
     const parts = [];
-    // 文件结构（排除 node_modules 等）
-    try {
-      const tree = execSync(
-        'find . -maxdepth 3 -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/dist/*" -not -path "*/__pycache__/*" | head -60',
-        { cwd: workingDir, timeout: 5000, encoding: 'utf-8' }
-      ).trim();
-      if (tree) parts.push(`### 文件结构\n${tree}`);
-    } catch {}
 
-    // 最近 git 提交
-    try {
-      const gitLog = execSync(
-        'git log --oneline -10 2>/dev/null',
-        { cwd: workingDir, timeout: 3000, encoding: 'utf-8' }
-      ).trim();
-      if (gitLog) parts.push(`### 最近提交\n${gitLog}`);
-    } catch {}
+    if (workingDir && fs.existsSync(workingDir)) {
+      // 文件结构（排除 node_modules 等）
+      // Windows 用 dir，Unix 用 find
+      try {
+        const isWin = process.platform === 'win32';
+        const cmd = isWin
+          ? 'dir /s /b /a:-d 2>nul | findstr /v "node_modules .git dist __pycache__"'
+          : 'find . -maxdepth 3 -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/dist/*" -not -path "*/__pycache__/*" | head -60';
+        const tree = execSync(cmd, { cwd: workingDir, timeout: 5000, encoding: 'utf-8' }).trim();
+        if (tree) parts.push(`### 文件结构\n${tree.substring(0, 2000)}`);
+      } catch {}
 
-    // package.json 或 pyproject.toml 摘要
-    for (const f of ['package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod']) {
-      const fp = path.join(workingDir, f);
-      if (fs.existsSync(fp)) {
-        try {
-          const content = fs.readFileSync(fp, 'utf-8').substring(0, 500);
-          parts.push(`### ${f}\n${content}`);
-        } catch {}
-        break;
+      // 最近 git 提交
+      try {
+        const gitLog = execSync(
+          'git log --oneline -10 2>/dev/null',
+          { cwd: workingDir, timeout: 3000, encoding: 'utf-8' }
+        ).trim();
+        if (gitLog) parts.push(`### 最近提交\n${gitLog}`);
+      } catch {}
+
+      // package.json 或 pyproject.toml 摘要
+      for (const f of ['package.json', 'pyproject.toml', 'Cargo.toml', 'go.mod']) {
+        const fp = path.join(workingDir, f);
+        if (fs.existsSync(fp)) {
+          try {
+            const content = fs.readFileSync(fp, 'utf-8').substring(0, 500);
+            parts.push(`### ${f}\n${content}`);
+          } catch {}
+          break;
+        }
       }
+    }
+
+    // 终端最近输出（反映 AI 当前工作进度）
+    if (terminalOutput) {
+      parts.push(`### 终端最近输出（反映当前进度）\n${terminalOutput.substring(0, 3000)}`);
     }
 
     return parts.length ? '\n## 项目现状\n' + parts.join('\n\n') : '';
@@ -54,7 +62,7 @@ class PlannerService {
    * 将 goal 展开为 feature list
    * @param {string} sessionId
    * @param {string} goal - 用户 1-4 句需求描述
-   * @param {object} projectContext - { projectPath, projectDesc, workingDir }
+   * @param {object} projectContext - { projectPath, projectDesc, workingDir, terminalOutput }
    * @returns {object|null} progress 对象
    */
   async expandGoal(sessionId, goal, projectContext = {}) {
@@ -63,7 +71,7 @@ class PlannerService {
     // 创建初始 progress
     progressManager.createProgress(sessionId, goal);
 
-    const projectScan = this._scanProject(projectContext.workingDir);
+    const projectScan = this._scanProject(projectContext.workingDir, projectContext.terminalOutput);
     const prompt = this._buildPlannerPrompt(goal, projectContext, projectScan);
 
     try {
