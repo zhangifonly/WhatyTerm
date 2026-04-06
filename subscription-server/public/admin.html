@@ -68,6 +68,7 @@
         <button onclick="showTab('devices')" class="tab-btn px-4 py-2 rounded-lg bg-gray-700" data-tab="devices">设备</button>
         <button onclick="showTab('orders')" class="tab-btn px-4 py-2 rounded-lg bg-gray-700" data-tab="orders">订单</button>
         <button onclick="showTab('telemetry')" class="tab-btn px-4 py-2 rounded-lg bg-gray-700" data-tab="telemetry">用户分析</button>
+        <button onclick="showTab('crashes')" class="tab-btn px-4 py-2 rounded-lg bg-gray-700" data-tab="crashes">崩溃日志</button>
       </div>
 
       <!-- 支付配置 -->
@@ -437,6 +438,63 @@
         </div>
       </div>
     </div>
+
+      <!-- 崩溃日志 -->
+      <div id="tab-crashes" class="tab-content hidden">
+        <div class="glass rounded-xl p-6">
+          <div class="flex flex-wrap justify-between items-center mb-6 gap-4">
+            <h2 class="text-xl font-bold">崩溃日志</h2>
+            <select id="crash-days" onchange="loadCrashes()" class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm">
+              <option value="1">最近 1 天</option>
+              <option value="7" selected>最近 7 天</option>
+              <option value="30">最近 30 天</option>
+            </select>
+          </div>
+          <div class="grid grid-cols-3 gap-4 mb-6">
+            <div class="bg-gray-800 rounded-xl p-4 text-center">
+              <div id="c-total" class="text-3xl font-bold text-red-400">-</div>
+              <div class="text-gray-400 text-sm mt-1">崩溃总数</div>
+            </div>
+            <div class="bg-gray-800 rounded-xl p-4 text-center">
+              <div id="c-devices" class="text-3xl font-bold text-yellow-400">-</div>
+              <div class="text-gray-400 text-sm mt-1">受影响设备</div>
+            </div>
+            <div class="bg-gray-800 rounded-xl p-4 text-center">
+              <div id="c-types" class="text-3xl font-bold text-blue-400">-</div>
+              <div class="text-gray-400 text-sm mt-1">错误类型</div>
+            </div>
+          </div>
+          <div id="c-by-type" class="mb-6"></div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-gray-700 text-gray-400">
+                  <th class="text-left py-2 px-2">时间</th>
+                  <th class="text-left py-2 px-2">类型</th>
+                  <th class="text-left py-2 px-2">错误信息</th>
+                  <th class="text-left py-2 px-2">版本</th>
+                  <th class="text-left py-2 px-2">平台</th>
+                  <th class="text-left py-2 px-2">地域</th>
+                  <th class="text-left py-2 px-2">操作</th>
+                </tr>
+              </thead>
+              <tbody id="c-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 崩溃详情弹窗 -->
+  <div id="crash-modal" class="fixed inset-0 bg-black/70 items-center justify-center z-50 hidden" style="display:none">
+    <div class="glass rounded-2xl p-6 max-w-4xl w-full mx-4 max-h-[85vh] overflow-y-auto">
+      <div class="flex justify-between items-center mb-4">
+        <h3 class="text-lg font-bold">崩溃详情</h3>
+        <button onclick="document.getElementById('crash-modal').style.display='none'" class="text-gray-400 hover:text-white text-2xl">&times;</button>
+      </div>
+      <div id="crash-detail-content"></div>
+    </div>
   </div>
 
   <!-- 许可证延期弹窗 -->
@@ -552,6 +610,86 @@
       if (tab === 'devices') loadDevices();
       if (tab === 'orders') loadOrders();
       if (tab === 'telemetry') loadTelemetry();
+      if (tab === 'crashes') loadCrashes();
+    }
+
+    async function loadCrashes() {
+      var daysEl = document.getElementById('crash-days');
+      var days = daysEl ? daysEl.value : 7;
+      try {
+        var res = await fetch('/api/admin/crash-reports?days=' + days, {
+          headers: { 'X-Admin-Key': adminKey }
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        var data = await res.json();
+        var s = data.stats || {};
+        document.getElementById('c-total').textContent = s.total || 0;
+        document.getElementById('c-devices').textContent = s.affected_devices || 0;
+        document.getElementById('c-types').textContent = s.error_types || 0;
+
+        // 错误类型分布
+        var typeHtml = '';
+        var types = data.by_type || [];
+        if (types.length > 0) {
+          typeHtml = '<div class="bg-gray-800 rounded-xl p-4 mb-2"><h3 class="font-semibold mb-2 text-gray-300 text-sm">按类型统计</h3>';
+          for (var i = 0; i < types.length; i++) {
+            var t = types[i];
+            typeHtml += '<div class="flex items-center gap-2 text-sm py-1">'
+              + '<span class="text-red-400 font-mono w-40 truncate">' + t.type + '</span>'
+              + '<span class="text-gray-400">' + t.count + ' 次</span>'
+              + '<span class="text-gray-500">(' + t.devices + ' 台设备)</span></div>';
+          }
+          typeHtml += '</div>';
+        }
+        document.getElementById('c-by-type').innerHTML = typeHtml;
+
+        // 崩溃列表
+        var rows = data.recent || [];
+        var rowsHtml = '';
+        for (var j = 0; j < rows.length; j++) {
+          var r = rows[j];
+          var time = r.created_at ? new Date(r.created_at * 1000).toLocaleString('zh-CN') : '-';
+          rowsHtml += '<tr class="border-b border-gray-700/50 hover:bg-gray-800/50 cursor-pointer" onclick="showCrashDetail(' + r.id + ')">'
+            + '<td class="py-2 px-2 text-gray-400 text-xs whitespace-nowrap">' + time + '</td>'
+            + '<td class="py-2 px-2 text-red-400 font-mono text-xs">' + (r.type || '-') + '</td>'
+            + '<td class="py-2 px-2 text-gray-300 text-xs truncate max-w-xs" title="' + (r.message || '').replace(/"/g, '&quot;') + '">' + (r.message || '-') + '</td>'
+            + '<td class="py-2 px-2 text-gray-400 text-xs">' + (r.app_version || '-') + '</td>'
+            + '<td class="py-2 px-2 text-gray-400 text-xs">' + (r.platform || '') + '-' + (r.arch || '') + '</td>'
+            + '<td class="py-2 px-2 text-gray-400 text-xs">' + (r.region || '-') + '</td>'
+            + '<td class="py-2 px-2"><span class="text-blue-400 text-xs hover:underline">详情</span></td></tr>';
+        }
+        document.getElementById('c-rows').innerHTML = rowsHtml || '<tr><td colspan="7" class="py-4 text-center text-gray-500">暂无崩溃记录</td></tr>';
+      } catch (e) {
+        document.getElementById('c-total').textContent = 'ERR';
+        document.getElementById('c-by-type').innerHTML = '<span class="text-red-400">' + e.message + '</span>';
+      }
+    }
+
+    async function showCrashDetail(id) {
+      try {
+        var res = await fetch('/api/admin/crash-reports/' + id, { headers: { 'X-Admin-Key': adminKey } });
+        var r = await res.json();
+        var time = r.created_at ? new Date(r.created_at * 1000).toLocaleString('zh-CN') : '-';
+        var html = '<div class="space-y-4 text-sm">'
+          + '<div class="grid grid-cols-2 md:grid-cols-4 gap-3">'
+          + '<div><span class="text-gray-500">设备ID</span><br><span class="font-mono text-xs">' + (r.device_id || '') + '</span></div>'
+          + '<div><span class="text-gray-500">版本</span><br>' + (r.app_version || '-') + '</div>'
+          + '<div><span class="text-gray-500">平台</span><br>' + (r.platform || '') + '-' + (r.arch || '') + '</div>'
+          + '<div><span class="text-gray-500">系统</span><br>' + (r.os_version || '-') + '</div>'
+          + '<div><span class="text-gray-500">IP</span><br><span class="font-mono text-xs">' + (r.ip || '-') + '</span></div>'
+          + '<div><span class="text-gray-500">地域</span><br>' + (r.region || '-') + '</div>'
+          + '<div><span class="text-gray-500">类型</span><br><span class="text-red-400">' + (r.type || '-') + '</span></div>'
+          + '<div><span class="text-gray-500">时间</span><br>' + time + '</div></div>'
+          + '<div><span class="text-gray-500">错误信息</span><pre class="mt-1 bg-gray-900 p-3 rounded-lg text-red-300 whitespace-pre-wrap text-xs">' + (r.message || '-') + '</pre></div>'
+          + '<div><span class="text-gray-500">堆栈跟踪</span><pre class="mt-1 bg-gray-900 p-3 rounded-lg text-gray-300 whitespace-pre-wrap text-xs max-h-60 overflow-y-auto">' + (r.stack || '无') + '</pre></div>'
+          + '<div><span class="text-gray-500">最近日志（最后50行）</span><pre class="mt-1 bg-gray-900 p-3 rounded-lg text-gray-400 whitespace-pre-wrap text-xs max-h-60 overflow-y-auto">' + (r.recent_logs || '无') + '</pre></div>'
+          + '</div>';
+        document.getElementById('crash-detail-content').innerHTML = html;
+        var modal = document.getElementById('crash-modal');
+        modal.style.display = 'flex';
+      } catch (e) {
+        alert('加载失败: ' + e.message);
+      }
     }
 
     async function loadTelemetry() {

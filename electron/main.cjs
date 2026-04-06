@@ -994,21 +994,77 @@ function stopServer() {
 // ==================== 应用生命周期 ====================
 
 // 全局错误捕获
+// ==================== 崩溃上报 ====================
+
+function reportCrash(type, message, stack, extra) {
+  try {
+    const os = require('os');
+    const crypto = require('crypto');
+    // 匿名设备ID
+    let raw = (os.cpus()[0] || {}).model || '';
+    const ifaces = os.networkInterfaces();
+    for (const name of Object.keys(ifaces)) {
+      for (const iface of ifaces[name]) {
+        if (!iface.internal && iface.mac !== '00:00:00:00:00:00') { raw += iface.mac; break; }
+      }
+    }
+    const deviceId = crypto.createHash('sha256').update(raw).digest('hex').substring(0, 32);
+    // 脱敏路径
+    const sanitize = (s) => (s || '')
+      .replace(/\/Users\/[^/]+/g, '/Users/***')
+      .replace(/C:\\Users\\[^\\]+/g, 'C:\\Users\\***')
+      .replace(/\/home\/[^/]+/g, '/home/***');
+    // 读最近日志
+    let recentLogs = '';
+    try {
+      const logDir = getLogPath();
+      const logFiles = fs.readdirSync(logDir).filter(f => f.endsWith('.log')).sort().reverse();
+      if (logFiles.length > 0) {
+        const content = fs.readFileSync(path.join(logDir, logFiles[0]), 'utf8');
+        recentLogs = sanitize(content.split('\n').slice(-50).join('\n')).substring(0, 5000);
+      }
+    } catch {}
+    const pkg = require('./package.json');
+    const payload = JSON.stringify({
+      deviceId, appVersion: pkg.version, platform: os.platform(), arch: os.arch(),
+      osVersion: os.release(), type, message: (message || '').substring(0, 500),
+      stack: sanitize(stack || '').substring(0, 3000), recentLogs,
+      extra: JSON.stringify(extra || {}).substring(0, 1000), timestamp: Date.now(),
+    });
+    const url = new URL('https://term.whaty.org/api/crash-report');
+    const mod = require('https');
+    const req = mod.request({ hostname: url.hostname, port: 443, path: url.pathname,
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+      timeout: 10000 }, () => {});
+    req.on('error', () => {});
+    req.write(payload);
+    req.end();
+  } catch {}
+}
+
 process.on('uncaughtException', (error) => {
   writeLog(`[Electron] 未捕获的异常: ${error.message}`);
   writeLog(`[Electron] 堆栈: ${error.stack}`);
+  reportCrash('uncaughtException', error.message, error.stack);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   writeLog(`[Electron] 未处理的 Promise 拒绝: ${reason}`);
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  const stk = reason instanceof Error ? reason.stack : '';
+  reportCrash('unhandledRejection', msg, stk);
 });
 
 app.on('render-process-gone', (event, webContents, details) => {
   writeLog(`[Electron] 渲染进程退出: ${details.reason}, exitCode: ${details.exitCode}`);
+  reportCrash('renderCrash', `reason=${details.reason}, exitCode=${details.exitCode}`, '');
 });
 
 app.on('child-process-gone', (event, details) => {
   writeLog(`[Electron] 子进程退出: ${details.type}, reason: ${details.reason}, exitCode: ${details.exitCode}`);
+  if (details.reason !== 'clean-exit') {
+    reportCrash('childProcessCrash', `type=${details.type}, reason=${details.reason}, exitCode=${details.exitCode}`, '');
+  }
 });
 
 app.whenReady().then(async () => {
