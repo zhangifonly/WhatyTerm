@@ -2770,11 +2770,14 @@ function isAutoActionPausedByUserInput(sessionId) {
 // 后台自动操作：定时检查所有启用了自动操作的会话
 // Harness: 检测终端输出中的 feature 完成信号并推进 Sprint
 // 只在终端空闲（非运行中）时检测，避免 Claude 运行中误判
-const featureCompletionCount = new Map(); // sessionId -> count
+const featureCompletionCount = new Map(); // sessionId -> consecutive idle count
 
 function checkAndAdvanceFeature(sessionId, terminalContent, status) {
-  // 只在空闲状态下检测，运行中不检测
-  if (status?.currentState?.includes('运行中') || status?.currentState?.includes('running')) return;
+  // 只在空闲/等待状态下检测
+  if (status?.currentState?.includes('运行中') || status?.currentState?.includes('running')) {
+    featureCompletionCount.delete(sessionId);
+    return;
+  }
 
   const progress = progressManager.loadProgress(sessionId);
   if (!progress?.features?.length || progress.status !== 'in_progress') return;
@@ -2790,23 +2793,34 @@ function checkAndAdvanceFeature(sessionId, terminalContent, status) {
     return;
   }
 
-  // 检测完成信号（需要连续 2 次检测到才推进，防止误判）
-  const lastLines = (terminalContent || '').split('\n').slice(-15).join('\n');
-  const completionPatterns = [
-    /已完成.*feature|feature.*已完成/i,
-    /功能.*实现完毕|开发完成/,
-    /all.*tests.*pass/i,
+  const lastLines = (terminalContent || '').split('\n').slice(-30).join('\n').toLowerCase();
+
+  // 多维度检测 feature 完成信号
+  const completionSignals = [
+    // 直接完成声明
+    /完成|完毕|done|finished|completed|succeed|成功/,
+    // 代码提交
+    /git commit|git push|已提交|committed/,
+    // 文件创建/修改确认
+    /created|wrote|saved|生成了|创建了|写入了/,
+    // 测试通过
+    /tests?\s+pass|测试通过|all.*pass/i,
+    // Claude 等待新指令（说明上一轮任务做完了）
+    /what.*next|还需要|接下来|下一步|anything else/i,
   ];
 
-  const hasCompletion = completionPatterns.some(p => p.test(lastLines));
-  if (!hasCompletion) {
+  const signalCount = completionSignals.filter(p => p.test(lastLines)).length;
+
+  // 至少匹配 2 个信号才认为完成（防误判）
+  if (signalCount < 2) {
     featureCompletionCount.delete(sessionId);
     return;
   }
 
+  // 连续 2 次检测都匹配才推进
   const count = (featureCompletionCount.get(sessionId) || 0) + 1;
   featureCompletionCount.set(sessionId, count);
-  if (count < 2) return; // 需要连续 2 次检测到
+  if (count < 2) return;
 
   featureCompletionCount.delete(sessionId);
   progressManager.updateFeatureStatus(sessionId, current.id, { status: 'completed' });
