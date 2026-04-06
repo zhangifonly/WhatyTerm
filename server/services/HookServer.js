@@ -10,9 +10,11 @@
  */
 
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, appendFileSync } from 'fs';
-import { homedir } from 'os';
+import { homedir, platform } from 'os';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
+
+const isWindows = platform() === 'win32';
 
 const MAX_LOG_LINES = 200;
 
@@ -31,13 +33,23 @@ class HookServer {
   /** 安装所有 CLI 的 hook 脚本，服务启动时调用一次 */
   install() {
     try {
-      this._installHookScripts();       // 公共 shell 脚本
+      this._cleanOldScripts();          // 清理旧平台脚本
+      this._installHookScripts();       // 安装当前平台脚本
       this._mergeClaudeSettings();      // Claude Code
       this._mergeGeminiSettings();      // Gemini CLI
       this._mergeCodexSettings();       // Codex CLI
-      console.log(`[HookServer] Hooks 安装完成（claude/gemini/codex），端口 ${this.serverPort}`);
+      console.log(`[HookServer] Hooks 安装完成（claude/gemini/codex），端口 ${this.serverPort}，平台 ${isWindows ? 'win32/ps1' : 'unix/sh'}`);
     } catch (err) {
       console.error('[HookServer] 安装失败:', err.message);
+    }
+  }
+
+  /** 清理旧平台的脚本（如从 .sh 切换到 .ps1） */
+  _cleanOldScripts() {
+    const oldExt = isWindows ? '.sh' : '.ps1';
+    for (const base of ['pre-tool', 'post-tool', 'stop']) {
+      const oldPath = join(this.hooksDir, base + oldExt);
+      try { require('fs').unlinkSync(oldPath); } catch {}
     }
   }
 
@@ -103,18 +115,24 @@ class HookServer {
     }
   }
 
+  /** 获取 hook 脚本扩展名 */
+  _scriptExt() { return isWindows ? '.ps1' : '.sh'; }
+
+  /** 获取 hook 脚本名 */
+  _scriptName(base) { return base + this._scriptExt(); }
+
   _installHookScripts() {
     mkdirSync(this.hooksDir, { recursive: true });
-    const script = this._buildScript();
-    for (const name of ['pre-tool.sh', 'post-tool.sh', 'stop.sh']) {
-      const p = join(this.hooksDir, name);
-      // 始终重写（确保端口和 token 是最新的）
+    const script = isWindows ? this._buildPowerShellScript() : this._buildBashScript();
+    const ext = this._scriptExt();
+    for (const base of ['pre-tool', 'post-tool', 'stop']) {
+      const p = join(this.hooksDir, base + ext);
       writeFileSync(p, script);
-      chmodSync(p, 0o755);
+      if (!isWindows) chmodSync(p, 0o755);
     }
   }
 
-  _buildScript() {
+  _buildBashScript() {
     return `#!/bin/bash
 # WhatyTerm hook script - auto-generated, do not edit manually
 INPUT=$(cat)
@@ -126,26 +144,48 @@ exit 0
 `;
   }
 
+  _buildPowerShellScript() {
+    return `# WhatyTerm hook script - auto-generated, do not edit manually
+$input_data = [Console]::In.ReadToEnd()
+try {
+  $body = [System.Text.Encoding]::UTF8.GetBytes($input_data)
+  $req = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:${this.serverPort}/hooks")
+  $req.Method = "POST"
+  $req.ContentType = "application/json"
+  $req.Headers.Add("X-WebtmuxToken", "${this.token}")
+  $req.Timeout = 2000
+  $stream = $req.GetRequestStream()
+  $stream.Write($body, 0, $body.Length)
+  $stream.Close()
+  $null = $req.GetResponse()
+} catch {}
+`;
+  }
+
   _mergeGeminiSettings() {
     const settingsPath = join(homedir(), '.gemini', 'settings.json');
     let settings = {};
     try { settings = JSON.parse(readFileSync(settingsPath, 'utf8')); } catch {}
     if (!settings.hooks) settings.hooks = {};
 
+    const ext = this._scriptExt();
     const hookMap = {
-      BeforeTool: join(this.hooksDir, 'pre-tool.sh'),
-      AfterTool:  join(this.hooksDir, 'post-tool.sh'),
-      SessionEnd: join(this.hooksDir, 'stop.sh'),
+      BeforeTool: join(this.hooksDir, 'pre-tool' + ext),
+      AfterTool:  join(this.hooksDir, 'post-tool' + ext),
+      SessionEnd: join(this.hooksDir, 'stop' + ext),
     };
 
     for (const [event, scriptPath] of Object.entries(hookMap)) {
+      const command = isWindows
+        ? `powershell -ExecutionPolicy Bypass -File "${scriptPath}"`
+        : scriptPath;
       if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
       settings.hooks[event] = settings.hooks[event].filter(h =>
-        !h.hooks?.some(c => c.command === scriptPath)
+        !h.hooks?.some(c => c.command?.includes('webtmux'))
       );
       settings.hooks[event].push({
         matcher: '.*',
-        hooks: [{ type: 'command', command: scriptPath, timeout: 5000 }],
+        hooks: [{ type: 'command', command, timeout: 5000 }],
       });
     }
 
@@ -159,16 +199,20 @@ exit 0
     let hooks = {};
     try { hooks = JSON.parse(readFileSync(hooksPath, 'utf8')); } catch {}
 
+    const ext = this._scriptExt();
     const hookMap = {
-      pre_tool_call:  join(this.hooksDir, 'pre-tool.sh'),
-      post_tool_call: join(this.hooksDir, 'post-tool.sh'),
-      session_end:    join(this.hooksDir, 'stop.sh'),
+      pre_tool_call:  join(this.hooksDir, 'pre-tool' + ext),
+      post_tool_call: join(this.hooksDir, 'post-tool' + ext),
+      session_end:    join(this.hooksDir, 'stop' + ext),
     };
 
     for (const [event, scriptPath] of Object.entries(hookMap)) {
+      const command = isWindows
+        ? `powershell -ExecutionPolicy Bypass -File "${scriptPath}"`
+        : scriptPath;
       if (!Array.isArray(hooks[event])) hooks[event] = [];
-      hooks[event] = hooks[event].filter(h => h.command !== scriptPath);
-      hooks[event].push({ command: scriptPath, timeout: 5 });
+      hooks[event] = hooks[event].filter(h => !h.command?.includes('webtmux'));
+      hooks[event].push({ command, timeout: 5 });
     }
 
     mkdirSync(join(homedir(), '.codex'), { recursive: true });
@@ -190,17 +234,22 @@ exit 0
     try { settings = JSON.parse(readFileSync(settingsPath, 'utf8')); } catch {}
     if (!settings.hooks) settings.hooks = {};
 
-    const hookMap = { PreToolUse: 'pre-tool.sh', PostToolUse: 'post-tool.sh', Stop: 'stop.sh' };
+    const ext = this._scriptExt();
+    const hookMap = { PreToolUse: 'pre-tool' + ext, PostToolUse: 'post-tool' + ext, Stop: 'stop' + ext };
 
     for (const [event, script] of Object.entries(hookMap)) {
       const scriptPath = join(this.hooksDir, script);
+      // Windows: powershell 执行 .ps1；Unix: 直接执行 .sh
+      const command = isWindows
+        ? `powershell -ExecutionPolicy Bypass -File "${scriptPath}"`
+        : scriptPath;
       if (!settings.hooks[event]) settings.hooks[event] = [];
-      // 移除旧版同路径条目（端口/token 可能已变），再重新加入
+      // 移除旧版条目（端口/token 可能已变），再重新加入
       settings.hooks[event] = settings.hooks[event].filter(h =>
-        !h.hooks?.some(c => c.command === scriptPath)
+        !h.hooks?.some(c => c.command?.includes('webtmux'))
       );
       settings.hooks[event].push({
-        hooks: [{ type: 'command', command: scriptPath, timeout: 5 }]
+        hooks: [{ type: 'command', command, timeout: 5 }]
       });
     }
 
