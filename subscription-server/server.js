@@ -150,6 +150,8 @@ db.exec(`
     session_count INTEGER DEFAULT 0,
     is_pro INTEGER DEFAULT 0,
     features TEXT,
+    ip TEXT,
+    region TEXT,
     reported_at INTEGER,
     created_at INTEGER DEFAULT (strftime('%s', 'now'))
   );
@@ -2100,17 +2102,44 @@ app.post('/api/payment/cancel/:orderNo', async (req, res) => {
 // ── 匿名遥测接口 ──────────────────────────────────────────
 
 const insertTelemetry = db.prepare(`
-  INSERT INTO telemetry (device_id, app_version, platform, arch, os_version, session_count, is_pro, features, reported_at)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO telemetry (device_id, app_version, platform, arch, os_version, session_count, is_pro, features, ip, region, reported_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
+// 从请求中提取客户端真实 IP
+function getClientIp(req) {
+  const xff = req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || '';
+  const ip = xff.split(',')[0].trim() || req.socket.remoteAddress || '';
+  return ip.replace(/^::ffff:/, '');
+}
+
+// 通过 ip-api.com 查询地域（免费，限 45 次/分钟）
+async function lookupRegion(ip) {
+  if (!ip || ip === '127.0.0.1' || ip.startsWith('192.168.') || ip.startsWith('10.')) return '局域网';
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch(`http://ip-api.com/json/${ip}?fields=status,country,regionName,city&lang=zh-CN`, {
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+    const data = await res.json();
+    if (data.status === 'success') {
+      return [data.country, data.regionName, data.city].filter(Boolean).join(' ');
+    }
+  } catch {}
+  return '';
+}
+
 // 客户端上报
-app.post('/api/telemetry', (req, res) => {
+app.post('/api/telemetry', async (req, res) => {
   try {
     const { deviceId, appVersion, platform, arch, osVersion, sessionCount, isPro, features, reportedAt } = req.body;
     if (!deviceId || typeof deviceId !== 'string' || deviceId.length > 64) {
       return res.status(400).json({ error: 'invalid' });
     }
+    const ip = getClientIp(req);
+    const region = await lookupRegion(ip);
     insertTelemetry.run(
       deviceId.substring(0, 64),
       String(appVersion || '').substring(0, 32),
@@ -2120,6 +2149,8 @@ app.post('/api/telemetry', (req, res) => {
       Math.max(0, Math.min(9999, parseInt(sessionCount) || 0)),
       isPro ? 1 : 0,
       JSON.stringify(features || {}),
+      ip.substring(0, 45),
+      region.substring(0, 128),
       parseInt(reportedAt) || Math.floor(Date.now() / 1000)
     );
     res.json({ ok: true });
@@ -2163,7 +2194,20 @@ app.get('/api/admin/telemetry', adminMiddleware, (req, res) => {
     GROUP BY day ORDER BY day DESC LIMIT ?
   `).all(since, days);
 
-  res.json({ period_days: days, stats, by_version: byVersion, by_platform: byPlatform, daily });
+  const byRegion = db.prepare(`
+    SELECT COALESCE(NULLIF(region,''), '未知') AS region, COUNT(DISTINCT device_id) AS devices
+    FROM telemetry WHERE created_at >= ?
+    GROUP BY region ORDER BY devices DESC LIMIT 20
+  `).all(since);
+
+  const recentDevices = db.prepare(`
+    SELECT device_id, app_version, platform, arch, ip, region,
+           MAX(created_at) AS last_seen, SUM(session_count) AS total_sessions
+    FROM telemetry WHERE created_at >= ?
+    GROUP BY device_id ORDER BY last_seen DESC LIMIT 50
+  `).all(since);
+
+  res.json({ period_days: days, stats, by_version: byVersion, by_platform: byPlatform, by_region: byRegion, daily, recent_devices: recentDevices });
 });
 
 // 前端页面
