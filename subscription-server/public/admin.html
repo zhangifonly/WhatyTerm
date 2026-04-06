@@ -67,6 +67,7 @@
         <button onclick="showTab('users')" class="tab-btn px-4 py-2 rounded-lg bg-gray-700" data-tab="users">用户</button>
         <button onclick="showTab('devices')" class="tab-btn px-4 py-2 rounded-lg bg-gray-700" data-tab="devices">设备</button>
         <button onclick="showTab('orders')" class="tab-btn px-4 py-2 rounded-lg bg-gray-700" data-tab="orders">订单</button>
+        <button onclick="showTab('telemetry')" class="tab-btn px-4 py-2 rounded-lg bg-gray-700" data-tab="telemetry">用户分析</button>
       </div>
 
       <!-- 支付配置 -->
@@ -347,6 +348,94 @@
           <div id="orders-pagination" class="flex justify-center gap-2 mt-4"></div>
         </div>
       </div>
+
+      <!-- 用户分析（遥测） -->
+      <div id="tab-telemetry" class="tab-content hidden">
+        <div class="glass rounded-xl p-6 mb-6">
+          <div class="flex flex-wrap justify-between items-center mb-6 gap-4">
+            <h2 class="text-xl font-bold">用户分析</h2>
+            <div class="flex gap-2 items-center">
+              <span class="text-gray-400 text-sm">统计周期</span>
+              <select id="telemetry-days" onchange="loadTelemetry()" class="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm">
+                <option value="7">最近 7 天</option>
+                <option value="30" selected>最近 30 天</option>
+                <option value="90">最近 90 天</option>
+              </select>
+            </div>
+          </div>
+          <!-- 汇总指标 -->
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8" id="telemetry-stats">
+            <div class="bg-gray-800 rounded-xl p-4 text-center">
+              <div id="t-devices" class="text-3xl font-bold text-blue-400">-</div>
+              <div class="text-gray-400 text-sm mt-1">活跃设备</div>
+            </div>
+            <div class="bg-gray-800 rounded-xl p-4 text-center">
+              <div id="t-pro" class="text-3xl font-bold text-yellow-400">-</div>
+              <div class="text-gray-400 text-sm mt-1">付费设备</div>
+            </div>
+            <div class="bg-gray-800 rounded-xl p-4 text-center">
+              <div id="t-sessions" class="text-3xl font-bold text-green-400">-</div>
+              <div class="text-gray-400 text-sm mt-1">会话总数</div>
+            </div>
+            <div class="bg-gray-800 rounded-xl p-4 text-center">
+              <div id="t-reports" class="text-3xl font-bold text-purple-400">-</div>
+              <div class="text-gray-400 text-sm mt-1">上报次数</div>
+            </div>
+          </div>
+          <!-- 平台分布 + 版本分布 + 地域分布 -->
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+            <div class="bg-gray-800 rounded-xl p-4">
+              <h3 class="font-semibold mb-3 text-gray-300">平台分布</h3>
+              <div id="t-platform-list" class="space-y-2 text-sm"></div>
+            </div>
+            <div class="bg-gray-800 rounded-xl p-4">
+              <h3 class="font-semibold mb-3 text-gray-300">版本分布</h3>
+              <div id="t-version-list" class="space-y-2 text-sm"></div>
+            </div>
+            <div class="bg-gray-800 rounded-xl p-4">
+              <h3 class="font-semibold mb-3 text-gray-300">地域分布</h3>
+              <div id="t-region-list" class="space-y-2 text-sm"></div>
+            </div>
+          </div>
+          <!-- 每日趋势 -->
+          <div class="bg-gray-800 rounded-xl p-4 mb-8">
+            <h3 class="font-semibold mb-3 text-gray-300">每日活跃趋势</h3>
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="border-b border-gray-700 text-gray-400">
+                    <th class="text-left py-2 px-2">日期</th>
+                    <th class="text-right py-2 px-2">活跃设备</th>
+                    <th class="text-right py-2 px-2">会话数</th>
+                    <th class="text-left py-2 px-2">活跃度</th>
+                  </tr>
+                </thead>
+                <tbody id="t-daily-rows"></tbody>
+              </table>
+            </div>
+          </div>
+          <!-- 设备列表 -->
+          <div class="bg-gray-800 rounded-xl p-4">
+            <h3 class="font-semibold mb-3 text-gray-300">活跃设备列表</h3>
+            <div class="overflow-x-auto">
+              <table class="w-full text-sm">
+                <thead>
+                  <tr class="border-b border-gray-700 text-gray-400">
+                    <th class="text-left py-2 px-2">设备ID</th>
+                    <th class="text-left py-2 px-2">版本</th>
+                    <th class="text-left py-2 px-2">平台</th>
+                    <th class="text-left py-2 px-2">IP</th>
+                    <th class="text-left py-2 px-2">地域</th>
+                    <th class="text-right py-2 px-2">会话数</th>
+                    <th class="text-left py-2 px-2">最后活跃</th>
+                  </tr>
+                </thead>
+                <tbody id="t-device-rows"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -462,6 +551,110 @@
       if (tab === 'users') loadUsers();
       if (tab === 'devices') loadDevices();
       if (tab === 'orders') loadOrders();
+      if (tab === 'telemetry') loadTelemetry();
+    }
+
+    async function loadTelemetry() {
+      var daysEl = document.getElementById('telemetry-days');
+      var days = daysEl ? daysEl.value : 30;
+      try {
+        var res = await fetch('/api/admin/telemetry?days=' + days, {
+          headers: { 'X-Admin-Key': adminKey }
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        var data = await res.json();
+        var s = data.stats || {};
+        document.getElementById('t-devices').textContent = s.active_devices || 0;
+        document.getElementById('t-pro').textContent = s.pro_devices || 0;
+        document.getElementById('t-sessions').textContent = s.total_sessions || 0;
+        document.getElementById('t-reports').textContent = s.total_reports || 0;
+
+        // 平台分布
+        var platformEl = document.getElementById('t-platform-list');
+        var totalDev = s.active_devices || 1;
+        var platformHtml = '';
+        var platforms = data.by_platform || [];
+        for (var i = 0; i < platforms.length; i++) {
+          var p = platforms[i];
+          var pct = Math.round(p.devices / totalDev * 100);
+          platformHtml += '<div class="flex items-center gap-2">'
+            + '<span class="text-gray-300 w-32 truncate">' + p.platform_arch + '</span>'
+            + '<div class="flex-1 bg-gray-700 rounded-full h-2">'
+            + '<div class="bg-blue-500 h-2 rounded-full" style="width:' + pct + '%"></div></div>'
+            + '<span class="text-gray-400 w-12 text-right">' + p.devices + ' (' + pct + '%)</span></div>';
+        }
+        platformEl.innerHTML = platformHtml || '<span class="text-gray-500">暂无数据</span>';
+
+        // 版本分布
+        var versionEl = document.getElementById('t-version-list');
+        var versionHtml = '';
+        var versions = data.by_version || [];
+        for (var j = 0; j < versions.length; j++) {
+          var v = versions[j];
+          var vpct = Math.round(v.devices / totalDev * 100);
+          versionHtml += '<div class="flex items-center gap-2">'
+            + '<span class="text-gray-300 w-20">v' + v.app_version + '</span>'
+            + '<div class="flex-1 bg-gray-700 rounded-full h-2">'
+            + '<div class="bg-green-500 h-2 rounded-full" style="width:' + vpct + '%"></div></div>'
+            + '<span class="text-gray-400 w-12 text-right">' + v.devices + ' (' + vpct + '%)</span></div>';
+        }
+        versionEl.innerHTML = versionHtml || '<span class="text-gray-500">暂无数据</span>';
+
+        // 每日趋势
+        var daily = data.daily || [];
+        var maxDev = 1;
+        for (var k = 0; k < daily.length; k++) {
+          if (daily[k].active_devices > maxDev) maxDev = daily[k].active_devices;
+        }
+        var tbody = document.getElementById('t-daily-rows');
+        var rowsHtml = '';
+        for (var m = 0; m < daily.length; m++) {
+          var d = daily[m];
+          var barW = Math.round(d.active_devices / maxDev * 100);
+          rowsHtml += '<tr class="border-b border-gray-700/50">'
+            + '<td class="py-2 px-2 text-gray-300">' + d.day + '</td>'
+            + '<td class="py-2 px-2 text-right text-blue-400">' + d.active_devices + '</td>'
+            + '<td class="py-2 px-2 text-right text-green-400">' + (d.sessions || 0) + '</td>'
+            + '<td class="py-2 px-2 w-32"><div class="bg-gray-700 rounded-full h-2">'
+            + '<div class="bg-blue-500 h-2 rounded-full" style="width:' + barW + '%"></div></div></td></tr>';
+        }
+        tbody.innerHTML = rowsHtml || '<tr><td colspan="4" class="py-4 text-center text-gray-500">暂无数据</td></tr>';
+        // 地域分布
+        var regionEl = document.getElementById('t-region-list');
+        var regionHtml = '';
+        var regions = data.by_region || [];
+        for (var r = 0; r < regions.length; r++) {
+          var rg = regions[r];
+          var rpct = Math.round(rg.devices / totalDev * 100);
+          regionHtml += '<div class="flex items-center gap-2">'
+            + '<span class="text-gray-300 w-28 truncate" title="' + rg.region + '">' + rg.region + '</span>'
+            + '<div class="flex-1 bg-gray-700 rounded-full h-2">'
+            + '<div class="bg-yellow-500 h-2 rounded-full" style="width:' + rpct + '%"></div></div>'
+            + '<span class="text-gray-400 w-12 text-right">' + rg.devices + '</span></div>';
+        }
+        regionEl.innerHTML = regionHtml || '<span class="text-gray-500">暂无数据</span>';
+
+        // 设备列表
+        var devRows = document.getElementById('t-device-rows');
+        var devHtml = '';
+        var devices = data.recent_devices || [];
+        for (var n = 0; n < devices.length; n++) {
+          var dev = devices[n];
+          var lastSeen = dev.last_seen ? new Date(dev.last_seen * 1000).toLocaleString('zh-CN') : '-';
+          devHtml += '<tr class="border-b border-gray-700/50">'
+            + '<td class="py-2 px-2 text-gray-400 font-mono text-xs">' + (dev.device_id || '').substring(0, 12) + '...</td>'
+            + '<td class="py-2 px-2 text-gray-300">' + (dev.app_version || '-') + '</td>'
+            + '<td class="py-2 px-2 text-gray-300">' + (dev.platform || '') + '-' + (dev.arch || '') + '</td>'
+            + '<td class="py-2 px-2 text-gray-400 font-mono text-xs">' + (dev.ip || '-') + '</td>'
+            + '<td class="py-2 px-2 text-gray-300">' + (dev.region || '-') + '</td>'
+            + '<td class="py-2 px-2 text-right text-green-400">' + (dev.total_sessions || 0) + '</td>'
+            + '<td class="py-2 px-2 text-gray-400 text-xs">' + lastSeen + '</td></tr>';
+        }
+        devRows.innerHTML = devHtml || '<tr><td colspan="7" class="py-4 text-center text-gray-500">暂无数据</td></tr>';
+      } catch (e) {
+        document.getElementById('t-devices').textContent = 'ERR';
+        document.getElementById('t-platform-list').innerHTML = '<span class="text-red-400">' + e.message + '</span>';
+      }
     }
 
     async function loadStats() {
