@@ -43,8 +43,17 @@ scp "$MAC_YML" "$WIN_YML" \
     us-lax02:"/var/www/downloads/releases/"
 
 # ── 更新下载页面版本号 ────────────────────────────────────
+# 只匹配明确的安装包/版本目录路径，不会误伤 SVG path 等数据
 echo "🌐 更新 term.whaty.org 下载页面"
-sed -i '' "s/1\.[0-9]*\.[0-9]*/${VERSION}/g" subscription-server/public/index.html
+sed -i '' \
+  -e "s|/whatyterm/v1\.0\.[0-9]*/WhatyTerm|/whatyterm/v${VERSION}/WhatyTerm|g" \
+  -e "s|WhatyTerm-1\.0\.[0-9]*\.dmg|WhatyTerm-${VERSION}.dmg|g" \
+  -e "s|WhatyTerm-1\.0\.[0-9]*-arm64\.dmg|WhatyTerm-${VERSION}-arm64.dmg|g" \
+  -e "s|WhatyTerm Setup 1\.0\.[0-9]*\.exe|WhatyTerm Setup ${VERSION}.exe|g" \
+  -e "s|WhatyTerm%20Setup%201\.0\.[0-9]*\.exe|WhatyTerm%20Setup%20${VERSION}.exe|g" \
+  -e "s|WhatyTerm-1\.0\.[0-9]*\.AppImage|WhatyTerm-${VERSION}.AppImage|g" \
+  -e "s|>v1\.0\.[0-9]*<|>v${VERSION}<|g" \
+  subscription-server/public/index.html
 scp subscription-server/public/index.html us-lax02:/tmp/index.html
 ssh us-lax02 "docker cp /tmp/index.html whatyterm-subscription:/app/public/index.html"
 
