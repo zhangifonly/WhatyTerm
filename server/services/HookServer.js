@@ -194,36 +194,49 @@ try {
   }
 
   _mergeCodexSettings() {
-    // hooks.json
+    // Codex 官方文档：Windows 上 hooks 暂不支持，直接跳过
+    if (isWindows) {
+      console.log('[HookServer] Codex hooks 暂不支持 Windows，跳过');
+      return;
+    }
+
+    // hooks.json - Codex 格式与 Claude Code 完全一致
     const hooksPath = join(homedir(), '.codex', 'hooks.json');
-    let hooks = {};
-    try { hooks = JSON.parse(readFileSync(hooksPath, 'utf8')); } catch {}
+    let settings = {};
+    try { settings = JSON.parse(readFileSync(hooksPath, 'utf8')); } catch {}
+    if (!settings.hooks) settings.hooks = {};
 
     const ext = this._scriptExt();
-    const hookMap = {
-      pre_tool_call:  join(this.hooksDir, 'pre-tool' + ext),
-      post_tool_call: join(this.hooksDir, 'post-tool' + ext),
-      session_end:    join(this.hooksDir, 'stop' + ext),
-    };
+    const hookMap = { PreToolUse: 'pre-tool' + ext, PostToolUse: 'post-tool' + ext, Stop: 'stop' + ext };
 
-    for (const [event, scriptPath] of Object.entries(hookMap)) {
-      const command = isWindows
-        ? `powershell -ExecutionPolicy Bypass -File "${scriptPath}"`
-        : scriptPath;
-      if (!Array.isArray(hooks[event])) hooks[event] = [];
-      hooks[event] = hooks[event].filter(h => !h.command?.includes('webtmux'));
-      hooks[event].push({ command, timeout: 5 });
+    for (const [event, script] of Object.entries(hookMap)) {
+      const scriptPath = join(this.hooksDir, script);
+      if (!settings.hooks[event]) settings.hooks[event] = [];
+      // 移除旧的 webtmux 条目
+      settings.hooks[event] = settings.hooks[event].filter(h =>
+        !h.hooks?.some(c => c.command?.includes('webtmux'))
+      );
+      settings.hooks[event].push({
+        matcher: '.*',
+        hooks: [{ type: 'command', command: scriptPath, timeout: 5 }]
+      });
     }
 
     mkdirSync(join(homedir(), '.codex'), { recursive: true });
-    writeFileSync(hooksPath, JSON.stringify(hooks, null, 2));
+    writeFileSync(hooksPath, JSON.stringify(settings, null, 2));
 
-    // config.toml - ensure hooks feature is enabled
+    // config.toml - 启用 codex_hooks 实验特性
     const configPath = join(homedir(), '.codex', 'config.toml');
     let config = '';
     try { config = readFileSync(configPath, 'utf8'); } catch {}
-    if (!config.includes('enable_hooks')) {
-      config += '\nenable_hooks = true\n';
+    // 清理旧的错误配置
+    config = config.replace(/^enable_hooks\s*=.*$/gm, '').replace(/\n{3,}/g, '\n\n');
+    if (!/\[features\][\s\S]*?codex_hooks\s*=\s*true/.test(config)) {
+      if (/\[features\]/.test(config)) {
+        config = config.replace(/\[features\]/, '[features]\ncodex_hooks = true');
+      } else {
+        config += '\n[features]\ncodex_hooks = true\n';
+      }
       writeFileSync(configPath, config);
     }
   }
@@ -261,9 +274,12 @@ try {
    * 将不同 CLI 的事件格式统一为 Claude Code 格式：
    *   hook_event_name: PreToolUse | PostToolUse | Stop
    *   tool_name, tool_input, cwd
+   *
+   * 注：Codex CLI 的事件格式与 Claude Code 完全一致（hook_event_name/tool_name/tool_input/cwd），
+   *     无需特殊处理，会被首个分支匹配。
    */
   _normalizeEvent(event) {
-    // 已经是标准格式（Claude Code）
+    // 已经是标准格式（Claude Code 和 Codex CLI 都使用此格式）
     if (event.hook_event_name) return event;
 
     // Gemini CLI: { eventName, toolName, arguments, workingDir }
@@ -275,19 +291,6 @@ try {
         tool_input: event.arguments || {},
         cwd: event.workingDir,
         _source: 'gemini',
-        _raw: event,
-      };
-    }
-
-    // Codex CLI: { event, tool, args, cwd }
-    if (event.event) {
-      const nameMap = { pre_tool_call: 'PreToolUse', post_tool_call: 'PostToolUse', session_end: 'Stop' };
-      return {
-        hook_event_name: nameMap[event.event] || event.event,
-        tool_name: event.tool,
-        tool_input: event.args || {},
-        cwd: event.cwd,
-        _source: 'codex',
         _raw: event,
       };
     }
