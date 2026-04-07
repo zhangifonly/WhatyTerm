@@ -1485,31 +1485,9 @@ ${historyText || '(空)'}
       };
     }
 
-    // 高优先级：检测 accept edits 等待状态（插件分析前）
-    // 注意：确认界面也可能包含 "shift+tab"，所以只在非确认界面时才检测
-    // 重要：如果终端最后几行有空闲提示符（❯ 或 >），说明 Claude Code 已完成任务，
-    // 底部状态栏的 "accept edits on" 只是提示，不需要发 Tab
-    const earlyLast500 = earlyCleanContent.slice(-500);
-    const hasIdlePromptEarly = /^[❯>]\s*$/m.test(earlyLast500) || /\n[❯>]\s*$/m.test(earlyLast500);
-    const isWaitingForAcceptEarly = !isEditConfirmEarly && !isProceedConfirmEarly && !hasIdlePromptEarly &&
-      (/accept edits on/i.test(earlyLast3000) || /shift\+tab to cycle/i.test(earlyLast3000));
-    if (isWaitingForAcceptEarly) {
-      console.log(`[AIEngine] [高优先级] 检测到等待接受编辑（插件分析前），发送 Tab`);
-      return {
-        currentState: `${cliNameEarly}等待接受编辑`,
-        workingDir: '未显示',
-        recentAction: '等待接受编辑',
-        needsAction: true,
-        actionType: 'single_char',
-        suggestedAction: '\t',
-        actionReason: '检测到编辑等待接受，发送 Tab 接受全部编辑',
-        suggestion: null,
-        updatedAt: new Date().toISOString(),
-        preAnalyzed: true,
-        detectedCLI,
-        ...pluginInfo
-      };
-    }
+    // 注意：accept_edits 状态由插件统一处理（发"继续"），不在这里强制发 Tab。
+    // Tab 通过 tmux send-keys 发送给 Claude Code (Ink 应用) 不可靠，
+    // 而发"继续"既能让 Claude 继续工作，也能间接接受编辑。
 
     // 尝试使用插件系统分析（如果有项目上下文）
     // 注意：默认插件也需要执行分析，以支持免费用户的自动化操作
@@ -1726,18 +1704,18 @@ ${historyText || '(空)'}
       };
     }
 
-    // 1.5 检测 accept edits 状态（Claude Code 完成任务后等待用户接受编辑）
-    // 这种状态需要用户手动操作（Tab 接受、Shift+Tab 切换、Esc 取消）
+    // 1.5 检测 accept edits 状态：发送"继续"而非 Tab
+    // 原因：Tab 通过 tmux send-keys 不可靠，"继续"文本输入更稳定且能让 Claude 推进 Sprint
     if (isWaitingForAccept) {
-      console.log(`[AIEngine] 检测到 ${cliName} 等待接受编辑，发送 Tab 接受全部编辑`);
+      console.log(`[AIEngine] 检测到 ${cliName} 等待接受编辑，发送"继续"`);
       return {
         currentState: `${cliName}等待接受编辑`,
         workingDir: '未显示',
         recentAction: '等待接受编辑',
         needsAction: true,
-        actionType: 'single_char',
-        suggestedAction: '\t',  // Tab 键接受编辑
-        actionReason: '检测到编辑等待接受，发送 Tab 接受全部编辑',
+        actionType: 'text_input',
+        suggestedAction: '继续',
+        actionReason: '检测到编辑等待接受，发送"继续"让 Claude 推进',
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
