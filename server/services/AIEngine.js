@@ -1501,19 +1501,11 @@ ${historyText || '(空)'}
         // 使用插件分析状态（包括默认插件）
         const pluginResult = plugin.analyzeStatus(terminalContent, phase, projectContext || {});
         if (pluginResult) {
-          // Harness: 统一注入 Sprint progress 引导（所有插件通用）
-          // 当有 progress 且操作是"继续"类指令时，注入当前 feature 上下文
+          // Harness: 统一注入 Sprint 当前 feature 的具体指令（替代笼统的"继续"）
           if (pluginResult.needsAction && pluginResult.actionType === 'text_input'
               && pluginResult.suggestedAction?.startsWith('继续')
               && projectContext?.progress?.features?.length) {
-            const features = projectContext.progress.features;
-            const cur = features.find(f => f.status === 'in_progress')
-              || features.find(f => f.status === 'pending');
-            if (cur) {
-              const done = features.filter(f => f.status === 'completed').length;
-              const remaining = features.filter(f => f.status !== 'completed').map(f => f.name);
-              pluginResult.suggestedAction = `继续。当前Sprint进度${done}/${features.length}，正在开发: ${cur.name}（${cur.description || ''}）。完成后请继续下一个: ${remaining.slice(1, 3).join('、') || '无'}`;
-            }
+            pluginResult.suggestedAction = this._buildSprintInstruction(projectContext.progress) || pluginResult.suggestedAction;
           }
           console.log(`[AIEngine] 插件 ${plugin.name} 分析结果: ${pluginResult.message || pluginResult.actionType}`);
           return {
@@ -2302,6 +2294,34 @@ ${this._buildProgressContext(projectContext)}
       console.error('AI 状态分析错误:', err);
       throw err;
     }
+  }
+
+  /**
+   * 构建 Sprint 的具体推进指令（替代笼统的"继续"）
+   * 输出形如："请开始下一个任务: feature 名\n描述\n完成后请告诉我已完成第 N 个 feature"
+   * 这样 AI 知道要做什么、做完后要说什么，便于 Sprint 自动推进
+   */
+  _buildSprintInstruction(progress) {
+    if (!progress?.features?.length) return null;
+    const features = progress.features;
+    const done = features.filter(f => f.status === 'completed').length;
+    const total = features.length;
+
+    // 优先取 in_progress，否则取第一个 pending
+    let cur = features.find(f => f.status === 'in_progress');
+    let isNew = false;
+    if (!cur) {
+      cur = features.find(f => f.status === 'pending');
+      isNew = true;
+    }
+    if (!cur) return null;
+
+    const idx = features.indexOf(cur) + 1;
+    const next = features.filter(f => f.status === 'pending' && f !== cur).slice(0, 2).map(f => f.name);
+    const action = isNew ? '请开始' : '请继续完成';
+    const desc = cur.description ? `\n要求: ${cur.description}` : '';
+    const tail = next.length ? `\n完成后请继续: ${next.join('、')}` : '\n这是最后一个任务';
+    return `${action}第 ${idx}/${total} 个任务: ${cur.name}${desc}${tail}\n完成后请明确说"已完成 ${cur.name}"`;
   }
 
   /** 构建进度上下文（注入到 AI 分析 prompt） */

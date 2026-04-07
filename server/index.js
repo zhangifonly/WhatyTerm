@@ -2772,6 +2772,10 @@ function isAutoActionPausedByUserInput(sessionId) {
 // 只在终端空闲（非运行中）时检测，避免 Claude 运行中误判
 const featureCompletionCount = new Map(); // sessionId -> consecutive idle count
 
+function escapeRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function checkAndAdvanceFeature(sessionId, terminalContent, status) {
   // 只在空闲/等待状态下检测
   if (status?.currentState?.includes('运行中') || status?.currentState?.includes('running')) {
@@ -2793,28 +2797,26 @@ function checkAndAdvanceFeature(sessionId, terminalContent, status) {
     return;
   }
 
-  const lastLines = (terminalContent || '').split('\n').slice(-30).join('\n').toLowerCase();
+  const lastLines = (terminalContent || '').split('\n').slice(-30).join('\n');
+  const lastLinesLower = lastLines.toLowerCase();
 
-  // 多维度检测 feature 完成信号
-  const completionSignals = [
-    // 直接完成声明
-    /完成|完毕|done|finished|completed|succeed|成功/,
-    // 代码提交
-    /git commit|git push|已提交|committed/,
-    // 文件创建/修改确认
-    /created|wrote|saved|生成了|创建了|写入了/,
-    // 测试通过
-    /tests?\s+pass|测试通过|all.*pass/i,
-    // Claude 等待新指令（说明上一轮任务做完了）
-    /what.*next|还需要|接下来|下一步|anything else/i,
-  ];
+  // 优先：AI 明确说"已完成 [当前 feature 名]"（最可靠）
+  const explicitDone = current.name && new RegExp(`已完成[\\s:：]*${escapeRegex(current.name)}`).test(lastLines);
 
-  const signalCount = completionSignals.filter(p => p.test(lastLines)).length;
-
-  // 至少匹配 2 个信号才认为完成（防误判）
-  if (signalCount < 2) {
-    featureCompletionCount.delete(sessionId);
-    return;
+  if (!explicitDone) {
+    // 多维度检测 feature 完成信号
+    const completionSignals = [
+      /完成|完毕|done|finished|completed|succeed|成功/,
+      /git commit|git push|已提交|committed/,
+      /created|wrote|saved|生成了|创建了|写入了/,
+      /tests?\s+pass|测试通过|all.*pass/i,
+      /what.*next|还需要|接下来|下一步|anything else/i,
+    ];
+    const signalCount = completionSignals.filter(p => p.test(lastLinesLower)).length;
+    if (signalCount < 2) {
+      featureCompletionCount.delete(sessionId);
+      return;
+    }
   }
 
   // 连续 2 次检测都匹配才推进
@@ -2826,6 +2828,9 @@ function checkAndAdvanceFeature(sessionId, terminalContent, status) {
   progressManager.updateFeatureStatus(sessionId, current.id, { status: 'completed' });
   const next = progressManager.advanceToNext(sessionId);
   const updated = progressManager.loadProgress(sessionId);
+
+  // 关键：清除冷却状态，下次自动操作能立即发送新 feature 的指令
+  lastActionMap.delete(sessionId);
 
   console.log(`[Harness] Feature 完成: ${current.name}${next ? `, 下一个: ${next.name}` : '，全部完成'}`);
   io.to(`session:${sessionId}`).emit('progress:updated', { sessionId, progress: updated });
