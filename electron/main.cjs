@@ -754,7 +754,8 @@ function createWindow() {
     icon: fs.existsSync(iconPath) ? iconPath : undefined,
     webPreferences: {
       nodeIntegration: false,
-      contextIsolation: true
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.cjs')
     }
   };
 
