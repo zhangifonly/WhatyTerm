@@ -3849,13 +3849,39 @@ function AboutPage({ socket, onClose }) {
     setDownloading(true);
     setDownloadProgress(0);
 
+    // 优先使用 Electron electron-updater 自动下载（无需用户手动操作）
+    if (window.electronAPI?.isElectron && window.electronAPI.downloadUpdate) {
+      try {
+        // 监听下载进度和完成状态
+        const cleanup = window.electronAPI.onUpdateStatus((data) => {
+          if (data.status === 'downloading') {
+            setDownloadProgress(Math.round(data.percent || 0));
+            setUpdateStatus(`正在下载 ${Math.round(data.percent || 0)}%`);
+          } else if (data.status === 'downloaded') {
+            setDownloadProgress(100);
+            setUpdateStatus('下载完成，等待重启安装');
+            setDownloading(false);
+            cleanup && cleanup();
+          } else if (data.status === 'error') {
+            setUpdateStatus('下载失败: ' + (data.message || ''));
+            setDownloading(false);
+            cleanup && cleanup();
+          }
+        });
+        await window.electronAPI.downloadUpdate();
+        return;
+      } catch (err) {
+        setUpdateStatus('自动下载失败，将打开浏览器: ' + err.message);
+        // 失败回退到浏览器下载
+      }
+    }
+
+    // Fallback：浏览器/Web 模式或自动下载失败时，打开浏览器下载
     try {
-      // 获取下载链接
       const response = await fetch(`/api/update/download?platform=${navigator.platform.includes('Mac') ? 'darwin' : navigator.platform.includes('Win') ? 'win32' : 'linux'}&arch=${navigator.userAgent.includes('arm64') ? 'arm64' : 'x64'}`);
       const data = await response.json();
 
       if (data.url) {
-        // 打开下载链接
         window.open(data.url, '_blank');
         setUpdateStatus('已打开下载页面');
       } else if (updateInfo.downloadUrl) {
