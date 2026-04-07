@@ -54,14 +54,16 @@ class HookServer {
   }
 
   /**
-   * 部署 OpenCode TypeScript 监控插件到指定项目目录
+   * 部署 OpenCode 监控插件到指定项目目录
    * 在 OpenCode 会话启动时调用
+   * 官方文档: https://opencode.ai/docs/plugins/
    */
   deployOpenCodePlugin(workingDir) {
     if (!workingDir) return;
     try {
       const pluginDir = join(workingDir, '.opencode', 'plugins');
-      const pluginPath = join(pluginDir, 'webtmux-monitor.ts');
+      // 使用 .js 避免 TypeScript 编译问题
+      const pluginPath = join(pluginDir, 'webtmux-monitor.js');
       mkdirSync(pluginDir, { recursive: true });
       writeFileSync(pluginPath, this._buildOpenCodePlugin());
       console.log(`[HookServer] OpenCode 插件已部署: ${pluginPath}`);
@@ -163,30 +165,38 @@ try {
   }
 
   _mergeGeminiSettings() {
+    // Gemini CLI hooks: ~/.gemini/settings.json
+    // 官方文档: https://geminicli.com/docs/hooks/reference/
+    // 事件名: BeforeTool / AfterTool / SessionEnd（与 Claude Code 不同）
+    // timeout 单位: 毫秒（默认 60000）
     const settingsPath = join(homedir(), '.gemini', 'settings.json');
     let settings = {};
     try { settings = JSON.parse(readFileSync(settingsPath, 'utf8')); } catch {}
     if (!settings.hooks) settings.hooks = {};
 
     const ext = this._scriptExt();
-    const hookMap = {
-      BeforeTool: join(this.hooksDir, 'pre-tool' + ext),
-      AfterTool:  join(this.hooksDir, 'post-tool' + ext),
-      SessionEnd: join(this.hooksDir, 'stop' + ext),
-    };
+    // BeforeTool/AfterTool 支持 matcher（按工具名匹配），SessionEnd 不需要
+    const eventConfigs = [
+      { event: 'BeforeTool', script: 'pre-tool' + ext, matcher: '.*' },
+      { event: 'AfterTool',  script: 'post-tool' + ext, matcher: '.*' },
+      { event: 'SessionEnd', script: 'stop' + ext, matcher: null },
+    ];
 
-    for (const [event, scriptPath] of Object.entries(hookMap)) {
+    for (const cfg of eventConfigs) {
+      const scriptPath = join(this.hooksDir, cfg.script);
       const command = isWindows
         ? `powershell -ExecutionPolicy Bypass -File "${scriptPath}"`
         : scriptPath;
-      if (!Array.isArray(settings.hooks[event])) settings.hooks[event] = [];
-      settings.hooks[event] = settings.hooks[event].filter(h =>
-        !h.hooks?.some(c => c.command?.includes('webtmux'))
+      if (!Array.isArray(settings.hooks[cfg.event])) settings.hooks[cfg.event] = [];
+      // 移除旧的 webtmux 条目
+      settings.hooks[cfg.event] = settings.hooks[cfg.event].filter(h =>
+        !h.hooks?.some(c => c.command?.includes('webtmux') || c.command?.includes('.webtmux'))
       );
-      settings.hooks[event].push({
-        matcher: '.*',
-        hooks: [{ type: 'command', command, timeout: 5000 }],
-      });
+      const entry = {
+        hooks: [{ name: 'webtmux-monitor', type: 'command', command, timeout: 5000 }],
+      };
+      if (cfg.matcher) entry.matcher = cfg.matcher;
+      settings.hooks[cfg.event].push(entry);
     }
 
     mkdirSync(join(homedir(), '.gemini'), { recursive: true });
@@ -194,32 +204,39 @@ try {
   }
 
   _mergeCodexSettings() {
-    // Codex 官方文档：Windows 上 hooks 暂不支持，直接跳过
+    // Codex CLI hooks: ~/.codex/hooks.json + [features] codex_hooks = true
+    // 官方文档: https://developers.openai.com/codex/hooks
+    // 事件名: SessionStart / PreToolUse / PostToolUse / UserPromptSubmit / Stop
+    // 仅 SessionStart/PreToolUse/PostToolUse 支持 matcher
+    // timeout 单位: 秒（默认 600）
     if (isWindows) {
       console.log('[HookServer] Codex hooks 暂不支持 Windows，跳过');
       return;
     }
 
-    // hooks.json - Codex 格式与 Claude Code 完全一致
     const hooksPath = join(homedir(), '.codex', 'hooks.json');
     let settings = {};
     try { settings = JSON.parse(readFileSync(hooksPath, 'utf8')); } catch {}
     if (!settings.hooks) settings.hooks = {};
 
     const ext = this._scriptExt();
-    const hookMap = { PreToolUse: 'pre-tool' + ext, PostToolUse: 'post-tool' + ext, Stop: 'stop' + ext };
+    const eventConfigs = [
+      { event: 'PreToolUse',  script: 'pre-tool' + ext,  matcher: '.*' },
+      { event: 'PostToolUse', script: 'post-tool' + ext, matcher: '.*' },
+      { event: 'Stop',        script: 'stop' + ext,      matcher: null }, // Stop 不支持 matcher
+    ];
 
-    for (const [event, script] of Object.entries(hookMap)) {
-      const scriptPath = join(this.hooksDir, script);
-      if (!settings.hooks[event]) settings.hooks[event] = [];
-      // 移除旧的 webtmux 条目
-      settings.hooks[event] = settings.hooks[event].filter(h =>
-        !h.hooks?.some(c => c.command?.includes('webtmux'))
+    for (const cfg of eventConfigs) {
+      const scriptPath = join(this.hooksDir, cfg.script);
+      if (!Array.isArray(settings.hooks[cfg.event])) settings.hooks[cfg.event] = [];
+      settings.hooks[cfg.event] = settings.hooks[cfg.event].filter(h =>
+        !h.hooks?.some(c => c.command?.includes('webtmux') || c.command?.includes('.webtmux'))
       );
-      settings.hooks[event].push({
-        matcher: '.*',
-        hooks: [{ type: 'command', command: scriptPath, timeout: 5 }]
-      });
+      const entry = {
+        hooks: [{ type: 'command', command: scriptPath, timeout: 5, statusMessage: 'webtmux-monitor' }],
+      };
+      if (cfg.matcher) entry.matcher = cfg.matcher;
+      settings.hooks[cfg.event].push(entry);
     }
 
     mkdirSync(join(homedir(), '.codex'), { recursive: true });
@@ -312,38 +329,50 @@ try {
     } catch {}
   }
   _buildOpenCodePlugin() {
+    // OpenCode 插件官方文档: https://opencode.ai/docs/plugins/
+    // - 入口: 命名导出的 async 函数，接收 { project, client, $, directory, worktree }
+    // - 工具事件: tool.execute.before / tool.execute.after，参数 (input, output)
+    //   input.tool = 工具名，output.args = 工具参数
+    // - 会话事件: 通过 event 处理器接收 { event }，event.type 形如 "session.idle"
     return `// WhatyTerm OpenCode monitor plugin - auto-generated
-// 使用真实的 OpenCode SDK API：tool.execute.before / tool.execute.after / session.idle
+// 直接发送 Claude Code 标准格式到 server 的 /hooks 端点
 const PORT = ${this.serverPort};
-const TOKEN = "${this.token}";
+const TOKEN = ${JSON.stringify(this.token)};
 
 async function postEvent(eventName, toolName, toolInput, cwd) {
   try {
-    await fetch(\`http://127.0.0.1:\${PORT}/hooks\`, {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 2000);
+    await fetch("http://127.0.0.1:" + PORT + "/hooks", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-WebtmuxToken": TOKEN },
       body: JSON.stringify({
         hook_event_name: eventName,
-        tool_name: toolName,
+        tool_name: toolName || "",
         tool_input: toolInput || {},
-        cwd: cwd || process.cwd(),
+        cwd: cwd || "",
       }),
-      signal: AbortSignal.timeout(2000),
+      signal: ctrl.signal,
     });
-  } catch {}
+    clearTimeout(timer);
+  } catch (e) {}
 }
 
-export const WebtmuxMonitor = async ({ directory }) => ({
-  "tool.execute.before": async (input, output) => {
-    await postEvent("PreToolUse", input?.tool, output?.args, directory);
-  },
-  "tool.execute.after": async (input, output) => {
-    await postEvent("PostToolUse", input?.tool, output?.args, directory);
-  },
-  "session.idle": async () => {
-    await postEvent("Stop", undefined, undefined, directory);
-  },
-});
+export const WebtmuxMonitor = async ({ directory }) => {
+  return {
+    "tool.execute.before": async (input, output) => {
+      await postEvent("PreToolUse", input && input.tool, output && output.args, directory);
+    },
+    "tool.execute.after": async (input, output) => {
+      await postEvent("PostToolUse", input && input.tool, output && output.args, directory);
+    },
+    event: async ({ event }) => {
+      if (event && (event.type === "session.idle" || event.type === "session.deleted")) {
+        await postEvent("Stop", "", {}, directory);
+      }
+    },
+  };
+};
 `;
   }
 }
