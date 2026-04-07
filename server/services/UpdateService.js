@@ -242,7 +242,7 @@ class UpdateService {
         latestVersion,
         notes: releaseInfo.notes,
         pubDate: releaseInfo.pubDate,
-        downloadUrl: releaseInfo.htmlUrl || `${UPDATE_CONFIG.updateServerUrl}/v${latestVersion}/`,
+        downloadUrl: releaseInfo.htmlUrl || `${UPDATE_CONFIG.updateServerUrl}/whatyterm/v${latestVersion}/`,
         assets: releaseInfo.assets || []
       };
 
@@ -282,7 +282,8 @@ class UpdateService {
     }
 
     const version = this.latestVersion;
-    const baseUrl = `${UPDATE_CONFIG.updateServerUrl}/v${version}`;
+    // 实际文件位于 /whatyterm/v{version}/...
+    const baseUrl = `${UPDATE_CONFIG.updateServerUrl}/whatyterm/v${version}`;
 
     // 根据平台和架构返回对应的下载链接
     const fileMap = {
