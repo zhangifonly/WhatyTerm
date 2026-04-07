@@ -3413,6 +3413,8 @@ async function runBackgroundAutoAction() {
 
           if (lastAction && lastAction.action === action && lastAction.contentHash === contentHash && (now - lastAction.time) < cooldownTime) {
             console.log(`[后台自动操作] 会话 ${session.name}: 跳过重复操作 \"${action}\" (冷却${cooldownTime/1000}秒)`);
+            // 即使被冷却跳过，也要尝试推进 Sprint（防止卡在某个状态时进度永远不动）
+            checkAndAdvanceFeature(session.id, terminalContent, status);
             session.isAutoActioning = false;
             updateCheckState(sessionData.id, false, status);
             continue;
@@ -3585,6 +3587,8 @@ async function runBackgroundAutoAction() {
 
         if (lastAction && lastAction.action === action && lastAction.contentHash === contentHash && (now - lastAction.time) < cooldownTime) {
           console.log(`[后台自动操作] 会话 ${session.name}: 跳过重复操作 "${action}" (冷却${cooldownTime/1000}秒，剩余 ${Math.ceil((cooldownTime - (now - lastAction.time)) / 1000)}秒)`);
+          // 即使被冷却跳过，也要尝试推进 Sprint
+          checkAndAdvanceFeature(session.id, terminalContent, status);
           session.isAutoActioning = false;
           continue;
         }

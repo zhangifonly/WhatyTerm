@@ -201,29 +201,20 @@ class DefaultPlugin extends BasePlugin {
       return 'running';
     }
 
-    // 检测 accept edits 状态（Claude Code 完成任务后等待用户接受编辑）
-    // 只有在不运行时才检测这个状态
-    // 条件：有 accept edits 提示，且有空闲的 > 提示符
+    // 注意："accept edits on" 是 Claude Code 的模式指示符（自动接受编辑模式开启）
+    // 不是"有待处理编辑"的意思，所以单看这个文字不应触发动作。
+    // 真正的待处理编辑会显示 "Do you want to..." 确认对话框，由 confirmation 阶段处理。
     if (/accept edits on|shift\+tab to cycle/i.test(cleanLastLines)) {
-      // 检查是否有空闲的 > 提示符（没有运行指示）
-      // 使用清理后的文本匹配，避免 ANSI 转义序列干扰
-      // 同时匹配普通 > 和 Unicode ❯
-      const hasIdlePrompt = /^[>❯]\s*$/m.test(cleanLastLines) || /\n[>❯]\s*$/.test(cleanLastLines);
-      // 排除有排队消息的情况（说明还在处理中）
       const hasQueuedMessages = /Press up to edit queued messages/i.test(cleanLastLines);
-      // 排除正在运行的情况（有 esc to interrupt 提示）
       const isRunning = /esc to interrupt|ctrl\+c to interrupt/i.test(cleanLastLines);
-
-      if (hasIdlePrompt && !hasQueuedMessages && !isRunning) {
-        return 'accept_edits';
-      }
-      // 如果有排队消息或正在运行，返回运行中状态
       if (hasQueuedMessages || isRunning) {
         return 'running';
       }
-      // 有 accept edits 提示但没有明确的空闲提示符，仍然返回 accept_edits
-      // 因为用户需要处理这个状态
-      return 'accept_edits';
+      // 有 idle prompt → 是 waiting 状态（Claude 等待用户输入）
+      const hasIdlePrompt = /^[>❯]\s*$/m.test(cleanLastLines) || /\n[>❯]\s*$/.test(cleanLastLines);
+      if (hasIdlePrompt) {
+        return 'waiting';
+      }
     }
 
     // 检测错误状态（排除代码中的错误处理相关内容）
