@@ -275,39 +275,21 @@ try {
    *   hook_event_name: PreToolUse | PostToolUse | Stop
    *   tool_name, tool_input, cwd
    *
-   * 注：Codex CLI 的事件格式与 Claude Code 完全一致（hook_event_name/tool_name/tool_input/cwd），
-   *     无需特殊处理，会被首个分支匹配。
+   * Claude Code / Codex CLI / Gemini CLI 的字段名完全一致（hook_event_name/tool_name/tool_input/cwd），
+   * 只是 Gemini CLI 的 event 名不同（BeforeTool/AfterTool/SessionEnd），需要翻译。
    */
   _normalizeEvent(event) {
-    // 已经是标准格式（Claude Code 和 Codex CLI 都使用此格式）
-    if (event.hook_event_name) return event;
-
-    // Gemini CLI: { eventName, toolName, arguments, workingDir }
-    if (event.eventName) {
-      const nameMap = { BeforeTool: 'PreToolUse', AfterTool: 'PostToolUse', SessionEnd: 'Stop' };
-      return {
-        hook_event_name: nameMap[event.eventName] || event.eventName,
-        tool_name: event.toolName,
-        tool_input: event.arguments || {},
-        cwd: event.workingDir,
-        _source: 'gemini',
-        _raw: event,
-      };
+    if (event.hook_event_name) {
+      // Gemini CLI 的 event 名翻译为 Claude Code 标准
+      const geminiNameMap = { BeforeTool: 'PreToolUse', AfterTool: 'PostToolUse', SessionEnd: 'Stop' };
+      if (geminiNameMap[event.hook_event_name]) {
+        return { ...event, hook_event_name: geminiNameMap[event.hook_event_name], _source: 'gemini' };
+      }
+      // Claude Code 和 Codex CLI 的 event 名已经是标准格式
+      return event;
     }
 
-    // OpenCode plugin: { type, toolName, params, workdir }
-    if (event.type) {
-      const nameMap = { PreToolUse: 'PreToolUse', PostToolUse: 'PostToolUse', SessionEnd: 'Stop' };
-      return {
-        hook_event_name: nameMap[event.type] || event.type,
-        tool_name: event.toolName,
-        tool_input: event.params || {},
-        cwd: event.workdir,
-        _source: 'opencode',
-        _raw: event,
-      };
-    }
-
+    // 注：OpenCode 插件已直接发送 Claude Code 格式（hook_event_name），由首个分支处理
     return event; // fallback
   }
 
@@ -331,39 +313,37 @@ try {
   }
   _buildOpenCodePlugin() {
     return `// WhatyTerm OpenCode monitor plugin - auto-generated
-import type { Plugin } from "@opencode-ai/sdk";
-
+// 使用真实的 OpenCode SDK API：tool.execute.before / tool.execute.after / session.idle
 const PORT = ${this.serverPort};
 const TOKEN = "${this.token}";
 
-async function postEvent(type: string, toolName?: string, params?: unknown, workdir?: string) {
+async function postEvent(eventName, toolName, toolInput, cwd) {
   try {
     await fetch(\`http://127.0.0.1:\${PORT}/hooks\`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-WebtmuxToken": TOKEN,
-      },
-      body: JSON.stringify({ type, toolName, params, workdir }),
+      headers: { "Content-Type": "application/json", "X-WebtmuxToken": TOKEN },
+      body: JSON.stringify({
+        hook_event_name: eventName,
+        tool_name: toolName,
+        tool_input: toolInput || {},
+        cwd: cwd || process.cwd(),
+      }),
       signal: AbortSignal.timeout(2000),
     });
   } catch {}
 }
 
-const plugin: Plugin = {
-  name: "webtmux-monitor",
-  async onPreToolUse({ tool, params, workdir }) {
-    await postEvent("PreToolUse", tool, params, workdir);
+export const WebtmuxMonitor = async ({ directory }) => ({
+  "tool.execute.before": async (input, output) => {
+    await postEvent("PreToolUse", input?.tool, output?.args, directory);
   },
-  async onPostToolUse({ tool, params, workdir }) {
-    await postEvent("PostToolUse", tool, params, workdir);
+  "tool.execute.after": async (input, output) => {
+    await postEvent("PostToolUse", input?.tool, output?.args, directory);
   },
-  async onSessionEnd({ workdir }) {
-    await postEvent("SessionEnd", undefined, undefined, workdir);
+  "session.idle": async () => {
+    await postEvent("Stop", undefined, undefined, directory);
   },
-};
-
-export default plugin;
+});
 `;
   }
 }
