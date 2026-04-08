@@ -19,15 +19,42 @@ CRCCheck off
   FileWrite $9 "Install dir: $INSTDIR$\r$\n"
   FileClose $9
 
-  ; 第一步：强制关闭 WhatyTerm 进程
-  nsExec::ExecToStack 'taskkill /F /IM "WhatyTerm.exe"'
+  ; 第一步：精细杀 WhatyTerm 主进程，**保留 mux-server 进程**
+  ; 重要背景：
+  ;   - mux-server 也叫 WhatyTerm.exe（用 process.execPath 启动）
+  ;   - 但命令行包含 "mux-server" 路径，可以用此区分
+  ;   - mux-server 持有所有 PTY 子进程，杀掉它就丢失所有会话
+  ;   - 普通 taskkill /IM 会按名字杀光所有 WhatyTerm.exe，导致会话丢失
+  ; 用 PowerShell 按 CommandLine 过滤，跳过 mux-server
+  nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process -Filter \"Name=''WhatyTerm.exe''\" | Where-Object { $_.CommandLine -notlike ''*mux-server*'' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"'
   Pop $R1
   Pop $R2
   FileOpen $9 "$TEMP\whatyterm-install.log" a
   FileSeek $9 0 END
-  FileWrite $9 "[KILL] taskkill: exit=$R1 out=$R2$\r$\n"
+  FileWrite $9 "[KILL] PS kill WhatyTerm (preserve mux-server): exit=$R1$\r$\n"
   FileClose $9
-  Sleep 2000
+
+  ; 杀掉 Windows 终端 helper 进程（这些是文件锁的主要来源）
+  ; OpenConsole / winpty-agent 是 WhatyTerm 主进程的 PTY helper，
+  ; 不持有 mux-server / tmux 状态，杀掉是安全的
+  nsExec::ExecToStack 'taskkill /F /IM "OpenConsole.exe"'
+  Pop $R1
+  Pop $R2
+  FileOpen $9 "$TEMP\whatyterm-install.log" a
+  FileSeek $9 0 END
+  FileWrite $9 "[KILL] taskkill OpenConsole: exit=$R1$\r$\n"
+  FileClose $9
+
+  nsExec::ExecToStack 'taskkill /F /IM "winpty-agent.exe"'
+  Pop $R1
+  Pop $R2
+  FileOpen $9 "$TEMP\whatyterm-install.log" a
+  FileSeek $9 0 END
+  FileWrite $9 "[KILL] taskkill winpty-agent: exit=$R1$\r$\n"
+  FileClose $9
+
+  ; 等待 OS 释放文件锁
+  Sleep 3000
 
   ; 第二步：清理所有已知的旧版本注册表项和安装目录
   ; 旧 GUID (1.0.27及之前)
