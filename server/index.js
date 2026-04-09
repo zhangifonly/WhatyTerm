@@ -2882,8 +2882,9 @@ function checkAndAdvanceFeature(sessionId, terminalContent, status) {
   const next = progressManager.advanceToNext(sessionId);
   const updated = progressManager.loadProgress(sessionId);
 
-  // 关键：清除冷却状态，下次自动操作能立即发送新 feature 的指令
+  // 关键：清除冷却和 Sprint feature 跟踪，下次自动操作能立即发送新 feature 的指令
   lastActionMap.delete(sessionId);
+  if (aiEngine) aiEngine._lastSprintFeature = null;
 
   console.log(`[Harness] Feature 完成: ${current.name}${next ? `, 下一个: ${next.name}` : '，全部完成'}`);
   io.to(`session:${sessionId}`).emit('progress:updated', { sessionId, progress: updated });

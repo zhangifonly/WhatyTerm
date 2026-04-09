@@ -1501,11 +1501,22 @@ ${historyText || '(空)'}
         // 使用插件分析状态（包括默认插件）
         const pluginResult = plugin.analyzeStatus(terminalContent, phase, projectContext || {});
         if (pluginResult) {
-          // Harness: 统一注入 Sprint 当前 feature 的具体指令（替代笼统的"继续"）
+          // Harness: Sprint feature 指令只在 feature 切换时注入一次
+          // 之后用普通"继续"，避免重复发送导致 Claude "第 N 次重复，未执行"
           if (pluginResult.needsAction && pluginResult.actionType === 'text_input'
               && pluginResult.suggestedAction?.startsWith('继续')
               && projectContext?.progress?.features?.length) {
-            pluginResult.suggestedAction = this._buildSprintInstruction(projectContext.progress) || pluginResult.suggestedAction;
+            const cur = projectContext.progress.features.find(f => f.status === 'in_progress')
+              || projectContext.progress.features.find(f => f.status === 'pending');
+            if (cur) {
+              const featureKey = cur.id || cur.name;
+              if (!this._lastSprintFeature || this._lastSprintFeature !== featureKey) {
+                // feature 切换了，发送完整指令
+                this._lastSprintFeature = featureKey;
+                pluginResult.suggestedAction = this._buildSprintInstruction(projectContext.progress) || pluginResult.suggestedAction;
+              }
+              // 否则保持原始的"继续"，不重复注入 feature 指令
+            }
           }
           console.log(`[AIEngine] 插件 ${plugin.name} 分析结果: ${pluginResult.message || pluginResult.actionType}`);
           return {
@@ -1688,6 +1699,26 @@ ${historyText || '(空)'}
         actionType: 'none',
         suggestedAction: null,
         actionReason: `${cliName} 正在工作，不应打断`,
+        suggestion: null,
+        updatedAt: new Date().toISOString(),
+        preAnalyzed: true,
+        detectedCLI,
+        ...pluginInfo
+      };
+    }
+
+    // 1.4 检测 Claude Code 评分/反馈对话框（"How is Claude doing?" 1: Bad 2: Fine 3: Good 0: Dismiss）
+    // 自动发送 0（Dismiss）跳过评分，让 Claude 继续工作
+    if (/How is Claude doing.*\(optional\)/i.test(cleanContent) && /0:\s*Dismiss/i.test(cleanContent)) {
+      console.log('[AIEngine] 检测到 Claude 评分对话框，自动 Dismiss');
+      return {
+        currentState: 'Claude 评分对话框',
+        workingDir: '未显示',
+        recentAction: '跳过评分',
+        needsAction: true,
+        actionType: 'single_char',
+        suggestedAction: '0',
+        actionReason: '检测到 Claude 评分对话框，自动发送 0 (Dismiss) 跳过',
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
