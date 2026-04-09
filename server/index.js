@@ -778,6 +778,59 @@ app.get('/api/sessions/:sessionId/hook-activity', (req, res) => {
   });
 });
 
+/**
+ * POST /api/sessions/:sessionId/analyze-now
+ * 真正的"立即分析"：调用 AIEngine.preAnalyzeStatus 分析当前终端状态
+ * 与后台监控用同一套逻辑，返回插件识别的当前状态、建议动作等
+ */
+app.post('/api/sessions/:sessionId/analyze-now', async (req, res) => {
+  try {
+    const session = sessionManager?.getSession(req.params.sessionId);
+    if (!session) return res.status(404).json({ error: 'session not found' });
+
+    const terminalContent = session.getScreenContent?.() || '';
+    if (!terminalContent || terminalContent.length < 10) {
+      return res.json({
+        currentState: '终端无内容',
+        needsAction: false,
+        updatedAt: Date.now(),
+        _source: 'analyze-now',
+      });
+    }
+
+    const sessionData = session.toJSON?.() || {};
+    const projectContext = {
+      projectPath: session.workingDir || sessionData.workingDir,
+      projectDesc: session.projectDesc || sessionData.projectDesc,
+      workingDir: session.workingDir || sessionData.workingDir,
+      goal: session.goal || sessionData.goal,
+      progress: progressManager.loadProgress(session.id)
+    };
+
+    const result = aiEngine.preAnalyzeStatus(
+      terminalContent,
+      sessionData.aiType || 'claude',
+      session.tmuxSessionName,
+      projectContext,
+      sessionData.monitorPluginId
+    );
+
+    if (!result) {
+      return res.json({
+        currentState: '无法分析（终端状态不明确）',
+        needsAction: false,
+        updatedAt: Date.now(),
+        _source: 'analyze-now',
+      });
+    }
+
+    res.json({ ...result, updatedAt: Date.now(), _source: 'analyze-now' });
+  } catch (err) {
+    console.error('[analyze-now] 失败:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 /** 将 HookServer 事件接入 session 状态 + TaskOrchestrator */
 function _wireHookServer() {
   if (!hookServer) return;

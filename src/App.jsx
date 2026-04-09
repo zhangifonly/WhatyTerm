@@ -2302,11 +2302,19 @@ export default function App() {
               onClick={async () => {
                 setAiStatusLoading(prev => ({ ...prev, [currentSession.id]: true }));
                 try {
-                  const res = await fetch(`/api/sessions/${currentSession.id}/hook-activity`);
+                  // 真正的"立即分析"：调用 AIEngine.preAnalyzeStatus
+                  const res = await fetch(`/api/sessions/${currentSession.id}/analyze-now`, { method: 'POST' });
                   const data = await res.json();
+                  if (data.error) throw new Error(data.error);
                   setAiStatusMap(prev => ({ ...prev, [currentSession.id]: data }));
                 } catch (e) {
-                  console.error('[立即分析] hook-activity 失败:', e);
+                  console.error('[立即分析] 失败:', e);
+                  // fallback 到查询 hook 活动
+                  try {
+                    const res = await fetch(`/api/sessions/${currentSession.id}/hook-activity`);
+                    const data = await res.json();
+                    setAiStatusMap(prev => ({ ...prev, [currentSession.id]: data }));
+                  } catch {}
                 } finally {
                   setAiStatusLoading(prev => ({ ...prev, [currentSession.id]: false }));
                 }
