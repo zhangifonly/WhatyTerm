@@ -26,7 +26,8 @@ CRCCheck off
   ;   - mux-server 持有所有 PTY 子进程，杀掉它就丢失所有会话
   ;   - 普通 taskkill /IM 会按名字杀光所有 WhatyTerm.exe，导致会话丢失
   ; 用 PowerShell 按 CommandLine 过滤，跳过 mux-server
-  nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process -Filter \"Name=''WhatyTerm.exe''\" | Where-Object { $_.CommandLine -notlike ''*mux-server*'' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"'
+  ; NSIS 中 $$ 转义为字面量 $（PowerShell 需要 $_）
+  nsExec::ExecToStack 'powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process -Filter \"Name=''WhatyTerm.exe''\" | Where-Object { $$_.CommandLine -notlike ''*mux-server*'' } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue }"'
   Pop $R1
   Pop $R2
   FileOpen $9 "$TEMP\whatyterm-install.log" a
