@@ -524,85 +524,9 @@ async function showMacDependencyDialog() {
 }
 
 // Windows 依赖检查对话框
+// Windows 使用 PowerShell + node-pty ConPTY，不需要 WSL 或 tmux
 async function showWindowsDependencyDialog() {
-  const hasWSL = checkWSL();
-
-  if (!hasWSL) {
-    const result = await dialog.showMessageBox({
-      type: 'warning',
-      title: '需要安装 WSL2',
-      message: 'WhatyTerm 需要 WSL2 (Windows Subsystem for Linux) 才能运行',
-      detail: 'WSL2 允许在 Windows 上运行 Linux 环境，这是运行 tmux 所必需的。\n\n安装步骤：\n1. 以管理员身份打开 PowerShell\n2. 运行: wsl --install\n3. 重启电脑\n4. 重新打开 WhatyTerm',
-      buttons: ['打开安装指南', '复制安装命令', '取消'],
-      defaultId: 0,
-      cancelId: 2
-    });
-
-    if (result.response === 0) {
-      shell.openExternal('https://learn.microsoft.com/zh-cn/windows/wsl/install');
-    } else if (result.response === 1) {
-      const { clipboard } = require('electron');
-      clipboard.writeText('wsl --install');
-      await dialog.showMessageBox({
-        type: 'info',
-        title: '已复制',
-        message: '安装命令已复制到剪贴板',
-        detail: '请以管理员身份打开 PowerShell，粘贴并运行命令。',
-        buttons: ['确定']
-      });
-    }
-    return false;
-  }
-
-  // WSL 已安装，检查 tmux
-  const hasTmux = checkTmuxInWSL();
-
-  if (hasTmux) {
-    return true;
-  }
-
-  // WSL 中没有 tmux
-  const distro = getWSLDistro();
-  const result = await dialog.showMessageBox({
-    type: 'question',
-    title: '需要安装 tmux',
-    message: 'WhatyTerm 需要在 WSL 中安装 tmux',
-    detail: `检测到 WSL 已安装${distro ? ` (${distro})` : ''}，但缺少 tmux。\n\n是否自动安装？\n\n这将执行: sudo apt install tmux`,
-    buttons: ['自动安装', '手动安装', '取消'],
-    defaultId: 0,
-    cancelId: 2
-  });
-
-  if (result.response === 0) {
-    const progressWindow = showProgressWindow('正在安装 tmux...', '请稍候，可能需要输入 WSL 密码');
-
-    try {
-      await installTmuxWSL();
-      progressWindow.close();
-      await dialog.showMessageBox({
-        type: 'info',
-        title: '安装成功',
-        message: 'tmux 已成功安装！',
-        buttons: ['继续']
-      });
-      return true;
-    } catch (err) {
-      progressWindow.close();
-      await dialog.showMessageBox({
-        type: 'error',
-        title: '安装失败',
-        message: 'tmux 安装失败',
-        detail: err.message + '\n\n请尝试手动安装:\n1. 打开 WSL 终端\n2. 运行: sudo apt update && sudo apt install tmux',
-        buttons: ['确定']
-      });
-      return false;
-    }
-  } else if (result.response === 1) {
-    shell.openExternal('https://github.com/tmux/tmux/wiki/Installing');
-    return false;
-  } else {
-    return false;
-  }
+  return true;
 }
 
 // Linux 依赖检查：直接检查系统 tmux，提示手动安装
