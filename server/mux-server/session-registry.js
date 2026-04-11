@@ -9,6 +9,16 @@
 import * as pty from 'node-pty';
 import { EventEmitter } from 'events';
 import { OutputBuffer } from './output-buffer.js';
+import Database from 'better-sqlite3';
+import path from 'path';
+import os from 'os';
+import fs from 'fs';
+
+function getMuxDbPath() {
+  const dir = path.join(os.homedir(), '.webtmux', 'db');
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, 'webtmux.db');
+}
 export class MuxSession extends EventEmitter {
     constructor(options) {
         super();
@@ -170,6 +180,42 @@ export class SessionRegistry extends EventEmitter {
         super(...arguments);
         this.sessions = new Map();
         this.sessionCounter = 0;
+        this._initDb();
+    }
+    _initDb() {
+        try {
+            this.db = new Database(getMuxDbPath());
+            this.db.exec(`
+                CREATE TABLE IF NOT EXISTS mux_sessions (
+                    id TEXT PRIMARY KEY,
+                    name TEXT,
+                    cwd TEXT,
+                    created_at TEXT,
+                    last_active_at TEXT
+                )
+            `);
+        } catch (err) {
+            console.error('[SessionRegistry] DB 初始化失败:', err.message);
+            this.db = null;
+        }
+    }
+    _dbSave(session) {
+        if (!this.db) return;
+        try {
+            this.db.prepare(`INSERT OR REPLACE INTO mux_sessions (id, name, cwd, created_at, last_active_at) VALUES (?, ?, ?, ?, ?)`)
+                .run(session.id, session.name, session.cwd, session.createdAt.toISOString(), new Date().toISOString());
+        } catch {}
+    }
+    _dbRemove(id) {
+        if (!this.db) return;
+        try { this.db.prepare('DELETE FROM mux_sessions WHERE id = ?').run(id); } catch {}
+    }
+    /** 启动时读取历史会话记录（PTY 已死，供上层移入 closed_sessions） */
+    getPersistedSessions() {
+        if (!this.db) return [];
+        try {
+            return this.db.prepare('SELECT * FROM mux_sessions').all();
+        } catch { return []; }
     }
     /**
      * 创建新会话
@@ -199,6 +245,7 @@ export class SessionRegistry extends EventEmitter {
             // 不自动删除会话，保留历史记录
         });
         this.sessions.set(id, session);
+        this._dbSave(session);
         this.emit('session:created', session.getInfo());
         console.log(`[SessionRegistry] 创建会话: ${id} (${name})`);
         return session;
@@ -225,6 +272,7 @@ export class SessionRegistry extends EventEmitter {
         }
         session.kill();
         this.sessions.delete(id);
+        this._dbRemove(id);
         this.emit('session:closed', id, 'killed');
         console.log(`[SessionRegistry] 终止会话: ${id}`);
         return true;

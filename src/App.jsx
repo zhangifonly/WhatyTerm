@@ -276,6 +276,15 @@ export default function App() {
         const updated = data.find(s => s.id === prev.id);
         return updated ? { ...prev, ...updated } : prev;
       });
+      // 重启恢复：首次加载会话列表时，自动 attach 上次活跃的会话
+      if (!currentSessionRef.current) {
+        try {
+          const lastId = localStorage.getItem('webtmux_last_session_id');
+          if (lastId && data.find(s => s.id === lastId)) {
+            socket.emit('session:attach', lastId);
+          }
+        } catch { /* 忽略 */ }
+      }
       try {
         localStorage.setItem('webtmux_sessions_cache', JSON.stringify(data));
       } catch { /* 忽略存储错误 */ }
@@ -317,6 +326,8 @@ export default function App() {
       setPendingScreenContent(data.fullContent || data.screenContent || '');
       setPendingCursorPosition(data.cursorPosition);
       setCurrentSession(data.session);
+      // 持久化上次活跃会话 ID，重启后自动恢复
+      try { localStorage.setItem('webtmux_last_session_id', data.session.id); } catch { /* 忽略 */ }
     });
 
     socket.on('session:updated', (sessionUpdate) => {

@@ -1018,6 +1018,14 @@ export class SessionManager {
     try {
       this.db.exec(`UPDATE sessions SET original_goal = goal WHERE original_goal IS NULL AND goal IS NOT NULL AND goal <> ''`);
     } catch {}
+    // 补全 closed_sessions 缺失字段
+    try { this.db.exec(`ALTER TABLE closed_sessions ADD COLUMN original_goal TEXT`); } catch {}
+    try { this.db.exec(`ALTER TABLE closed_sessions ADD COLUMN working_dir TEXT`); } catch {}
+    try { this.db.exec(`ALTER TABLE closed_sessions ADD COLUMN claude_provider TEXT`); } catch {}
+    try { this.db.exec(`ALTER TABLE closed_sessions ADD COLUMN codex_provider TEXT`); } catch {}
+    try { this.db.exec(`ALTER TABLE closed_sessions ADD COLUMN gemini_provider TEXT`); } catch {}
+    try { this.db.exec(`ALTER TABLE closed_sessions ADD COLUMN stats_total INTEGER DEFAULT 0`); } catch {}
+    try { this.db.exec(`ALTER TABLE closed_sessions ADD COLUMN stats_success INTEGER DEFAULT 0`); } catch {}
   }
 
   _loadSessions() {
@@ -1250,20 +1258,18 @@ export class SessionManager {
           try {
             const stmt = this.db.prepare(`
               INSERT OR REPLACE INTO closed_sessions
-              (id, name, tmux_session_name, goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, ai_type, project_name, project_desc, work_dir, closed_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled,
+               ai_type, project_name, project_desc, work_dir, working_dir, closed_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `);
             stmt.run(
-              row.id,
-              row.name,
-              row.tmux_session_name,
-              row.goal || '',
+              row.id, row.name, row.tmux_session_name,
+              row.goal || '', row.original_goal || row.goal || '',
               row.system_prompt || '',
-              row.ai_enabled,
-              row.auto_mode,
-              row.auto_action_enabled,
+              row.ai_enabled, row.auto_mode, row.auto_action_enabled,
               row.ai_type || 'claude',
-              '', '', '',
+              row.project_name || '', row.project_desc || '',
+              row.working_dir || '', row.working_dir || '',
               Date.now()
             );
             this.db.prepare('DELETE FROM sessions WHERE id = ?').run(row.id);
@@ -1279,13 +1285,19 @@ export class SessionManager {
         try {
           const stmt = this.db.prepare(`
             INSERT OR REPLACE INTO closed_sessions
-            (id, name, tmux_session_name, goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, ai_type, project_name, project_desc, work_dir, closed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled,
+             ai_type, project_name, project_desc, work_dir, working_dir, closed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `);
           stmt.run(
-            row.id, row.name, row.tmux_session_name, row.goal || '', row.system_prompt || '',
-            row.ai_enabled, row.auto_mode, row.auto_action_enabled, row.ai_type || 'claude',
-            '', '', '', Date.now()
+            row.id, row.name, row.tmux_session_name,
+            row.goal || '', row.original_goal || row.goal || '',
+            row.system_prompt || '',
+            row.ai_enabled, row.auto_mode, row.auto_action_enabled,
+            row.ai_type || 'claude',
+            row.project_name || '', row.project_desc || '',
+            row.working_dir || '', row.working_dir || '',
+            Date.now()
           );
           this.db.prepare('DELETE FROM sessions WHERE id = ?').run(row.id);
         } catch (e) {
@@ -1751,8 +1763,11 @@ export class SessionManager {
       // 保存到 closed_sessions 表
       const stmt = this.db.prepare(`
         INSERT OR REPLACE INTO closed_sessions
-        (id, name, tmux_session_name, goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, ai_type, project_name, project_desc, work_dir, closed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled,
+         ai_type, project_name, project_desc, work_dir, working_dir,
+         claude_provider, codex_provider, gemini_provider,
+         stats_total, stats_success, closed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       stmt.run(
@@ -1760,6 +1775,7 @@ export class SessionManager {
         session.name,
         session.tmuxSessionName,
         session.goal || '',
+        session.originalGoal || session.goal || '',
         session.systemPrompt || '',
         session.aiEnabled ? 1 : 0,
         session.autoMode ? 1 : 0,
@@ -1767,7 +1783,13 @@ export class SessionManager {
         session.aiType || 'claude',
         session.projectName || '',
         session.projectDesc || '',
-        session.workDir || '',
+        session.workingDir || '',
+        session.workingDir || '',
+        session.claudeProvider || '',
+        session.codexProvider || '',
+        session.geminiProvider || '',
+        session.stats?.total || 0,
+        session.stats?.success || 0,
         Date.now()
       );
 
