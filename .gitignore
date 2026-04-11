@@ -17,3 +17,5 @@ data/
 # 敏感文件
 CLAUDE.md
 .claude/settings.local.json
+.env
+**/.env
