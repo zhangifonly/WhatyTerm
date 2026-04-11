@@ -1466,6 +1466,12 @@ ${historyText || '(空)'}
     const isOption2PermanentAllowEarly = /2\.\s*Yes,\s*and\s+don.t\s+ask\s+again\s+for:/i.test(earlyLast3000);
 
     if ((isEditConfirmEarly || isProceedConfirmEarly) && hasOption1YesEarly) {
+      // 安全警告类确认不自动点击，让用户决定
+      const isSecurityWarningEarly = /bare repository attacks|Compound commands|security|dangerous|destructive/i.test(earlyLast3000);
+      if (isSecurityWarningEarly) {
+        console.log(`[AIEngine] [高优先级] 检测到安全警告确认界面，跳过自动操作，等待用户决定`);
+        // 不 return，继续往下走，最终会进入 needsAction:false 或 input 状态
+      } else {
       // 如果选项 2 是永久允许某命令模式，选 1（仅本次允许）
       const selectOption = (hasOption2YesEarly && !isOption2PermanentAllowEarly) ? '2' : '1';
       console.log(`[AIEngine] [高优先级] 检测到确认界面（插件分析前），选择选项 ${selectOption}${isOption2PermanentAllowEarly ? '（跳过永久允许）' : ''}`);
@@ -1483,6 +1489,7 @@ ${historyText || '(空)'}
         detectedCLI,
         ...pluginInfo
       };
+      } // end else (not security warning)
     }
 
     // 注意：accept_edits 状态由插件统一处理（发"继续"），不在这里强制发 Tab。
@@ -1892,7 +1899,10 @@ ${historyText || '(空)'}
 
     // 5. 检测普通确认界面（Do you want to proceed?）
     // 如果有选项 2 且不是永久允许某命令模式，选择 2；否则选择 1
-    if (/Do you want to proceed\?/i.test(cleanContent) &&
+    // 排除安全警告类确认（bare repository attacks、Compound commands 等），这类需要用户手动决定
+    const isSecurityWarning = /bare repository attacks|Compound commands|security|dangerous|destructive/i.test(cleanContent);
+    if (!isSecurityWarning &&
+        /Do you want to proceed\?/i.test(cleanContent) &&
         /1\.\s*Yes/i.test(cleanContent)) {
       const hasOption2 = /2\.\s*Yes/i.test(cleanContent);
       const isOption2Permanent = /2\.\s*Yes,\s*and\s+don't\s+ask\s+again\s+for:/i.test(cleanContent);
