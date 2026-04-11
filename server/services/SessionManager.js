@@ -235,11 +235,22 @@ export class Session {
     const tmuxCmd = getTmuxPrefix();
     try {
       if (isNew) {
+        // 检测系统是否支持 tmux-256color terminfo，不支持则回退到 screen-256color
+        let defaultTerminal = 'tmux-256color';
+        try {
+          execSync('infocmp tmux-256color', { stdio: 'pipe' });
+        } catch {
+          defaultTerminal = 'screen-256color';
+        }
         // 创建新的 tmux 会话
         execSync(`${tmuxCmd} new-session -d -s "${this.tmuxSessionName}" -x 80 -y 24`, {
           stdio: 'ignore',
           env: { ...process.env, CLAUDECODE: undefined }
         });
+        // 设置 default-terminal 确保退格等按键正常工作
+        try {
+          execSync(`${tmuxCmd} set-option -t "${this.tmuxSessionName}" default-terminal "${defaultTerminal}"`, { stdio: 'ignore' });
+        } catch {}
         // 清除 CLAUDECODE 环境变量，避免 Claude Code 检测到嵌套会话
         try {
           execSync(`${tmuxCmd} set-environment -t "${this.tmuxSessionName}" -u CLAUDECODE`, { stdio: 'ignore' });
