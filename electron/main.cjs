@@ -914,6 +914,23 @@ function stopServer() {
     serverProcess.kill();
     serverProcess = null;
   }
+  // Windows: 关闭 mux-server 守护进程
+  if (isWindows) {
+    try {
+      const net = require('net');
+      const pipePath = '\\\\.\\pipe\\whatyterm-mux';
+      const client = net.createConnection(pipePath, () => {
+        // 发送 shutdown 请求（mux-server 协议：4字节长度LE + JSON）
+        const msg = JSON.stringify({ id: 'shutdown-' + Date.now(), method: 'shutdown', params: {} });
+        const buf = Buffer.alloc(4 + Buffer.byteLength(msg));
+        buf.writeUInt32LE(Buffer.byteLength(msg), 0);
+        buf.write(msg, 4);
+        client.write(buf);
+        setTimeout(() => client.destroy(), 500);
+      });
+      client.on('error', () => {}); // mux-server 可能已经不在了
+    } catch {}
+  }
 }
 
 // ==================== 应用生命周期 ====================
