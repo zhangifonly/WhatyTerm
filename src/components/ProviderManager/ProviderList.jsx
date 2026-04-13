@@ -1,12 +1,10 @@
 import React from 'react';
-import { useTranslation } from 'react-i18next';
 import ProviderCard from './ProviderCard';
 
 /**
  * 供应商列表组件 - 简化版
  */
 export default function ProviderList({ providers, appType = 'claude', onSwitch, onDelete, onHealthCheck, socket }) {
-  const { t } = useTranslation();
   let providerList = Object.values(providers.providers);
 
   // 按 sortIndex 排序
@@ -33,7 +31,7 @@ export default function ProviderList({ providers, appType = 'claude', onSwitch, 
       {/* Cli Only 警告提示 */}
       <div className="bg-red-900/20 border border-red-500/50 rounded-lg p-3">
         <p className="text-red-400 text-sm leading-relaxed">
-          {t('provider.cliOnlyWarning')}
+          注意：此处配置的供应商仅用于 AI 监控功能，不影响 CLI 工具本身的 API 配置。
         </p>
       </div>
 
