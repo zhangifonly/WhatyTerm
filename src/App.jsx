@@ -14,6 +14,7 @@ import ProviderPriority from './components/ProviderPriority';
 import TerminalPlayback from './components/TerminalPlayback';
 import StorageManager from './components/StorageManager';
 import AdvancedSettings from './components/ProviderManager/AdvancedSettings';
+import ProviderManager from './components/ProviderManager/ProviderManager';
 import TeamView from './components/TeamView';
 import TeamPanel from './components/TeamPanel';
 import VoiceInput from './components/VoiceInput';
@@ -3479,19 +3480,10 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
             margin: '-20px',
             marginTop: '0',
             borderRadius: '0 0 8px 8px',
-            overflow: 'hidden'
+            overflow: 'auto',
+            padding: '20px'
           }}>
-            <iframe
-              src="/cc-switch/index.html"
-              style={{
-                width: '100%',
-                height: '100%',
-                border: 'none',
-                display: 'block'
-              }}
-              title="CC Switch API Configuration"
-              onLoad={() => setCcSwitchLoaded(true)}
-            />
+            <ProviderManager socket={socket} />
           </div>
         )}
 
