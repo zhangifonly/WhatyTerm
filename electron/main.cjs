@@ -1033,14 +1033,20 @@ app.whenReady().then(async () => {
   createTray();
   createWindow();
 
-  // 延迟检查更新（启动后 3 秒）
+  // 延迟检查更新（启动后 5 秒），之后每 6 小时检查一次
   if (!isDev) {
     setTimeout(() => {
       writeLog('[Electron] 开始检查更新...');
       autoUpdater.checkForUpdates().catch(err => {
         writeLog(`[AutoUpdater] 检查更新失败: ${err.message}`);
       });
-    }, 3000);
+    }, 5000);
+    setInterval(() => {
+      writeLog('[Electron] 定时检查更新...');
+      autoUpdater.checkForUpdates().catch(err => {
+        writeLog(`[AutoUpdater] 定时检查更新失败: ${err.message}`);
+      });
+    }, 6 * 60 * 60 * 1000);
   }
 
   app.on('activate', () => {
