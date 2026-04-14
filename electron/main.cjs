@@ -113,6 +113,8 @@ function setupIpcHandlers() {
   // 下载更新
   ipcMain.handle('download-update', async () => {
     try {
+      // 确保先检查过更新（electron-updater 需要先 check 才能 download）
+      await autoUpdater.checkForUpdates();
       await autoUpdater.downloadUpdate();
       return { status: 'ok' };
     } catch (err) {
