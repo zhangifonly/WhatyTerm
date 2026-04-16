@@ -807,9 +807,11 @@ app.post('/api/sessions/:sessionId/analyze-now', async (req, res) => {
       progress: progressManager.loadProgress(session.id)
     };
 
-    const result = aiEngine.preAnalyzeStatus(
+    // 先尝试规则判断，规则无法判断时调用 AI 分析
+    const result = await aiEngine.analyzeStatus(
       terminalContent,
       sessionData.aiType || 'claude',
+      session.id,
       session.tmuxSessionName,
       projectContext,
       sessionData.monitorPluginId
