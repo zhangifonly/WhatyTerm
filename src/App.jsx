@@ -15,6 +15,7 @@ import TerminalPlayback from './components/TerminalPlayback';
 import StorageManager from './components/StorageManager';
 import AdvancedSettings from './components/ProviderManager/AdvancedSettings';
 import ProviderManager from './components/ProviderManager/ProviderManager';
+import ClaudeConfigManager from './components/ClaudeConfigManager';
 import TeamView from './components/TeamView';
 import TeamPanel from './components/TeamPanel';
 import VoiceInput from './components/VoiceInput';
@@ -3475,16 +3476,7 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
 
         <div className="settings-content">
         {activeTab === 'api' && (
-          <div style={{
-            height: '600px',
-            margin: '-20px',
-            marginTop: '0',
-            borderRadius: '0 0 8px 8px',
-            overflow: 'auto',
-            padding: '20px'
-          }}>
-            <ProviderManager socket={socket} />
-          </div>
+          <ClaudeConfigManager socket={socket} />
         )}
 
         {activeTab === 'auth' && (
