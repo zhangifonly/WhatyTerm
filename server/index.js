@@ -4222,48 +4222,13 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
       throw new Error('会话没有工作目录，无法设置本地配置');
     }
 
-    // 从 CC Switch 数据库读取供应商信息
-    const ccSwitchDbPath = path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
-    if (!existsSync(ccSwitchDbPath)) {
-      throw new Error('CC Switch 数据库不存在');
-    }
-
     emitStatus('READING', '读取供应商配置...', 20);
 
-    let targetProviderRow;
-    try {
-      const db = new Database(ccSwitchDbPath, { readonly: true });
-      try {
-        targetProviderRow = db.prepare('SELECT * FROM providers WHERE id = ? AND app_type = ?').get(providerId, appType);
-      } finally {
-        db.close();
-      }
-    } catch (dbErr) {
-      throw new Error(`读取数据库失败: ${dbErr.message}`);
-    }
-
-    if (!targetProviderRow) {
+    // 从 ProviderService 读取供应商（新系统，存于 ~/.webtmux/db/providers.json）
+    const targetProvider = providerService.getById(appType, providerId);
+    if (!targetProvider) {
       throw new Error('目标供应商不存在');
     }
-
-    // 解析 settings_config
-    let settingsConfig = {};
-    try {
-      if (targetProviderRow.settings_config) {
-        settingsConfig = typeof targetProviderRow.settings_config === 'string'
-          ? JSON.parse(targetProviderRow.settings_config)
-          : targetProviderRow.settings_config;
-      }
-    } catch (parseErr) {
-      console.error('[Provider Switch] 解析 settings_config 失败:', parseErr);
-    }
-
-    const targetProvider = {
-      id: targetProviderRow.id,
-      name: targetProviderRow.name,
-      appType: targetProviderRow.app_type,
-      settingsConfig: settingsConfig
-    };
 
     // 写入项目本地配置
     emitStatus('WRITING', '写入本地配置...', 50);
@@ -4287,15 +4252,33 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
     // 保留本地 permissions
     const localPermissions = localConfig.permissions;
 
-    // 写入供应商配置
-    if (targetProvider.settingsConfig.env) {
-      localConfig.env = { ...targetProvider.settingsConfig.env };
+    // 写入供应商配置（兼容新旧两种 settingsConfig 结构）
+    const sc = targetProvider.settingsConfig || {};
+    if (sc.env) {
+      // 旧结构：直接有 env 字段（CC Switch 迁移来的）
+      localConfig.env = { ...sc.env };
+    } else {
+      // 新结构：openai/claude 子对象，转换为 Claude Code env 变量
+      const apiType = sc.apiType || 'openai';
+      const apiConf = sc[apiType] || {};
+      localConfig.env = localConfig.env || {};
+      if (apiConf.apiUrl) {
+        localConfig.env.ANTHROPIC_BASE_URL = apiConf.apiUrl;
+      }
+      if (apiConf.apiKey) {
+        localConfig.env.ANTHROPIC_API_KEY = apiConf.apiKey;
+      }
     }
-    if (targetProvider.settingsConfig.model) {
-      localConfig.model = targetProvider.settingsConfig.model;
+    if (sc.model) {
+      localConfig.model = sc.model;
+    } else {
+      // 从子对象取 model
+      const apiType = sc.apiType || 'openai';
+      const subModel = sc[apiType]?.model;
+      if (subModel) localConfig.model = subModel;
     }
-    if (targetProvider.settingsConfig.alwaysThinkingEnabled !== undefined) {
-      localConfig.alwaysThinkingEnabled = targetProvider.settingsConfig.alwaysThinkingEnabled;
+    if (sc.alwaysThinkingEnabled !== undefined) {
+      localConfig.alwaysThinkingEnabled = sc.alwaysThinkingEnabled;
     }
 
     // 恢复本地 permissions
