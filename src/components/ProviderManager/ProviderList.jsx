@@ -5,7 +5,7 @@ import ProviderCard from './ProviderCard';
  * 供应商列表组件 - 简化版
  */
 export default function ProviderList({ providers, appType = 'claude', onSwitch, onDelete, onHealthCheck, socket }) {
-  let providerList = Object.values(providers.providers);
+  let providerList = Object.values(providers?.providers || {});
 
   // 按 sortIndex 排序
   providerList.sort((a, b) => {

@@ -18,7 +18,12 @@ export default function ProviderManager({ socket }) {
     try {
       const res = await fetch(`/api/providers/${appType}`);
       const data = await res.json();
-      setProviders(data);
+      // 防御性检查：确保返回的是有效结构
+      if (data && typeof data === 'object' && !data.error && data.providers) {
+        setProviders(data);
+      } else {
+        console.error('加载供应商返回无效数据:', data);
+      }
     } catch (error) {
       console.error('加载供应商失败:', error);
     }
@@ -194,7 +199,7 @@ export default function ProviderManager({ socket }) {
         >
           供应商列表
           <span className="ml-2 text-xs bg-gray-700 px-2 py-0.5 rounded">
-            {Object.keys(providers.providers).length}
+            {Object.keys(providers?.providers || {}).length}
           </span>
         </button>
         <button
