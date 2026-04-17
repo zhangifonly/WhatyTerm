@@ -95,7 +95,7 @@ mac:
   category: public.app-category.developer-tools
   icon: build/icon.icns
   identity: "Beijing Youxun Online Technolog Co., Ltd. (75JRAR2YKZ)"
-  notarize: true
+  notarize: false
   target:
     - target: dmg
       arch:

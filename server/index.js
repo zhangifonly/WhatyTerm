@@ -4224,8 +4224,38 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
 
     emitStatus('READING', '读取供应商配置...', 20);
 
-    // 从 ProviderService 读取供应商（新系统，存于 ~/.webtmux/db/providers.json）
-    const targetProvider = providerService.getById(appType, providerId);
+    // 从 BuiltinProviderDB 读取（与前端下拉框 /api/cc-switch/providers 一致的数据源）
+    // 优先 CC Switch 数据库，无则用内置数据库
+    let targetProvider = null;
+    try {
+      const db = builtinProviderDB.getDB(true);
+      const row = db.prepare('SELECT * FROM providers WHERE id = ? AND app_type = ?').get(providerId, appType);
+      db.close();
+      if (row) {
+        let settingsConfig = {};
+        try {
+          if (row.settings_config) {
+            settingsConfig = typeof row.settings_config === 'string'
+              ? JSON.parse(row.settings_config)
+              : row.settings_config;
+          }
+        } catch (e) {
+          console.error('[Provider Switch] 解析 settings_config 失败:', e);
+        }
+        targetProvider = {
+          id: row.id,
+          name: row.name,
+          appType: row.app_type,
+          settingsConfig
+        };
+      }
+    } catch (dbErr) {
+      console.error('[Provider Switch] 读取 BuiltinProviderDB 失败:', dbErr);
+    }
+    // 兜底：再尝试 ProviderService（providers.json）
+    if (!targetProvider) {
+      targetProvider = providerService.getById(appType, providerId);
+    }
     if (!targetProvider) {
       throw new Error('目标供应商不存在');
     }
@@ -4292,6 +4322,61 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
       provider: targetProvider.name,
       url: localConfig.env?.ANTHROPIC_BASE_URL
     });
+
+    // 自动重启 Claude Code 让新配置生效（仅当检测到 Claude Code 正在运行时）
+    if (appType === 'claude') {
+      const screenContent = session.getScreenContent?.() || '';
+      const isClaudeRunning = /esc to interrupt|Context left|\? for shortcuts|accept edits|Bypass mode/i.test(screenContent)
+        || /^>\s*$/m.test(screenContent.split('\n').slice(-5).join('\n'));
+
+      if (isClaudeRunning) {
+        emitStatus('RESTARTING', '正在重启 Claude Code...', 70);
+        const tmuxName = session.tmuxSessionName;
+
+        // 1. 发送 /exit 退出 Claude Code
+        try {
+          if (tmuxName) {
+            execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" "/exit"`);
+            await new Promise(r => setTimeout(r, 100));
+            execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" Enter`);
+          } else {
+            session.write('/exit');
+            await new Promise(r => setTimeout(r, 100));
+            session.write('\r');
+          }
+        } catch (e) {
+          session.write('/exit');
+          await new Promise(r => setTimeout(r, 100));
+          session.write('\r');
+        }
+
+        // 2. 等待 shell 提示符出现（说明 Claude Code 已退出）
+        const exited = await waitForShellPrompt(session, 8000);
+        if (exited) {
+          // 3. 发送 claude -c 继续会话
+          try {
+            if (tmuxName) {
+              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" "claude -c"`);
+              await new Promise(r => setTimeout(r, 100));
+              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" Enter`);
+            } else {
+              session.write('claude -c');
+              await new Promise(r => setTimeout(r, 100));
+              session.write('\r');
+            }
+          } catch (e) {
+            session.write('claude -c');
+            await new Promise(r => setTimeout(r, 100));
+            session.write('\r');
+          }
+          console.log('[Provider Switch] 已自动重启 Claude Code');
+        } else {
+          console.log('[Provider Switch] 等待 Claude Code 退出超时，跳过自动重启');
+        }
+      } else {
+        console.log('[Provider Switch] Claude Code 未运行，无需重启');
+      }
+    }
 
     // 更新会话的 provider 信息
     emitStatus('UPDATING', '更新会话信息...', 80);
