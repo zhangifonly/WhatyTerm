@@ -1048,9 +1048,50 @@ function isLocalRequest(req) {
   return localIPs.includes(ip);
 }
 
-// 获取当前供应商信息（从实际配置文件读取，然后匹配 CC Switch 数据库）
+// 从运行中的 claude 进程读取实际环境变量（最高优先级，反映真实在用配置）
+function readClaudeProcessEnv(tmuxSessionName) {
+  if (!tmuxSessionName || process.platform === 'win32') return null;
+  try {
+    const panePid = execSync(`${getTmuxPrefix()} list-panes -t "${tmuxSessionName}" -F "#{pane_pid}"`, {
+      encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe']
+    }).trim();
+    if (!panePid) return null;
+    const descendants = execSync(`{ pgrep -P ${panePid}; pgrep -g ${panePid}; } 2>/dev/null || true`, {
+      encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'], shell: '/bin/bash'
+    }).trim().split('\n').filter(Boolean);
+    const allPids = [...new Set([panePid, ...descendants])].join(',');
+    const psOut = execSync(`ps -o pid=,comm= -p ${allPids} 2>/dev/null || true`, {
+      encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe']
+    }).trim();
+    for (const line of psOut.split('\n')) {
+      const m = line.trim().match(/^(\d+)\s+(.+)$/);
+      if (!m) continue;
+      const [, pid, comm] = m;
+      if (!/claude/i.test(comm)) continue;
+      const envOut = execSync(`ps eww -p ${pid} 2>/dev/null || true`, {
+        encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe']
+      });
+      const env = {};
+      for (const tok of envOut.split(/\s+/)) {
+        const eq = tok.indexOf('=');
+        if (eq > 0 && /^[A-Z_][A-Z0-9_]*$/.test(tok.slice(0, eq))) {
+          env[tok.slice(0, eq)] = tok.slice(eq + 1);
+        }
+      }
+      if (env.ANTHROPIC_BASE_URL || env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY) {
+        console.log(`[readClaudeProcessEnv] tmux=${tmuxSessionName} pid=${pid} BASE_URL=${env.ANTHROPIC_BASE_URL || '(none)'}`);
+        return env;
+      }
+    }
+  } catch (e) {
+    console.error('[readClaudeProcessEnv] 失败:', e.message);
+  }
+  return null;
+}
+
 // workingDir: 可选，用于检测项目本地配置
-function getCurrentProvider(appType, workingDir = null) {
+// tmuxSessionName: 可选，用于读取运行中 claude 进程的真实 env（优先级最高）
+function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) {
   return new Promise((resolve) => {
     const ccSwitchDbPath = path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
 
@@ -1058,7 +1099,7 @@ function getCurrentProvider(appType, workingDir = null) {
     let actualApiUrl = '';
     let actualApiKey = '';
     let actualModel = '';
-    let configSource = 'global'; // 'global' 或 'local'
+    let configSource = 'global'; // 'global' 或 'local' 或 'process'
 
     // 始终读取全局配置（用于显示和同步参考）
     let globalApiUrl = '';
@@ -1105,6 +1146,24 @@ function getCurrentProvider(appType, workingDir = null) {
         actualModel = globalModel;
         configSource = 'global';
       }
+
+      // 最高优先级：读取正在运行的 claude 进程的真实环境变量
+      // 仅当进程 URL 与 settings.json URL 一致时才使用（避免 CC Switch 切换后旧进程覆盖新配置）
+      const procEnv = readClaudeProcessEnv(tmuxSessionName);
+      if (procEnv && procEnv.ANTHROPIC_BASE_URL) {
+        const procUrl = procEnv.ANTHROPIC_BASE_URL.replace(/\/+$/, '');
+        const settingsUrl = actualApiUrl.replace(/\/+$/, '');
+        if (procUrl === settingsUrl) {
+          // 进程 URL 与配置一致，可信任进程环境变量（用于读取 API Key 等）
+          actualApiKey = procEnv.ANTHROPIC_AUTH_TOKEN || procEnv.ANTHROPIC_API_KEY || actualApiKey;
+          actualModel = procEnv.ANTHROPIC_MODEL || actualModel;
+          configSource = 'process';
+        }
+        // 若不一致：settings.json 已更新但进程未重启，以 settings.json 为准，不覆盖
+      }
+
+      // 模型来源：settings.json 的 model 字段（/model 命令持久化的值）
+      // 不使用 ANTHROPIC_DEFAULT_SONNET_MODEL 等环境变量（那是 CC Switch 的默认模型，不是用户选择的）
     } else if (appType === 'codex') {
       // 读取 ~/.codex/config.toml 或类似配置
       // TODO: 实现 Codex 配置读取
@@ -4049,23 +4108,23 @@ async function runBackgroundStatusAnalysis() {
             session.aiType = status.detectedCLI;
           }
 
-          // 仅在供应商未设置或 CLI 类型切换时才更新供应商
-          // 不要每次都刷新，以保留用户手动设置的配置
+          // 每次都重新读取供应商配置，确保 CC Switch 切换后及时生效
+          const provider = await getCurrentProvider(cliType, session.workingDir, session.tmuxSessionName);
           const currentProvider = cliType === 'claude' ? session.claudeProvider :
                                   cliType === 'codex' ? session.codexProvider :
                                   session.geminiProvider;
 
-          if (!currentProvider || cliTypeChanged) {
-            const provider = await getCurrentProvider(cliType, session.workingDir);
-            if (cliType === 'claude') {
-              session.claudeProvider = provider;
-            } else if (cliType === 'codex') {
-              session.codexProvider = provider;
-            } else if (cliType === 'gemini') {
-              session.geminiProvider = provider;
-            }
+          const providerChanged = !currentProvider || currentProvider.url !== provider.url || currentProvider.name !== provider.name;
 
-            // 通知前端更新 session 信息（包括供应商）
+          if (cliType === 'claude') {
+            session.claudeProvider = provider;
+          } else if (cliType === 'codex') {
+            session.codexProvider = provider;
+          } else if (cliType === 'gemini') {
+            session.geminiProvider = provider;
+          }
+
+          if (providerChanged) {
             io.emit('sessions:updated', sessionManager.listSessions());
             console.log(`[后台AI分析] 已更新 session 供应商: ${provider.name} (${provider.url})`);
           }
@@ -4260,68 +4319,87 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
       throw new Error('目标供应商不存在');
     }
 
-    // 写入项目本地配置
-    emitStatus('WRITING', '写入本地配置...', 50);
+    // 写入全局配置 ~/.claude/settings.json
+    emitStatus('WRITING', '写入全局配置...', 50);
 
-    const projectClaudeDir = path.join(session.workingDir, '.claude');
-    if (!existsSync(projectClaudeDir)) {
-      mkdirSync(projectClaudeDir, { recursive: true });
+    const globalSettingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+
+    // 读取现有全局配置（保留 hooks、permissions 等其他字段）
+    let globalConfig = {};
+    if (existsSync(globalSettingsPath)) {
+      try {
+        globalConfig = JSON.parse(readFileSync(globalSettingsPath, 'utf-8'));
+      } catch (e) {
+        console.error('[Provider Switch] 读取全局配置失败:', e.message);
+      }
     }
-    const localConfigPath = path.join(projectClaudeDir, 'settings.local.json');
 
-    // 读取现有本地配置
-    let localConfig = {};
+    // 写入供应商的 env 配置（兼容新旧两种 settingsConfig 结构）
+    const sc = targetProvider.settingsConfig || {};
+    if (sc.env) {
+      globalConfig.env = { ...sc.env };
+    } else {
+      const apiType = sc.apiType || 'openai';
+      const apiConf = sc[apiType] || {};
+      globalConfig.env = {};
+      if (apiConf.apiUrl) globalConfig.env.ANTHROPIC_BASE_URL = apiConf.apiUrl;
+      if (apiConf.apiKey) globalConfig.env.ANTHROPIC_API_KEY = apiConf.apiKey;
+    }
+    if (sc.model) {
+      globalConfig.model = sc.model;
+    } else {
+      const apiType = sc.apiType || 'openai';
+      const subModel = sc[apiType]?.model;
+      if (subModel) globalConfig.model = subModel;
+    }
+    if (sc.alwaysThinkingEnabled !== undefined) {
+      globalConfig.alwaysThinkingEnabled = sc.alwaysThinkingEnabled;
+    }
+
+    // localConfig 仅用于读取 permissions，不再写入 API 配置
+    const localConfigPath = path.join(session.workingDir, '.claude', 'settings.local.json');
+    let localConfig = { env: globalConfig.env, model: globalConfig.model };
     if (existsSync(localConfigPath)) {
       try {
         localConfig = JSON.parse(readFileSync(localConfigPath, 'utf-8'));
-      } catch (e) {
-        console.error('[Provider Switch] 读取本地配置失败:', e.message);
-      }
+      } catch (e) {}
     }
 
-    // 保留本地 permissions
-    const localPermissions = localConfig.permissions;
-
-    // 写入供应商配置（兼容新旧两种 settingsConfig 结构）
-    const sc = targetProvider.settingsConfig || {};
-    if (sc.env) {
-      // 旧结构：直接有 env 字段（CC Switch 迁移来的）
-      localConfig.env = { ...sc.env };
-    } else {
-      // 新结构：openai/claude 子对象，转换为 Claude Code env 变量
-      const apiType = sc.apiType || 'openai';
-      const apiConf = sc[apiType] || {};
-      localConfig.env = localConfig.env || {};
-      if (apiConf.apiUrl) {
-        localConfig.env.ANTHROPIC_BASE_URL = apiConf.apiUrl;
-      }
-      if (apiConf.apiKey) {
-        localConfig.env.ANTHROPIC_API_KEY = apiConf.apiKey;
-      }
-    }
-    if (sc.model) {
-      localConfig.model = sc.model;
-    } else {
-      // 从子对象取 model
-      const apiType = sc.apiType || 'openai';
-      const subModel = sc[apiType]?.model;
-      if (subModel) localConfig.model = subModel;
-    }
-    if (sc.alwaysThinkingEnabled !== undefined) {
-      localConfig.alwaysThinkingEnabled = sc.alwaysThinkingEnabled;
-    }
-
-    // 恢复本地 permissions
-    if (localPermissions) {
-      localConfig.permissions = localPermissions;
-    }
-
-    writeFileSync(localConfigPath, JSON.stringify(localConfig, null, 2), 'utf8');
-    console.log('[Provider Switch] 本地配置已更新:', {
-      path: localConfigPath,
+    writeFileSync(globalSettingsPath, JSON.stringify(globalConfig, null, 2), 'utf8');
+    console.log('[Provider Switch] 全局配置已更新:', {
+      path: globalSettingsPath,
       provider: targetProvider.name,
-      url: localConfig.env?.ANTHROPIC_BASE_URL
+      url: globalConfig.env?.ANTHROPIC_BASE_URL
     });
+
+    // 清空 ~/.claude/.current，让 CC Switch profile 系统失效
+    // profile 优先级高于 settings.local.json，不清空会导致切换无效
+    if (appType === 'claude') {
+      const profileCurrentPath = path.join(os.homedir(), '.claude', '.current');
+      if (existsSync(profileCurrentPath)) {
+        try {
+          writeFileSync(profileCurrentPath, '', 'utf8');
+          console.log('[Provider Switch] 已清空 ~/.claude/.current，profile 系统已禁用');
+        } catch (e) {
+          console.error('[Provider Switch] 清空 .current 失败:', e.message);
+        }
+      }
+
+      // 同步更新 tmux 全局环境变量，避免新进程继承旧 URL
+      const newEnv = localConfig.env || {};
+      const tmuxVars = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
+                        'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'];
+      for (const varName of tmuxVars) {
+        try {
+          if (newEnv[varName]) {
+            execSync(`${getTmuxPrefix()} set-environment -g ${varName} "${newEnv[varName]}"`, { stdio: 'ignore' });
+          } else {
+            execSync(`${getTmuxPrefix()} set-environment -g -u ${varName}`, { stdio: 'ignore' });
+          }
+        } catch (e) {}
+      }
+      console.log('[Provider Switch] 已同步 tmux 全局环境变量');
+    }
 
     // 自动重启 Claude Code 让新配置生效（仅当检测到 Claude Code 正在运行时）
     if (appType === 'claude') {
@@ -4353,19 +4431,26 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
         // 2. 等待 shell 提示符出现（说明 Claude Code 已退出）
         const exited = await waitForShellPrompt(session, 8000);
         if (exited) {
-          // 3. 发送 claude -c 继续会话
+          // 3. 先 export 新的 ANTHROPIC 环境变量，再启动 claude -c
+          const newEnvForShell = localConfig.env || {};
+          const anthropicVars = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
+                                 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'];
+          const envCmds = anthropicVars.map(v =>
+            newEnvForShell[v] ? `export ${v}="${newEnvForShell[v]}"` : `unset ${v}`
+          ).join('; ');
+          const restartCmd = `${envCmds} && claude -c`;
           try {
             if (tmuxName) {
-              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" "claude -c"`);
+              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" "${restartCmd}"`);
               await new Promise(r => setTimeout(r, 100));
               execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" Enter`);
             } else {
-              session.write('claude -c');
+              session.write(restartCmd);
               await new Promise(r => setTimeout(r, 100));
               session.write('\r');
             }
           } catch (e) {
-            session.write('claude -c');
+            session.write(restartCmd);
             await new Promise(r => setTimeout(r, 100));
             session.write('\r');
           }
@@ -4381,7 +4466,7 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
     // 更新会话的 provider 信息
     emitStatus('UPDATING', '更新会话信息...', 80);
 
-    const providerInfo = await getCurrentProvider(appType, session.workingDir);
+    const providerInfo = await getCurrentProvider(appType, session.workingDir, session.tmuxSessionName);
 
     if (appType === 'claude') {
       session.claudeProvider = providerInfo;
@@ -4392,6 +4477,17 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
     }
 
     sessionManager.updateSession(session);
+
+    // CC Switch 是全局切换，清除所有其他会话的同类型 provider 缓存
+    const allSessions = sessionManager.listSessions();
+    for (const s of allSessions) {
+      if (s.id === sessionId) continue;
+      const sess = sessionManager.getSession(s.id);
+      if (!sess) continue;
+      if (appType === 'claude') sess.claudeProvider = null;
+      else if (appType === 'codex') sess.codexProvider = null;
+      else if (appType === 'gemini') sess.geminiProvider = null;
+    }
 
     // 完成
     emitStatus('COMPLETED', '配置已更新！', 100);
@@ -4602,7 +4698,7 @@ io.on('connection', (socket) => {
 
       // 只获取当前会话使用的 AI 供应商信息
       // 传递 workingDir 以正确检测本地配置
-      const provider = await getCurrentProvider(session.aiType, session.workingDir);
+      const provider = await getCurrentProvider(session.aiType, session.workingDir, session.tmuxSessionName);
 
       // 根据 AI 类型保存对应的供应商信息
       if (session.aiType === 'claude') {
@@ -4628,7 +4724,7 @@ io.on('connection', (socket) => {
           session.aiType = detectedCLI;
 
           // 更新供应商信息
-          const detectedProvider = await getCurrentProvider(detectedCLI, session.workingDir);
+          const detectedProvider = await getCurrentProvider(detectedCLI, session.workingDir, session.tmuxSessionName);
           if (detectedCLI === 'claude') {
             session.claudeProvider = detectedProvider;
           } else if (detectedCLI === 'codex') {
@@ -4772,7 +4868,7 @@ io.on('connection', (socket) => {
       registerExitCallback(session);
 
       // 获取供应商信息
-      const provider = await getCurrentProvider(session.aiType, session.workingDir);
+      const provider = await getCurrentProvider(session.aiType, session.workingDir, session.tmuxSessionName);
       if (session.aiType === 'claude') {
         session.claudeProvider = provider;
       } else if (session.aiType === 'codex') {
@@ -5908,7 +6004,7 @@ ${terminalContext ? terminalContext : '（无）'}
 
           // 查询并更新供应商信息
           // 传递 workingDir 以正确检测本地配置
-          const provider = await getCurrentProvider(status.detectedCLI, session.workingDir);
+          const provider = await getCurrentProvider(status.detectedCLI, session.workingDir, session.tmuxSessionName);
           if (status.detectedCLI === 'claude') {
             session.claudeProvider = provider;
           } else if (status.detectedCLI === 'codex') {
@@ -6696,7 +6792,7 @@ async function startServer() {
             let needsUpdate = false;
 
             if (!session.claudeProvider) {
-              const claudeProvider = await getCurrentProvider('claude', session.workingDir);
+              const claudeProvider = await getCurrentProvider('claude', session.workingDir, session.tmuxSessionName);
               if (claudeProvider.exists) {
                 session.claudeProvider = claudeProvider;
                 needsUpdate = true;
@@ -6733,14 +6829,78 @@ async function startServer() {
 
       const refreshAllProviders = async () => {
         console.log('[配置监听] 检测到全局配置变化，刷新所有会话的供应商信息');
+
+        // CC Switch 外部切换时，清空 ~/.claude/.current 让 profile 系统失效
+        const profileCurrentPath = path.join(os.homedir(), '.claude', '.current');
+        if (existsSync(profileCurrentPath)) {
+          try {
+            writeFileSync(profileCurrentPath, '', 'utf8');
+            console.log('[配置监听] 已清空 ~/.claude/.current');
+          } catch (e) {}
+        }
+
+        // 同步 tmux 全局环境变量
+        try {
+          const newSettings = JSON.parse(readFileSync(claudeSettingsPath, 'utf8'));
+          const newEnv = newSettings.env || {};
+          const tmuxVars = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
+                            'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'];
+          for (const varName of tmuxVars) {
+            if (newEnv[varName]) {
+              execSync(`${getTmuxPrefix()} set-environment -g ${varName} "${newEnv[varName]}"`, { stdio: 'ignore' });
+            } else {
+              execSync(`${getTmuxPrefix()} set-environment -g -u ${varName}`, { stdio: 'ignore' });
+            }
+          }
+          console.log('[配置监听] 已同步 tmux 全局环境变量');
+        } catch (e) {}
+
         const sessions = Array.from(sessionManager.sessions.values());
 
         for (const session of sessions) {
           try {
-            const claudeProvider = await getCurrentProvider('claude', session.workingDir);
+            // 不传 tmuxSessionName：settings.json 已更新，不能用旧进程的环境变量覆盖新配置
+            const claudeProvider = await getCurrentProvider('claude', session.workingDir, null);
             if (claudeProvider.exists) {
               session.claudeProvider = claudeProvider;
               sessionManager.updateSession(session);
+            }
+
+            // 如果该会话有本地配置覆盖了全局，跳过重启（本地配置优先，不受全局切换影响）
+            const localConfigPath = session.workingDir
+              ? path.join(session.workingDir, '.claude', 'settings.local.json')
+              : null;
+            const hasLocalUrl = (() => {
+              if (!localConfigPath || !existsSync(localConfigPath)) return false;
+              try {
+                const lc = JSON.parse(readFileSync(localConfigPath, 'utf8'));
+                return !!lc.env?.ANTHROPIC_BASE_URL;
+              } catch { return false; }
+            })();
+            if (hasLocalUrl) continue;
+
+            // 重启该会话的 Claude Code，让新的全局配置生效
+            const tmuxName = session.tmuxSessionName;
+            if (!tmuxName) continue;
+            const screenContent = session.getScreenContent?.() || '';
+            const isClaudeRunning = /esc to interrupt|Context left|\? for shortcuts|accept edits|Bypass mode/i.test(screenContent)
+              || /^>\s*$/m.test(screenContent.split('\n').slice(-5).join('\n'));
+            if (!isClaudeRunning) continue;
+
+            console.log(`[配置监听] 重启会话 ${session.name} 的 Claude Code`);
+            try {
+              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" "/exit"`);
+              await new Promise(r => setTimeout(r, 100));
+              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" Enter`);
+              const exited = await waitForShellPrompt(session, 8000);
+              if (exited) {
+                const unsetCmd = 'unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL';
+                execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" "${unsetCmd} && claude -c"`);
+                await new Promise(r => setTimeout(r, 100));
+                execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" Enter`);
+              }
+            } catch (e) {
+              console.error(`[配置监听] 重启会话 ${session.name} 失败:`, e.message);
             }
           } catch (err) {
             console.error(`[配置监听] 刷新会话 ${session.name} 供应商失败:`, err.message);

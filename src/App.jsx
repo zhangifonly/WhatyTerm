@@ -2007,6 +2007,12 @@ export default function App() {
                         {provider.url}
                       </p>
                     )}
+                    {provider?.model && (
+                      <p className="mono" style={{ fontSize: '11px', color: 'hsl(var(--muted-foreground))', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: 'hsl(var(--primary) / 0.15)', color: color }}>模型</span>
+                        {provider.model}
+                      </p>
+                    )}
                     {/* 当使用本地配置时，显示全局配置供参考和恢复按钮 */}
                     {isLocalConfig && globalConfig && (
                       <div style={{
