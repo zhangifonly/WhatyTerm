@@ -1114,7 +1114,7 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         try {
           const settings = JSON.parse(readFileSync(claudeSettingsPath, 'utf8'));
           globalApiUrl = settings.env?.ANTHROPIC_BASE_URL || '';
-          globalApiKey = settings.env?.ANTHROPIC_AUTH_TOKEN || '';
+          globalApiKey = settings.env?.ANTHROPIC_AUTH_TOKEN || settings.env?.ANTHROPIC_API_KEY || '';
           globalModel = settings.model || '';
         } catch (e) {
           console.error('[getCurrentProvider] 读取 Claude 全局配置失败:', e);
@@ -1129,7 +1129,7 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
             const localSettings = JSON.parse(readFileSync(localConfigPath, 'utf8'));
             if (localSettings.env?.ANTHROPIC_BASE_URL) {
               actualApiUrl = localSettings.env.ANTHROPIC_BASE_URL;
-              actualApiKey = localSettings.env?.ANTHROPIC_AUTH_TOKEN || '';
+              actualApiKey = localSettings.env?.ANTHROPIC_AUTH_TOKEN || localSettings.env?.ANTHROPIC_API_KEY || '';
               actualModel = localSettings.model || '';
               configSource = 'local';
             }
@@ -1165,12 +1165,65 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
       // 模型来源：settings.json 的 model 字段（/model 命令持久化的值）
       // 不使用 ANTHROPIC_DEFAULT_SONNET_MODEL 等环境变量（那是 CC Switch 的默认模型，不是用户选择的）
     } else if (appType === 'codex') {
-      // 读取 ~/.codex/config.toml 或类似配置
-      // TODO: 实现 Codex 配置读取
+      // 读取 ~/.codex/config.toml（提取 base_url、model）和 ~/.codex/auth.json
+      const codexConfigPath = path.join(os.homedir(), '.codex', 'config.toml');
+      const codexAuthPath = path.join(os.homedir(), '.codex', 'auth.json');
+      if (existsSync(codexConfigPath)) {
+        try {
+          const toml = readFileSync(codexConfigPath, 'utf8');
+          const urlMatch = toml.match(/base_url\s*=\s*"([^"]+)"/);
+          const modelMatch = toml.match(/^\s*model\s*=\s*"([^"]+)"/m);
+          globalApiUrl = urlMatch ? urlMatch[1] : '';
+          globalModel = modelMatch ? modelMatch[1] : '';
+        } catch (e) {
+          console.error('[getCurrentProvider] 读取 Codex 配置失败:', e.message);
+        }
+      }
+      if (existsSync(codexAuthPath)) {
+        try {
+          const auth = JSON.parse(readFileSync(codexAuthPath, 'utf8'));
+          globalApiKey = auth.OPENAI_API_KEY || auth.CODEX_API_KEY || '';
+        } catch (e) {}
+      }
+      actualApiUrl = globalApiUrl;
+      actualApiKey = globalApiKey;
+      actualModel = globalModel;
+      configSource = 'global';
     } else if (appType === 'gemini') {
-      // 读取 Gemini 配置
-      // TODO: 实现 Gemini 配置读取
+      // gemini 的 URL/Key 不在 ~/.gemini/settings.json 里，只能从 CC Switch DB 的 is_current 读
+      // 这里先不读，下面 DB 查询分支会走 is_current 回退路径返回
     }
+
+    // 读取 OAuth 官方账号邮箱（仅 claude 且无 URL 时有意义）
+    const readOAuthEmail = () => {
+      if (appType !== 'claude') return '';
+      try {
+        const j = JSON.parse(readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'));
+        return j.oauthAccount?.emailAddress || '';
+      } catch { return ''; }
+    };
+    // apiType 直接由 appType 决定：claude→'claude'、codex→'openai'、gemini→'gemini'
+    // URL 包含 /v1/messages 的启发式不可靠（Claude Relay 常为 /api/）
+    const computeApiType = () => appType === 'gemini' ? 'gemini' : (appType === 'claude' ? 'claude' : 'openai');
+    // 统一的返回构造器：补齐所有分支缺失的字段（apiType / isOAuth / oauthEmail）
+    const buildResult = (extras) => {
+      const url = extras.url !== undefined ? extras.url : '';
+      const isOAuth = !url && appType === 'claude' && !!extras.exists;
+      return {
+        id: extras.id,
+        name: extras.name,
+        url,
+        apiKey: extras.apiKey !== undefined ? extras.apiKey : maskApiKey(''),
+        model: extras.model !== undefined ? extras.model : '',
+        apiType: extras.apiType || computeApiType(),
+        app: appType,
+        exists: !!extras.exists,
+        configSource: extras.configSource || 'global',
+        isOAuth,
+        oauthEmail: isOAuth ? readOAuthEmail() : '',
+        ...(extras.globalConfig !== undefined ? { globalConfig: extras.globalConfig } : {})
+      };
+    };
 
     // 辅助函数：根据 URL 在 CC Switch 数据库中查找供应商名称
     const findProviderName = (url, rows) => {
@@ -1203,21 +1256,23 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
 
     // 检查 CC Switch 数据库是否存在
     if (!existsSync(ccSwitchDbPath)) {
-      return resolve({
+      return resolve(buildResult({
         name: actualApiUrl ? '未知供应商' : '未配置',
         url: actualApiUrl,
         apiKey: maskApiKey(actualApiKey),
         model: actualModel,
-        app: appType,
         exists: !!actualApiUrl,
-        configSource: configSource,
+        configSource,
         globalConfig: configSource === 'local' ? buildGlobalInfo(null) : null
-      });
+      }));
     }
 
     // 使用 better-sqlite3 同步读取
     try {
       const db = new Database(ccSwitchDbPath, { readonly: true });
+
+      // 调试日志：记录 actualApiUrl 的值
+      console.log(`[getCurrentProvider] appType=${appType}, actualApiUrl="${actualApiUrl}", configSource=${configSource}, workingDir=${workingDir}`);
 
       // 如果有实际的 API URL，尝试在数据库中匹配
       if (actualApiUrl) {
@@ -1227,16 +1282,15 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         const globalInfo = configSource === 'local' ? buildGlobalInfo(rows) : null;
 
         if (!rows || rows.length === 0) {
-          return resolve({
+          return resolve(buildResult({
             name: '未知供应商',
             url: actualApiUrl,
             apiKey: maskApiKey(actualApiKey),
             model: actualModel,
-            app: appType,
             exists: true,
-            configSource: configSource,
+            configSource,
             globalConfig: globalInfo
-          });
+          }));
         }
 
         // 遍历供应商，找到 URL 精确匹配的
@@ -1252,18 +1306,16 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
 
               // 精确匹配
               if (normalizedActual === normalizedProvider) {
-                return resolve({
+                return resolve(buildResult({
                   id: row.id,
                   name: row.name || '未命名',
                   url: actualApiUrl,
                   apiKey: maskApiKey(actualApiKey),
                   model: actualModel,
-                  apiType: actualApiUrl.includes('/v1/messages') ? 'claude' : 'openai',
-                  app: appType,
                   exists: true,
-                  configSource: configSource,
+                  configSource,
                   globalConfig: globalInfo
-                });
+                }));
               }
             }
           } catch (parseError) {
@@ -1272,29 +1324,62 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         }
 
         // 没有找到匹配的供应商
-        return resolve({
+        return resolve(buildResult({
           name: '未知供应商',
           url: actualApiUrl,
           apiKey: maskApiKey(actualApiKey),
           model: actualModel,
-          app: appType,
           exists: true,
-          configSource: configSource,
+          configSource,
           globalConfig: globalInfo
-        });
+        }));
       } else {
-        // 没有实际配置，回退到查询 is_current = 1
+        // 没有实际配置（settings.json 为空 env）
+        // 若是 Claude，先检查是否处于 OAuth 模式（~/.claude.json 有 oauthAccount）
+        // 如果是，优先找 DB 里的 OAuth provider（useOAuth=true），而不是 is_current（可能是非 OAuth provider）
+        if (appType === 'claude') {
+          let hasOAuth = false;
+          try {
+            const cj = JSON.parse(readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'));
+            hasOAuth = !!cj.oauthAccount;
+          } catch {}
+
+          if (hasOAuth) {
+            const allRows = db.prepare('SELECT * FROM providers WHERE app_type = ?').all(appType);
+            db.close();
+            // 找 useOAuth=true 的 provider，优先 is_current，否则取第一个
+            let oauthRow = allRows.find(r => { try { return !!JSON.parse(r.settings_config || '{}').useOAuth && r.is_current; } catch { return false; } });
+            if (!oauthRow) oauthRow = allRows.find(r => { try { return !!JSON.parse(r.settings_config || '{}').useOAuth; } catch { return false; } });
+            if (oauthRow) {
+              return resolve(buildResult({
+                id: oauthRow.id,
+                name: oauthRow.name || 'Claude Official',
+                url: '',
+                exists: true,
+                configSource: 'global'
+              }));
+            }
+            // 找不到 useOAuth provider，返回 OAuth 匿名
+            return resolve(buildResult({
+              name: 'Claude Official',
+              url: '',
+              exists: true,
+              configSource: 'global'
+            }));
+          }
+        }
+
+        // 非 OAuth 或非 Claude：回退到 is_current
         const row = db.prepare('SELECT * FROM providers WHERE app_type = ? AND is_current = 1').get(appType);
         db.close();
 
         if (!row) {
-          return resolve({
+          return resolve(buildResult({
             name: '未配置',
             url: '',
-            app: appType,
             exists: false,
             configSource: 'global'
-          });
+          }));
         }
 
         // 解析 settings_config 获取完整配置
@@ -1311,7 +1396,7 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
               apiUrl = config.env?.ANTHROPIC_BASE_URL || config.baseURL || '';
               apiKey = config.env?.ANTHROPIC_AUTH_TOKEN || config.env?.ANTHROPIC_API_KEY || '';
               model = config.env?.ANTHROPIC_MODEL || config.model || '';
-              apiType = apiUrl.includes('/v1/messages') ? 'claude' : 'openai';
+              apiType = 'claude';
             } else if (appType === 'codex') {
               apiUrl = config.env?.OPENAI_BASE_URL || config.baseURL || '';
               apiKey = config.env?.OPENAI_API_KEY || config.env?.OPENAI_AUTH_TOKEN || '';
@@ -1321,36 +1406,34 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
               apiUrl = config.env?.GEMINI_BASE_URL || config.baseURL || config.env?.BASE_URL || '';
               apiKey = config.env?.GEMINI_API_KEY || config.env?.API_KEY || '';
               model = config.env?.GEMINI_MODEL || config.model || '';
-              apiType = 'openai';
+              apiType = 'gemini';
             }
           }
         } catch (parseError) {
           console.error(`[getCurrentProvider] 解析 ${appType} settings_config 失败:`, parseError);
         }
 
-        resolve({
+        resolve(buildResult({
           id: row.id,
           name: row.name || '未命名',
           url: apiUrl,
           apiKey: maskApiKey(apiKey),
-          model: model,
-          apiType: apiType,
-          app: appType,
+          model,
+          apiType,
           exists: true,
           configSource: 'global'
-        });
+        }));
       }
     } catch (dbError) {
       console.error('[getCurrentProvider] 数据库读取失败:', dbError);
-      return resolve({
+      return resolve(buildResult({
         name: actualApiUrl ? '未知供应商' : '未配置',
         url: actualApiUrl,
         apiKey: maskApiKey(actualApiKey),
         model: actualModel,
-        app: appType,
         exists: !!actualApiUrl,
-        configSource: configSource
-      });
+        configSource
+      }));
     }
   });
 }
@@ -4116,12 +4199,16 @@ async function runBackgroundStatusAnalysis() {
 
           const providerChanged = !currentProvider || currentProvider.url !== provider.url || currentProvider.name !== provider.name;
 
-          if (cliType === 'claude') {
-            session.claudeProvider = provider;
-          } else if (cliType === 'codex') {
-            session.codexProvider = provider;
-          } else if (cliType === 'gemini') {
-            session.geminiProvider = provider;
+          // 切换进行中时跳过后台覆盖，避免覆盖 switchProviderStateMachine 刚设置的值
+          if (!_providerSwitchInProgress) {
+            if (cliType === 'claude') {
+              console.log(`[后台AI分析] 更新 claudeProvider: ${provider.name} (${provider.url || 'OAuth'}), 来源: runBackgroundStatusAnalysis`);
+              session.claudeProvider = provider;
+            } else if (cliType === 'codex') {
+              session.codexProvider = provider;
+            } else if (cliType === 'gemini') {
+              session.geminiProvider = provider;
+            }
           }
 
           if (providerChanged) {
@@ -4266,6 +4353,9 @@ setInterval(runBackgroundStatusAnalysis, AI_ANALYSIS_INTERVAL);
 // 启动后 5 秒执行第一次分析
 setTimeout(runBackgroundStatusAnalysis, 5000);
 
+// 标志位：switchProviderStateMachine 执行期间为 true，防止 watchFile 触发 refreshAllProviders 重复重启
+let _providerSwitchInProgress = false;
+
 /**
  * 切换供应商 - 简化版：直接将选中供应商的配置写入本地配置文件
  */
@@ -4275,12 +4365,8 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
     socket.emit('provider:switchStatus', { sessionId, step, message, progress });
   };
 
+  _providerSwitchInProgress = true;
   try {
-    // 检查是否有工作目录
-    if (!session.workingDir) {
-      throw new Error('会话没有工作目录，无法设置本地配置');
-    }
-
     emitStatus('READING', '读取供应商配置...', 20);
 
     // 从 BuiltinProviderDB 读取（与前端下拉框 /api/cc-switch/providers 一致的数据源）
@@ -4319,58 +4405,166 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
       throw new Error('目标供应商不存在');
     }
 
-    // 写入全局配置 ~/.claude/settings.json
-    emitStatus('WRITING', '写入全局配置...', 50);
+    // 写入配置（Claude 优先写 workdir 本地配置，实现 per-session 隔离）
+    emitStatus('WRITING', '写入配置...', 50);
 
-    const globalSettingsPath = path.join(os.homedir(), '.claude', 'settings.json');
-
-    // 读取现有全局配置（保留 hooks、permissions 等其他字段）
-    let globalConfig = {};
-    if (existsSync(globalSettingsPath)) {
-      try {
-        globalConfig = JSON.parse(readFileSync(globalSettingsPath, 'utf-8'));
-      } catch (e) {
-        console.error('[Provider Switch] 读取全局配置失败:', e.message);
-      }
-    }
-
-    // 写入供应商的 env 配置（兼容新旧两种 settingsConfig 结构）
     const sc = targetProvider.settingsConfig || {};
-    if (sc.env) {
-      globalConfig.env = { ...sc.env };
-    } else {
-      const apiType = sc.apiType || 'openai';
-      const apiConf = sc[apiType] || {};
-      globalConfig.env = {};
-      if (apiConf.apiUrl) globalConfig.env.ANTHROPIC_BASE_URL = apiConf.apiUrl;
-      if (apiConf.apiKey) globalConfig.env.ANTHROPIC_API_KEY = apiConf.apiKey;
-    }
-    if (sc.model) {
-      globalConfig.model = sc.model;
-    } else {
-      const apiType = sc.apiType || 'openai';
-      const subModel = sc[apiType]?.model;
-      if (subModel) globalConfig.model = subModel;
-    }
-    if (sc.alwaysThinkingEnabled !== undefined) {
-      globalConfig.alwaysThinkingEnabled = sc.alwaysThinkingEnabled;
+    // localConfig 仅供后续（claude/gemini 的）重启逻辑读取 env
+    let localConfig = { env: {} };
+
+    if (appType === 'claude') {
+      // 判断是否为 OAuth：useOAuth 标记 或 env 为空对象（无 ANTHROPIC_BASE_URL）
+      const isOAuth = sc.useOAuth || (sc.env && Object.keys(sc.env).length === 0) ||
+                      (!sc.env?.ANTHROPIC_BASE_URL && !sc.claude?.apiUrl && !sc.openai?.apiUrl);
+      if (isOAuth) {
+        // OAuth 类型（Claude Official）：必须清除 settings 里残留的 ANTHROPIC_* env，
+        // 否则 Claude Code 会继续使用上一个 relay 的 URL/Token，导致面板显示官方但实际走旧 relay。
+        const anthropicKeys = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
+                               'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL',
+                               'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL'];
+        const stripAnthropicEnv = (filePath) => {
+          if (!existsSync(filePath)) return false;
+          try {
+            const s = JSON.parse(readFileSync(filePath, 'utf-8'));
+            if (!s.env) return false;
+            let changed = false;
+            for (const k of anthropicKeys) {
+              if (k in s.env) { delete s.env[k]; changed = true; }
+            }
+            if (changed) {
+              writeFileSync(filePath, JSON.stringify(s, null, 2), 'utf8');
+              console.log('[Provider Switch] 已清除 ANTHROPIC_* env:', filePath);
+            }
+            return changed;
+          } catch (e) {
+            console.error('[Provider Switch] 清理 env 失败:', filePath, e.message);
+            return false;
+          }
+        };
+        // 清全局 ~/.claude/settings.json
+        stripAnthropicEnv(path.join(os.homedir(), '.claude', 'settings.json'));
+        // 清当前 workdir 的 .claude/settings.local.json（若存在）
+        if (session.workingDir) {
+          const localPath = path.join(session.workingDir, '.claude', 'settings.local.json');
+          if (existsSync(localPath)) {
+            try {
+              const ls = JSON.parse(readFileSync(localPath, 'utf-8'));
+              let hasOther = false;
+              if (ls.env) {
+                for (const k of anthropicKeys) delete ls.env[k];
+                hasOther = Object.keys(ls.env).length > 0;
+              }
+              const otherKeys = Object.keys(ls).filter(k => k !== 'env');
+              if (!hasOther && otherKeys.length === 0) {
+                unlinkSync(localPath);
+                console.log('[Provider Switch] 已删除空的本地配置:', localPath);
+              } else {
+                if (ls.env && !hasOther) delete ls.env;
+                writeFileSync(localPath, JSON.stringify(ls, null, 2), 'utf8');
+                console.log('[Provider Switch] 已清除本地配置 ANTHROPIC_* env:', localPath);
+              }
+            } catch (e) {
+              console.error('[Provider Switch] 处理本地配置失败:', e.message);
+            }
+          }
+        }
+        localConfig.env = {};
+        console.log('[Provider Switch] Claude OAuth provider，已清理 env 配置:', targetProvider.name);
+      } else {
+        // 构造新的 env 块
+        let newEnv = {};
+        if (sc.env) {
+          newEnv = { ...sc.env };
+        } else {
+          const apiType = sc.apiType || 'openai';
+          const apiConf = sc[apiType] || {};
+          if (apiConf.apiUrl) newEnv.ANTHROPIC_BASE_URL = apiConf.apiUrl;
+          if (apiConf.apiKey) newEnv.ANTHROPIC_API_KEY = apiConf.apiKey;
+        }
+        localConfig.env = newEnv;
+
+        const workingDir = session.workingDir;
+        if (workingDir) {
+          // 方案 B：写 <workdir>/.claude/settings.local.json，仅影响本 session 的工作目录
+          const localClaudeDir = path.join(workingDir, '.claude');
+          if (!existsSync(localClaudeDir)) mkdirSync(localClaudeDir, { recursive: true });
+          const localSettingsPath = path.join(localClaudeDir, 'settings.local.json');
+          let localSettings = {};
+          if (existsSync(localSettingsPath)) {
+            try { localSettings = JSON.parse(readFileSync(localSettingsPath, 'utf-8')); } catch (e) {}
+          }
+          localSettings.env = newEnv;
+          writeFileSync(localSettingsPath, JSON.stringify(localSettings, null, 2), 'utf8');
+          console.log('[Provider Switch] Claude 本地配置已更新:', {
+            provider: targetProvider.name, path: localSettingsPath, url: newEnv.ANTHROPIC_BASE_URL
+          });
+        } else {
+          // 无 workingDir 时兜底：写全局配置（原行为）
+          const globalSettingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+          let globalConfig = {};
+          if (existsSync(globalSettingsPath)) {
+            try { globalConfig = JSON.parse(readFileSync(globalSettingsPath, 'utf-8')); } catch (e) {}
+          }
+          globalConfig.env = newEnv;
+          writeFileSync(globalSettingsPath, JSON.stringify(globalConfig, null, 2), 'utf8');
+          console.log('[Provider Switch] Claude 全局配置已更新（无 workingDir）:', {
+            provider: targetProvider.name, url: newEnv.ANTHROPIC_BASE_URL
+          });
+        }
+      }
+    } else if (appType === 'codex') {
+      // CC Switch codex settingsConfig: { auth: {...}, config: "TOML字符串" }
+      const codexDir = path.join(os.homedir(), '.codex');
+      if (!existsSync(codexDir)) mkdirSync(codexDir, { recursive: true });
+      if (sc.auth) {
+        writeFileSync(path.join(codexDir, 'auth.json'), JSON.stringify(sc.auth, null, 2), 'utf8');
+      }
+      if (typeof sc.config === 'string' && sc.config.length > 0) {
+        writeFileSync(path.join(codexDir, 'config.toml'), sc.config, 'utf8');
+      }
+      console.log('[Provider Switch] Codex 配置已更新:', targetProvider.name);
+    } else if (appType === 'gemini') {
+      // CC Switch gemini settingsConfig: { config: {...}, env: {...} }
+      const geminiDir = path.join(os.homedir(), '.gemini');
+      if (!existsSync(geminiDir)) mkdirSync(geminiDir, { recursive: true });
+      const settingsPath = path.join(geminiDir, 'settings.json');
+      let settings = {};
+      if (existsSync(settingsPath)) {
+        try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')); } catch {}
+      }
+      // 合并 config（保留用户的 hooks 等配置），覆盖 general/security/ui 等
+      if (sc.config && typeof sc.config === 'object') {
+        Object.assign(settings, sc.config);
+      }
+      writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
+      localConfig.env = sc.env || {};
+      console.log('[Provider Switch] Gemini 配置已更新:', targetProvider.name);
     }
 
-    // localConfig 仅用于读取 permissions，不再写入 API 配置
-    const localConfigPath = path.join(session.workingDir, '.claude', 'settings.local.json');
-    let localConfig = { env: globalConfig.env, model: globalConfig.model };
-    if (existsSync(localConfigPath)) {
-      try {
-        localConfig = JSON.parse(readFileSync(localConfigPath, 'utf-8'));
-      } catch (e) {}
+    // 同步更新 DB 的 is_current，保持 DB 与 settings.json 一致
+    // 如果是 OAuth provider，同时保留 useOAuth 标记（防止 CC Switch 覆盖后丢失）
+    try {
+      const dbW = builtinProviderDB.getDB(false);
+      dbW.prepare('UPDATE providers SET is_current = 0 WHERE app_type = ?').run(appType);
+      dbW.prepare('UPDATE providers SET is_current = 1 WHERE id = ? AND app_type = ?').run(targetProvider.id, appType);
+      if (sc.useOAuth) {
+        // 保留 useOAuth 标记，防止 CC Switch 同步时覆盖
+        const currentScRow = dbW.prepare('SELECT settings_config FROM providers WHERE id = ? AND app_type = ?').get(targetProvider.id, appType);
+        if (currentScRow) {
+          let currentSc = {};
+          try { currentSc = JSON.parse(currentScRow.settings_config); } catch {}
+          currentSc.useOAuth = true;
+          currentSc.env = {};
+          dbW.prepare('UPDATE providers SET settings_config = ? WHERE id = ? AND app_type = ?').run(
+            JSON.stringify(currentSc), targetProvider.id, appType
+          );
+        }
+      }
+      dbW.close();
+      console.log('[Provider Switch] DB is_current 已更新为:', targetProvider.name);
+    } catch (dbErr) {
+      console.error('[Provider Switch] 更新 DB is_current 失败:', dbErr);
     }
-
-    writeFileSync(globalSettingsPath, JSON.stringify(globalConfig, null, 2), 'utf8');
-    console.log('[Provider Switch] 全局配置已更新:', {
-      path: globalSettingsPath,
-      provider: targetProvider.name,
-      url: globalConfig.env?.ANTHROPIC_BASE_URL
-    });
 
     // 清空 ~/.claude/.current，让 CC Switch profile 系统失效
     // profile 优先级高于 settings.local.json，不清空会导致切换无效
@@ -4463,10 +4657,46 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
       }
     }
 
-    // 更新会话的 provider 信息
+    // 更新会话的 provider 信息（直接用 targetProvider，避免 URL 反查匹配到同 URL 的其他 provider）
     emitStatus('UPDATING', '更新会话信息...', 80);
 
-    const providerInfo = await getCurrentProvider(appType, session.workingDir, session.tmuxSessionName);
+    const tpSc = targetProvider.settingsConfig || {};
+    let tpUrl = '';
+    let tpKey = '';
+    if (appType === 'claude') {
+      tpUrl = tpSc.env?.ANTHROPIC_BASE_URL || '';
+      tpKey = tpSc.env?.ANTHROPIC_AUTH_TOKEN || tpSc.env?.ANTHROPIC_API_KEY || '';
+    } else if (appType === 'codex') {
+      // 从 TOML config 字符串中提取 base_url
+      const m = typeof tpSc.config === 'string' ? tpSc.config.match(/base_url\s*=\s*"([^"]+)"/) : null;
+      tpUrl = m ? m[1] : '';
+      tpKey = tpSc.auth?.OPENAI_API_KEY || tpSc.auth?.CODEX_API_KEY || '';
+    } else if (appType === 'gemini') {
+      tpUrl = tpSc.env?.GOOGLE_GEMINI_BASE_URL || tpSc.env?.GEMINI_BASE_URL || '';
+      tpKey = tpSc.env?.GEMINI_API_KEY || tpSc.env?.API_KEY || '';
+    }
+    const wroteLocalConfig = appType === 'claude' && !sc.useOAuth && !!session.workingDir;
+    // OAuth 官方账号：读取 ~/.claude.json 的账号邮箱
+    let oauthEmail = '';
+    if (!tpUrl && appType === 'claude') {
+      try {
+        const claudeJson = JSON.parse(readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'));
+        oauthEmail = claudeJson.oauthAccount?.emailAddress || '';
+      } catch {}
+    }
+    const providerInfo = {
+      id: targetProvider.id,
+      name: targetProvider.name,
+      url: tpUrl,
+      apiKey: maskApiKey(tpKey),
+      model: '',
+      apiType: appType === 'claude' ? 'claude' : (appType === 'gemini' ? 'gemini' : 'openai'),
+      app: appType,
+      exists: true,
+      configSource: wroteLocalConfig ? 'local' : 'global',
+      isOAuth: !tpUrl && appType === 'claude',
+      oauthEmail
+    };
 
     if (appType === 'claude') {
       session.claudeProvider = providerInfo;
@@ -4478,15 +4708,34 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
 
     sessionManager.updateSession(session);
 
-    // CC Switch 是全局切换，清除所有其他会话的同类型 provider 缓存
-    const allSessions = sessionManager.listSessions();
-    for (const s of allSessions) {
-      if (s.id === sessionId) continue;
-      const sess = sessionManager.getSession(s.id);
-      if (!sess) continue;
-      if (appType === 'claude') sess.claudeProvider = null;
-      else if (appType === 'codex') sess.codexProvider = null;
-      else if (appType === 'gemini') sess.geminiProvider = null;
+    // 同步其他会话的 provider 显示：
+    // - 方案 B（写了 workdir 本地配置）：不更新其他 session，它们有自己的本地配置
+    // - 兜底模式（写了全局配置）：更新没有本地覆盖的其他 session
+    if (!wroteLocalConfig) {
+      const allSessions = sessionManager.listSessions();
+      for (const s of allSessions) {
+        if (s.id === sessionId) continue;
+        const sess = sessionManager.getSession(s.id);
+        if (!sess) continue;
+
+        if (appType === 'claude') {
+          const localPath = sess.workingDir
+            ? path.join(sess.workingDir, '.claude', 'settings.local.json')
+            : null;
+          let hasLocalOverride = false;
+          if (localPath && existsSync(localPath)) {
+            try {
+              const lc = JSON.parse(readFileSync(localPath, 'utf8'));
+              hasLocalOverride = !!lc.env?.ANTHROPIC_BASE_URL;
+            } catch {}
+          }
+          if (!hasLocalOverride) sess.claudeProvider = providerInfo;
+        } else if (appType === 'codex') {
+          sess.codexProvider = providerInfo;
+        } else if (appType === 'gemini') {
+          sess.geminiProvider = providerInfo;
+        }
+      }
     }
 
     // 完成
@@ -4509,6 +4758,9 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
       sessionId,
       error: err.message
     });
+  } finally {
+    // 延迟 3 秒后解除标志，给 watchFile 的 refreshAllProviders 留出时间跳过本次触发
+    setTimeout(() => { _providerSwitchInProgress = false; }, 3000);
   }
 }
 
@@ -6828,6 +7080,11 @@ async function startServer() {
       let configWatchDebounce = null;
 
       const refreshAllProviders = async () => {
+        // 如果是由 switchProviderStateMachine 触发的写入，跳过（避免双重重启）
+        if (_providerSwitchInProgress) {
+          console.log('[配置监听] switchProviderStateMachine 正在执行，跳过本次刷新');
+          return;
+        }
         console.log('[配置监听] 检测到全局配置变化，刷新所有会话的供应商信息');
 
         // CC Switch 外部切换时，清空 ~/.claude/.current 让 profile 系统失效
@@ -6840,9 +7097,10 @@ async function startServer() {
         }
 
         // 同步 tmux 全局环境变量
+        let newEnv = {};
         try {
           const newSettings = JSON.parse(readFileSync(claudeSettingsPath, 'utf8'));
-          const newEnv = newSettings.env || {};
+          newEnv = newSettings.env || {};
           const tmuxVars = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
                             'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'];
           for (const varName of tmuxVars) {
@@ -6857,13 +7115,69 @@ async function startServer() {
 
         const sessions = Array.from(sessionManager.sessions.values());
 
+        // 以 settings.json 的实际 env 为准确定当前供应商，DB is_current 仅作辅助
+        let currentCcProvider = null;
+        try {
+          const db = builtinProviderDB.getDB(true);
+          // 读取 settings.json 的实际 URL 和 Key
+          const actualUrl = newEnv.ANTHROPIC_BASE_URL || '';
+          const actualKey = newEnv.ANTHROPIC_AUTH_TOKEN || newEnv.ANTHROPIC_API_KEY || '';
+
+          let matchedRow = null;
+          if (actualUrl) {
+            // 优先按 URL 精确匹配（settings.json 里的 URL 才是 Claude Code 真正在用的）
+            const allRows = db.prepare("SELECT * FROM providers WHERE app_type='claude'").all();
+            for (const r of allRows) {
+              try {
+                const sc = typeof r.settings_config === 'string' ? JSON.parse(r.settings_config) : (r.settings_config || {});
+                if (sc.env?.ANTHROPIC_BASE_URL === actualUrl) { matchedRow = r; break; }
+              } catch {}
+            }
+          }
+          // 如果 URL 为空（OAuth 官方账号），回退到 is_current=1
+          if (!matchedRow) {
+            matchedRow = db.prepare("SELECT * FROM providers WHERE app_type='claude' AND is_current=1 LIMIT 1").get();
+          }
+          db.close();
+
+          if (matchedRow) {
+            // OAuth 官方账号：URL 为空，读取 ~/.claude.json 的账号邮箱作为显示信息
+            let oauthEmail = '';
+            if (!actualUrl) {
+              try {
+                const claudeJson = JSON.parse(readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'));
+                oauthEmail = claudeJson.oauthAccount?.emailAddress || '';
+              } catch {}
+            }
+            currentCcProvider = {
+              id: matchedRow.id,
+              name: matchedRow.name,
+              url: actualUrl,
+              apiKey: maskApiKey(actualKey),
+              model: '',
+              apiType: 'claude',
+              app: 'claude',
+              exists: true,
+              configSource: 'global',
+              isOAuth: !actualUrl,
+              oauthEmail
+            };
+          }
+        } catch (e) {}
+
         for (const session of sessions) {
           try {
-            // 不传 tmuxSessionName：settings.json 已更新，不能用旧进程的环境变量覆盖新配置
-            const claudeProvider = await getCurrentProvider('claude', session.workingDir, null);
-            if (claudeProvider.exists) {
-              session.claudeProvider = claudeProvider;
+            // 用 CC Switch is_current provider 更新会话（精确匹配，不依赖 URL 反查）
+            if (currentCcProvider) {
+              session.claudeProvider = currentCcProvider;
               sessionManager.updateSession(session);
+            } else {
+              // 兜底：用 getCurrentProvider（可能 URL 匹配不准）
+              const claudeProvider = await getCurrentProvider('claude', session.workingDir, null);
+              if (claudeProvider.exists) {
+                session.claudeProvider = claudeProvider;
+                sessionManager.updateSession(session);
+              }
             }
 
             // 如果该会话有本地配置覆盖了全局，跳过重启（本地配置优先，不受全局切换影响）
@@ -6894,8 +7208,12 @@ async function startServer() {
               execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" Enter`);
               const exited = await waitForShellPrompt(session, 8000);
               if (exited) {
-                const unsetCmd = 'unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL';
-                execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" "${unsetCmd} && claude -c"`);
+                const anthropicVars = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
+                                       'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'];
+                const envCmds = anthropicVars.map(v =>
+                  newEnv[v] ? `export ${v}="${newEnv[v]}"` : `unset ${v}`
+                ).join('; ');
+                execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" "${envCmds} && claude -c"`);
                 await new Promise(r => setTimeout(r, 100));
                 execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" Enter`);
               }

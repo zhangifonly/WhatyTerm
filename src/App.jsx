@@ -2002,9 +2002,9 @@ export default function App() {
                         </button>
                       )}
                     </div>
-                    {provider?.url && (
-                      <p className="mono" style={{ fontSize: '11px', wordBreak: 'break-all', marginTop: '4px' }}>
-                        {provider.url}
+                    {(provider?.url || provider?.oauthEmail) && (
+                      <p className="mono" style={{ fontSize: '11px', wordBreak: 'break-all', marginTop: '4px', color: provider?.isOAuth ? '#10b981' : undefined }}>
+                        {provider.isOAuth ? (provider.oauthEmail || '官方账号') : provider.url}
                       </p>
                     )}
                     {provider?.model && (
