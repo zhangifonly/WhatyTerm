@@ -1944,6 +1944,7 @@ export default function App() {
                              currentSession.aiType === 'gemini' ? 'hsl(45 93% 47%)' : 'hsl(var(--muted-foreground))';
 
                 const isLocalConfig = provider?.configSource === 'local';
+                const isProcessConfig = provider?.configSource === 'process';
                 const globalConfig = provider?.globalConfig;
 
                 return (
@@ -1957,10 +1958,16 @@ export default function App() {
                           fontSize: '9px',
                           padding: '1px 4px',
                           borderRadius: '3px',
-                          background: isLocalConfig ? 'hsl(142 70% 45% / 0.2)' : 'hsl(220 14% 40% / 0.3)',
-                          color: isLocalConfig ? 'hsl(142 70% 55%)' : 'hsl(220 14% 70%)'
+                          background: isLocalConfig ? 'hsl(142 70% 45% / 0.2)' :
+                                     isProcessConfig ? 'hsl(45 93% 47% / 0.2)' :
+                                     'hsl(220 14% 40% / 0.3)',
+                          color: isLocalConfig ? 'hsl(142 70% 55%)' :
+                                isProcessConfig ? 'hsl(45 93% 60%)' :
+                                'hsl(220 14% 70%)'
                         }}>
-                          {isLocalConfig ? t('aiPanel.local') : t('aiPanel.global')}
+                          {isLocalConfig ? t('aiPanel.local') :
+                           isProcessConfig ? '进程' :
+                           t('aiPanel.global')}
                         </span>
                       )}
                       {/* 本地配置时显示红色删除按钮 */}
