@@ -4463,10 +4463,8 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
     // localConfig 仅供后续（claude/gemini 的）重启逻辑读取 env
     let localConfig = { env: {} };
 
+    const isOAuth = appType === 'claude' && !!sc.useOAuth;
     if (appType === 'claude') {
-      // 判断是否为 OAuth：仅当明确标记 useOAuth 时才视为 OAuth
-      // env 为空不代表 OAuth（可能是 provider 配置不完整，如 Whaty）
-      const isOAuth = !!sc.useOAuth;
       if (isOAuth) {
         // OAuth 类型（Claude Official）：必须清除 settings 里残留的 ANTHROPIC_* env，
         // 否则 Claude Code 会继续使用上一个 relay 的 URL/Token，导致面板显示官方但实际走旧 relay。
