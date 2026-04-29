@@ -2009,9 +2009,14 @@ export default function App() {
                         </button>
                       )}
                     </div>
-                    {(provider?.url || provider?.oauthEmail) && (
-                      <p className="mono" style={{ fontSize: '11px', wordBreak: 'break-all', marginTop: '4px', color: provider?.isOAuth ? '#10b981' : undefined }}>
-                        {provider.isOAuth ? (provider.oauthEmail || '官方账号') : provider.url}
+                    {provider?.isOAuth && provider?.oauthEmail && (
+                      <p className="mono" style={{ fontSize: '11px', wordBreak: 'break-all', marginTop: '4px', color: '#10b981' }}>
+                        {provider.oauthEmail}
+                      </p>
+                    )}
+                    {!provider?.isOAuth && provider?.url && (
+                      <p className="mono" style={{ fontSize: '11px', wordBreak: 'break-all', marginTop: '4px' }}>
+                        {provider.url}
                       </p>
                     )}
                     {provider?.model && (
