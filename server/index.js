@@ -7130,7 +7130,7 @@ async function startServer() {
       const claudeSettingsPath = path.join(os.homedir(), '.claude', 'settings.json');
       let configWatchDebounce = null;
 
-      const refreshAllProviders = async () => {
+      const refreshAllProviders = async (skipRestart = false) => {
         // 如果是由 switchProviderStateMachine 触发的写入，跳过（避免双重重启）
         if (_providerSwitchInProgress) {
           console.log('[配置监听] switchProviderStateMachine 正在执行，跳过本次刷新');
@@ -7294,6 +7294,7 @@ async function startServer() {
             sessionManager.updateSession(session);
 
             // 如果该会话有本地配置覆盖了全局，跳过重启（本地配置优先，不受全局切换影响）
+            if (skipRestart) continue;
             const localConfigPath = session.workingDir
               ? path.join(session.workingDir, '.claude', 'settings.local.json')
               : null;
@@ -7401,7 +7402,7 @@ async function startServer() {
       // 启动时刷新一次所有会话的供应商信息（DB 恢复的可能是旧数据）
       setTimeout(() => {
         console.log('[配置监听] 启动时刷新所有会话供应商信息');
-        refreshAllProviders();
+        refreshAllProviders(true);
       }, 2000);
     });
   } catch (err) {
