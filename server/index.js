@@ -7170,97 +7170,21 @@ async function startServer() {
 
         const sessions = Array.from(sessionManager.sessions.values());
 
-        // 以 settings.json 的实际 env 为准确定当前供应商，DB is_current 仅作辅助
+        // 直接用 DB is_current 确定当前供应商（switchProviderStateMachine 已更新 is_current）
         let currentCcProvider = null;
         try {
           const db = builtinProviderDB.getDB(true);
-          // 读取 settings.json 的实际 URL 和 Key
           const actualUrl = newEnv.ANTHROPIC_BASE_URL || '';
           const actualKey = newEnv.ANTHROPIC_AUTH_TOKEN || newEnv.ANTHROPIC_API_KEY || '';
 
-          let matchedRow = null;
-          if (actualUrl) {
-            // 按 URL 匹配，多个同 URL 时优先 URL+Key 精确匹配，其次 is_current
-            const allRows = db.prepare("SELECT * FROM providers WHERE app_type='claude'").all();
-            const normalizedUrl = actualUrl.replace(/\/+$/, '');
-            let urlMatches = [];
-            for (const r of allRows) {
-              try {
-                const sc = typeof r.settings_config === 'string' ? JSON.parse(r.settings_config) : (r.settings_config || {});
-                const providerUrl = (sc.env?.ANTHROPIC_BASE_URL || '').replace(/\/+$/, '');
-                if (providerUrl === normalizedUrl) {
-                  const providerKey = sc.env?.ANTHROPIC_AUTH_TOKEN || sc.env?.ANTHROPIC_API_KEY || '';
-                  urlMatches.push({ row: r, keyMatch: providerKey === actualKey });
-                }
-              } catch {}
-            }
-            if (urlMatches.length > 0) {
-              // 优先 URL+Key 精确匹配
-              const exactMatch = urlMatches.find(m => m.keyMatch);
-              if (exactMatch) {
-                matchedRow = exactMatch.row;
-              } else {
-                // 多个同 URL，优先 is_current
-                const currentMatch = urlMatches.find(m => m.row.is_current);
-                matchedRow = currentMatch ? currentMatch.row : urlMatches[0].row;
-              }
-            }
-          }
-          // 如果 URL 为空，检查是否是 OAuth 官方账号
-          if (!matchedRow && !actualUrl) {
-            // 先检查 ~/.claude.json 是否有 oauthAccount
-            let hasOAuth = false;
-            let oauthEmail = '';
-            try {
-              const claudeJson = JSON.parse(readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'));
-              hasOAuth = !!claudeJson.oauthAccount;
-              oauthEmail = claudeJson.oauthAccount?.emailAddress || '';
-            } catch {}
-
-            if (hasOAuth) {
-              // 是 OAuth，优先找 useOAuth=true 的 provider
-              const allRows = db.prepare("SELECT * FROM providers WHERE app_type='claude'").all();
-              matchedRow = allRows.find(r => {
-                try {
-                  const sc = typeof r.settings_config === 'string' ? JSON.parse(r.settings_config) : (r.settings_config || {});
-                  return !!sc.useOAuth && r.is_current;
-                } catch { return false; }
-              });
-              if (!matchedRow) {
-                matchedRow = allRows.find(r => {
-                  try {
-                    const sc = typeof r.settings_config === 'string' ? JSON.parse(r.settings_config) : (r.settings_config || {});
-                    return !!sc.useOAuth;
-                  } catch { return false; }
-                });
-              }
-              // 找不到 useOAuth provider，创建匿名 OAuth 显示
-              if (!matchedRow) {
-                currentCcProvider = {
-                  id: 'oauth-official',
-                  name: 'Claude Official',
-                  url: '',
-                  apiKey: '',
-                  model: '',
-                  apiType: 'claude',
-                  app: 'claude',
-                  exists: true,
-                  configSource: 'global',
-                  isOAuth: true,
-                  oauthEmail
-                };
-              }
-            } else {
-              // 不是 OAuth，回退到 is_current
-              matchedRow = db.prepare("SELECT * FROM providers WHERE app_type='claude' AND is_current=1 LIMIT 1").get();
-            }
-          }
+          const matchedRow = db.prepare("SELECT * FROM providers WHERE app_type='claude' AND is_current=1 LIMIT 1").get();
           db.close();
 
-          if (matchedRow && !currentCcProvider) {
-            // OAuth 官方账号：URL 为空，读取 ~/.claude.json 的账号邮箱作为显示信息
+          if (matchedRow) {
+            const matchedSc = (() => { try { return JSON.parse(matchedRow.settings_config || '{}'); } catch { return {}; } })();
+            const isMatchOAuth = !!matchedSc.useOAuth;
             let oauthEmail = '';
-            if (!actualUrl) {
+            if (isMatchOAuth) {
               try {
                 const claudeJson = JSON.parse(readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'));
                 oauthEmail = claudeJson.oauthAccount?.emailAddress || '';
@@ -7276,7 +7200,7 @@ async function startServer() {
               app: 'claude',
               exists: true,
               configSource: 'global',
-              isOAuth: !actualUrl,
+              isOAuth: isMatchOAuth,
               oauthEmail
             };
           }
