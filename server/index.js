@@ -7130,7 +7130,7 @@ async function startServer() {
       const claudeSettingsPath = path.join(os.homedir(), '.claude', 'settings.json');
       let configWatchDebounce = null;
 
-      const refreshAllProviders = async (skipRestart = false) => {
+      const refreshAllProviders = async () => {
         // 如果是由 switchProviderStateMachine 触发的写入，跳过（避免双重重启）
         if (_providerSwitchInProgress) {
           console.log('[配置监听] switchProviderStateMachine 正在执行，跳过本次刷新');
@@ -7292,48 +7292,6 @@ async function startServer() {
               session.claudeProvider = sessionProvider;
             }
             sessionManager.updateSession(session);
-
-            // 如果该会话有本地配置覆盖了全局，跳过重启（本地配置优先，不受全局切换影响）
-            if (skipRestart) continue;
-            const localConfigPath = session.workingDir
-              ? path.join(session.workingDir, '.claude', 'settings.local.json')
-              : null;
-            const hasLocalUrl = (() => {
-              if (!localConfigPath || !existsSync(localConfigPath)) return false;
-              try {
-                const lc = JSON.parse(readFileSync(localConfigPath, 'utf8'));
-                return !!lc.env?.ANTHROPIC_BASE_URL;
-              } catch { return false; }
-            })();
-            if (hasLocalUrl) continue;
-
-            // 重启该会话的 Claude Code，让新的全局配置生效
-            const tmuxName = session.tmuxSessionName;
-            if (!tmuxName) continue;
-            const screenContent = session.getScreenContent?.() || '';
-            const isClaudeRunning = /esc to interrupt|Context left|\? for shortcuts|accept edits|Bypass mode/i.test(screenContent)
-              || /^>\s*$/m.test(screenContent.split('\n').slice(-5).join('\n'));
-            if (!isClaudeRunning) continue;
-
-            console.log(`[配置监听] 重启会话 ${session.name} 的 Claude Code`);
-            try {
-              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" "/exit"`);
-              await new Promise(r => setTimeout(r, 100));
-              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" Enter`);
-              const exited = await waitForShellPrompt(session, 8000);
-              if (exited) {
-                const anthropicVars = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
-                                       'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'];
-                const envCmds = anthropicVars.map(v =>
-                  newEnv[v] ? `export ${v}="${newEnv[v]}"` : `unset ${v}`
-                ).join('; ');
-                execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" "${envCmds} && claude -c"`);
-                await new Promise(r => setTimeout(r, 100));
-                execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" Enter`);
-              }
-            } catch (e) {
-              console.error(`[配置监听] 重启会话 ${session.name} 失败:`, e.message);
-            }
           } catch (err) {
             console.error(`[配置监听] 刷新会话 ${session.name} 供应商失败:`, err.message);
           }
@@ -7402,7 +7360,7 @@ async function startServer() {
       // 启动时刷新一次所有会话的供应商信息（DB 恢复的可能是旧数据）
       setTimeout(() => {
         console.log('[配置监听] 启动时刷新所有会话供应商信息');
-        refreshAllProviders(true);
+        refreshAllProviders();
       }, 2000);
     });
   } catch (err) {
