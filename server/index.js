@@ -5390,6 +5390,10 @@ io.on('connection', (socket) => {
         oldSession.detach();
       }
       socket.leave(`session:${socket.data.currentSessionId}`);
+      if (socket.data.refreshInterval) {
+        clearInterval(socket.data.refreshInterval);
+        socket.data.refreshInterval = null;
+      }
     }
 
     // 如果是同一个会话重复 attach（如 socket 重连），也要先移除旧的回调
@@ -5498,6 +5502,17 @@ io.on('connection', (socket) => {
     setTimeout(() => {
       session.refreshScreen();
     }, 100);
+
+    // 定期刷新 tmux 屏幕，确保前端内容实时更新
+    // Claude Code 的 Ink UI 在状态转换时可能不触发 tmux 刷新
+    const refreshInterval = setInterval(() => {
+      if (socket.data.currentSessionId !== sessionId) {
+        clearInterval(refreshInterval);
+        return;
+      }
+      session.refreshScreen();
+    }, 3000);
+    socket.data.refreshInterval = refreshInterval;
   });
 
   // 终端鼠标滚轮滚动（tmux mouse off 时，通过 copy-mode 实现历史浏览）
