@@ -1641,6 +1641,7 @@ ${historyText || '(空)'}
       // Claude Code 运行中标志
       // 如果是确认界面或等待接受编辑，不判断为运行中
       // 如果有空闲提示符（❯），状态栏的 esc to interrupt 可能是后台 shell，不代表 claude 在运行
+      const isCompacting = /Evaporat|Compact|Summariz/i.test(cleanContent) && /\(\d+[ms]\s*\d*s?\s*[·•]?\s*↓/i.test(cleanContent);
       const hasRunningIndicator = !hasIdlePromptForAccept && (
         /esc to interrupt/i.test(cleanContent) ||
         /ctrl\+t to show todos/i.test(cleanContent)
@@ -1651,7 +1652,7 @@ ${historyText || '(空)'}
       // 如果有 Brewed for 或 accept edits，说明任务已完成，不是运行中
       const hasRecentRuntime = /\(\d+m\s*\d+s\)|\d+m\s+\d+s/.test(last500) && !hasBrewedFor && !isWaitingForAccept;
 
-      isRunning = !isConfirmDialog && !isWaitingForAccept && (hasRunningIndicator || hasRecentRuntime);
+      isRunning = !isConfirmDialog && !isWaitingForAccept && (isCompacting || hasRunningIndicator || hasRecentRuntime);
     } else if (aiType === 'codex') {
       // Codex CLI 运行中标志（排除确认界面）
       isRunning = !isConfirmDialog && (
@@ -1693,15 +1694,35 @@ ${historyText || '(空)'}
     }
 
     if (isRunning) {
-      console.log(`[AIEngine] 检测到程序运行中, CLI: ${cliName}`);
+      const stateDesc = isCompacting ? '上下文压缩中' : '程序运行中';
+      console.log(`[AIEngine] 检测到${stateDesc}, CLI: ${cliName}`);
       return {
-        currentState: '程序运行中',
+        currentState: stateDesc,
         workingDir: '未显示',
         recentAction: '执行中',
         needsAction: false,
         actionType: 'none',
         suggestedAction: null,
         actionReason: `${cliName} 正在工作，不应打断`,
+        suggestion: null,
+        updatedAt: new Date().toISOString(),
+        preAnalyzed: true,
+        detectedCLI,
+        ...pluginInfo
+      };
+    }
+
+    // 1.35 检测排队消息状态（Evaporating 后残留的排队输入）
+    if (/Press up to edit queued messages/i.test(cleanContent)) {
+      console.log(`[AIEngine] 检测到排队消息状态，发送 Escape 清除`);
+      return {
+        currentState: '有排队消息待清除',
+        workingDir: '未显示',
+        recentAction: '排队消息',
+        needsAction: true,
+        actionType: 'single_char',
+        suggestedAction: 'Escape',
+        actionReason: '清除上下文压缩期间排队的无效消息',
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
