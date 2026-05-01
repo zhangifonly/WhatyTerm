@@ -1640,8 +1640,11 @@ ${historyText || '(空)'}
     if (aiType === 'claude') {
       // Claude Code 运行中标志
       // 如果是确认界面或等待接受编辑，不判断为运行中
-      const hasRunningIndicator = /esc to interrupt/i.test(cleanContent) ||
-                                  /ctrl\+t to show todos/i.test(cleanContent);
+      // 如果有空闲提示符（❯），状态栏的 esc to interrupt 可能是后台 shell，不代表 claude 在运行
+      const hasRunningIndicator = !hasIdlePromptForAccept && (
+        /esc to interrupt/i.test(cleanContent) ||
+        /ctrl\+t to show todos/i.test(cleanContent)
+      );
       // 运行时间只在最后500字符内检测，避免匹配到历史 timeout 参数
       // 但要排除 "Brewed for" 这种完成时间
       const last500 = cleanContent.slice(-500);
