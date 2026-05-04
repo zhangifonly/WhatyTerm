@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { io } from 'socket.io-client';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { Unicode11Addon } from '@xterm/addon-unicode11';
 import Anser from 'anser';
 import { ToastContainer, toast } from './components/Toast';
 import { useTranslation } from './i18n';
@@ -824,6 +825,9 @@ export default function App() {
 
     fitAddon.current = new FitAddon();
     term.loadAddon(fitAddon.current);
+    const unicode11Addon = new Unicode11Addon();
+    term.loadAddon(unicode11Addon);
+    term.unicode.activeVersion = '11';
     term.open(terminalRef.current);
 
     // 延迟调用 fit，确保 DOM 已完全渲染

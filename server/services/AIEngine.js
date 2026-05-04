@@ -1619,6 +1619,26 @@ ${historyText || '(空)'}
       };
     }
 
+    // 0. 最高优先级：检测排队消息状态（上下文压缩期间排队的无效输入）
+    // 必须在所有其他检测之前，因为此时任何操作都会被打断
+    if (/Press up to edit queued messages/i.test(cleanContent)) {
+      console.log(`[AIEngine] 检测到排队消息状态，发送 Escape 清除`);
+      return {
+        currentState: '有排队消息待清除',
+        workingDir: '未显示',
+        recentAction: '排队消息',
+        needsAction: true,
+        actionType: 'single_char',
+        suggestedAction: 'Escape',
+        actionReason: '清除上下文压缩期间排队的无效消息',
+        suggestion: null,
+        updatedAt: new Date().toISOString(),
+        preAnalyzed: true,
+        detectedCLI,
+        ...pluginInfo
+      };
+    }
+
     // 1. 检测程序运行中（在 API 错误检测之后）
     // 如果程序正在运行，即使历史中有确认界面内容，也应该返回"运行中"
     // 但要排除确认界面的情况（确认界面显示时程序实际上已暂停）
@@ -1631,28 +1651,37 @@ ${historyText || '(空)'}
                             /1\.\s*Yes/i.test(cleanContent);
 
     // 检查是否有 accept edits 等待状态（Claude Code 完成任务后等待用户接受编辑）
-    // 重要：如果有空闲提示符（❯ 或 >），说明 Claude Code 已完成，底部状态栏的 accept edits 只是提示
-    const hasIdlePromptForAccept = /^[❯>]\s*$/m.test(cleanContent) || /\n[❯>]\s*$/m.test(cleanContent);
+    // 重要：只检测最后 5 行，避免匹配到历史滚动缓冲区里的旧提示符
+    const last5Lines = cleanContent.split('\n').slice(-5).join('\n');
+    const hasIdlePromptForAccept = /^[❯>]\s*$/m.test(last5Lines) || /\n[❯>]\s*$/m.test(last5Lines);
     const isWaitingForAccept = !hasIdlePromptForAccept && /accept edits on|shift\+tab to cycle/i.test(cleanContent);
     // 检查是否有 Brewed for（任务完成标志）
     const hasBrewedFor = /Brewed for \d+m\s*\d+s/i.test(cleanContent);
+
+    // 提前声明 isCompacting，供后续 stateDesc 使用（跨 aiType 分支）
+    let isCompacting = false;
 
     if (aiType === 'claude') {
       // Claude Code 运行中标志
       // 如果是确认界面或等待接受编辑，不判断为运行中
       // 如果有空闲提示符（❯），状态栏的 esc to interrupt 可能是后台 shell，不代表 claude 在运行
-      const isCompacting = /Evaporat|Compact|Summariz/i.test(cleanContent) && /\(\d+[ms]\s*\d*s?\s*[·•]?\s*↓/i.test(cleanContent);
+      isCompacting = /Evaporat|Compact|Summariz|Churning/i.test(cleanContent) && /\(\d+[ms]\s*\d*s?\s*[·•]?\s*[↓↑]/i.test(cleanContent);
+      // 活跃运行状态词：Claude Code 运行时显示任意文本 + "..." + 时间/token 指示器
+      // 如 "Tinkering... (8s · ↓ 456 tokens)"、"+ 实现 OCR 文档解析... (0s · ↓ 534 tokens)"
+      // 优先级高于 isWaitingForAccept（屏幕可能同时残留上一轮的 accept edits 文本）
+      const last500 = cleanContent.slice(-500);
+      const isActivelyRunning = /\.{2,3}\s*\(\d+[ms]/i.test(last500);
       const hasRunningIndicator = !hasIdlePromptForAccept && (
         /esc to interrupt/i.test(cleanContent) ||
         /ctrl\+t to show todos/i.test(cleanContent)
       );
       // 运行时间只在最后500字符内检测，避免匹配到历史 timeout 参数
       // 但要排除 "Brewed for" 这种完成时间
-      const last500 = cleanContent.slice(-500);
       // 如果有 Brewed for 或 accept edits，说明任务已完成，不是运行中
       const hasRecentRuntime = /\(\d+m\s*\d+s\)|\d+m\s+\d+s/.test(last500) && !hasBrewedFor && !isWaitingForAccept;
 
-      isRunning = !isConfirmDialog && !isWaitingForAccept && (isCompacting || hasRunningIndicator || hasRecentRuntime);
+      // isActivelyRunning 优先级最高：即使屏幕残留 accept edits 文本，只要有活跃运行状态词就判定为运行中
+      isRunning = !isConfirmDialog && (isActivelyRunning || isCompacting || (!isWaitingForAccept && (hasRunningIndicator || hasRecentRuntime)));
     } else if (aiType === 'codex') {
       // Codex CLI 运行中标志（排除确认界面）
       isRunning = !isConfirmDialog && (
@@ -1704,25 +1733,6 @@ ${historyText || '(空)'}
         actionType: 'none',
         suggestedAction: null,
         actionReason: `${cliName} 正在工作，不应打断`,
-        suggestion: null,
-        updatedAt: new Date().toISOString(),
-        preAnalyzed: true,
-        detectedCLI,
-        ...pluginInfo
-      };
-    }
-
-    // 1.35 检测排队消息状态（Evaporating 后残留的排队输入）
-    if (/Press up to edit queued messages/i.test(cleanContent)) {
-      console.log(`[AIEngine] 检测到排队消息状态，发送 Escape 清除`);
-      return {
-        currentState: '有排队消息待清除',
-        workingDir: '未显示',
-        recentAction: '排队消息',
-        needsAction: true,
-        actionType: 'single_char',
-        suggestedAction: 'Escape',
-        actionReason: '清除上下文压缩期间排队的无效消息',
         suggestion: null,
         updatedAt: new Date().toISOString(),
         preAnalyzed: true,
@@ -1992,6 +2002,27 @@ ${historyText || '(空)'}
     const hasInputPrompt = /^[❯>]\s*$/m.test(cleanLast800) || /[❯>]\s*\|/.test(cleanLast800) || /\n[❯>]\s*$/.test(cleanLast800) || /─>─/.test(cleanLast800);
 
     if (hasInputPrompt) {
+      // 重要：先检查是否正在运行中（任意文本 + "..." + 时间指示器）
+      // 如果正在运行，即使历史输出中有 ❯ 提示符，也不应该发送"继续"
+      const isActivelyRunning = /\.{2,3}\s*\(\d+[ms]/i.test(cleanLast800);
+      if (isActivelyRunning) {
+        console.log('[AIEngine] 检测到活跃运行状态，跳过空闲处理');
+        return {
+          currentState: '程序运行中',
+          workingDir: '未显示',
+          recentAction: '执行中',
+          needsAction: false,
+          actionType: 'none',
+          suggestedAction: null,
+          actionReason: `${cliName} 正在工作，不应打断`,
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI,
+          ...pluginInfo
+        };
+      }
+
       // 检测"是否继续"类问题 - 应该自动回答"继续"
       const isContinueQuestion = /是否继续.{0,20}[？?]/i.test(cleanLast800);
       if (isContinueQuestion) {
