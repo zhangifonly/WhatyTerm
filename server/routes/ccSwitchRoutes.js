@@ -1,6 +1,7 @@
 import express from 'express';
 import { DEFAULT_MODEL } from '../config/constants.js';
 import builtinProviderDB from '../services/BuiltinProviderDB.js';
+import ccSwitchAudit from '../services/CCSwitchAudit.js';
 
 const router = express.Router();
 
@@ -175,6 +176,8 @@ router.post('/switch', (req, res) => {
     // 设置当前供应商为 current
     db.prepare('UPDATE providers SET is_current = 1 WHERE id = ? AND app_type = ?').run(provider_id, app);
 
+    ccSwitchAudit.log('/api/cc-switch/switch', 'UPDATE is_current', { app, provider_id });
+
     db.close();
 
     res.json({
@@ -224,6 +227,8 @@ router.post('/add', (req, res) => {
       JSON.stringify(provider.meta || {}),
       0  // is_current default to false
     );
+
+    ccSwitchAudit.log('/api/cc-switch/add', 'INSERT provider', { app, id: provider.id, name: provider.name });
 
     db.close();
 
@@ -282,6 +287,10 @@ router.put('/update/:id', (req, res) => {
       app
     );
 
+    if (result.changes > 0) {
+      ccSwitchAudit.log('/api/cc-switch/update', 'UPDATE provider', { app, id, name: provider.name });
+    }
+
     db.close();
 
     if (result.changes === 0) {
@@ -320,6 +329,10 @@ router.delete('/delete/:id', (req, res) => {
     const db = builtinProviderDB.getDB(false);
 
     const result = db.prepare('DELETE FROM providers WHERE id = ? AND app_type = ?').run(id, app);
+
+    if (result.changes > 0) {
+      ccSwitchAudit.log('/api/cc-switch/delete', 'DELETE provider', { app, id });
+    }
 
     db.close();
 

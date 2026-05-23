@@ -197,6 +197,9 @@ export class Session {
     this.analysisTimer = null;
     this.autoActionTimer = null;  // 后台自动操作定时器
     this.autoCommandCount = 0;
+    // 操作历史记录（用于智能监控，检测反复打断）
+    this.actionHistory = [];  // [{ action, timestamp, result, screenContent }]
+    this.maxActionHistory = 10;  // 保留最近 10 次操作
     this.pty = null;
     this.attachCount = 0;
 
@@ -283,6 +286,10 @@ export class Session {
     try {
       // 设置 history-limit 为 10000 行
       execSync(`${tmuxCmd} set-option -t "${this.tmuxSessionName}" history-limit 10000`, {
+        stdio: 'ignore'
+      });
+      // 关闭 tmux status bar，避免与 PTY 高度冲突导致排版错乱
+      execSync(`${tmuxCmd} set-option -t "${this.tmuxSessionName}" status off`, {
         stdio: 'ignore'
       });
       // 开启 tmux 鼠标模式，支持鼠标滚轮翻页（进入 copy-mode）

@@ -1557,6 +1557,9 @@ ${historyText || '(空)'}
 
     // 先清理 ANSI 转义序列，确保正则能正确匹配
     const cleanContent = terminalContent.replace(/\x1b\[[0-9;]*m/g, '');
+    // 更彻底的 ANSI 清理（包括光标移动、清行等），用于运行状态检测
+    // 避免 Claude Code 运行状态行被非颜色 ANSI 序列破坏导致正则无法匹配
+    const fullyCleanContent = terminalContent.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
 
     // 0. 最高优先级：检测 API 错误（必须在"运行中"检测之前）
     // 因为即使终端历史中有 "esc to interrupt"，如果有 API 错误也应该触发修复
@@ -1667,9 +1670,8 @@ ${historyText || '(空)'}
       // 如果有空闲提示符（❯），状态栏的 esc to interrupt 可能是后台 shell，不代表 claude 在运行
       isCompacting = /Evaporat|Compact|Summariz|Churning/i.test(cleanContent) && /\(\d+[ms]\s*\d*s?\s*[·•]?\s*[↓↑]/i.test(cleanContent);
       // 活跃运行状态词：Claude Code 运行时显示任意文本 + "..." + 时间/token 指示器
-      // 如 "Tinkering... (8s · ↓ 456 tokens)"、"+ 实现 OCR 文档解析... (0s · ↓ 534 tokens)"
-      // 优先级高于 isWaitingForAccept（屏幕可能同时残留上一轮的 accept edits 文本）
-      const last500 = cleanContent.slice(-500);
+      // 使用 fullyCleanContent 避免光标移动等 ANSI 序列破坏运行状态文本
+      const last500 = fullyCleanContent.slice(-500);
       const isActivelyRunning = /\.{2,3}\s*\(\d+[ms]/i.test(last500);
       const hasRunningIndicator = !hasIdlePromptForAccept && (
         /esc to interrupt/i.test(cleanContent) ||
@@ -1764,6 +1766,29 @@ ${historyText || '(空)'}
     // 1.5 检测 accept edits 状态：发送"继续"而非 Tab
     // 原因：Tab 通过 tmux send-keys 不可靠，"继续"文本输入更稳定且能让 Claude 推进 Sprint
     if (isWaitingForAccept) {
+      // 重要：先检查是否正在运行中（活跃运行状态词）
+      // 使用更彻底的 ANSI 清理，避免光标移动等序列破坏运行状态文本
+      const fullyClean = fullyCleanContent;
+      const last500 = fullyClean.slice(-500);
+      const isActivelyRunning = /\.{2,3}\s*\(\d+[ms]/i.test(last500);
+      if (isActivelyRunning) {
+        console.log(`[AIEngine] 检测到活跃运行状态，跳过 accept edits 处理`);
+        return {
+          currentState: '程序运行中',
+          workingDir: '未显示',
+          recentAction: '执行中',
+          needsAction: false,
+          actionType: 'none',
+          suggestedAction: null,
+          actionReason: `${cliName} 正在工作，不应打断`,
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI,
+          ...pluginInfo
+        };
+      }
+
       console.log(`[AIEngine] 检测到 ${cliName} 等待接受编辑，发送"继续"`);
       return {
         currentState: `${cliName}等待接受编辑`,
@@ -1976,9 +2001,52 @@ ${historyText || '(空)'}
     // 2.7 检测 Claude Code 空闲状态（有提示符 + accept edits 状态栏）
     // 底部状态栏的 "accept edits on" 只是提示，不需要按 Tab
     // 空闲状态下应该自动发送"继续"让 Claude Code 继续开发
-    const hasPrompt = /^[❯>]\s*$/m.test(cleanContent) || /\n[❯>]\s*$/m.test(cleanContent);
+    // 复用前面声明的 last5Lines
+    const hasPrompt = /^[❯>]\s*$/m.test(last5Lines) || /\n[❯>]\s*$/m.test(last5Lines);
     const isEditConfirmMode = />>.*accept edits/i.test(cleanContent) || /shift\+tab to cycle/i.test(cleanContent);
     if (hasPrompt && /accept edits/i.test(cleanContent) && !isEditConfirmMode) {
+      // 重要：先检查是否正在运行中（使用 fullyCleanContent 避免 ANSI 序列干扰）
+      const last500 = fullyCleanContent.slice(-500);
+      const isActivelyRunning = /\.{2,3}\s*\(\d+[ms]/i.test(last500);
+      if (isActivelyRunning) {
+        console.log(`[AIEngine] 检测到活跃运行状态，跳过空闲处理`);
+        return {
+          currentState: '程序运行中',
+          workingDir: '未显示',
+          recentAction: '执行中',
+          needsAction: false,
+          actionType: 'none',
+          suggestedAction: null,
+          actionReason: `${cliName} 正在工作，不应打断`,
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI,
+          ...pluginInfo
+        };
+      }
+
+      // 检测 Claude 已表示任务完成/无更多工作
+      const taskDone800 = fullyCleanContent.slice(-800);
+      const taskDoneCheck = /没有(更多|其他)?(任务|工作|需要|要做)|已(全部)?完成(所有|全部)?|all\s*(tasks?\s*)?done|nothing\s*(left\s*)?(to\s*do|more)|no\s*(more\s*)?(tasks?|work)|任务.*已.*完成|工作.*已.*结束|没什么.*要做/i;
+      if (taskDoneCheck.test(taskDone800)) {
+        console.log(`[AIEngine] 检测到 ${cliName} 表示任务已完成，停止自动操作`);
+        return {
+          currentState: '任务已完成',
+          workingDir: '未显示',
+          recentAction: 'Claude 表示无更多任务',
+          needsAction: false,
+          actionType: 'none',
+          suggestedAction: null,
+          actionReason: 'Claude 已表示没有更多任务，不再发送继续',
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI,
+          ...pluginInfo
+        };
+      }
+
       console.log(`[AIEngine] 检测到 ${cliName} 空闲（有 accept edits 状态栏），自动发送继续`);
       return {
         currentState: `${cliName}空闲`,
@@ -2002,9 +2070,8 @@ ${historyText || '(空)'}
     const hasInputPrompt = /^[❯>]\s*$/m.test(cleanLast800) || /[❯>]\s*\|/.test(cleanLast800) || /\n[❯>]\s*$/.test(cleanLast800) || /─>─/.test(cleanLast800);
 
     if (hasInputPrompt) {
-      // 重要：先检查是否正在运行中（任意文本 + "..." + 时间指示器）
-      // 如果正在运行，即使历史输出中有 ❯ 提示符，也不应该发送"继续"
-      const isActivelyRunning = /\.{2,3}\s*\(\d+[ms]/i.test(cleanLast800);
+      // 重要：先检查是否正在运行中（使用 fullyCleanContent 避免 ANSI 序列干扰）
+      const isActivelyRunning = /\.{2,3}\s*\(\d+[ms]/i.test(fullyCleanContent.slice(-800));
       if (isActivelyRunning) {
         console.log('[AIEngine] 检测到活跃运行状态，跳过空闲处理');
         return {
@@ -2089,6 +2156,28 @@ ${historyText || '(空)'}
       // 检测开发阶段空闲状态 - 有 > 或 ❯ 提示符，刚完成操作，应该发送"继续"
       // 策略：只要 Claude Code 空闲且自动操作开启，默认发送"继续"
       // 不再依赖关键词匹配，因为各种语言/框架的关键词太多无法穷举
+
+      // 检测 Claude 已表示任务完成/无更多工作 - 不应再发"继续"
+      // 常见表述：没有任务、已完成所有、没有更多、all done、nothing to do 等
+      const taskDonePatterns = /没有(更多|其他)?(任务|工作|需要|要做)|已(全部)?完成(所有|全部)?|all\s*(tasks?\s*)?done|nothing\s*(left\s*)?(to\s*do|more)|no\s*(more\s*)?(tasks?|work)|任务.*已.*完成|工作.*已.*结束|没什么.*要做/i;
+      if (taskDonePatterns.test(cleanLast800)) {
+        console.log('[AIEngine] 检测到 Claude 表示任务已完成/无更多工作，停止自动操作');
+        return {
+          currentState: '任务已完成',
+          workingDir: '未显示',
+          recentAction: 'Claude 表示无更多任务',
+          needsAction: false,
+          actionType: 'none',
+          suggestedAction: null,
+          actionReason: 'Claude 已表示没有更多任务，不再发送继续',
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI,
+          ...pluginInfo
+        };
+      }
+
       console.log('[AIEngine] 检测到空闲状态（❯ 提示符），自动发送继续');
       return {
         currentState: `${cliName}空闲`,

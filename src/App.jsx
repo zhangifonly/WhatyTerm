@@ -1891,10 +1891,11 @@ export default function App() {
             <div className="ai-status-section" style={{ position: 'relative' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
                 <h4 style={{ margin: 0 }}>
-                  {currentSession.aiType === 'claude' ? 'Claude API' :
-                   currentSession.aiType === 'codex' ? 'Codex API' :
-                   currentSession.aiType === 'gemini' ? 'Gemini API' :
-                   currentSession.aiType === 'droid' ? 'Droid' : 'AI API'}
+                  {currentSession.aiType === 'claude' ? 'CLAUDE' :
+                   currentSession.aiType === 'codex' ? 'CODEX' :
+                   currentSession.aiType === 'gemini' ? 'GEMINI' :
+                   currentSession.aiType === 'droid' ? 'DROID' :
+                   currentSession.aiType === 'opencode' ? 'OPENCODE' : 'AI'}
                 </h4>
                 {/* Droid 使用官方账号，不显示供应商切换按钮 */}
                 {currentSession.aiType !== 'droid' && (

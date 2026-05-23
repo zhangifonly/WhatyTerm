@@ -4,6 +4,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import os from 'os';
 import fs from 'fs';
+import ccSwitchAudit from '../services/CCSwitchAudit.js';
 
 const router = express.Router();
 const configManager = new ConfigManager();
@@ -304,6 +305,8 @@ router.post('/switch', (req, res) => {
 
           // 设置当前供应商为 current
           db.prepare('UPDATE providers SET is_current = 1 WHERE id = ? AND app_type = ?').run(profile, appType);
+
+          ccSwitchAudit.log('/api/config/switch', 'UPDATE is_current', { appType, profile });
 
           db.close();
 

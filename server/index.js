@@ -108,6 +108,7 @@ import HookServer from './services/HookServer.js';
 import cliLearner from './services/CliLearner.js';
 import tokenStatsService from './services/TokenStatsService.js';
 import builtinProviderDB from './services/BuiltinProviderDB.js';
+import ccSwitchAudit from './services/CCSwitchAudit.js';
 import configService from './services/ConfigService.js';
 import TeamManager from './services/TeamManager.js';
 import TaskOrchestrator from './services/TaskOrchestrator.js';
@@ -126,6 +127,7 @@ _crashReporter = crashReporter;
 
 // 初始化内置供应商数据库（优先使用 CC-Switch，不存在则创建内置数据库）
 builtinProviderDB.init();
+ccSwitchAudit.startWatcher();
 
 // API 密钥脱敏函数，防止敏感信息泄露
 function maskApiKey(key) {
@@ -1185,6 +1187,28 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         } catch {}
       }
 
+      // 最后兜底：如果仍无 URL，检查 WebTmux 服务进程自身的环境变量
+      // （tmux 会话继承服务进程 env，Claude Code 会使用这些变量）
+      // 但如果 DB is_current 明确指向 OAuth 供应商，说明用户已切换到官方，不应使用过时的 env
+      if (!actualApiUrl && process.env.ANTHROPIC_BASE_URL) {
+        let dbPointsToOAuth = false;
+        try {
+          const checkDb = new Database(ccSwitchDbPath, { readonly: true });
+          const curRow = checkDb.prepare('SELECT settings_config FROM providers WHERE app_type = ? AND is_current = 1').get(appType);
+          checkDb.close();
+          if (curRow) {
+            const curSc = JSON.parse(curRow.settings_config || '{}');
+            dbPointsToOAuth = !!curSc.useOAuth || !curSc.env?.ANTHROPIC_BASE_URL;
+          }
+        } catch {}
+        if (!dbPointsToOAuth) {
+          actualApiUrl = process.env.ANTHROPIC_BASE_URL.replace(/\/+$/, '');
+          actualApiKey = process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY || actualApiKey;
+          configSource = 'process';
+          console.log(`[getCurrentProvider] 从服务进程 env 获取 base URL: ${actualApiUrl}`);
+        }
+      }
+
       // 模型来源：settings.json 的 model 字段（/model 命令持久化的值）
       // 不使用 ANTHROPIC_DEFAULT_SONNET_MODEL 等环境变量（那是 CC Switch 的默认模型，不是用户选择的）
     } else if (appType === 'codex') {
@@ -1366,8 +1390,32 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         }));
       } else {
         // 没有实际配置（settings.json 为空 env）
-        // 若是 Claude，先检查是否处于 OAuth 模式（~/.claude.json 有 oauthAccount）
-        // 如果是，优先找 DB 里的 OAuth provider（useOAuth=true），而不是 is_current（可能是非 OAuth provider）
+        // 优先以 DB is_current 为准（switchProviderStateMachine 切换时已更新 is_current）
+        const row = db.prepare('SELECT * FROM providers WHERE app_type = ? AND is_current = 1').get(appType);
+
+        if (appType === 'claude' && row) {
+          // 检查 is_current 指向的供应商是否为 OAuth 类型
+          let currentSc = {};
+          try { currentSc = JSON.parse(row.settings_config || '{}'); } catch {}
+          const currentUrl = currentSc.env?.ANTHROPIC_BASE_URL || '';
+          const currentIsOAuth = !!currentSc.useOAuth || !currentUrl;
+
+          if (!currentIsOAuth) {
+            // is_current 指向非 OAuth 供应商（有 URL），以 DB 为准
+            db.close();
+            return resolve(buildResult({
+              id: row.id,
+              name: row.name || '未命名',
+              url: currentUrl,
+              apiKey: maskApiKey(currentSc.env?.ANTHROPIC_AUTH_TOKEN || currentSc.env?.ANTHROPIC_API_KEY || ''),
+              model: currentSc.model || '',
+              exists: true,
+              configSource: 'global'
+            }));
+          }
+        }
+
+        // is_current 为 OAuth 或不存在，检查 ~/.claude.json 确认 OAuth 状态
         if (appType === 'claude') {
           let hasOAuth = false;
           try {
@@ -1376,23 +1424,11 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
           } catch {}
 
           if (hasOAuth) {
-            const allRows = db.prepare('SELECT * FROM providers WHERE app_type = ?').all(appType);
             db.close();
-            // 找 useOAuth=true 的 provider，优先 is_current，否则取第一个
-            let oauthRow = allRows.find(r => { try { return !!JSON.parse(r.settings_config || '{}').useOAuth && r.is_current; } catch { return false; } });
-            if (!oauthRow) oauthRow = allRows.find(r => { try { return !!JSON.parse(r.settings_config || '{}').useOAuth; } catch { return false; } });
-            if (oauthRow) {
-              return resolve(buildResult({
-                id: oauthRow.id,
-                name: oauthRow.name || 'Claude Official',
-                url: '',
-                exists: true,
-                configSource: 'global'
-              }));
-            }
-            // 找不到 useOAuth provider，返回 OAuth 匿名
+            const oauthName = row?.name || 'Claude Official';
             return resolve(buildResult({
-              name: 'Claude Official',
+              id: row?.id,
+              name: oauthName,
               url: '',
               exists: true,
               configSource: 'global'
@@ -1400,8 +1436,6 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
           }
         }
 
-        // 非 OAuth 或非 Claude：回退到 is_current
-        const row = db.prepare('SELECT * FROM providers WHERE app_type = ? AND is_current = 1').get(appType);
         db.close();
 
         if (!row) {
@@ -3649,6 +3683,14 @@ async function runBackgroundAutoAction() {
           action = status.suggestion;
         }
 
+        // warning 类型仅做状态展示，不发送输入
+        if (status.actionType === 'warning') {
+          console.log(`[后台自动操作] 会话 ${session.name}: 警告(仅展示): ${action}`);
+          session.isAutoActioning = false;
+          updateCheckState(sessionData.id, false, status);
+          continue;
+        }
+
         if (status.needsAction && action) {
           // 跳转到操作执行逻辑（复用后面的代码）
           // 这里直接处理
@@ -3704,6 +3746,25 @@ async function runBackgroundAutoAction() {
               session.write(action);
             }
           } else if (status.actionType === 'text_input' || status.actionType === 'suggestion' || action.length > 1) {
+            // 全局保护：发送文本输入前最后一次核验，避免误打断运行中的任务
+            // 这是最终防线。主要的场景识别应该在 AIEngine / 插件里做准确。
+            {
+              const currentScreen = session.getScreenContent ? session.getScreenContent() : '';
+              const fullyClean = currentScreen.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+              const screenLast800 = fullyClean.slice(-800);
+              // Claude Code 运行中的三种明确证据（任一成立即拦截）
+              const isRunning = /\.{2,3}\s*\(\d+[ms]/i.test(screenLast800);
+              const hasEscToInterrupt = /esc to interrupt/i.test(screenLast800);
+              const hasQueuedMessages = /Press up to edit queued messages/i.test(currentScreen);
+              if (isRunning || hasEscToInterrupt || hasQueuedMessages) {
+                const reason = isRunning ? '运行状态指示器' :
+                               hasEscToInterrupt ? 'esc to interrupt' :
+                               '排队消息';
+                console.log(`[后台自动操作] 会话 ${session.name}: 末端保护拦截 (${reason})，取消发送 "${String(action).slice(0, 40)}"`);
+                return;
+              }
+            }
+
             // Claude Code 文本输入模式：分两次发送，延迟50ms发送回车
             console.log(`[后台自动操作] 会话 ${session.name}: 发送文本 "${action}" + CR (延迟50ms)`);
             session.write(action);
@@ -3711,6 +3772,33 @@ async function runBackgroundAutoAction() {
             setTimeout(() => {
               session.write('\r');
             }, 50);
+
+            // 记录操作到历史（用于智能监控）
+            if (!session.actionHistory) session.actionHistory = [];
+            session.actionHistory.push({
+              action,
+              timestamp: Date.now(),
+              result: null,  // 稍后检测 Interrupted 时更新
+              screenContent: session.getScreenContent ? session.getScreenContent().slice(-500) : ''
+            });
+            // 保留最近 10 次
+            if (session.actionHistory.length > 10) {
+              session.actionHistory.shift();
+            }
+
+            // 延迟 2 秒后检测是否被打断
+            setTimeout(() => {
+              const screenContent = session.getScreenContent ? session.getScreenContent() : '';
+              const lastAction = session.actionHistory[session.actionHistory.length - 1];
+              if (lastAction && lastAction.action === action && !lastAction.result) {
+                if (/Interrupted.*What should Claude do instead/i.test(screenContent)) {
+                  lastAction.result = 'Interrupted';
+                  console.log(`[智能监控] 检测到操作"${action}"被打断`);
+                } else {
+                  lastAction.result = 'success';
+                }
+              }
+            }, 2000);
           } else if (status.actionType === 'single_char') {
             // 单字符特殊按键（如 Tab、Escape）：通过 tmux send-keys 发送更可靠
             const tmuxSession = session.tmuxSessionName;
@@ -4303,13 +4391,20 @@ async function runBackgroundStatusAnalysis() {
 
           // 切换进行中时跳过后台覆盖，避免覆盖 switchProviderStateMachine 刚设置的值
           if (!_providerSwitchInProgress) {
-            if (cliType === 'claude') {
-              console.log(`[后台AI分析] 更新 claudeProvider: ${provider.name} (${provider.url || 'OAuth'}), 来源: runBackgroundStatusAnalysis`);
-              session.claudeProvider = provider;
-            } else if (cliType === 'codex') {
-              session.codexProvider = provider;
-            } else if (cliType === 'gemini') {
-              session.geminiProvider = provider;
+            // 防止 OAuth 误判覆盖：如果 session 已有非 OAuth provider（有 URL），
+            // 但 getCurrentProvider 返回 OAuth（无 URL），说明配置文件被清除但 DB is_current 未变，
+            // 此时应以 DB is_current 为准，不覆盖
+            const shouldSkipUpdate = cliType === 'claude' && currentProvider?.url && !provider.url && provider.isOAuth;
+            if (shouldSkipUpdate) {
+              // 不覆盖，保留 switchProviderStateMachine 设置的值
+            } else {
+              if (cliType === 'claude') {
+                session.claudeProvider = provider;
+              } else if (cliType === 'codex') {
+                session.codexProvider = provider;
+              } else if (cliType === 'gemini') {
+                session.geminiProvider = provider;
+              }
             }
           }
 
@@ -4659,6 +4754,9 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
       const dbW = builtinProviderDB.getDB(false);
       dbW.prepare('UPDATE providers SET is_current = 0 WHERE app_type = ?').run(appType);
       dbW.prepare('UPDATE providers SET is_current = 1 WHERE id = ? AND app_type = ?').run(targetProvider.id, appType);
+      ccSwitchAudit.log('switchProviderStateMachine', 'UPDATE is_current', {
+        appType, targetId: targetProvider.id, targetName: targetProvider.name, sessionId
+      });
       if (sc.useOAuth) {
         // 保留 useOAuth 标记，防止 CC Switch 同步时覆盖
         const currentScRow = dbW.prepare('SELECT settings_config FROM providers WHERE id = ? AND app_type = ?').get(targetProvider.id, appType);
@@ -4670,6 +4768,9 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
           dbW.prepare('UPDATE providers SET settings_config = ? WHERE id = ? AND app_type = ?').run(
             JSON.stringify(currentSc), targetProvider.id, appType
           );
+          ccSwitchAudit.log('switchProviderStateMachine', 'UPDATE settings_config (useOAuth)', {
+            targetId: targetProvider.id, targetName: targetProvider.name
+          });
         }
       }
       dbW.close();
@@ -5531,6 +5632,10 @@ io.on('connection', (socket) => {
     const refreshInterval = setInterval(() => {
       if (socket.data.currentSessionId !== sessionId) {
         clearInterval(refreshInterval);
+        return;
+      }
+      // 用户正在输入时跳过刷新，避免 tmux 全屏重绘与 Ink 渲染交错导致乱码
+      if (isAutoActionPausedByUserInput(sessionId)) {
         return;
       }
       session.refreshScreen();

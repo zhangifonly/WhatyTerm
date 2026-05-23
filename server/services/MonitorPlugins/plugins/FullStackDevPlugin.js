@@ -250,7 +250,55 @@ class FullStackDevPlugin extends BasePlugin {
    */
   analyzeStatus(terminalContent, phase, context) {
     const config = this.getPhaseConfig(phase);
-    const lastLines = terminalContent.split('\n').slice(-30).join('\n');
+
+    // 关键前置：先判断 Claude Code 是否在运行中。运行中绝不发任何指令。
+    // Claude Code 运行时会显示 "Xxxing... (1m 29s · ↑ 5.2k tokens)" + "esc to interrupt"
+    const fullyClean = terminalContent
+      .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+      .replace(/\x1b\][^\x07]*\x07/g, '');
+    const tail800 = fullyClean.slice(-800);
+    const isRunning = /\.{2,3}\s*\(\d+[ms]/i.test(tail800) || /esc to interrupt/i.test(tail800);
+    const hasQueued = /Press up to edit queued messages/i.test(fullyClean);
+    if (isRunning || hasQueued) {
+      return {
+        needsAction: false,
+        actionType: null,
+        suggestedAction: null,
+        phase,
+        phaseConfig: config,
+        message: isRunning ? 'Claude Code 正在运行中，等待完成' : '存在排队消息，等待处理'
+      };
+    }
+
+    // 进一步：必须出现空闲提示符 "> " 或 "❯ " 才认为可以发指令
+    // 这避免了在滚动输出中段误识别错误关键字
+    const last10Lines = fullyClean.split('\n').slice(-10).join('\n');
+    const hasIdlePrompt = /^\s*[>❯]\s*$/m.test(last10Lines) || /╭─+╮[\s\S]{0,200}[>❯]\s/m.test(last10Lines);
+    if (!hasIdlePrompt) {
+      return {
+        needsAction: false,
+        actionType: null,
+        suggestedAction: null,
+        phase,
+        phaseConfig: config,
+        message: '未检测到空闲输入提示符，等待'
+      };
+    }
+
+    // 检测 Claude 已表示任务完成/无更多工作 - 不应再发任何指令
+    const taskDonePatterns = /没有(更多|其他)?(任务|工作|需要|要做)|已(全部)?完成(所有|全部)?|all\s*(tasks?\s*)?done|nothing\s*(left\s*)?(to\s*do|more)|no\s*(more\s*)?(tasks?|work)|任务.*已.*完成|工作.*已.*结束|没什么.*要做/i;
+    if (taskDonePatterns.test(tail800)) {
+      return {
+        needsAction: false,
+        actionType: null,
+        suggestedAction: null,
+        phase,
+        phaseConfig: config,
+        message: 'Claude 表示任务已完成，停止自动操作'
+      };
+    }
+
+    const lastLines = fullyClean.split('\n').slice(-30).join('\n');
 
     // 检测文档保存成功
     if (phase === 'requirements' || phase === 'design' || phase === 'planning') {

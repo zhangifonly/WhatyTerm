@@ -282,98 +282,109 @@ class ClaudeSessionFixer {
       const content = await fs.readFile(filepath, 'utf-8');
       const lines = content.split('\n');
 
-      // 处理每一行
-      const fixedLines = [];
       let removedCount = 0;
       let fixedEmptyCount = 0;
       let removedMessagesCount = 0;
 
+      // 移除 thinking / redacted_thinking 块，并清理残留签名与空 text 块
+      const cleanBlocks = (arr) => {
+        const originalLen = arr.length;
+        let blocks = arr.filter(c =>
+          !(c && typeof c === 'object' && (c.type === 'thinking' || c.type === 'redacted_thinking'))
+        );
+        removedCount += originalLen - blocks.length;
+        // 删除残留 signature 字段（thinking 外的块上不应携带）
+        for (const c of blocks) {
+          if (c && typeof c === 'object' && c.signature !== undefined) delete c.signature;
+        }
+        // 移除空 text 块
+        blocks = blocks.filter(c => {
+          if (c && typeof c === 'object' && c.type === 'text' && (!c.text || c.text.trim() === '')) {
+            fixedEmptyCount++;
+            return false;
+          }
+          return true;
+        });
+        return blocks;
+      };
+
+      // 第一遍：逐行清理，记录被删除条目的 uuid -> parentUuid，用于后续重链
+      // Claude Code 把每个 thinking 块单独存为一行，并通过 uuid/parentUuid 串成链；
+      // 直接删除这些行会让后续行的 parentUuid 悬空，导致 `claude -c` 重建对话时断链。
+      const entries = [];               // { data } 或 { raw }
+      const deletedParent = new Map();  // 被删除条目 uuid -> 其 parentUuid
+
       for (const line of lines) {
         if (!line.trim()) continue;
 
+        let data;
         try {
-          const data = JSON.parse(line);
-
-          // 处理 message.content 数组
-          if (data.message && data.message.content && Array.isArray(data.message.content)) {
-            const originalLen = data.message.content.length;
-
-            // 移除 thinking 类型的内容块
-            data.message.content = data.message.content.filter(c => {
-              if (typeof c === 'object' && c.type === 'thinking') {
-                return false;
-              }
-              if (typeof c === 'object' && c.signature) {
-                delete c.signature;
-              }
-              return true;
-            });
-
-            removedCount += originalLen - data.message.content.length;
-
-            // 移除空 text blocks（text 为空字符串）
-            data.message.content = data.message.content.filter(c => {
-              if (typeof c === 'object' && c.type === 'text' && (!c.text || c.text.trim() === '')) {
-                fixedEmptyCount++;
-                return false;
-              }
-              return true;
-            });
-
-            // 如果 content 变成空数组，处理方式取决于角色
-            if (data.message.content.length === 0) {
-              if (data.message.role === 'assistant') {
-                // assistant 消息 content 为空：整条消息删除
-                removedMessagesCount++;
-                continue;
-              } else {
-                // user 消息 content 为空：补一个占位 text block
-                data.message.content = [{ type: 'text', text: '.' }];
-                fixedEmptyCount++;
-              }
-            }
-          }
-
-          // 也检查顶层 content 数组（某些格式）
-          if (data.content && Array.isArray(data.content)) {
-            const originalLen = data.content.length;
-
-            data.content = data.content.filter(c => {
-              if (typeof c === 'object' && c.type === 'thinking') {
-                return false;
-              }
-              if (typeof c === 'object' && c.signature) {
-                delete c.signature;
-              }
-              return true;
-            });
-
-            removedCount += originalLen - data.content.length;
-
-            // 移除空 text blocks
-            data.content = data.content.filter(c => {
-              if (typeof c === 'object' && c.type === 'text' && (!c.text || c.text.trim() === '')) {
-                fixedEmptyCount++;
-                return false;
-              }
-              return true;
-            });
-          }
-
-          // 清理可能导致 "Improperly formed request" 的字段
-          // 某些上游 API 不支持 thinking 相关的顶层参数
-          if (data.thinking) delete data.thinking;
-          if (data.budget_tokens !== undefined) delete data.budget_tokens;
-
-          fixedLines.push(JSON.stringify(data) + '\n');
-        } catch (jsonErr) {
-          // 保留无法解析的行
-          fixedLines.push(line);
+          data = JSON.parse(line);
+        } catch {
+          entries.push({ raw: line });   // 保留无法解析的行
+          continue;
         }
+
+        if (data.message && Array.isArray(data.message.content)) {
+          data.message.content = cleanBlocks(data.message.content);
+
+          if (data.message.content.length === 0) {
+            if (data.message.role === 'assistant') {
+              // assistant 内容清空（典型为 thinking-only 行）：删除整条并记录重链关系
+              removedMessagesCount++;
+              if (data.uuid) deletedParent.set(data.uuid, data.parentUuid ?? null);
+              continue;
+            }
+            // user 内容清空：补占位 text 块，保持链完整
+            data.message.content = [{ type: 'text', text: '.' }];
+            fixedEmptyCount++;
+          }
+        }
+
+        // 也检查顶层 content 数组（某些格式）
+        if (Array.isArray(data.content)) {
+          data.content = cleanBlocks(data.content);
+        }
+
+        // 清理可能导致 "Improperly formed request" 的顶层字段
+        if (data.thinking) delete data.thinking;
+        if (data.budget_tokens !== undefined) delete data.budget_tokens;
+
+        entries.push({ data });
+      }
+
+      // 沿 parentUuid 链向上跳过所有已删除条目，得到最近的存活祖先
+      const resolveParent = (uuid) => {
+        const seen = new Set();
+        let cur = uuid;
+        while (cur && deletedParent.has(cur) && !seen.has(cur)) {
+          seen.add(cur);
+          cur = deletedParent.get(cur);
+        }
+        return cur;
+      };
+
+      // 第二遍：重链幸存条目的 parentUuid，避免删除 thinking 行后断链
+      const fixedLines = [];
+      let relinkedCount = 0;
+      for (const e of entries) {
+        if (e.raw !== undefined) {
+          fixedLines.push(e.raw + '\n');
+          continue;
+        }
+        const data = e.data;
+        if (data.parentUuid && deletedParent.has(data.parentUuid)) {
+          data.parentUuid = resolveParent(data.parentUuid);
+          relinkedCount++;
+        }
+        fixedLines.push(JSON.stringify(data) + '\n');
       }
 
       // 写回文件
       await fs.writeFile(filepath, fixedLines.join(''), 'utf-8');
+      if (relinkedCount > 0) {
+        console.log(`[ClaudeSessionFixer] 重链 ${relinkedCount} 条记录的 parentUuid，保持对话链完整`);
+      }
 
       console.log(`[ClaudeSessionFixer] 修复完成！移除 ${removedCount} 个 thinking blocks, 修复 ${fixedEmptyCount} 个空内容, 删除 ${removedMessagesCount} 条空消息`);
 
