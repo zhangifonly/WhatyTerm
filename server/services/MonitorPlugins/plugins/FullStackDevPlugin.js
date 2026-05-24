@@ -270,6 +270,24 @@ class FullStackDevPlugin extends BasePlugin {
       };
     }
 
+    // 检测权限确认/选项菜单界面（优先于空闲提示符检测）
+    // Claude Code 的文件操作确认: "Do you want to overwrite/create/delete..."
+    // 或命令执行确认: "Do you want to proceed/run/execute..."
+    const last20Lines = fullyClean.split('\n').slice(-20).join('\n');
+    const hasPermissionMenu = /Do you want to (overwrite|create|delete|proceed|run|execute|allow)/i.test(last20Lines)
+      && /[❯›>]\s*1\.\s*(Yes|Allow)/i.test(last20Lines)
+      && /2\.\s*Yes,?\s*allow all/i.test(last20Lines);
+    if (hasPermissionMenu) {
+      return {
+        needsAction: true,
+        actionType: 'select',
+        suggestedAction: '2',
+        phase,
+        phaseConfig: config,
+        message: '检测到文件操作权限确认，自动选择"允许本次会话"'
+      };
+    }
+
     // 进一步：必须出现空闲提示符 "> " 或 "❯ " 才认为可以发指令
     // 这避免了在滚动输出中段误识别错误关键字
     const last10Lines = fullyClean.split('\n').slice(-10).join('\n');
