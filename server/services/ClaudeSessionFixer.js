@@ -451,6 +451,125 @@ class ClaudeSessionFixer {
       sessionFile
     };
   }
+
+  /**
+   * 快速检测会话文件是否有问题（不修复，仅扫描）
+   * @returns {object} { hasIssues, thinkingCount, emptyTextCount, signatureCount }
+   */
+  async quickScanFile(filepath) {
+    try {
+      const content = await fs.readFile(filepath, 'utf-8');
+      const lines = content.split('\n');
+      let thinkingCount = 0;
+      let emptyTextCount = 0;
+      let signatureCount = 0;
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const data = JSON.parse(line);
+          const msgContent = data.message?.content;
+          if (Array.isArray(msgContent)) {
+            for (const block of msgContent) {
+              if (!block || typeof block !== 'object') continue;
+              if (block.type === 'thinking' || block.type === 'redacted_thinking') thinkingCount++;
+              if (block.signature !== undefined) signatureCount++;
+              if (block.type === 'text' && (!block.text || block.text.trim() === '')) emptyTextCount++;
+            }
+          }
+        } catch {
+          continue;
+        }
+      }
+
+      return {
+        hasIssues: thinkingCount > 0 || emptyTextCount > 0,
+        thinkingCount,
+        emptyTextCount,
+        signatureCount
+      };
+    } catch (err) {
+      return { hasIssues: false, thinkingCount: 0, emptyTextCount: 0, signatureCount: 0, error: err.message };
+    }
+  }
+
+  /**
+   * 主动扫描并修复所有有问题的会话文件
+   * 定期调用，在错误发生前就清理 thinking 块和空 text 块
+   * @param {number} maxAgeDays - 只扫描最近 N 天内修改的文件
+   * @returns {object} { scanned, fixed, errors, details }
+   */
+  async proactiveScanAndFix(maxAgeDays = 7) {
+    const startTime = Date.now();
+    const results = { scanned: 0, fixed: 0, errors: 0, details: [] };
+
+    try {
+      await fs.access(this.claudeDir);
+    } catch {
+      return results;
+    }
+
+    const projectDirs = await fs.readdir(this.claudeDir);
+    const cutoff = Date.now() - maxAgeDays * 86400000;
+
+    for (const dir of projectDirs) {
+      const projectPath = path.join(this.claudeDir, dir);
+      try {
+        const stat = await fs.stat(projectPath);
+        if (!stat.isDirectory()) continue;
+      } catch {
+        continue;
+      }
+
+      try {
+        const files = await fs.readdir(projectPath);
+        const jsonlFiles = files.filter(f =>
+          f.endsWith('.jsonl') &&
+          !f.startsWith('agent-') &&
+          !f.endsWith('.backup')
+        );
+
+        for (const file of jsonlFiles) {
+          const filePath = path.join(projectPath, file);
+          try {
+            const stat = await fs.stat(filePath);
+            if (stat.mtime.getTime() < cutoff) continue;
+
+            results.scanned++;
+            const scan = await this.quickScanFile(filePath);
+
+            if (scan.hasIssues) {
+              console.log(`[ClaudeSessionFixer] 主动修复: ${dir}/${file} (thinking=${scan.thinkingCount}, emptyText=${scan.emptyTextCount})`);
+              const fixResult = await this.fixSessionFile(filePath);
+              if (fixResult.success) {
+                results.fixed++;
+                results.details.push({
+                  project: dir.replace(/-Users-[^-]+-Documents-ClaudeCode-/, ''),
+                  file: file.substring(0, 12),
+                  thinking: fixResult.removedCount,
+                  emptyText: fixResult.fixedEmptyCount,
+                  removedMessages: fixResult.removedMessagesCount
+                });
+              } else {
+                results.errors++;
+              }
+            }
+          } catch {
+            continue;
+          }
+        }
+      } catch {
+        continue;
+      }
+    }
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    if (results.fixed > 0) {
+      console.log(`[ClaudeSessionFixer] 主动扫描完成: 扫描 ${results.scanned} 个文件，修复 ${results.fixed} 个，耗时 ${elapsed}s`);
+    }
+
+    return results;
+  }
 }
 
 export default new ClaudeSessionFixer();

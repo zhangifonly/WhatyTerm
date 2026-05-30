@@ -847,12 +847,18 @@ function _wireHookServer() {
     const { hook_event_name: ev, cwd, session_id: claudeId } = event;
     // 找到对应 WhatyTerm session（按 workingDir 匹配）
     const sessions = sessionManager?.listSessions() || [];
-    const session = sessions.find(s => s.workingDir && cwd?.startsWith(s.workingDir));
+    const sessionData = sessions.find(s => s.workingDir && cwd?.startsWith(s.workingDir));
+    if (!sessionData) return;
+
+    // 获取真实 session 实例（listSessions 返回的是 JSON 副本，设置属性无效）
+    const session = sessionManager.getSession(sessionData.id);
     if (!session) return;
 
     // 更新 session 的 hook 状态（供 runBackgroundAutoAction 使用）
     session.lastHookEventAt = Date.now();
-    session.hookState = (ev === 'PreToolUse') ? 'working' : (ev === 'Stop' ? 'idle' : session.hookState);
+    session.hookState = (ev === 'PreToolUse') ? 'working'
+      : (ev === 'PostToolUse' || ev === 'Stop') ? 'idle'
+      : session.hookState;
 
     // Team Member 事件转发给 TaskOrchestrator
     if (session.teamRole === 'member' && taskOrchestrator) {
@@ -1138,6 +1144,10 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
               actualApiKey = localSettings.env?.ANTHROPIC_AUTH_TOKEN || localSettings.env?.ANTHROPIC_API_KEY || '';
               actualModel = localSettings.model || '';
               configSource = 'local';
+            } else if (localSettings._localProvider) {
+              // OAuth 供应商同步到本地：env 为空但有 _localProvider 标记
+              configSource = 'local';
+              actualModel = localSettings.model || '';
             }
           } catch (e) {
             console.error('[getCurrentProvider] 读取项目本地配置失败:', e.message);
@@ -1145,12 +1155,16 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         }
       }
 
-      // 如果没有本地配置，使用全局配置
-      if (!actualApiUrl) {
+      // 如果没有本地配置，使用全局配置（但保留已检测到的 local 标记）
+      if (!actualApiUrl && configSource !== 'local') {
         actualApiUrl = globalApiUrl;
         actualApiKey = globalApiKey;
         actualModel = globalModel;
         configSource = 'global';
+      } else if (!actualApiUrl && configSource === 'local') {
+        // OAuth 本地配置：URL 为空但确实是本地配置，用全局值补充显示
+        actualApiUrl = globalApiUrl;
+        actualApiKey = globalApiKey;
       }
 
       // 最高优先级：读取正在运行的 claude 进程的真实环境变量
@@ -1405,17 +1419,16 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
       } else {
         // 没有实际配置（settings.json 为空 env）
         // 优先以 DB is_current 为准（switchProviderStateMachine 切换时已更新 is_current）
+        // 注意：保留前面已检测到的 configSource（可能是 'local'）
         const row = db.prepare('SELECT * FROM providers WHERE app_type = ? AND is_current = 1').get(appType);
 
         if (appType === 'claude' && row) {
-          // 检查 is_current 指向的供应商是否为 OAuth 类型
           let currentSc = {};
           try { currentSc = JSON.parse(row.settings_config || '{}'); } catch {}
           const currentUrl = currentSc.env?.ANTHROPIC_BASE_URL || '';
           const currentIsOAuth = !!currentSc.useOAuth || !currentUrl;
 
           if (!currentIsOAuth) {
-            // is_current 指向非 OAuth 供应商（有 URL），以 DB 为准
             db.close();
             return resolve(buildResult({
               id: row.id,
@@ -1424,12 +1437,11 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
               apiKey: maskApiKey(currentSc.env?.ANTHROPIC_AUTH_TOKEN || currentSc.env?.ANTHROPIC_API_KEY || ''),
               model: currentSc.model || '',
               exists: true,
-              configSource: 'global'
+              configSource
             }));
           }
         }
 
-        // is_current 为 OAuth 或不存在，检查 ~/.claude.json 确认 OAuth 状态
         if (appType === 'claude') {
           let hasOAuth = false;
           try {
@@ -1445,7 +1457,7 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
               name: oauthName,
               url: '',
               exists: true,
-              configSource: 'global'
+              configSource
             }));
           }
         }
@@ -1575,25 +1587,24 @@ async function tryAutoSwitchProvider(session, sessionData, status) {
   console.log(`[自动修复] 需要切换供应商，当前: ${currentProvider?.name || '未知'}`);
   console.log(`[自动修复] 错误原因: ${status.isServerUnavailable ? '服务器不可用' : status.isInsufficientBalance ? '余额不足' : 'thinking不兼容'}`);
 
-  // 获取所有可用供应商
+  // 获取所有可用供应商，只保留优先列表中的供应商
   const allProviders = await getAllProviders(aiType);
-  if (allProviders.length <= 1) {
-    console.log(`[自动修复] 只有一个供应商，无法切换`);
+  const priorityList = aiType === 'claude' ? CLAUDE_PROVIDER_PRIORITY : [];
+  const eligibleProviders = priorityList.length > 0
+    ? allProviders.filter(p => priorityList.includes(p.id))
+    : allProviders;
+
+  if (eligibleProviders.length <= 1) {
+    console.log(`[自动修复] 优先列表中只有 ${eligibleProviders.length} 个供应商（共 ${allProviders.length} 个），无法切换`);
     return null;
   }
 
-  // 按优先级排序供应商
-  const sortedProviders = [...allProviders].sort((a, b) => {
-    const priorityA = CLAUDE_PROVIDER_PRIORITY.indexOf(a.id);
-    const priorityB = CLAUDE_PROVIDER_PRIORITY.indexOf(b.id);
-    // 不在列表中的放最后
-    const orderA = priorityA === -1 ? 999 : priorityA;
-    const orderB = priorityB === -1 ? 999 : priorityB;
-    return orderA - orderB;
+  // 按优先级排序
+  const sortedProviders = [...eligibleProviders].sort((a, b) => {
+    return priorityList.indexOf(a.id) - priorityList.indexOf(b.id);
   });
 
-  // 打印供应商切换顺序
-  console.log(`[自动修复] 供应商切换顺序:`);
+  console.log(`[自动修复] 可切换供应商 (${sortedProviders.length}/${allProviders.length}):`);
   sortedProviders.forEach((p, i) => {
     const isCurrent = p.id === currentProvider?.id;
     console.log(`  ${i + 1}. ${p.name} (${p.id})${isCurrent ? ' ← 当前' : ''}`);
@@ -1620,40 +1631,33 @@ async function tryAutoSwitchProvider(session, sessionData, status) {
 
   console.log(`[自动修复] 正在切换到: ${nextProvider.name} (${nextProvider.id})`);
 
-  // 实际执行供应商切换
+  // 使用 switchProviderStateMachine 正确写入 settings 文件
+  // providerService.switch() 只更新 providers.json，不会写入 Claude Code 读取的 settings.json
   try {
-    const switchResult = providerService.switch(aiType, nextProvider.id);
-    if (switchResult) {
-      console.log(`[自动修复] 供应商切换成功: ${nextProvider.name}`);
+    const dummySocket = { emit: (ev, data) => console.log(`[自动修复] ${ev}:`, data?.message || '') };
+    await switchProviderStateMachine(session, aiType, nextProvider.id, dummySocket);
+    console.log(`[自动修复] 供应商切换成功: ${nextProvider.name}`);
 
-      // 重新加载 AIEngine 配置
-      aiEngine.reloadSettings();
-      console.log(`[自动修复] AIEngine 配置已重新加载`);
-
-      // 更新会话的供应商信息
-      if (aiType === 'claude') {
-        session.claudeProvider = { id: nextProvider.id, name: nextProvider.name };
-      } else if (aiType === 'codex') {
-        session.codexProvider = { id: nextProvider.id, name: nextProvider.name };
-      } else if (aiType === 'gemini') {
-        session.geminiProvider = { id: nextProvider.id, name: nextProvider.name };
-      }
-
-      return {
-        success: true,
-        newProvider: nextProvider.name,
-        newProviderId: nextProvider.id,
-        allProviders: sortedProviders.map(p => ({
-          id: p.id,
-          name: p.name,
-          isCurrent: p.id === nextProvider.id
-        })),
-        message: `已切换到 ${nextProvider.name}`
-      };
-    } else {
-      console.error(`[自动修复] 供应商切换失败: ${nextProvider.name}`);
-      return null;
+    // 更新会话的供应商信息
+    if (aiType === 'claude') {
+      session.claudeProvider = { id: nextProvider.id, name: nextProvider.name };
+    } else if (aiType === 'codex') {
+      session.codexProvider = { id: nextProvider.id, name: nextProvider.name };
+    } else if (aiType === 'gemini') {
+      session.geminiProvider = { id: nextProvider.id, name: nextProvider.name };
     }
+
+    return {
+      success: true,
+      newProvider: nextProvider.name,
+      newProviderId: nextProvider.id,
+      allProviders: sortedProviders.map(p => ({
+        id: p.id,
+        name: p.name,
+        isCurrent: p.id === nextProvider.id
+      })),
+      message: `已切换到 ${nextProvider.name}`
+    };
   } catch (err) {
     console.error(`[自动修复] 供应商切换出错:`, err);
     return null;
@@ -1886,12 +1890,26 @@ app.post('/api/claude-code/config', async (req, res) => {
       return res.status(400).json({ error: '读取全局配置失败: ' + e.message });
     }
 
-    const apiUrl = globalConfig.env?.ANTHROPIC_BASE_URL;
-    const apiKey = globalConfig.env?.ANTHROPIC_AUTH_TOKEN;
-
-    if (!apiUrl || !apiKey) {
-      return res.status(400).json({ error: '全局配置中缺少 ANTHROPIC_BASE_URL 或 ANTHROPIC_AUTH_TOKEN' });
+    // 从 CC Switch DB 获取当前活跃供应商的配置
+    // 全局 settings.json 可能是 OAuth（env 为空），需要从 DB 读取实际供应商
+    let dbEnv = {};
+    try {
+      const db = new Database(path.join(os.homedir(), '.cc-switch', 'cc-switch.db'), { readonly: true });
+      const row = db.prepare("SELECT settings_config FROM providers WHERE app_type='claude' AND is_current=1").get();
+      db.close();
+      if (row) {
+        const sc = JSON.parse(row.settings_config);
+        if (sc.env && Object.keys(sc.env).length > 0) {
+          dbEnv = sc.env;
+        }
+      }
+    } catch (e) {
+      console.log('[Claude Code Config] 读取 CC Switch DB 失败，使用全局配置');
     }
+
+    // 合并：DB 供应商配置优先，全局 settings.json 补充
+    const mergedEnv = Object.keys(dbEnv).length > 0 ? dbEnv : (globalConfig.env || {});
+    const isOAuth = !mergedEnv.ANTHROPIC_BASE_URL;
 
     // 写入项目级别配置：<projectPath>/.claude/settings.local.json
     const projectClaudeDir = join(projectPath, '.claude');
@@ -1909,44 +1927,25 @@ app.post('/api/claude-code/config', async (req, res) => {
       }
     }
 
-    // 保存本地的 permissions（本地权限优先）
     const localPermissions = config.permissions;
 
-    // 同步全局配置的关键字段
-    // 1. env（API 配置）
-    config.env = { ...globalConfig.env };
-
-    // 2. model（模型选择）
-    if (globalConfig.model) {
-      config.model = globalConfig.model;
+    // 同步配置
+    if (isOAuth) {
+      // OAuth 供应商：标记为本地 OAuth 配置，清除残留的 relay env
+      config.env = {};
+      config._localProvider = 'oauth';
+    } else {
+      config.env = { ...mergedEnv };
+      config._localProvider = 'relay';
     }
 
-    // 3. alwaysThinkingEnabled（思考模式）
-    if (globalConfig.alwaysThinkingEnabled !== undefined) {
-      config.alwaysThinkingEnabled = globalConfig.alwaysThinkingEnabled;
-    }
+    if (globalConfig.model) config.model = globalConfig.model;
+    if (globalConfig.alwaysThinkingEnabled !== undefined) config.alwaysThinkingEnabled = globalConfig.alwaysThinkingEnabled;
+    if (globalConfig.CLAUDE_CODE_MAX_OUTPUT_TOKENS !== undefined) config.CLAUDE_CODE_MAX_OUTPUT_TOKENS = globalConfig.CLAUDE_CODE_MAX_OUTPUT_TOKENS;
+    if (globalConfig.MAX_THINKING_TOKENS !== undefined) config.MAX_THINKING_TOKENS = globalConfig.MAX_THINKING_TOKENS;
+    if (globalConfig.maxContextTokens !== undefined) config.maxContextTokens = globalConfig.maxContextTokens;
+    if (globalConfig.enabledPlugins) config.enabledPlugins = { ...globalConfig.enabledPlugins };
 
-    // 4. CLAUDE_CODE_MAX_OUTPUT_TOKENS（最大输出 token）
-    if (globalConfig.CLAUDE_CODE_MAX_OUTPUT_TOKENS !== undefined) {
-      config.CLAUDE_CODE_MAX_OUTPUT_TOKENS = globalConfig.CLAUDE_CODE_MAX_OUTPUT_TOKENS;
-    }
-
-    // 5. MAX_THINKING_TOKENS（最大思考 token）
-    if (globalConfig.MAX_THINKING_TOKENS !== undefined) {
-      config.MAX_THINKING_TOKENS = globalConfig.MAX_THINKING_TOKENS;
-    }
-
-    // 6. maxContextTokens（最大上下文 token）
-    if (globalConfig.maxContextTokens !== undefined) {
-      config.maxContextTokens = globalConfig.maxContextTokens;
-    }
-
-    // 7. enabledPlugins（启用的插件）
-    if (globalConfig.enabledPlugins) {
-      config.enabledPlugins = { ...globalConfig.enabledPlugins };
-    }
-
-    // 8. permissions（合并：本地优先，全局补充）
     if (localPermissions || globalConfig.permissions) {
       config.permissions = {
         allow: [...(localPermissions?.allow || []), ...(globalConfig.permissions?.allow || [])].filter((v, i, a) => a.indexOf(v) === i),
@@ -3453,12 +3452,18 @@ async function runBackgroundAutoAction() {
 
     // hookState === 'working' 表示 PreToolUse 已触发但 PostToolUse/Stop 尚未到来
     // 工具可能执行几分钟（bash 命令等），不能用时间限制，直接跳过直到收到完成事件
+    // 但例外：如果 working 超过 8 秒，可能是确认界面（Claude Code 弹出 "Do you want to proceed?"）
+    // 此时 PreToolUse 已触发但命令等待用户确认，需要自动操作来处理
     if (session.hookState === 'working') {
-      continue;
+      const hookAge = Date.now() - (session.lastHookEventAt || 0);
+      if (hookAge < 8000) {
+        continue;
+      }
+      // 超过 8 秒仍在 working，可能是确认界面，继续检测
     }
     // hookState === 'idle' 但事件很新（5s内），也跳过避免误判
-    const hookAge = Date.now() - (session.lastHookEventAt || 0);
-    if (session.hookState === 'idle' && hookAge < 5000) {
+    const idleAge = Date.now() - (session.lastHookEventAt || 0);
+    if (session.hookState === 'idle' && idleAge < 5000) {
       continue;
     }
 
@@ -3614,58 +3619,46 @@ async function runBackgroundAutoAction() {
               }
             }
           } else if (status.autoFixAction === 'run_fixer') {
-            // thinking 错误：启动 ClaudeSessionFixer 修复程序
-            console.log(`[后台自动操作] 会话 ${session.name}: thinking 错误，启动修复程序`);
-            // 获取工作目录：优先使用 session.workingDir，否则从终端内容解析
+            // 会话文件错误：启动状态机修复流程（quit → fix → restart）
+            // 不能在 Claude Code 运行时直接修改文件，必须先退出
+            console.log(`[后台自动操作] 会话 ${session.name}: 会话文件错误，启动状态机修复流程`);
             let workingDir = session.workingDir;
             if (!workingDir) {
-              // 尝试从终端内容解析工作目录
               workingDir = parseWorkingDirFromOutput(terminalContent);
               if (workingDir) {
-                console.log(`[后台自动操作] 从终端内容解析到工作目录: ${workingDir}`);
                 session.workingDir = workingDir;
-              } else {
-                // 即使没有工作目录，也尝试修复（ClaudeSessionFixer 有备用方案）
-                console.log(`[后台自动操作] 无法获取工作目录，将使用备用方案查找最近的会话文件`);
               }
             }
 
-            // 标记正在修复
-            session.isFixingClaudeError = true;
             session.fixAttempts = (session.fixAttempts || 0) + 1;
+            session.isFixingClaudeError = true;
+            session.fixingStep = 1;
+            session.fixContext = {
+              workingDir: workingDir,
+              tmuxSession: session.tmuxSessionName,
+              startTime: Date.now()
+            };
 
-            // 调用 ClaudeSessionFixer（使用 autoFixIfNeeded 方法）
-            const fixResult = await claudeSessionFixer.autoFixIfNeeded(terminalContent, workingDir);
-
-            if (fixResult.success) {
-              console.log(`[后台自动操作] 会话 ${session.name}: 修复成功，移除了 ${fixResult.removedCount} 个 thinking blocks`);
-
-              // 修复成功后重启 Claude Code
-              // 执行前重新检查自动操作开关状态
-              if (!session.autoActionEnabled) {
-                console.log(`[后台自动操作] 会话 ${session.name}: 自动操作已关闭，跳过发送 claude -c 命令`);
-              } else {
-                console.log(`[后台自动操作] 会话 ${session.name}: 发送 claude -c 继续开发`);
-                session.write('claude -c');
-                setTimeout(() => {
-                  if (session.autoActionEnabled) {
-                    session.write('\r');
-                  }
-                }, 100);
-              }
-
-              historyLogger.log(session.id, {
-                type: 'system',
-                content: `thinking 错误修复成功 (第${session.fixAttempts}次): 移除了 ${fixResult.removedCount} 个 thinking blocks，正在重启 Claude Code...`
-              });
-            } else {
-              historyLogger.log(session.id, {
-                type: 'system',
-                content: `thinking 错误修复 (第${session.fixAttempts}次): ${fixResult.error || '未检测到需要修复'}`
-              });
+            // 步骤1: 发送 /quit 退出 Claude Code
+            console.log(`[后台自动操作] 会话 ${session.name}: 步骤1 - 发送 /quit`);
+            try {
+              execSync(`${getTmuxPrefix()} send-keys -t "${session.tmuxSessionName}" "/quit"`);
+              setTimeout(() => {
+                try {
+                  execSync(`${getTmuxPrefix()} send-keys -t "${session.tmuxSessionName}" Enter`);
+                } catch (e) {
+                  session.write('\r');
+                }
+              }, 100);
+            } catch (e) {
+              session.write('/quit');
+              setTimeout(() => session.write('\r'), 100);
             }
 
-            session.isFixingClaudeError = false;
+            historyLogger.log(session.id, {
+              type: 'system',
+              content: `检测到会话文件错误（第${session.fixAttempts}次），启动修复流程：退出 → 修复 → 重启`
+            });
             session.lastClaudeFixTime = Date.now();
           } else if (status.autoFixAction === 'wait_and_retry') {
             // 频率限制：等待后重试
@@ -4109,6 +4102,23 @@ async function runBackgroundAutoAction() {
 // 每 1 秒检查一次（实际检测由 sessionCheckState 控制，支持爆发模式的 3 秒间隔）
 setInterval(runBackgroundAutoAction, 1000);
 
+// 主动扫描修复会话文件：每 30 分钟扫描一次，在错误发生前清理 thinking 块和空 text 块
+let lastProactiveScanTime = 0;
+setInterval(async () => {
+  const now = Date.now();
+  if (now - lastProactiveScanTime < 30 * 60 * 1000) return;
+  lastProactiveScanTime = now;
+
+  try {
+    const result = await claudeSessionFixer.proactiveScanAndFix(7);
+    if (result.fixed > 0) {
+      console.log(`[主动扫描] 修复了 ${result.fixed} 个会话文件:`, result.details.map(d => `${d.project}(thinking=${d.thinking},空text=${d.emptyText})`).join(', '));
+    }
+  } catch (err) {
+    console.error('[主动扫描] 扫描失败:', err.message);
+  }
+}, 60000);
+
 // Team 协调：TaskOrchestrator 已在 runBackgroundAutoAction 的 1 秒循环中统一处理
 // 保留 runCoordination 作为 Lead 会话的协调（非 member 任务分配）
 setInterval(async () => {
@@ -4453,96 +4463,57 @@ async function runBackgroundStatusAnalysis() {
 
         console.log(`[后台AI分析] 会话 ${session.name}: 分析完成`);
 
-        // 检查是否需要会话文件修复（thinking block 相关错误）
+        // 检查是否需要会话文件修复（thinking/空text/签名 等错误）
         // 即使没有开启自动操作，也应该自动修复这类错误
+        // 使用统一的状态机修复流程（quit → fix → restart）
         if (status.needsSessionFix) {
-          // 检查是否正在修复中或最近刚修复过（5分钟冷却）
           const now = Date.now();
           const lastFixTime = session.lastThinkingFixTime || 0;
-          const fixCooldown = 5 * 60 * 1000; // 5分钟冷却
+          const fixCooldown = 5 * 60 * 1000;
 
-          if (session.isFixingThinkingError) {
+          if (session.isFixingClaudeError || session.isFixingThinkingError) {
             console.log(`[后台AI分析] 会话 ${session.name}: 正在修复中，跳过`);
           } else if (now - lastFixTime < fixCooldown) {
-            console.log(`[后台AI分析] 会话 ${session.name}: 最近已修复过，冷却中 (剩余 ${Math.ceil((fixCooldown - (now - lastFixTime)) / 1000)} 秒)`);
+            console.log(`[后台AI分析] 会话 ${session.name}: 最近已修复过，冷却中`);
           } else {
-            console.log(`[后台AI分析] 会话 ${session.name}: 检测到 thinking block 错误，触发自动修复`);
+            console.log(`[后台AI分析] 会话 ${session.name}: 检测到会话文件错误，启动状态机修复`);
 
-            // 标记正在修复
-            session.isFixingThinkingError = true;
-
-          // 获取工作目录
-          let workingDir = session.workingDir;
-          if (!workingDir) {
-            // 尝试从终端内容解析工作目录
-            workingDir = parseWorkingDirFromOutput(terminalContent);
-            if (workingDir) {
-              console.log(`[后台AI分析] 从终端内容解析到工作目录: ${workingDir}`);
-              session.workingDir = workingDir;
+            let workingDir = session.workingDir;
+            if (!workingDir) {
+              workingDir = parseWorkingDirFromOutput(terminalContent);
+              if (workingDir) session.workingDir = workingDir;
             }
-          }
 
-          // 直接调用修复方法，不再重复检测错误
-          // （AIEngine.preAnalyzeStatus 已经确认需要修复）
-          const sessionFile = await claudeSessionFixer.findSessionFile(workingDir);
+            session.isFixingClaudeError = true;
+            session.fixingStep = 1;
+            session.fixAttempts = (session.fixAttempts || 0) + 1;
+            session.fixContext = {
+              workingDir,
+              tmuxSession: session.tmuxSessionName,
+              startTime: now
+            };
 
-          if (!sessionFile) {
-            console.log(`[后台AI分析] 会话 ${session.name}: 未找到 Claude Code 会话文件`);
-            historyLogger.log(sessionData.id, {
-              type: 'system',
-              content: `thinking 错误修复失败: 未找到 Claude Code 会话文件`
-            });
-
-            // 清除修复标记，设置冷却时间
-            session.isFixingThinkingError = false;
-            session.lastThinkingFixTime = Date.now();
-          } else {
-            console.log(`[后台AI分析] 会话 ${session.name}: 找到会话文件 ${sessionFile}，开始修复`);
-            const fixResult = await claudeSessionFixer.fixSessionFile(sessionFile);
-
-            if (fixResult.success) {
-              console.log(`[后台AI分析] 会话 ${session.name}: 修复成功，移除了 ${fixResult.removedCount} 个 thinking blocks`);
-
-              // 修复成功后，先退出当前的 Claude Code，再重启
-              // 步骤1: 发送 /quit 退出
-              console.log(`[后台AI分析] 会话 ${session.name}: 发送 /quit 退出当前 Claude Code`);
+            // 步骤1: 发送 /quit 退出（后续步骤由状态机循环处理）
+            console.log(`[后台AI分析] 会话 ${session.name}: 步骤1 - 发送 /quit`);
+            try {
+              execSync(`${getTmuxPrefix()} send-keys -t "${session.tmuxSessionName}" "/quit"`);
+              setTimeout(() => {
+                try {
+                  execSync(`${getTmuxPrefix()} send-keys -t "${session.tmuxSessionName}" Enter`);
+                } catch (e) {
+                  session.write('\r');
+                }
+              }, 100);
+            } catch (e) {
               session.write('/quit');
               setTimeout(() => session.write('\r'), 100);
-
-              // 步骤2: 等待 2 秒后发送 claude -c 重启
-              setTimeout(() => {
-                console.log(`[后台AI分析] 会话 ${session.name}: 发送 claude -c 继续开发`);
-                session.write('claude -c');
-                setTimeout(() => session.write('\r'), 100);
-
-                // 清除修复标记
-                session.isFixingThinkingError = false;
-                session.lastThinkingFixTime = Date.now();
-              }, 2000);
-
-              historyLogger.log(sessionData.id, {
-                type: 'system',
-                content: `thinking 错误自动修复成功: 移除了 ${fixResult.removedCount} 个 thinking blocks，正在重启 Claude Code...`
-              });
-
-              // 通知前端
-              io.emit('claude:sessionFixed', {
-                sessionId: sessionData.id,
-                success: true,
-                message: `已修复 ${fixResult.removedCount} 个 thinking blocks，正在重启...`
-              });
-            } else {
-              console.log(`[后台AI分析] 会话 ${session.name}: 修复失败 - ${fixResult.error}`);
-              historyLogger.log(sessionData.id, {
-                type: 'system',
-                content: `thinking 错误修复失败: ${fixResult.error}`
-              });
-
-              // 清除修复标记，设置冷却时间
-              session.isFixingThinkingError = false;
-              session.lastThinkingFixTime = Date.now();
             }
-          }
+
+            session.lastThinkingFixTime = now;
+            historyLogger.log(sessionData.id, {
+              type: 'system',
+              content: `检测到会话文件错误（第${session.fixAttempts}次），启动修复流程：退出 → 修复 → 重启`
+            });
           }
         }
       }

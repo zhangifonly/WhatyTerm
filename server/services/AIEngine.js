@@ -1585,6 +1585,9 @@ ${historyText || '(空)'}
                             /thinking\.signature.*Field required/i.test(recentContentNoNewlines) ||
                             /thinking\.signature:\s*Field required/i.test(recentContentNoNewlines) ||
                             /"signature":\s*"Field required"/i.test(recentContentNoNewlines) ||
+                            /text content blocks must be non-empty/i.test(recentContentNoNewlines) ||
+                            /content blocks must be non-empty/i.test(recentContentNoNewlines) ||
+                            /Improperly formed request/i.test(recentContentNoNewlines) ||
                             /tool_use_id/i.test(recentContentNoNewlines) && /API Error/i.test(recentContentNoNewlines);
 
     // 调试日志
@@ -1599,6 +1602,9 @@ ${historyText || '(空)'}
           { name: 'thinking.signature Field required', regex: /thinking\.signature.*Field required/i },
           { name: 'thinking.signature: Field required (JSON)', regex: /thinking\.signature:\s*Field required/i },
           { name: 'JSON signature Field required', regex: /"signature":\s*"Field required"/i },
+          { name: 'text content blocks must be non-empty', regex: /text content blocks must be non-empty/i },
+          { name: 'content blocks must be non-empty', regex: /content blocks must be non-empty/i },
+          { name: 'Improperly formed request', regex: /Improperly formed request/i },
           { name: 'tool_use_id + API Error', regex: /tool_use_id/i }
         ];
         for (const p of patterns) {
