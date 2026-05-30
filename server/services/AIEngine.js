@@ -1505,6 +1505,40 @@ ${historyText || '(空)'}
     // Tab 通过 tmux send-keys 发送给 Claude Code (Ink 应用) 不可靠，
     // 而发"继续"既能让 Claude 继续工作，也能间接接受编辑。
 
+    // === 高优先级：检测"列出多个下一步方向/选项让用户选择"的场景 ===
+    // Claude 完成一轮开发后常列出"下一步可选方向/接下来可以..."等编号清单等待选择。
+    // 这种场景应自动回复"按建议顺序继续开发"，让开发持续推进（优先于插件阶段判断，
+    // 避免被测试归档等禁用自动操作的阶段误拦截）。
+    {
+      const directionLast1500 = earlyCleanContent.slice(-1500);
+      // 必须是空闲状态（有提示符 ❯/> 且不在运行中）
+      const directionLast5 = earlyCleanContent.split('\n').slice(-6).join('\n');
+      const hasIdlePrompt = /^[❯>]\s*$/m.test(directionLast5) || /\n[❯>]\s*$/m.test(directionLast5);
+      const isRunningNow = /\.{2,3}\s*\(\d+[ms]/i.test(earlyCleanContent.slice(-500)) || /esc to interrupt/i.test(directionLast5);
+      // "下一步方向/选项"提示语 + 至少两个编号项 + 征询选择的问句
+      const hasDirectionHeader = /(下一步|接下来|后续|可选)(可以|的)?(方向|选项|工作|功能|计划|步骤)|next steps?|下一步可选/i.test(directionLast1500);
+      const hasNumberedOptions = (directionLast1500.match(/^\s*\d+\.\s+\S/gm) || []).length >= 2;
+      const hasChoicePrompt = /(继续哪个|选择哪个|想做哪|要做哪|哪个方向|which (one|direction|option)|或有其他|告诉我|你的想法|如何选择)/i.test(directionLast1500);
+
+      if (hasIdlePrompt && !isRunningNow && hasDirectionHeader && hasNumberedOptions && hasChoicePrompt) {
+        console.log('[AIEngine] 检测到"列出下一步方向"场景，自动回复按建议顺序继续开发');
+        return {
+          currentState: `${cliNameEarly}列出下一步方向`,
+          workingDir: '未显示',
+          recentAction: '等待选择方向',
+          needsAction: true,
+          actionType: 'text_input',
+          suggestedAction: '按建议顺序继续开发',
+          actionReason: '列出多个方向待选，自动按建议顺序推进',
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI,
+          ...pluginInfo
+        };
+      }
+    }
+
     // 尝试使用插件系统分析（如果有项目上下文）
     // 注意：默认插件也需要执行分析，以支持免费用户的自动化操作
     if (projectContext || forcedPluginId) {
