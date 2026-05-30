@@ -1459,13 +1459,15 @@ ${historyText || '(空)'}
     const isEditConfirmEarly = /Do you want to (make this edit|create|delete|overwrite|run|allow|execute)/i.test(earlyLast3000);
     const isProceedConfirmEarly = /(Do you want to|Would you like to) (proceed|run|execute)/i.test(earlyLast3000);
     const isPlanExecuteEarly = /written up a plan.*ready to execute/i.test(earlyLast3000);
+    // 通用确认界面：Exit plan mode? / Exit worktree? 等带选项 1. Yes 的界面
+    const isGenericConfirmEarly = /^(Exit|Leave|Close|Discard|Remove)\s+\w+.*\?\s*$/im.test(earlyLast3000);
     const hasOption1YesEarly = /1\.\s*Yes/i.test(earlyLast3000);
     const hasOption2YesEarly = /2\.\s*Yes/i.test(earlyLast3000);
     // 检测选项 2 是否是"永久允许某命令模式"（don't ask again for: 具体命令）
     // 这种情况不应自动选 2，因为会永久跳过该命令的确认
     const isOption2PermanentAllowEarly = /2\.\s*Yes,\s*and\s+don.t\s+ask\s+again\s+for:/i.test(earlyLast3000);
 
-    if ((isEditConfirmEarly || isProceedConfirmEarly || isPlanExecuteEarly) && hasOption1YesEarly) {
+    if ((isEditConfirmEarly || isProceedConfirmEarly || isPlanExecuteEarly || isGenericConfirmEarly) && hasOption1YesEarly) {
       // Plan 执行确认（auto-accept edits）：选 1
       // 文件操作确认（allow all edits this session）：选 2
       // 永久允许某命令模式：选 1（避免永久跳过确认）
