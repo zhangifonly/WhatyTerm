@@ -1451,16 +1451,21 @@ ${historyText || '(空)'}
     // === 高优先级：在插件分析之前，先检测确认界面 ===
     // 确认界面（Do you want to proceed? / Do you want to run?）必须优先于插件分析
     // 否则插件可能误匹配终端内容中的关键词（如 "error"）而跳过确认界面检测
-    const earlyCleanContent = terminalContent.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+    const earlyCleanContent = terminalContent
+      .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')  // CSI 序列（含 ?25h 等）
+      .replace(/\x1b\][^\x07]*\x07/g, '')       // OSC 序列
+      .replace(/\x1b[()][A-Z0-9]/g, '')         // 字符集切换
+      .replace(/\x1b[=>]/g, '')                  // 键盘模式
+      .replace(/\r/g, '');                       // 回车符
     const cliNameEarly = getCliName(aiType);
 
-    // 检测 "Do you want to ..." 确认界面（只检查最后 3000 字符，避免匹配历史内容）
-    const earlyLast3000 = earlyCleanContent.slice(-3000);
+    // 检测 "Do you want to ..." 确认界面（检查最后 5000 字符，确保覆盖可见屏幕）
+    const earlyLast3000 = earlyCleanContent.slice(-5000);
     const isEditConfirmEarly = /Do you want to (make this edit|create|delete|overwrite|run|allow|execute)/i.test(earlyLast3000);
-    const isProceedConfirmEarly = /(Do you want to|Would you like to) (proceed|run|execute)/i.test(earlyLast3000);
+    const isProceedConfirmEarly = /(Do you want to|Would you like to) (proceed|run|execute|install|enable|update|continue)/i.test(earlyLast3000);
     const isPlanExecuteEarly = /written up a plan.*ready to execute/i.test(earlyLast3000);
-    // 通用确认界面：Exit plan mode? / Exit worktree? 等带选项 1. Yes 的界面
-    const isGenericConfirmEarly = /^(Exit|Leave|Close|Discard|Remove)\s+\w+.*\?\s*$/im.test(earlyLast3000);
+    // 通用确认界面：任何以 ? 结尾的问句 + 选项 1. Yes（覆盖 Exit plan mode? / Would you like to install? 等）
+    const isGenericConfirmEarly = /\?\s*\n[\s\S]{0,100}1\.\s*(Yes|Install|Enable|Accept)/im.test(earlyLast3000);
     const hasOption1YesEarly = /1\.\s*Yes/i.test(earlyLast3000);
     const hasOption2YesEarly = /2\.\s*Yes/i.test(earlyLast3000);
     // 检测选项 2 是否是"永久允许某命令模式"（don't ask again for: 具体命令）
