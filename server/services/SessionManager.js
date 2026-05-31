@@ -596,11 +596,8 @@ export class Session {
     if (settings.autoActionEnabled !== undefined) {
       const oldValue = this.autoActionEnabled;
       this.autoActionEnabled = settings.autoActionEnabled;
-      // 记录状态变化，便于调试
       if (oldValue !== settings.autoActionEnabled) {
         console.log(`[Session ${this.name}] autoActionEnabled 变化: ${oldValue} -> ${settings.autoActionEnabled}`);
-        // 打印调用栈，追踪变化来源
-        console.log(new Error('autoActionEnabled 变化调用栈').stack);
       }
     }
     if (settings.monitorPluginId !== undefined) {

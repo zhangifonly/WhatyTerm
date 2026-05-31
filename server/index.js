@@ -115,6 +115,7 @@ import TaskOrchestrator from './services/TaskOrchestrator.js';
 import progressManager from './services/ProgressManager.js';
 import PlannerService from './services/PlannerService.js';
 import EvaluatorService from './services/EvaluatorService.js';
+import RalphEngine from './services/RalphEngine.js';
 import telemetryService from './services/TelemetryService.js';
 import crashReporter from './services/CrashReporter.js';
 import sleepPrevention from './services/SleepPreventionService.js';
@@ -883,6 +884,7 @@ const providerService = new ProviderService(io);
 const healthCheckScheduler = new HealthCheckScheduler(io);
 const scheduleManager = new ScheduleManager();
 let teamManager = null; // TeamManager 在 SessionManager 初始化后创建
+let ralphEngine = null; // RalphEngine 自主模式引擎，在 SessionManager 初始化后创建
 let taskOrchestrator = null; // TaskOrchestrator 在 TeamManager 初始化后创建
 let hookServer = null; // HookServer：Claude Code 官方 Hooks 集成
 
@@ -898,6 +900,8 @@ let sessionManagerReady = false;
     console.log('[Server] TeamManager 初始化完成');
     taskOrchestrator = new TaskOrchestrator(teamManager, sessionManager, aiEngine);
     console.log('[Server] TaskOrchestrator 初始化完成');
+    ralphEngine = new RalphEngine(sessionManager, io);
+    console.log('[Server] RalphEngine 初始化完成');
     teamManager.recoverStaleTeams();
     hookServer = new HookServer(currentPort);
     hookServer.install();
@@ -910,6 +914,7 @@ let sessionManagerReady = false;
     sessionManagerReady = true;
     teamManager = new TeamManager(sessionManager.db, sessionManager, aiEngine);
     taskOrchestrator = new TaskOrchestrator(teamManager, sessionManager, aiEngine);
+    ralphEngine = new RalphEngine(sessionManager, io);
     teamManager.recoverStaleTeams();
     hookServer = new HookServer(currentPort);
     hookServer.install();
@@ -2547,6 +2552,10 @@ setupRoutes(app, getSessionManager, historyLogger, io, aiEngine, healthCheckSche
 
 // 记录每个会话最后执行的操作和时间，用于防止重复执行
 const lastActionMap = new Map();
+
+// 后台自动操作开关的去抖（模块级，跨所有 socket 连接共享，避免多客户端/重连导致状态 flip-flop）
+// 结构：sessionId -> { timer, targetEnabled }
+const autoActionToggleState = new Map();
 
 // 记录每个会话的检测状态，用于动态调整检测周期
 const sessionCheckState = new Map();
@@ -5473,6 +5482,159 @@ io.on('connection', (socket) => {
     socket.emit('evaluator:status', { sessionId, enabled });
   });
 
+  // ───────── Ralph 自主模式 ─────────
+
+  // 自主模式任务拆分（带 acceptanceCriteria/dependsOn/branch）
+  socket.on('ralph:plan', async ({ sessionId, goal }) => {
+    try {
+      const session = sessionManager?.getSession(sessionId);
+      const terminalOutput = session?.getRecentOutput?.(80) || '';
+      const projectContext = {
+        projectDesc: session?.projectDesc,
+        workingDir: session?.workingDir,
+        terminalOutput,
+        autonomous: true
+      };
+      const progress = await plannerService.expandGoal(sessionId, goal, projectContext);
+      socket.emit('progress:data', { sessionId, progress });
+      io.to(`session:${sessionId}`).emit('progress:updated', { sessionId, progress });
+    } catch (err) {
+      console.error('[Ralph] 拆分失败:', err.message);
+      socket.emit('progress:data', { sessionId, progress: null, error: err.message });
+    }
+  });
+
+  // 启动自主执行循环
+  socket.on('ralph:start', ({ sessionId, maxIterations }) => {
+    if (!ralphEngine) {
+      socket.emit('ralph:state', { sessionId, running: false, error: '引擎未就绪' });
+      return;
+    }
+    if (ralphEngine.isRunning(sessionId)) {
+      socket.emit('ralph:state', { sessionId, running: true, phase: 'idle' });
+      return;
+    }
+    // 非阻塞启动
+    ralphEngine.start(sessionId, maxIterations || 100);
+  });
+
+  // 停止自主执行
+  socket.on('ralph:stop', ({ sessionId }) => {
+    if (ralphEngine) ralphEngine.stop(sessionId);
+    socket.emit('ralph:state', { sessionId, running: false, phase: 'stopped' });
+  });
+
+  // 查询自主模式状态
+  socket.on('ralph:status', ({ sessionId }) => {
+    const running = ralphEngine ? ralphEngine.isRunning(sessionId) : false;
+    socket.emit('ralph:state', { sessionId, running });
+  });
+
+  // 暂停后恢复
+  socket.on('ralph:resume', ({ sessionId }) => {
+    if (ralphEngine) ralphEngine.resume(sessionId);
+  });
+
+  // ───────── 自主开发一键向导 ─────────
+
+  // 向导 Step1→Step2：建目录 + git init + 建会话 + 自主拆分，返回任务清单
+  socket.on('ralph:wizard:plan', async ({ projectName, parentDir, requirement, existingDir, aiType }, cb) => {
+    const reply = (data) => { socket.emit('ralph:wizard:planned', data); if (typeof cb === 'function') cb(data); };
+    try {
+      await waitForSessionManager();
+      // 1. 确定 workingDir
+      let workingDir;
+      if (existingDir) {
+        workingDir = existingDir;
+      } else {
+        if (!parentDir || !projectName) return reply({ error: '缺少项目名或位置' });
+        workingDir = path.join(parentDir.replace(/^~/, os.homedir()), projectName);
+        if (!existsSync(workingDir)) mkdirSync(workingDir, { recursive: true });
+      }
+      if (!existsSync(workingDir)) return reply({ error: `目录不存在: ${workingDir}` });
+
+      // 2. 非 git 仓库则 git init（后续要建分支/提交）
+      const isGitRepo = existsSync(path.join(workingDir, '.git'));
+      if (!isGitRepo) {
+        try {
+          execSync('git init', { cwd: workingDir, encoding: 'utf-8' });
+          // 建一个初始提交，确保后续能建分支
+          execSync('git add -A && git commit -m "chore: 初始化项目" --allow-empty', { cwd: workingDir, encoding: 'utf-8' });
+        } catch (e) { console.error('[Ralph向导] git init 失败:', e.message); }
+      }
+
+      // 3. 建会话并设工作目录
+      const session = await sessionManager.createSession({
+        name: projectName || path.basename(workingDir),
+        goal: requirement || '',
+        systemPrompt: ''
+      });
+      registerBellCallback(session);
+      registerExitCallback(session);
+      session.aiType = aiType || 'claude';
+      session.workingDir = workingDir;
+      session.projectName = projectName || path.basename(workingDir);
+      sessionManager.updateSession(session);
+      // 让终端进入工作目录
+      setTimeout(() => { try { session.write(`cd "${workingDir}"\r`); } catch {} }, 300);
+
+      // 4. 自主拆分
+      const progress = await plannerService.expandGoal(session.id, requirement, {
+        workingDir, autonomous: true, projectDesc: session.projectDesc
+      });
+      io.emit('sessions:updated', sessionManager.listSessions());
+      if (!progress?.features?.length) {
+        return reply({ sessionId: session.id, workingDir, features: [], error: '拆分未产生任务，请补充需求描述' });
+      }
+      reply({ sessionId: session.id, workingDir, features: progress.features, isGitRepo });
+    } catch (err) {
+      console.error('[Ralph向导] plan 失败:', err.message);
+      reply({ error: err.message });
+    }
+  });
+
+  // 向导 Step2 确认：git 干净检查 + 建分支 + 启动执行
+  socket.on('ralph:wizard:start', ({ sessionId, enabledTaskIds, pauseAfterEachTask, ignoreDirty }, cb) => {
+    const reply = (data) => { socket.emit('ralph:wizard:started', { sessionId, ...data }); if (typeof cb === 'function') cb(data); };
+    try {
+      if (!ralphEngine) return reply({ error: '引擎未就绪' });
+      const session = sessionManager.getSession(sessionId);
+      if (!session?.workingDir) return reply({ error: '会话或工作目录无效' });
+
+      // 取消未勾选的任务
+      if (Array.isArray(enabledTaskIds)) {
+        const progress = progressManager.loadProgress(sessionId);
+        if (progress?.features) {
+          for (const f of progress.features) {
+            if (!enabledTaskIds.includes(f.id) && f.status !== 'completed') {
+              progressManager.updateFeatureStatus(sessionId, f.id, { blocked: true });
+            }
+          }
+        }
+      }
+
+      // 护栏1：git 干净检查
+      if (!ignoreDirty) {
+        try {
+          const dirty = execSync('git status --porcelain', { cwd: session.workingDir, encoding: 'utf-8' }).trim();
+          if (dirty) {
+            return reply({ blocked: 'dirty', files: dirty.split('\n').slice(0, 20) });
+          }
+        } catch {}
+      }
+
+      // 护栏2：分支名取自 features 的 branch
+      const progress = progressManager.loadProgress(sessionId);
+      const branch = progress?.features?.find(f => f.branch)?.branch || `ralph/${Date.now().toString(36)}`;
+
+      ralphEngine.start(sessionId, { maxIterations: 100, branch, pauseAfterEachTask: !!pauseAfterEachTask });
+      reply({ started: true, branch });
+    } catch (err) {
+      console.error('[Ralph向导] start 失败:', err.message);
+      reply({ error: err.message });
+    }
+  });
+
   // 获取进度摘要
   socket.on('progress:summary', (sessionId) => {
     const summary = progressManager.getSummary(sessionId);
@@ -6059,36 +6221,40 @@ ${terminalContext ? terminalContext : '（无）'}
   });
 
   // 切换后台自动操作开关（带去抖，防止多客户端/快速切换导致状态循环）
-  const autoActionToggleTimers = new Map();
+  // 去抖状态存于模块级 autoActionToggleState，跨所有连接共享，确保「最后一次意图」胜出
   socket.on('ai:toggleAutoAction', (data) => {
     const session = sessionManager.getSession(data.sessionId);
-    if (session) {
-      // 如果状态没变化，忽略
-      if (session.autoActionEnabled === data.enabled) return;
+    if (!session) return;
 
-      // 去抖：300ms 内的重复切换只执行最后一次
-      const timerId = autoActionToggleTimers.get(data.sessionId);
-      if (timerId) clearTimeout(timerId);
+    const targetEnabled = !!data.enabled;
+    const existing = autoActionToggleState.get(data.sessionId);
 
-      autoActionToggleTimers.set(data.sessionId, setTimeout(() => {
-        autoActionToggleTimers.delete(data.sessionId);
-        // 再次检查状态是否已经是目标值（可能已被其他请求处理）
-        if (session.autoActionEnabled === data.enabled) return;
+    // 始终记录「最新意图」为目标值，并重置去抖计时器（last-write-wins）
+    if (existing?.timer) clearTimeout(existing.timer);
 
-        session.updateSettings({ autoActionEnabled: data.enabled });
-        sessionManager.updateSession(session);
+    const timer = setTimeout(() => {
+      const st = autoActionToggleState.get(data.sessionId);
+      autoActionToggleState.delete(data.sessionId);
+      const desired = st ? st.targetEnabled : targetEnabled;
 
-        io.to(`session:${data.sessionId}`).emit('session:updated', session.toJSON());
-        io.emit('sessions:updated', sessionManager.listSessions());
+      // 仅在最终目标值与当前状态不同时才写入，避免无谓的状态变更/持久化
+      if (session.autoActionEnabled === desired) return;
 
-        historyLogger.log(data.sessionId, {
-          type: 'system',
-          content: `后台自动操作${data.enabled ? '开启' : '关闭'}`
-        });
+      session.updateSettings({ autoActionEnabled: desired });
+      sessionManager.updateSession(session);
 
-        console.log(`[自动操作] 会话 ${session.name}: ${data.enabled ? '开启' : '关闭'}`);
-      }, 300));
-    }
+      io.to(`session:${data.sessionId}`).emit('session:updated', session.toJSON());
+      io.emit('sessions:updated', sessionManager.listSessions());
+
+      historyLogger.log(data.sessionId, {
+        type: 'system',
+        content: `后台自动操作${desired ? '开启' : '关闭'}`
+      });
+
+      console.log(`[自动操作] 会话 ${session.name}: ${desired ? '开启' : '关闭'}`);
+    }, 300);
+
+    autoActionToggleState.set(data.sessionId, { timer, targetEnabled });
   });
 
   // ========== 预约管理事件 ==========

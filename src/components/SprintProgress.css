@@ -149,3 +149,68 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ───────── Ralph 自主模式 ───────── */
+.sprint-feature.blocked { opacity: 0.6; }
+.feature-retry {
+  font-size: 10px;
+  color: hsl(38 92% 50%);
+  margin-left: 4px;
+}
+.ralph-panel {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed hsl(var(--border));
+}
+.ralph-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ralph-replan-btn, .ralph-run-btn {
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--secondary));
+  color: hsl(var(--foreground));
+  cursor: pointer;
+}
+.ralph-replan-btn:disabled { opacity: 0.6; cursor: wait; }
+.ralph-run-btn.running {
+  background: hsl(0 70% 45% / 0.2);
+  border-color: hsl(0 70% 50%);
+  color: hsl(0 70% 70%);
+}
+.ralph-phase {
+  font-size: 11px;
+  color: hsl(var(--primary));
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.ralph-phase em { color: hsl(var(--muted-foreground)); font-style: normal; }
+.ralph-logs {
+  margin-top: 6px;
+  max-height: 120px;
+  overflow-y: auto;
+  background: hsl(220 14% 10%);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: monospace;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.ralph-log-line {
+  color: hsl(var(--muted-foreground));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ralph-resume-btn {
+  font-size: 11px; padding: 4px 10px; border-radius: 4px;
+  background: hsl(142 70% 45% / 0.2); border: 1px solid hsl(142 70% 50%);
+  color: hsl(142 70% 65%); cursor: pointer;
+}
+.ralph-phase-paused { color: hsl(38 92% 55%); }

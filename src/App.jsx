@@ -21,6 +21,7 @@ import TeamView from './components/TeamView';
 import TeamPanel from './components/TeamPanel';
 import VoiceInput from './components/VoiceInput';
 import SprintProgress from './components/SprintProgress';
+import RalphWizard from './components/RalphWizard';
 
 const socket = io();
 
@@ -151,6 +152,7 @@ export default function App() {
   });
   const [currentSession, setCurrentSession] = useState(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showRalphWizard, setShowRalphWizard] = useState(false);
   const [suggestion, setSuggestion] = useState(null);
   const [showHistory, setShowHistory] = useState(false);
   const [playbackSessionId, setPlaybackSessionId] = useState(null); // 用于存储管理的回放
@@ -1241,6 +1243,9 @@ export default function App() {
           </button>
           <button className="btn btn-small" onClick={() => setShowCreateTeamDialog(true)} title="创建 Agent Team" style={{ marginLeft: '4px' }}>
             Team
+          </button>
+          <button className="btn btn-small" onClick={() => setShowRalphWizard(true)} title="自主开发：描述需求，AI 自动拆分并逐个完成" style={{ marginLeft: '4px' }}>
+            🏭 自主开发
           </button>
         </div>
 
@@ -2469,6 +2474,15 @@ export default function App() {
         <CreateSessionModal
           onClose={() => setShowCreateModal(false)}
           onCreate={createSession}
+        />
+      )}
+
+      {/* 自主开发向导 */}
+      {showRalphWizard && (
+        <RalphWizard
+          socket={socket}
+          onClose={() => setShowRalphWizard(false)}
+          onStarted={(sid) => { setShowRalphWizard(false); if (sid) attachSession(sid); }}
         />
       )}
 

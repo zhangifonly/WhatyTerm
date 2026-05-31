@@ -55,15 +55,18 @@ class ProgressManager {
   /** 创建初始 progress（status: planning） */
   createProgress(sessionId, goal) {
     const data = {
-      version: '1.0',
+      version: '1.1',
       sessionId,
       goal,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       status: 'planning',
+      mode: 'interactive',        // 'interactive' | 'autonomous'（Ralph 自主模式）
       currentFeatureIndex: 0,
       sprint: null,
       features: [],
+      patterns: [],               // Codebase Patterns（跨迭代学习，Ralph）
+      archive: [],                // 归档历史（已完成轮次）
       evaluatorConfig: { enabled: false, strictMode: false }
     };
     this.saveProgress(sessionId, data);
@@ -82,6 +85,13 @@ class ProgressManager {
         description: f.description || '',
         priority: f.priority || i + 1,
         status: isCompleted ? 'completed' : 'pending',
+        // Ralph 任务模型扩展字段
+        acceptanceCriteria: Array.isArray(f.acceptanceCriteria) ? f.acceptanceCriteria : [],
+        dependsOn: Array.isArray(f.dependsOn) ? f.dependsOn : [],
+        branch: f.branch || '',
+        retryCount: 0,
+        blocked: false,
+        validationNotes: '',
         passes: {
           implemented: isCompleted,
           compiles: isCompleted,
@@ -193,6 +203,81 @@ class ProgressManager {
     } catch (err) {
       console.error(`[ProgressManager] 删除失败:`, err.message);
     }
+  }
+
+  // ───────── Ralph 自主模式扩展方法 ─────────
+
+  /** 设置运行模式 'interactive' | 'autonomous' */
+  setMode(sessionId, mode) {
+    const progress = this.loadProgress(sessionId);
+    if (!progress) return false;
+    progress.mode = mode;
+    return this.saveProgress(sessionId, progress);
+  }
+
+  /** 取下一个可执行任务：非 blocked、非 completed、依赖已满足，按 priority 排序 */
+  getNextTask(sessionId) {
+    const progress = this.loadProgress(sessionId);
+    if (!progress?.features?.length) return null;
+    const doneIds = new Set(progress.features.filter(f => f.status === 'completed').map(f => f.id));
+    const candidates = progress.features
+      .filter(f => f.status !== 'completed' && !f.blocked)
+      .filter(f => (f.dependsOn || []).every(d => doneIds.has(d)))
+      .sort((a, b) => (a.priority || 999) - (b.priority || 999));
+    return candidates[0] || null;
+  }
+
+  /** 验证失败：retryCount+1，记录原因，满 maxRetry 标记 blocked。返回 { blocked, retryCount } */
+  recordValidationFailure(sessionId, featureId, notes, maxRetry = 5) {
+    const progress = this.loadProgress(sessionId);
+    if (!progress) return null;
+    const feature = progress.features.find(f => f.id === featureId);
+    if (!feature) return null;
+    feature.retryCount = (feature.retryCount || 0) + 1;
+    feature.validationNotes = notes || '';
+    feature.status = 'pending';
+    if (feature.retryCount >= maxRetry) {
+      feature.blocked = true;
+    }
+    this.saveProgress(sessionId, progress);
+    return { blocked: feature.blocked, retryCount: feature.retryCount };
+  }
+
+  /** 追加一条 Codebase Pattern（去重） */
+  addPattern(sessionId, pattern) {
+    if (!pattern) return false;
+    const progress = this.loadProgress(sessionId);
+    if (!progress) return false;
+    if (!Array.isArray(progress.patterns)) progress.patterns = [];
+    if (!progress.patterns.includes(pattern)) {
+      progress.patterns.push(pattern);
+    }
+    return this.saveProgress(sessionId, progress);
+  }
+
+  /** 是否还有可执行任务 */
+  hasRunnableTask(sessionId) {
+    return this.getNextTask(sessionId) !== null;
+  }
+
+  /** 归档当前轮次（features + patterns），重置 features 供新一轮拆分 */
+  archiveRound(sessionId) {
+    const progress = this.loadProgress(sessionId);
+    if (!progress) return false;
+    if (!Array.isArray(progress.archive)) progress.archive = [];
+    if (progress.features.length > 0) {
+      progress.archive.push({
+        archivedAt: new Date().toISOString(),
+        goal: progress.goal,
+        features: progress.features,
+        patterns: progress.patterns || []
+      });
+    }
+    progress.features = [];
+    progress.patterns = [];
+    progress.status = 'planning';
+    progress.currentFeatureIndex = 0;
+    return this.saveProgress(sessionId, progress);
   }
 }
 
