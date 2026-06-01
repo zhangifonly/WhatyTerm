@@ -17,8 +17,6 @@ import StorageManager from './components/StorageManager';
 import AdvancedSettings from './components/ProviderManager/AdvancedSettings';
 import ProviderManager from './components/ProviderManager/ProviderManager';
 import ClaudeConfigManager from './components/ClaudeConfigManager';
-import TeamView from './components/TeamView';
-import TeamPanel from './components/TeamPanel';
 import VoiceInput from './components/VoiceInput';
 import SprintProgress from './components/SprintProgress';
 import RalphWizard from './components/RalphWizard';
@@ -29,11 +27,6 @@ const socket = io();
 let lastInputTime = 0;
 let lastInputData = '';
 const INPUT_DEBOUNCE_MS = 50; // 50ms 内的相同输入视为重复
-
-// Team（多 Agent 协作）功能开关。
-// 该功能已被「自主开发(Ralph)」取代（串行+验证闭环，更稳），暂时隐藏所有入口。
-// 后端代码与数据保留；如需重新启用，将此处改为 true 即可恢复全部 UI 入口。
-const TEAM_FEATURE_ENABLED = false;
 
 // IME 输入法状态跟踪
 let isComposing = false;
@@ -225,11 +218,6 @@ export default function App() {
   const [tooltipPosition, setTooltipPosition] = useState({ top: 0 });
   // 订阅状态
   const [subscriptionStatus, setSubscriptionStatus] = useState(null);
-  // Team 相关状态
-  const [teams, setTeams] = useState([]);
-  const [currentTeam, setCurrentTeam] = useState(null);
-  const [showCreateTeamDialog, setShowCreateTeamDialog] = useState(false);
-  const [showStartTeamDialog, setShowStartTeamDialog] = useState(false);
   const [sessionContextMenu, setSessionContextMenu] = useState(null); // { session, x, y }
   // 注意：autoActionEnabled 现在存储在服务器端，通过 session.autoActionEnabled 获取
 
@@ -439,24 +427,6 @@ export default function App() {
 
     socket.emit('sessions:list');
 
-    // Team 事件
-    socket.on('teams:list', (data) => setTeams(data || []));
-    socket.on('teams:updated', (data) => setTeams(data || []));
-    socket.on('team:created', (team) => {
-      setCurrentSession(null);
-      setCurrentTeam(team);
-    });
-    socket.on('team:updated', (team) => {
-      // 团队被销毁或完成时清除 currentTeam
-      if (team.status === 'destroyed' || team.status === 'completed') {
-        setCurrentTeam(prev => prev?.id === team.id ? null : prev);
-      } else {
-        setCurrentTeam(prev => prev?.id === team.id ? team : prev);
-      }
-      setTeams(prev => prev.map(t => t.id === team.id ? team : t));
-    });
-    socket.emit('teams:list');
-
     return () => {
       socket.off('connect');
       socket.off('disconnect');
@@ -474,10 +444,6 @@ export default function App() {
       socket.off('settings:loaded');
       socket.off('tunnel:connected');
       socket.off('tunnel:disconnected');
-      socket.off('teams:list');
-      socket.off('teams:updated');
-      socket.off('team:created');
-      socket.off('team:updated');
     };
   }, []);
 
@@ -1031,7 +997,6 @@ export default function App() {
   const attachSession = useCallback((sessionId) => {
     // 不在这里清空终端，由 pendingScreenContent 处理时统一清空和写入
     setSuggestion(null);
-    setCurrentTeam(null); // 切换到单会话视图
     socket.emit('session:attach', sessionId);
   }, []);
 
@@ -1247,42 +1212,11 @@ export default function App() {
             <button className="btn btn-primary btn-small" onClick={() => setShowCreateModal(true)}>
               {t('sidebar.newSession')}
             </button>
-            {TEAM_FEATURE_ENABLED && (
-              <button className="btn btn-small" onClick={() => setShowCreateTeamDialog(true)} title="创建 Agent Team">
-                Team
-              </button>
-            )}
             <button className="btn btn-small" onClick={() => setShowRalphWizard(true)} title="自主开发：描述需求，AI 自动拆分并逐个完成">
               🏭 自主开发
             </button>
           </div>
         </div>
-
-        {/* Teams 分组 */}
-        {TEAM_FEATURE_ENABLED && teams.length > 0 && (
-          <div className="sidebar-teams-section">
-            <div className="sidebar-teams-header">
-              <span>Teams</span>
-              <button className="create-team-btn" onClick={() => setShowCreateTeamDialog(true)} title="创建团队">+</button>
-            </div>
-            {teams.filter(t => t.status !== 'completed').map(team => (
-              <div
-                key={team.id}
-                className={`sidebar-team-item ${currentTeam?.id === team.id ? 'active' : ''}`}
-                onClick={() => {
-                  setCurrentTeam(team);
-                  setCurrentSession(null);
-                }}
-              >
-                <span className="team-icon">{team.status === 'active' ? '▶' : '⏸'}</span>
-                <span className="team-name">{team.name}</span>
-                <span className="team-progress-mini">
-                  {team.taskStats?.completed || 0}/{team.taskStats?.total || 0}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
 
         <div className="session-list">
           {sessions.map((session) => (
@@ -1419,9 +1353,7 @@ export default function App() {
 
       {/* 主内容区 */}
       <main className="main-content">
-        {currentTeam ? (
-          <TeamView team={currentTeam} socket={socket} />
-        ) : currentSession ? (
+        {currentSession ? (
           <div className="terminal-container">
             <div
               className={`terminal-wrapper${isDragOver ? ' drag-over' : ''}`}
@@ -1809,14 +1741,7 @@ export default function App() {
       </main>
 
       {/* 右侧面板 */}
-      {currentTeam && (
-        <TeamPanel
-          team={currentTeam}
-          socket={socket}
-          onClose={() => setCurrentTeam(null)}
-        />
-      )}
-      {!currentTeam && currentSession && (
+      {currentSession && (
         <aside className={`ai-panel ${aiPanelCollapsed ? 'collapsed' : ''}`}>
           <button
             className="panel-toggle ai-panel-toggle"
@@ -2419,15 +2344,6 @@ export default function App() {
             >
               {t('common.history')}
             </button>
-            {TEAM_FEATURE_ENABLED && !currentSession.teamId && (
-              <button
-                className="btn btn-secondary btn-small"
-                onClick={() => setShowStartTeamDialog(true)}
-                title="从当前会话启动团队模式"
-              >
-                Team
-              </button>
-            )}
           </div>
 
           {/* AI 调试日志面板 */}
@@ -2507,24 +2423,6 @@ export default function App() {
             style={{ top: sessionContextMenu.y, left: sessionContextMenu.x }}
             onClick={(e) => e.stopPropagation()}
           >
-            {TEAM_FEATURE_ENABLED && !sessionContextMenu.session.teamId && (
-              <div
-                className="context-menu-item"
-                onClick={() => {
-                  setShowStartTeamDialog(true);
-                  // 先 attach 到该会话，确保 currentSession 正确
-                  attachSession(sessionContextMenu.session.id);
-                  setSessionContextMenu(null);
-                }}
-              >
-                启动 Team 模式
-              </div>
-            )}
-            {sessionContextMenu.session.teamId && (
-              <div className="context-menu-item disabled">
-                已在团队中
-              </div>
-            )}
             <div
               className="context-menu-item"
               onClick={() => {
@@ -2549,45 +2447,6 @@ export default function App() {
             </div>
           </div>
         </div>
-      )}
-
-      {/* 创建团队对话框 */}
-      {showCreateTeamDialog && (
-        <CreateTeamDialog
-          onClose={() => setShowCreateTeamDialog(false)}
-          onCreate={(data) => {
-            socket.emit('team:create', data, (response) => {
-              if (response?.team) {
-                setCurrentSession(null);
-                setCurrentTeam(response.team);
-                toast.success('团队创建成功');
-              } else if (response?.error) {
-                toast.error('创建团队失败: ' + response.error);
-              }
-            });
-            setShowCreateTeamDialog(false);
-          }}
-        />
-      )}
-
-      {/* 从现有会话启动团队 */}
-      {showStartTeamDialog && currentSession && (
-        <StartTeamFromSessionDialog
-          session={currentSession}
-          onClose={() => setShowStartTeamDialog(false)}
-          onCreate={(data) => {
-            socket.emit('team:createFromSession', data, (response) => {
-              if (response?.team) {
-                setCurrentSession(null);
-                setCurrentTeam(response.team);
-                toast.success('团队创建成功');
-              } else if (response?.error) {
-                toast.error('从会话创建团队失败: ' + response.error);
-              }
-            });
-            setShowStartTeamDialog(false);
-          }}
-        />
       )}
 
       {/* 终端回放面板 */}
@@ -4115,124 +3974,6 @@ function AboutPage({ socket, onClose }) {
         <button type="button" className="btn btn-secondary" onClick={onClose}>
           {t('common.close')}
         </button>
-      </div>
-    </div>
-  );
-}
-
-function CreateTeamDialog({ onClose, onCreate }) {
-  const [name, setName] = useState('');
-  const [goal, setGoal] = useState('');
-  const [workingDir, setWorkingDir] = useState('');
-  const [memberCount, setMemberCount] = useState(2);
-
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    if (!name.trim() || !goal.trim()) return;
-    onCreate({ name: name.trim(), goal: goal.trim(), workingDir: workingDir.trim(), memberCount });
-  };
-
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()}>
-        <h2>创建 Agent Team</h2>
-        <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label>团队名称</label>
-            <input
-              type="text"
-              value={name}
-              onChange={e => setName(e.target.value)}
-              placeholder="例如: ecommerce-team"
-              autoFocus
-            />
-          </div>
-          <div className="form-group">
-            <label>目标</label>
-            <textarea
-              value={goal}
-              onChange={e => setGoal(e.target.value)}
-              placeholder="描述团队要完成的目标..."
-            />
-          </div>
-          <div className="form-group">
-            <label>工作目录</label>
-            <input
-              type="text"
-              value={workingDir}
-              onChange={e => setWorkingDir(e.target.value)}
-              placeholder="/path/to/project（可选）"
-            />
-          </div>
-          <div className="form-group">
-            <label>Agent 数量: {memberCount}</label>
-            <input
-              type="range"
-              min="1"
-              max="6"
-              value={memberCount}
-              onChange={e => setMemberCount(parseInt(e.target.value))}
-              style={{ width: '100%' }}
-            />
-          </div>
-          <div className="modal-actions">
-            <button type="button" className="btn btn-secondary" onClick={onClose}>取消</button>
-            <button type="submit" className="btn btn-primary" disabled={!name.trim() || !goal.trim()}>创建</button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-function StartTeamFromSessionDialog({ session, onClose, onCreate }) {
-  const [goal, setGoal] = useState('');
-  const [memberCount, setMemberCount] = useState(2);
-
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    if (!goal.trim()) return;
-    onCreate({
-      sessionId: session.id,
-      goal: goal.trim(),
-      memberCount
-    });
-  };
-
-  return (
-    <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()}>
-        <h2>从当前会话启动团队</h2>
-        <p style={{ fontSize: '12px', color: 'hsl(var(--muted-foreground))', marginBottom: '12px' }}>
-          当前会话 "{session.projectName || session.name}" 将成为 Team Lead，
-          自动创建 {memberCount} 个 Teammate 并启动 Claude。
-        </p>
-        <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label>团队目标</label>
-            <textarea
-              value={goal}
-              onChange={e => setGoal(e.target.value)}
-              placeholder="描述团队要完成的目标..."
-              autoFocus
-            />
-          </div>
-          <div className="form-group">
-            <label>Teammate 数量: {memberCount}</label>
-            <input
-              type="range"
-              min="1"
-              max="4"
-              value={memberCount}
-              onChange={e => setMemberCount(parseInt(e.target.value))}
-              style={{ width: '100%' }}
-            />
-          </div>
-          <div className="modal-actions">
-            <button type="button" className="btn btn-secondary" onClick={onClose}>取消</button>
-            <button type="submit" className="btn btn-primary" disabled={!goal.trim()}>启动团队</button>
-          </div>
-        </form>
       </div>
     </div>
   );

@@ -110,8 +110,6 @@ import tokenStatsService from './services/TokenStatsService.js';
 import builtinProviderDB from './services/BuiltinProviderDB.js';
 import ccSwitchAudit from './services/CCSwitchAudit.js';
 import configService from './services/ConfigService.js';
-import TeamManager from './services/TeamManager.js';
-import TaskOrchestrator from './services/TaskOrchestrator.js';
 import progressManager from './services/ProgressManager.js';
 import PlannerService from './services/PlannerService.js';
 import EvaluatorService from './services/EvaluatorService.js';
@@ -841,7 +839,7 @@ app.post('/api/sessions/:sessionId/analyze-now', async (req, res) => {
   }
 });
 
-/** 将 HookServer 事件接入 session 状态 + TaskOrchestrator */
+/** 将 HookServer 事件接入 session 状态 */
 function _wireHookServer() {
   if (!hookServer) return;
 
@@ -862,11 +860,6 @@ function _wireHookServer() {
       : (ev === 'PostToolUse' || ev === 'Stop') ? 'idle'
       : session.hookState;
 
-    // Team Member 事件转发给 TaskOrchestrator
-    if (session.teamRole === 'member' && taskOrchestrator) {
-      taskOrchestrator.onHookEvent(event, session);
-    }
-
     // 广播给前端（可选，用于实时状态显示）
     io.to(`session:${session.id}`).emit('session:hookEvent', { sessionId: session.id, event: ev });
   });
@@ -884,9 +877,7 @@ const authService = new AuthService();
 const providerService = new ProviderService(io);
 const healthCheckScheduler = new HealthCheckScheduler(io);
 const scheduleManager = new ScheduleManager();
-let teamManager = null; // TeamManager 在 SessionManager 初始化后创建
 let ralphEngine = null; // RalphEngine 自主模式引擎，在 SessionManager 初始化后创建
-let taskOrchestrator = null; // TaskOrchestrator 在 TeamManager 初始化后创建
 let hookServer = null; // HookServer：Claude Code 官方 Hooks 集成
 
 // 异步初始化 SessionManager
@@ -896,14 +887,8 @@ let sessionManagerReady = false;
     sessionManager = await SessionManager.create();
     sessionManagerReady = true;
     console.log('[Server] SessionManager 初始化完成');
-    // 初始化 TeamManager（复用 SessionManager 的数据库）
-    teamManager = new TeamManager(sessionManager.db, sessionManager, aiEngine);
-    console.log('[Server] TeamManager 初始化完成');
-    taskOrchestrator = new TaskOrchestrator(teamManager, sessionManager, aiEngine);
-    console.log('[Server] TaskOrchestrator 初始化完成');
     ralphEngine = new RalphEngine(sessionManager, io);
     console.log('[Server] RalphEngine 初始化完成');
-    teamManager.recoverStaleTeams();
     hookServer = new HookServer(currentPort);
     hookServer.install();
     _wireHookServer();
@@ -913,10 +898,7 @@ let sessionManagerReady = false;
     sessionManager = new SessionManager();
     await sessionManager.init().catch(e => console.error('[Server] SessionManager.init() 失败:', e));
     sessionManagerReady = true;
-    teamManager = new TeamManager(sessionManager.db, sessionManager, aiEngine);
-    taskOrchestrator = new TaskOrchestrator(teamManager, sessionManager, aiEngine);
     ralphEngine = new RalphEngine(sessionManager, io);
-    teamManager.recoverStaleTeams();
     hookServer = new HookServer(currentPort);
     hookServer.install();
     _wireHookServer();
@@ -3518,18 +3500,6 @@ async function runBackgroundAutoAction() {
       continue;
     }
 
-    // Team Member 会话交给 TaskOrchestrator 处理
-    if (session.teamId && session.teamRole === 'member' && taskOrchestrator) {
-      try {
-        const terminalContent = session.getScreenContent();
-        if (terminalContent && terminalContent.length >= 10) {
-          await taskOrchestrator.handleMemberTick(session, terminalContent);
-        }
-      } catch (err) {
-        console.error(`[TaskOrchestrator] 会话 ${session.name} 处理异常:`, err.message);
-      }
-      continue; // 跳过普通 auto-action 逻辑
-    }
 
     // 检查是否因用户输入而暂停
     if (isAutoActionPausedByUserInput(sessionData.id)) {
@@ -4169,17 +4139,6 @@ setInterval(async () => {
     console.error('[主动扫描] 扫描失败:', err.message);
   }
 }, 60000);
-
-// Team 协调：TaskOrchestrator 已在 runBackgroundAutoAction 的 1 秒循环中统一处理
-// 保留 runCoordination 作为 Lead 会话的协调（非 member 任务分配）
-setInterval(async () => {
-  if (!teamManager) return;
-  try {
-    await teamManager.runCoordination();
-  } catch (err) {
-    console.error('[TeamManager] 协调循环错误:', err.message);
-  }
-}, 10000);
 
 // 内存限制状态跟踪
 const memoryLimitState = new Map(); // sessionId -> { warned: boolean, limited: boolean }
@@ -5354,10 +5313,6 @@ io.on('connection', (socket) => {
     if (result.success) {
       // 清理会话相关的缓存数据
       cleanupAllSessionCache(sessionId);
-      // 清理 TaskOrchestrator 中的 Agent 状态
-      if (taskOrchestrator) {
-        taskOrchestrator.cleanupSession(sessionId);
-      }
       console.log(`会话已关闭（可恢复）: ${sessionId}`);
       io.emit('sessions:updated', sessionManager.listSessions());
       socket.emit('session:closed', result.closedSession);
@@ -6819,307 +6774,9 @@ ${terminalContext ? terminalContext : '（无）'}
     });
   });
 
-  // ==================== Team 事件 ====================
-
-  // 获取团队列表
-  socket.on('teams:list', async () => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager) { socket.emit('teams:list', []); return; }
-      socket.emit('teams:list', teamManager.listTeams());
-    } catch (err) {
-      console.error('[teams:list] 错误:', err.message);
-      socket.emit('teams:list', []);
-    }
-  });
-
-  // 创建团队
-  socket.on('team:create', async (data, ack) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager) {
-        socket.emit('error', { message: 'TeamManager 未初始化' });
-        if (typeof ack === 'function') ack({ error: 'TeamManager 未初始化' });
-        return;
-      }
-      console.log('[team:create] 开始创建团队:', data.name);
-      const team = await teamManager.createTeam({
-        name: data.name,
-        goal: data.goal,
-        workingDir: data.workingDir || '',
-        memberCount: data.memberCount || 2
-      });
-      console.log('[team:create] 团队创建成功:', team.id);
-      socket.emit('team:created', team);
-      if (typeof ack === 'function') ack({ team });
-      io.emit('teams:updated', teamManager.listTeams());
-      io.emit('sessions:updated', sessionManager.listSessions());
-    } catch (err) {
-      console.error('[team:create] 错误:', err.message);
-      socket.emit('error', { message: `创建团队失败: ${err.message}` });
-      if (typeof ack === 'function') ack({ error: err.message });
-    }
-  });
-
-  // 从现有会话创建团队
-  socket.on('team:createFromSession', async (data, ack) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager) {
-        if (typeof ack === 'function') ack({ error: 'TeamManager 未初始化' });
-        return;
-      }
-
-      const { sessionId, goal, memberCount } = data;
-      if (!sessionId || !goal) {
-        if (typeof ack === 'function') ack({ error: '缺少必要参数: sessionId, goal' });
-        return;
-      }
-
-      const existingSession = sessionManager.getSession(sessionId);
-      if (!existingSession) {
-        if (typeof ack === 'function') ack({ error: '会话不存在' });
-        return;
-      }
-
-      if (existingSession.teamId) {
-        if (typeof ack === 'function') ack({ error: '该会话已属于一个团队' });
-        return;
-      }
-
-      console.log('[team:createFromSession] 从现有会话创建团队:', existingSession.name);
-
-      const team = await teamManager.createTeamFromSession(
-        existingSession,
-        { goal, memberCount: memberCount || 2 },
-        (memberSession) => {
-          registerBellCallback(memberSession);
-          registerExitCallback(memberSession);
-        }
-      );
-
-      console.log('[team:createFromSession] 团队创建成功:', team.id);
-      if (typeof ack === 'function') ack({ team });
-      io.emit('teams:updated', teamManager.listTeams());
-      io.emit('sessions:updated', sessionManager.listSessions());
-    } catch (err) {
-      console.error('[team:createFromSession] 错误:', err.message);
-      if (typeof ack === 'function') ack({ error: err.message });
-    }
-  });
-
-  // 进入 Team 视图（加入 room，监听所有成员输出）
-  socket.on('team:attach', async (teamId) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager) return;
-      const team = teamManager.getTeam(teamId);
-      if (!team) { socket.emit('error', { message: '团队不存在' }); return; }
-
-      // 清理旧的 attach（防止重复 attach 导致事件重复）
-      if (socket.data.currentTeamId) {
-        const oldCallbacks = socket.data.teamOutputCallbacks || {};
-        for (const [sid, cb] of Object.entries(oldCallbacks)) {
-          const s = sessionManager?.getSession(sid);
-          if (s) s.offOutput(cb);
-        }
-        socket.data.teamOutputCallbacks = {};
-        if (socket.data.currentTeamId !== teamId) {
-          socket.leave(`team:${socket.data.currentTeamId}`);
-        }
-      }
-
-      socket.join(`team:${teamId}`);
-      socket.data.currentTeamId = teamId;
-
-      // 为每个成员注册输出转发
-      const allSessionIds = [team.leadSessionId, ...team.memberSessionIds];
-      const teamOutputCallbacks = {};
-
-      for (const sid of allSessionIds) {
-        const session = sessionManager.getSession(sid);
-        if (!session) continue;
-
-        const callback = (data) => {
-          socket.emit('team:terminalOutput', { sessionId: sid, data });
-        };
-        session.onOutput(callback);
-        teamOutputCallbacks[sid] = callback;
-
-        // 发送现有 buffer
-        if (session.outputBuffer) {
-          socket.emit('team:terminalOutput', { sessionId: sid, data: session.outputBuffer });
-        }
-      }
-
-      socket.data.teamOutputCallbacks = teamOutputCallbacks;
-
-      // 发送任务和消息
-      socket.emit('team:tasks', teamManager.getTasksByTeam(teamId));
-      socket.emit('team:messages', teamManager.getTeamMessages(teamId));
-      // 发送编排器状态
-      if (taskOrchestrator) {
-        socket.emit('team:orchestrator:status', taskOrchestrator.getStatus());
-      }
-    } catch (err) {
-      console.error('[team:attach] 错误:', err.message);
-    }
-  });
-
-  // 离开 Team 视图
-  socket.on('team:detach', () => {
-    const teamId = socket.data.currentTeamId;
-    if (!teamId) return;
-
-    // 清理输出回调
-    const callbacks = socket.data.teamOutputCallbacks || {};
-    for (const [sid, cb] of Object.entries(callbacks)) {
-      const session = sessionManager?.getSession(sid);
-      if (session) session.offOutput(cb);
-    }
-
-    socket.leave(`team:${teamId}`);
-    socket.data.currentTeamId = null;
-    socket.data.teamOutputCallbacks = null;
-  });
-
-  // 向指定成员终端输入
-  socket.on('team:terminalInput', async (data) => {
-    try {
-      await waitForSessionManager();
-      if (!data || typeof data.sessionId !== 'string' || typeof data.input !== 'string') return;
-      if (data.input.length > 10000) return; // 防止超大输入
-      const session = sessionManager.getSession(data.sessionId);
-      if (session) {
-        session.write(data.input);
-      }
-    } catch (err) {
-      console.error('[team:terminalInput] 错误:', err.message);
-    }
-  });
-
-  // 暂停团队
-  socket.on('team:pause', async (teamId) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager) return;
-      const team = teamManager.pauseTeam(teamId);
-      if (team) {
-        io.to(`team:${teamId}`).emit('team:updated', team);
-        io.emit('teams:updated', teamManager.listTeams());
-        io.emit('sessions:updated', sessionManager.listSessions());
-      }
-    } catch (err) {
-      console.error('[team:pause] 错误:', err.message);
-    }
-  });
-
-  // 恢复团队
-  socket.on('team:resume', async (teamId) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager) return;
-      const team = teamManager.resumeTeam(teamId);
-      if (team) {
-        io.to(`team:${teamId}`).emit('team:updated', team);
-        io.emit('teams:updated', teamManager.listTeams());
-        io.emit('sessions:updated', sessionManager.listSessions());
-      }
-    } catch (err) {
-      console.error('[team:resume] 错误:', err.message);
-    }
-  });
-
-  // 销毁团队
-  socket.on('team:destroy', async (teamId) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager) return;
-      const team = await teamManager.destroyTeam(teamId);
-      // 清理编排器中的 Agent 状态
-      if (team && taskOrchestrator) {
-        const memberIds = team.memberSessionIds || [];
-        for (const sid of memberIds) {
-          taskOrchestrator.cleanupSession(sid);
-        }
-        taskOrchestrator.cleanupTeam(teamId);
-      }
-      if (team) {
-        io.to(`team:${teamId}`).emit('team:updated', team);
-        io.emit('teams:updated', teamManager.listTeams());
-        io.emit('sessions:updated', sessionManager.listSessions());
-      }
-    } catch (err) {
-      console.error('[team:destroy] 错误:', err.message);
-    }
-  });
-
-  // 手动创建任务
-  socket.on('team:task:create', async (data) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager || !data) return;
-      if (typeof data.teamId !== 'string' || typeof data.subject !== 'string') return;
-      const subject = data.subject.trim().slice(0, 500);
-      if (!subject) return;
-      const task = teamManager.createTask(data.teamId, {
-        subject,
-        description: typeof data.description === 'string' ? data.description.slice(0, 5000) : '',
-        priority: typeof data.priority === 'number' ? data.priority : 0,
-        blockedBy: Array.isArray(data.blockedBy) ? data.blockedBy : []
-      });
-      io.to(`team:${data.teamId}`).emit('team:taskUpdated', task);
-    } catch (err) {
-      console.error('[team:task:create] 错误:', err.message);
-    }
-  });
-
-  // 更新任务
-  socket.on('team:task:update', async (data) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager || !data) return;
-      if (typeof data.taskId !== 'string' && typeof data.taskId !== 'number') return;
-      if (!data.updates || typeof data.updates !== 'object') return;
-      const task = teamManager.updateTask(data.taskId, data.updates);
-      if (task) {
-        io.to(`team:${task.teamId}`).emit('team:taskUpdated', task);
-      }
-    } catch (err) {
-      console.error('[team:task:update] 错误:', err.message);
-    }
-  });
-
-  // 发送团队消息
-  socket.on('team:message', async (data) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager || !data) return;
-      if (typeof data.teamId !== 'string') return;
-      const content = typeof data.content === 'string' ? data.content.slice(0, 5000) : '';
-      if (!content) return;
-      const msg = teamManager.sendMessage(
-        data.teamId, data.fromSessionId || null,
-        data.toSessionId || null, content, data.type || 'info'
-      );
-      io.to(`team:${data.teamId}`).emit('team:messageReceived', msg);
-    } catch (err) {
-      console.error('[team:message] 错误:', err.message);
-    }
-  });
-
   // 断开连接
   socket.on('disconnect', () => {
     console.log(`客户端断开: ${socket.id}`);
-    // 清理 Team 输出回调
-    if (socket.data.currentTeamId) {
-      const callbacks = socket.data.teamOutputCallbacks || {};
-      for (const [sid, cb] of Object.entries(callbacks)) {
-        const session = sessionManager?.getSession(sid);
-        if (session) session.offOutput(cb);
-      }
-      socket.leave(`team:${socket.data.currentTeamId}`);
-    }
     if (socket.data.currentSessionId) {
       const session = sessionManager.getSession(socket.data.currentSessionId);
       if (session) {
