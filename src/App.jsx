@@ -30,6 +30,11 @@ let lastInputTime = 0;
 let lastInputData = '';
 const INPUT_DEBOUNCE_MS = 50; // 50ms 内的相同输入视为重复
 
+// Team（多 Agent 协作）功能开关。
+// 该功能已被「自主开发(Ralph)」取代（串行+验证闭环，更稳），暂时隐藏所有入口。
+// 后端代码与数据保留；如需重新启用，将此处改为 true 即可恢复全部 UI 入口。
+const TEAM_FEATURE_ENABLED = false;
+
 // IME 输入法状态跟踪
 let isComposing = false;
 
@@ -1242,9 +1247,11 @@ export default function App() {
             <button className="btn btn-primary btn-small" onClick={() => setShowCreateModal(true)}>
               {t('sidebar.newSession')}
             </button>
-            <button className="btn btn-small" onClick={() => setShowCreateTeamDialog(true)} title="创建 Agent Team">
-              Team
-            </button>
+            {TEAM_FEATURE_ENABLED && (
+              <button className="btn btn-small" onClick={() => setShowCreateTeamDialog(true)} title="创建 Agent Team">
+                Team
+              </button>
+            )}
             <button className="btn btn-small" onClick={() => setShowRalphWizard(true)} title="自主开发：描述需求，AI 自动拆分并逐个完成">
               🏭 自主开发
             </button>
@@ -1252,7 +1259,7 @@ export default function App() {
         </div>
 
         {/* Teams 分组 */}
-        {teams.length > 0 && (
+        {TEAM_FEATURE_ENABLED && teams.length > 0 && (
           <div className="sidebar-teams-section">
             <div className="sidebar-teams-header">
               <span>Teams</span>
@@ -2412,7 +2419,7 @@ export default function App() {
             >
               {t('common.history')}
             </button>
-            {!currentSession.teamId && (
+            {TEAM_FEATURE_ENABLED && !currentSession.teamId && (
               <button
                 className="btn btn-secondary btn-small"
                 onClick={() => setShowStartTeamDialog(true)}
@@ -2500,7 +2507,7 @@ export default function App() {
             style={{ top: sessionContextMenu.y, left: sessionContextMenu.x }}
             onClick={(e) => e.stopPropagation()}
           >
-            {!sessionContextMenu.session.teamId && (
+            {TEAM_FEATURE_ENABLED && !sessionContextMenu.session.teamId && (
               <div
                 className="context-menu-item"
                 onClick={() => {
