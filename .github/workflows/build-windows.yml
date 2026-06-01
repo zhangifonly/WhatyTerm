@@ -1,0 +1,74 @@
+name: Build Windows (private)
+
+# 在私有仓构建 Windows 安装包：核心代码（Ralph 等）不进公开仓。
+# 仅构建 Windows，自动上传 exe + latest.yml 到下载服务器（与 build.yml 同路径）。
+# GitHub Release（公开仓 v1.2.20）由本地从服务器拉取后补挂。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  DOWNLOAD_PATH: /var/www/downloads/whatyterm
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Rebuild native modules for Electron
+        run: npx electron-rebuild -f -w better-sqlite3,node-pty
+
+      - name: Build (frontend + premium 混淆 + Windows 包)
+        run: npm run electron:build:win
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List built files
+        run: dir release
+
+      - name: Upload artifacts (备份用)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: |
+            release/*.exe
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload to download server
+        shell: bash
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -p 22 ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+
+          VERSION="v$(node -p "require('./package.json').version")"
+          REMOTE_PATH="${{ env.DOWNLOAD_PATH }}/$VERSION"
+          RELEASES_PATH="/var/www/downloads/releases"
+
+          ssh -o StrictHostKeyChecking=no ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }} \
+            "mkdir -p $REMOTE_PATH $RELEASES_PATH"
+
+          for file in release/*.exe; do
+            [ -f "$file" ] && scp -o StrictHostKeyChecking=no "$file" \
+              ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:"$REMOTE_PATH/"
+          done
+
+          if [ -f "release/latest.yml" ]; then
+            scp -o StrictHostKeyChecking=no "release/latest.yml" \
+              ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:"$RELEASES_PATH/"
+          fi
