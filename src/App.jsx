@@ -1201,19 +1201,23 @@ export default function App() {
           {sidebarCollapsed ? '›' : '‹'}
         </button>
         <div className="sidebar-header">
-          <h1
+          <div
+            className="sidebar-brand"
             onClick={() => setCurrentSession(null)}
-            style={{ cursor: 'pointer' }}
             title={t('welcome.startHint')}
           >
-            {t('app.title')} <span style={{ fontSize: '14px', opacity: 0.7, fontWeight: 'normal' }}>{t('app.subtitle')}</span>
-          </h1>
+            <span className="sidebar-brand-mark">W</span>
+            <span className="sidebar-brand-text">
+              <span className="sidebar-brand-name">WhatyTerm</span>
+              <span className="sidebar-brand-sub">网梯终端</span>
+            </span>
+          </div>
           <div className="sidebar-header-actions">
-            <button className="btn btn-primary btn-small" onClick={() => setShowCreateModal(true)}>
-              {t('sidebar.newSession')}
+            <button className="btn btn-primary btn-small btn-new" onClick={() => setShowCreateModal(true)}>
+              <span className="btn-ico">＋</span>{t('sidebar.newSession').replace(/^\+\s*/, '')}
             </button>
-            <button className="btn btn-small" onClick={() => setShowRalphWizard(true)} title="自主开发：描述需求，AI 自动拆分并逐个完成">
-              🏭 自主开发
+            <button className="btn btn-small btn-ralph" onClick={() => setShowRalphWizard(true)} title="自主开发：描述需求，AI 自动拆分并逐个完成">
+              <span className="btn-ico">🏭</span>自主开发
             </button>
           </div>
         </div>
