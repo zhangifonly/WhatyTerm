@@ -1238,15 +1238,17 @@ export default function App() {
           >
             {t('app.title')} <span style={{ fontSize: '14px', opacity: 0.7, fontWeight: 'normal' }}>{t('app.subtitle')}</span>
           </h1>
-          <button className="btn btn-primary btn-small" onClick={() => setShowCreateModal(true)}>
-            {t('sidebar.newSession')}
-          </button>
-          <button className="btn btn-small" onClick={() => setShowCreateTeamDialog(true)} title="创建 Agent Team" style={{ marginLeft: '4px' }}>
-            Team
-          </button>
-          <button className="btn btn-small" onClick={() => setShowRalphWizard(true)} title="自主开发：描述需求，AI 自动拆分并逐个完成" style={{ marginLeft: '4px' }}>
-            🏭 自主开发
-          </button>
+          <div className="sidebar-header-actions">
+            <button className="btn btn-primary btn-small" onClick={() => setShowCreateModal(true)}>
+              {t('sidebar.newSession')}
+            </button>
+            <button className="btn btn-small" onClick={() => setShowCreateTeamDialog(true)} title="创建 Agent Team">
+              Team
+            </button>
+            <button className="btn btn-small" onClick={() => setShowRalphWizard(true)} title="自主开发：描述需求，AI 自动拆分并逐个完成">
+              🏭 自主开发
+            </button>
+          </div>
         </div>
 
         {/* Teams 分组 */}

@@ -212,24 +212,24 @@ body {
 }
 
 .sidebar-header {
-  padding: 18px 12px;
+  padding: 14px 12px;
   border-bottom: 1px solid hsl(var(--border) / 0.5);
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: nowrap;
-  gap: 6px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
   position: relative;
   z-index: 1;
-  overflow: hidden;
 }
 
 .sidebar-header h1 {
   font-size: 16px;
   font-weight: 700;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   min-width: 0;
-  flex: 1;
+  margin: 0;
   color: hsl(var(--foreground));
   background: linear-gradient(135deg,
     hsl(var(--foreground)) 0%,
@@ -237,6 +237,18 @@ body {
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+/* 操作按钮行：自动换行，不再挤压/遮挡标题 */
+.sidebar-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.sidebar-header-actions .btn {
+  flex: 0 0 auto;
 }
 
 .btn {
