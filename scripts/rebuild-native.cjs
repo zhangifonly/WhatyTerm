@@ -18,7 +18,50 @@ module.exports = async function (context) {
 
   // 清理 node-pty 非目标平台预编译二进制
   cleanNodePtyPrebuilds(appOutDir, electronPlatformName);
+
+  // 用混淆版覆盖打包后的明文付费文件（闭源保护）
+  applyPremiumObfuscation(appOutDir, electronPlatformName);
 };
+
+/**
+ * 用 dist/server 下的混淆版覆盖安装包内 Resources/server 的明文付费文件。
+ * extraResources 多条目目标重叠不保证覆盖，故在此对真实打包产物就地替换，确保生效。
+ * 依赖 `npm run build:premium` 已生成 dist/server/* 混淆产物。
+ */
+function applyPremiumObfuscation(appOutDir, platform) {
+  const rootDir = path.join(__dirname, '..');
+  const resourcesDir = platform === 'darwin'
+    ? path.join(appOutDir, 'WhatyTerm.app', 'Contents', 'Resources')
+    : path.join(appOutDir, 'resources');
+
+  // 单文件付费核心
+  const files = [
+    'server/services/RalphEngine.js',
+    'server/services/ralph/prompts.js',
+  ];
+  for (const rel of files) {
+    const src = path.join(rootDir, 'dist', rel);
+    const dst = path.join(resourcesDir, rel);
+    if (fs.existsSync(src) && fs.existsSync(dst)) {
+      fs.copyFileSync(src, dst);
+      console.log(`[premium] 已用混淆版覆盖: ${rel}`);
+    } else {
+      console.warn(`[premium] 跳过(缺失): src=${fs.existsSync(src)} dst=${fs.existsSync(dst)} ${rel}`);
+    }
+  }
+
+  // 付费监控插件目录（dist 里除免费插件外均为混淆版）
+  const pluginsRel = 'server/services/MonitorPlugins/plugins';
+  const pSrcDir = path.join(rootDir, 'dist', pluginsRel);
+  const pDstDir = path.join(resourcesDir, pluginsRel);
+  if (fs.existsSync(pSrcDir) && fs.existsSync(pDstDir)) {
+    for (const f of fs.readdirSync(pSrcDir)) {
+      if (!f.endsWith('.js')) continue;
+      fs.copyFileSync(path.join(pSrcDir, f), path.join(pDstDir, f));
+    }
+    console.log(`[premium] 已用混淆版覆盖监控插件目录`);
+  }
+}
 
 function cleanNodePtyPrebuilds(appOutDir, platform) {
   const isWin = platform === 'win32';

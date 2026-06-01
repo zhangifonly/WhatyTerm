@@ -27,17 +27,11 @@ extraResources:
     to: icon.ico
   - from: build/icon.icns
     to: icon.icns
-  # 服务器代码（明文）
+  # 服务器代码（明文打包；付费文件随后由 afterPack 钩子用 dist 混淆版就地覆盖）
+  # 注：extraResources 多条目目标重叠不保证覆盖，故 premium 保护改在 scripts/rebuild-native.cjs
+  #     的 applyPremiumObfuscation() 里对真实打包产物执行，确保生效。
   - from: server
     to: server
-  # 用混淆版覆盖明文（premium 保护，必须排在 server 之后，后写覆盖先写）
-  # 来源由 npm run build:premium 生成；运行时加载的就是这些被覆盖后的文件
-  - from: dist/server/services/MonitorPlugins/plugins
-    to: server/services/MonitorPlugins/plugins
-  - from: dist/server/services/RalphEngine.js
-    to: server/services/RalphEngine.js
-  - from: dist/server/services/ralph/prompts.js
-    to: server/services/ralph/prompts.js
   # 前端构建产物（Express 需要直接访问文件系统）
   - from: dist
     to: dist
