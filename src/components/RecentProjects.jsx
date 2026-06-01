@@ -4,7 +4,7 @@ import './RecentProjects.css';
 
 const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) => {
   const { t } = useTranslation();
-  const [projects, setProjects] = useState({ claude: [], codex: [], gemini: [] });
+  const [projects, setProjects] = useState({ claude: [], codex: [], gemini: [], grok: [] });
   const [activeTab, setActiveTab] = useState('claude');
   const [loading, setLoading] = useState(true);
   const [expandedSections, setExpandedSections] = useState({});
@@ -21,6 +21,7 @@ const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) 
       if (data.claude?.length > 0) setActiveTab('claude');
       else if (data.codex?.length > 0) setActiveTab('codex');
       else if (data.gemini?.length > 0) setActiveTab('gemini');
+      else if (data.grok?.length > 0) setActiveTab('grok');
     };
 
     socket.on('recentProjects:list', handleList);
@@ -58,7 +59,8 @@ const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) 
 
   const totalCount = (projects.claude?.length || 0) +
                      (projects.codex?.length || 0) +
-                     (projects.gemini?.length || 0);
+                     (projects.gemini?.length || 0) +
+                     (projects.grok?.length || 0);
 
   if (loading) {
     // 骨架屏 - 改善感知加载速度
@@ -92,7 +94,8 @@ const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) 
   const allProjects = [
     ...(projects.claude || []),
     ...(projects.codex || []),
-    ...(projects.gemini || [])
+    ...(projects.gemini || []),
+    ...(projects.grok || [])
   ].sort((a, b) => b.lastUsed - a.lastUsed);
 
   const currentProjects = projects[activeTab] || [];
@@ -110,7 +113,8 @@ const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) 
     const aiTypes = [
       { key: 'claude', label: 'Claude', data: projects.claude || [] },
       { key: 'codex', label: 'Codex', data: projects.codex || [] },
-      { key: 'gemini', label: 'Gemini', data: projects.gemini || [] }
+      { key: 'gemini', label: 'Gemini', data: projects.gemini || [] },
+      { key: 'grok', label: 'Grok', data: projects.grok || [] }
     ].filter(ai => ai.data.length > 0);
 
     return (
@@ -206,6 +210,14 @@ const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) 
             onClick={() => setActiveTab('gemini')}
           >
             Gemini ({projects.gemini.length})
+          </button>
+        )}
+        {projects.grok?.length > 0 && (
+          <button
+            className={`tab-btn grok ${activeTab === 'grok' ? 'active' : ''}`}
+            onClick={() => setActiveTab('grok')}
+          >
+            Grok ({projects.grok.length})
           </button>
         )}
       </div>

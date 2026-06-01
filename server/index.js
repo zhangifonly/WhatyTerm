@@ -5446,7 +5446,7 @@ io.on('connection', (socket) => {
       socket.emit('recentProjects:list', projects);
     } catch (error) {
       console.error('[RecentProjects] 获取失败:', error);
-      socket.emit('recentProjects:list', { claude: [], codex: [], gemini: [] });
+      socket.emit('recentProjects:list', { claude: [], codex: [], gemini: [], grok: [] });
     }
   });
 

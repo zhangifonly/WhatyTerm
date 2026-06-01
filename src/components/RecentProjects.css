@@ -73,6 +73,11 @@
   border-color: #fbbf24;
 }
 
+.tab-btn.grok.active {
+  background: rgba(56, 189, 248, 0.15);
+  border-color: #38bdf8;
+}
+
 .recent-projects-list {
   display: flex;
   flex-direction: column;
@@ -134,6 +139,11 @@
 .ai-badge.gemini {
   background: rgba(251, 191, 36, 0.2);
   color: #fbbf24;
+}
+
+.ai-badge.grok {
+  background: rgba(56, 189, 248, 0.2);
+  color: #38bdf8;
 }
 
 .project-path {
@@ -258,6 +268,11 @@
 .compact-ai-label.gemini {
   color: #fbbf24;
   background: rgba(251, 191, 36, 0.12);
+}
+
+.compact-ai-label.grok {
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.12);
 }
 
 .compact-count {
