@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import './RalphWizard.css';
 
 /**
@@ -21,6 +21,29 @@ const RalphWizard = ({ socket, onClose, onStarted }) => {
   const [features, setFeatures] = useState([]);
   const [enabled, setEnabled] = useState({});      // id -> bool
   const [dirtyFiles, setDirtyFiles] = useState(null);
+
+  // 已有项目列表（来自各 CLI 的最近项目，供选择）
+  const [recentProjects, setRecentProjects] = useState([]);
+
+  useEffect(() => {
+    if (!socket) return;
+    const handleList = (data) => {
+      // 合并各 CLI、按路径去重、按最近使用排序
+      const merged = [
+        ...(data.claude || []), ...(data.codex || []),
+        ...(data.gemini || []), ...(data.grok || [])
+      ];
+      const byPath = new Map();
+      for (const p of merged) {
+        const ex = byPath.get(p.path);
+        if (!ex || (p.lastUsed || 0) > (ex.lastUsed || 0)) byPath.set(p.path, p);
+      }
+      setRecentProjects([...byPath.values()].sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0)));
+    };
+    socket.on('recentProjects:list', handleList);
+    socket.emit('recentProjects:get');
+    return () => socket.off('recentProjects:list', handleList);
+  }, [socket]);
 
   // Step1 提交：触发拆分
   const doPlan = () => {
@@ -95,8 +118,29 @@ const RalphWizard = ({ socket, onClose, onStarted }) => {
           </>
         ) : (
           <div className="form-group">
-            <label>已有项目目录（绝对路径）</label>
-            <input value={existingDir} onChange={e => setExistingDir(e.target.value)} placeholder="/Users/you/Code/myproject" />
+            <label>选择已有项目</label>
+            {recentProjects.length > 0 && (
+              <div className="rw-projects">
+                {recentProjects.map(p => (
+                  <button
+                    type="button"
+                    key={p.path}
+                    className={`rw-project ${existingDir === p.path ? 'active' : ''}`}
+                    onClick={() => setExistingDir(p.path)}
+                    title={p.path}
+                  >
+                    <span className={`rw-project-badge ${p.aiType}`}>{p.aiType}</span>
+                    <span className="rw-project-name">{p.name}</span>
+                    <span className="rw-project-path">{p.path}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <input
+              value={existingDir}
+              onChange={e => setExistingDir(e.target.value)}
+              placeholder="或手动输入绝对路径 /Users/you/Code/myproject"
+            />
           </div>
         )}
         <div className="form-group">
