@@ -547,6 +547,14 @@ class SubscriptionService {
   }
 
   /**
+   * Ralph 自主开发模式是否可用（付费功能）
+   * @returns {boolean}
+   */
+  isRalphAvailable() {
+    return this.licenseValid === true;
+  }
+
+  /**
    * 检查插件是否可用
    * 监控策略不再限制，所有插件对所有用户开放
    * @param {string} pluginId - 插件 ID

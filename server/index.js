@@ -115,7 +115,8 @@ import TaskOrchestrator from './services/TaskOrchestrator.js';
 import progressManager from './services/ProgressManager.js';
 import PlannerService from './services/PlannerService.js';
 import EvaluatorService from './services/EvaluatorService.js';
-import RalphEngine from './services/RalphEngine.js';
+// Ralph 自主开发：经公开壳 loader 加载付费闭源核心（缺失时优雅降级）
+import { RalphEngine, RALPH_CORE_PRESENT } from './services/ralph/loader.js';
 import telemetryService from './services/TelemetryService.js';
 import crashReporter from './services/CrashReporter.js';
 import sleepPrevention from './services/SleepPreventionService.js';
@@ -5484,8 +5485,23 @@ io.on('connection', (socket) => {
 
   // ───────── Ralph 自主模式 ─────────
 
+  // 付费门禁：未订阅则拦截并引导订阅。返回 true 表示已拦截（调用方应 return）
+  const ralphGate = (socket, sessionId) => {
+    if (RALPH_CORE_PRESENT && subscriptionService.isRalphAvailable()) return false;
+    const payload = {
+      sessionId,
+      error: 'premium_required',
+      message: '自主开发是专业版功能，请订阅后使用',
+      subscriptionUrl: subscriptionService.getSubscriptionUrl?.() || ''
+    };
+    socket.emit('ralph:state', { ...payload, running: false });
+    socket.emit('ralph:premium_required', payload);
+    return true;
+  };
+
   // 自主模式任务拆分（带 acceptanceCriteria/dependsOn/branch）
   socket.on('ralph:plan', async ({ sessionId, goal }) => {
+    if (ralphGate(socket, sessionId)) return;
     try {
       const session = sessionManager?.getSession(sessionId);
       const terminalOutput = session?.getRecentOutput?.(80) || '';
@@ -5506,6 +5522,7 @@ io.on('connection', (socket) => {
 
   // 启动自主执行循环
   socket.on('ralph:start', ({ sessionId, maxIterations }) => {
+    if (ralphGate(socket, sessionId)) return;
     if (!ralphEngine) {
       socket.emit('ralph:state', { sessionId, running: false, error: '引擎未就绪' });
       return;
@@ -5540,6 +5557,9 @@ io.on('connection', (socket) => {
   // 向导 Step1→Step2：建目录 + git init + 建会话 + 自主拆分，返回任务清单
   socket.on('ralph:wizard:plan', async ({ projectName, parentDir, requirement, existingDir, aiType }, cb) => {
     const reply = (data) => { socket.emit('ralph:wizard:planned', data); if (typeof cb === 'function') cb(data); };
+    if (!RALPH_CORE_PRESENT || !subscriptionService.isRalphAvailable()) {
+      return reply({ error: 'premium_required', message: '自主开发是专业版功能，请订阅后使用', subscriptionUrl: subscriptionService.getSubscriptionUrl?.() || '' });
+    }
     try {
       await waitForSessionManager();
       // 1. 确定 workingDir
@@ -5596,6 +5616,9 @@ io.on('connection', (socket) => {
   // 向导 Step2 确认：git 干净检查 + 建分支 + 启动执行
   socket.on('ralph:wizard:start', ({ sessionId, enabledTaskIds, pauseAfterEachTask, ignoreDirty }, cb) => {
     const reply = (data) => { socket.emit('ralph:wizard:started', { sessionId, ...data }); if (typeof cb === 'function') cb(data); };
+    if (!RALPH_CORE_PRESENT || !subscriptionService.isRalphAvailable()) {
+      return reply({ error: 'premium_required', message: '自主开发是专业版功能，请订阅后使用', subscriptionUrl: subscriptionService.getSubscriptionUrl?.() || '' });
+    }
     try {
       if (!ralphEngine) return reply({ error: '引擎未就绪' });
       const session = sessionManager.getSession(sessionId);

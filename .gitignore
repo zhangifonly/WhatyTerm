@@ -1,21 +1,30 @@
+# Dependencies
 node_modules/
-dist/
-.DS_Store
-*.log
-server/db/*.json
-server/db/*.db
-release/
-*.dmg
-*.exe
-!server/bin/windows/*.exe
-*.zip
-*.AppImage
-*.deb
-data/
-.build-tmux/
 
-# 敏感文件
-CLAUDE.md
-.claude/settings.local.json
+# Build outputs
+dist/
+release/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*.DS_Store
+
+# Environment variables
 .env
-**/.env
+.env.local
+
+# Claude settings
+.claude/settings.local.json
+CLAUDE.md
+
+# Ralph 自主开发 — 付费闭源核心（不随公开仓库发布）
+# 公开壳为 server/services/ralph/loader.js（保留），核心实现排除如下：
+/server/services/RalphEngine.js
+/server/services/ralph/prompts.js
