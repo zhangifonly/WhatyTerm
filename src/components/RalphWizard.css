@@ -70,6 +70,8 @@
 
 .rw-dirty { max-height: 200px; overflow-y: auto; background: hsl(220 14% 10%); border-radius: 4px; padding: 8px; font-family: monospace; font-size: 11px; color: hsl(38 92% 60%); margin-bottom: 12px; }
 
+.rw-hint { color: hsl(var(--muted-foreground)); font-size: 12px; flex: 1; }
+.rw-provider-note { color: hsl(var(--muted-foreground)); font-size: 11px; margin: -4px 0 10px; opacity: 0.8; }
 .rw-error { color: hsl(0 70% 65%); font-size: 12px; margin-bottom: 10px; }
 .rw-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .rw-actions button { padding: 8px 16px; border-radius: 6px; cursor: pointer; border: 1px solid hsl(var(--border)); background: hsl(var(--secondary)); color: hsl(var(--foreground)); font-size: 13px; }

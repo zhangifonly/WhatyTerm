@@ -15,6 +15,10 @@ const RalphWizard = ({ socket, onClose, onStarted }) => {
   const [aiType, setAiType] = useState('claude');
   const [pauseEach, setPauseEach] = useState(false);
 
+  // API 供应商（每会话独立，不影响全局）
+  const [providers, setProviders] = useState([]);
+  const [providerId, setProviderId] = useState('');
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [sessionId, setSessionId] = useState(null);
@@ -45,6 +49,24 @@ const RalphWizard = ({ socket, onClose, onStarted }) => {
     return () => socket.off('recentProjects:list', handleList);
   }, [socket]);
 
+  // 随 CLI 联动拉取供应商列表，默认选当前激活项（跟随全局）
+  useEffect(() => {
+    let aborted = false;
+    setProviders([]);
+    setProviderId('');
+    fetch(`/api/cc-switch/providers?app=${aiType}`)
+      .then(r => r.json())
+      .then(res => {
+        if (aborted) return;
+        const list = res?.data?.providers || res?.providers || [];
+        setProviders(list);
+        const cur = list.find(p => p.isCurrent);
+        setProviderId(cur ? cur.id : ''); // '' = 跟随默认
+      })
+      .catch(() => { if (!aborted) setProviders([]); });
+    return () => { aborted = true; };
+  }, [aiType]);
+
   // Step1 提交：触发拆分
   const doPlan = () => {
     setError('');
@@ -57,7 +79,8 @@ const RalphWizard = ({ socket, onClose, onStarted }) => {
       parentDir: parentDir.trim(),
       existingDir: mode === 'existing' ? existingDir.trim() : undefined,
       requirement: requirement.trim(),
-      aiType
+      aiType,
+      providerId: providerId || undefined
     }, (res) => {
       setLoading(false);
       if (res.error === 'premium_required') {
@@ -161,6 +184,20 @@ const RalphWizard = ({ socket, onClose, onStarted }) => {
             每个任务完成后暂停
           </label>
         </div>
+        <div className="form-group rw-row">
+          <label>API 供应商</label>
+          {providers.length > 0 ? (
+            <select value={providerId} onChange={e => setProviderId(e.target.value)} style={{ flex: 1 }}>
+              <option value="">跟随当前默认</option>
+              {providers.map(p => (
+                <option key={p.id} value={p.id}>{p.name}{p.isCurrent ? '（当前）' : ''}</option>
+              ))}
+            </select>
+          ) : (
+            <span className="rw-hint">该 CLI 无可选供应商，使用默认</span>
+          )}
+        </div>
+        <div className="rw-provider-note">仅本次会话生效，不影响全局设置</div>
         {error && <div className="rw-error">{error}</div>}
         <div className="rw-actions">
           <button onClick={onClose} disabled={loading}>取消</button>

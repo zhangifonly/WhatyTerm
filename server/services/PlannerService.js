@@ -96,6 +96,8 @@ class PlannerService {
       if (typeof this.aiEngine.generateTextViaCLI === 'function') {
         result = await this.aiEngine.generateTextViaCLI(prompt, {
           cwd: projectContext.workingDir,
+          aiType: projectContext.aiType || 'claude',
+          providerEnv: projectContext.providerEnv || {},
           timeout: 180000,
         });
         if (!result) console.warn('[Planner] CLI 拆分无结果，回退 HTTP API');

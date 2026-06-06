@@ -4558,6 +4558,128 @@ setInterval(() => {
 let _providerSwitchInProgress = false;
 
 /**
+ * 按 providerId 读取供应商配置并解析出可用于子进程/会话的信息。
+ * 与 switchProviderStateMachine 同源（BuiltinProviderDB → providers.json 兜底）。
+ * @returns {{ provider, settingsConfig, env, isOAuth }|null}
+ *   env: Claude 为 { ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN } 等（OAuth 时为空对象）
+ */
+function resolveProviderInfo(appType, providerId) {
+  if (!providerId) return null;
+  let targetProvider = null;
+  try {
+    const db = builtinProviderDB.getDB(true);
+    const row = db.prepare('SELECT * FROM providers WHERE id = ? AND app_type = ?').get(providerId, appType);
+    db.close();
+    if (row) {
+      let settingsConfig = {};
+      try {
+        if (row.settings_config) {
+          settingsConfig = typeof row.settings_config === 'string'
+            ? JSON.parse(row.settings_config) : row.settings_config;
+        }
+      } catch {}
+      targetProvider = { id: row.id, name: row.name, appType: row.app_type, settingsConfig };
+    }
+  } catch (e) {
+    console.error('[resolveProviderInfo] 读取 BuiltinProviderDB 失败:', e.message);
+  }
+  if (!targetProvider) {
+    targetProvider = providerService.getById(appType, providerId);
+  }
+  if (!targetProvider) return null;
+
+  const sc = targetProvider.settingsConfig || {};
+  let env = {};
+  if (appType === 'claude') {
+    if (sc.env && Object.keys(sc.env).length > 0) {
+      env = { ...sc.env };
+    } else {
+      const apiType = sc.apiType || 'openai';
+      const apiConf = sc[apiType] || {};
+      if (apiConf.apiUrl) env.ANTHROPIC_BASE_URL = apiConf.apiUrl;
+      if (apiConf.apiKey) env.ANTHROPIC_AUTH_TOKEN = apiConf.apiKey;
+    }
+  } else if (appType === 'gemini') {
+    if (sc.env && Object.keys(sc.env).length > 0) env = { ...sc.env };
+  }
+  // codex 用 auth.json/config.toml（非 env），由 applySessionProvider 写会话目录
+  const isOAuth = appType === 'claude' && (!!sc.useOAuth || !env.ANTHROPIC_BASE_URL);
+  return { provider: targetProvider, settingsConfig: sc, env, isOAuth };
+}
+
+/**
+ * 为单个会话设置 API 供应商（仅影响本会话，不动全局配置）。
+ * Claude: 写 <workdir>/.claude/settings.local.json + 会话级 tmux env
+ * Codex:  会话专属 CODEX_HOME 目录(auth.json/config.toml) + 会话级 tmux env CODEX_HOME
+ * Gemini: 写 <workdir>/.gemini/settings.json + 会话级 tmux env
+ * @returns {{ ok:boolean, providerEnv?:object, error?:string }}
+ *   providerEnv 用于拆分阶段 spawn 注入（值为 null 表示从继承 env 中删除该键）
+ */
+function applySessionProvider(session, appType, providerId) {
+  const info = resolveProviderInfo(appType, providerId);
+  if (!info) return { ok: false, error: '供应商不存在' };
+
+  const workdir = session.workingDir;
+  const tmux = session.tmuxSessionName;
+  const setEnv = (k, v) => {
+    if (!tmux) return;
+    try { execSync(`${getTmuxPrefix()} set-environment -t "${tmux}" ${k} "${v}"`, { stdio: 'ignore' }); } catch {}
+  };
+  const unsetEnv = (k) => {
+    if (!tmux) return;
+    try { execSync(`${getTmuxPrefix()} set-environment -t "${tmux}" -u ${k}`, { stdio: 'ignore' }); } catch {}
+  };
+
+  let providerEnv = {};
+  try {
+    if (appType === 'claude') {
+      const localDir = path.join(workdir, '.claude');
+      if (!existsSync(localDir)) mkdirSync(localDir, { recursive: true });
+      const lp = path.join(localDir, 'settings.local.json');
+      let ls = {};
+      if (existsSync(lp)) { try { ls = JSON.parse(readFileSync(lp, 'utf-8')); } catch {} }
+      ls.env = ls.env || {};
+      const keys = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL'];
+      if (info.isOAuth) {
+        // 官方登录：清除本地与会话 env 里的 ANTHROPIC_*，让 CLI 走订阅登录
+        for (const k of keys) { delete ls.env[k]; unsetEnv(k); providerEnv[k] = null; }
+      } else {
+        for (const [k, v] of Object.entries(info.env)) { ls.env[k] = v; setEnv(k, v); providerEnv[k] = v; }
+      }
+      writeFileSync(lp, JSON.stringify(ls, null, 2), 'utf8');
+      session.claudeProvider = { id: info.provider.id, name: info.provider.name };
+    } else if (appType === 'codex') {
+      // 会话专属 CODEX_HOME，避免污染 ~/.codex
+      const codexHome = path.join(os.homedir(), '.webtmux', 'sessions', session.id, 'codex');
+      if (!existsSync(codexHome)) mkdirSync(codexHome, { recursive: true });
+      const sc = info.settingsConfig;
+      if (sc.auth) writeFileSync(path.join(codexHome, 'auth.json'), JSON.stringify(sc.auth, null, 2), 'utf8');
+      if (sc.config) writeFileSync(path.join(codexHome, 'config.toml'), sc.config, 'utf8');
+      setEnv('CODEX_HOME', codexHome);
+      providerEnv.CODEX_HOME = codexHome;
+      session.codexProvider = { id: info.provider.id, name: info.provider.name };
+    } else if (appType === 'gemini') {
+      // 项目级 .gemini（实现时验证 gemini 是否读取；至少 env 经 tmux/spawn 生效）
+      const gdir = path.join(workdir, '.gemini');
+      if (!existsSync(gdir)) mkdirSync(gdir, { recursive: true });
+      const sc = info.settingsConfig;
+      const settings = (sc.config && typeof sc.config === 'object') ? { ...sc.config } : {};
+      writeFileSync(path.join(gdir, 'settings.json'), JSON.stringify(settings, null, 2), 'utf8');
+      for (const [k, v] of Object.entries(info.env)) { setEnv(k, v); providerEnv[k] = v; }
+      session.geminiProvider = { id: info.provider.id, name: info.provider.name };
+    } else {
+      return { ok: false, error: `不支持的 CLI: ${appType}` };
+    }
+    try { sessionManager.updateSession(session); } catch {}
+    console.log(`[applySessionProvider] 会话 ${session.name} 设置 ${appType} 供应商: ${info.provider.name}`);
+    return { ok: true, providerEnv };
+  } catch (e) {
+    console.error('[applySessionProvider] 失败:', e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+/**
  * 切换供应商 - 简化版：直接将选中供应商的配置写入本地配置文件
  */
 async function switchProviderStateMachine(session, appType, providerId, socket) {
@@ -5510,7 +5632,7 @@ io.on('connection', (socket) => {
   // ───────── 自主开发一键向导 ─────────
 
   // 向导 Step1→Step2：建目录 + git init + 建会话 + 自主拆分，返回任务清单
-  socket.on('ralph:wizard:plan', async ({ projectName, parentDir, requirement, existingDir, aiType }, cb) => {
+  socket.on('ralph:wizard:plan', async ({ projectName, parentDir, requirement, existingDir, aiType, providerId }, cb) => {
     const reply = (data) => { socket.emit('ralph:wizard:planned', data); if (typeof cb === 'function') cb(data); };
     if (!RALPH_CORE_PRESENT || !subscriptionService.isRalphAvailable()) {
       return reply({ error: 'premium_required', message: '自主开发是专业版功能，请订阅后使用', subscriptionUrl: subscriptionService.getSubscriptionUrl?.() || '' });
@@ -5553,9 +5675,18 @@ io.on('connection', (socket) => {
       // 让终端进入工作目录
       setTimeout(() => { try { session.write(`cd "${workingDir}"\r`); } catch {} }, 300);
 
+      // 3.5 若指定了供应商，仅为本会话设置（不污染全局），拿到拆分阶段要注入的 env
+      let providerEnv = {};
+      if (providerId) {
+        const r = applySessionProvider(session, session.aiType, providerId);
+        if (r.ok) providerEnv = r.providerEnv || {};
+        else console.warn('[Ralph向导] 设置会话供应商失败:', r.error);
+      }
+
       // 4. 自主拆分
       const progress = await plannerService.expandGoal(session.id, requirement, {
-        workingDir, autonomous: true, projectDesc: session.projectDesc
+        workingDir, autonomous: true, projectDesc: session.projectDesc,
+        aiType: session.aiType, providerEnv
       });
       io.emit('sessions:updated', sessionManager.listSessions());
       if (!progress?.features?.length) {
@@ -5578,6 +5709,15 @@ io.on('connection', (socket) => {
       if (!ralphEngine) return reply({ error: '引擎未就绪' });
       const session = sessionManager.getSession(sessionId);
       if (!session?.workingDir) return reply({ error: '会话或工作目录无效' });
+
+      // 幂等重设会话供应商：确保执行阶段 tmux env（如 codex CODEX_HOME）就绪
+      // （拆分阶段已在 wizard:plan 设过；此处保险，主要为依赖 tmux env 的 codex）
+      const sessProvider = session.aiType === 'codex' ? session.codexProvider
+        : session.aiType === 'gemini' ? session.geminiProvider
+        : session.claudeProvider;
+      if (sessProvider?.id) {
+        applySessionProvider(session, session.aiType || 'claude', sessProvider.id);
+      }
 
       // 取消未勾选的任务
       if (Array.isArray(enabledTaskIds)) {
