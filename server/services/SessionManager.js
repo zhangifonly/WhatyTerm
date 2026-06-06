@@ -1776,6 +1776,13 @@ export class SessionManager {
       // 停止 pty 但不杀 tmux 会话
       session.destroy();
 
+      // provider 字段可能是对象（每会话供应商）或字符串，统一序列化为字符串再入库，
+      // 否则 better-sqlite3 会把对象当成命名参数报错 "named parameters in two different objects"。
+      const toProviderStr = (v) => {
+        if (v == null) return '';
+        return typeof v === 'object' ? JSON.stringify(v) : String(v);
+      };
+
       // 保存到 closed_sessions 表
       const stmt = this.db.prepare(`
         INSERT OR REPLACE INTO closed_sessions
@@ -1801,9 +1808,9 @@ export class SessionManager {
         session.projectDesc || '',
         session.workingDir || '',
         session.workingDir || '',
-        session.claudeProvider || '',
-        session.codexProvider || '',
-        session.geminiProvider || '',
+        toProviderStr(session.claudeProvider),
+        toProviderStr(session.codexProvider),
+        toProviderStr(session.geminiProvider),
         session.stats?.total || 0,
         session.stats?.success || 0,
         Date.now()
