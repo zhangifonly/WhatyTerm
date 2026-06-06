@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { spawn } from 'child_process';
 import { ProxyAgent, Agent } from 'undici';
 import Database from 'better-sqlite3';
 import ProviderService from './ProviderService.js';
@@ -2723,6 +2724,98 @@ ${this._buildProgressContext(projectContext)}
       } catch (err) {
         console.error('[AIEngine] 文本生成失败:', err.message);
         return null;
+      }
+    });
+  }
+
+  /**
+   * 解析 claude CLI 可执行文件路径（兼容 Electron 打包后 PATH 受限）
+   */
+  _resolveClaudeExe() {
+    const home = os.homedir();
+    const candidates = [
+      join(home, '.local/bin/claude'),
+      '/opt/homebrew/bin/claude',
+      '/usr/local/bin/claude',
+      join(home, '.claude/local/claude'),
+    ];
+    for (const p of candidates) {
+      try { if (fs.existsSync(p)) return p; } catch {}
+    }
+    return 'claude'; // 兜底走 PATH
+  }
+
+  /**
+   * 通过 claude CLI 子进程生成文本（照搬 WhatRalph 原版方式）。
+   * 复用 Claude Code 当前激活的供应商与登录态（官方订阅 / 中转 key 均可），
+   * 不自己直连 HTTP API，因此不受单个中转 504 影响、官方登录也能用。
+   * @param {string} prompt
+   * @param {object} options { timeout=180000, cwd }
+   * @returns {Promise<string|null>} 最终文本，失败返回 null
+   */
+  generateTextViaCLI(prompt, options = {}) {
+    const timeout = options.timeout || 180000;
+    const cwd = (options.cwd && fs.existsSync(options.cwd)) ? options.cwd : os.tmpdir();
+    const exe = this._resolveClaudeExe();
+
+    return new Promise((resolve) => {
+      let proc;
+      try {
+        proc = spawn(exe, ['--print', '--output-format', 'stream-json', '--verbose'], {
+          cwd,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          env: { ...process.env },
+        });
+      } catch (err) {
+        console.error('[AIEngine] 启动 claude CLI 失败:', err.message);
+        return resolve(null);
+      }
+
+      let finalText = null;
+      let buf = '';
+      let settled = false;
+      const done = (val) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { proc.kill('SIGTERM'); } catch {}
+        resolve(val);
+      };
+
+      const timer = setTimeout(() => {
+        console.error(`[AIEngine] claude CLI 超时(${timeout}ms)`);
+        done(finalText); // 超时也返回已拿到的（通常为 null）
+      }, timeout);
+
+      proc.stdout.on('data', (chunk) => {
+        buf += chunk.toString('utf-8');
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          try {
+            const obj = JSON.parse(line);
+            if (obj.type === 'result' && typeof obj.result === 'string') {
+              finalText = obj.result;
+              if (obj.subtype === 'success' && !obj.is_error) done(finalText);
+            }
+          } catch { /* 非完整 JSON 行，忽略 */ }
+        }
+      });
+
+      proc.on('error', (err) => {
+        console.error('[AIEngine] claude CLI 进程错误:', err.message);
+        done(null);
+      });
+      proc.on('close', () => done(finalText));
+
+      try {
+        proc.stdin.write(prompt);
+        proc.stdin.end();
+      } catch (err) {
+        console.error('[AIEngine] 写入 prompt 失败:', err.message);
+        done(null);
       }
     });
   }

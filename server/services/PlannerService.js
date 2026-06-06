@@ -90,7 +90,19 @@ class PlannerService {
 
     try {
       console.log(`[Planner] 开始规划${autonomous ? '(自主模式)' : ''}: ${goal.substring(0, 50)}...`);
-      const result = await this.aiEngine.generateText(prompt);
+      // 优先用 claude CLI 子进程（照搬 WhatRalph：复用 Claude Code 当前供应商/登录态，
+      // 官方登录或中转均可，不受单个中转 504 影响）；CLI 不可用时回退 HTTP。
+      let result = null;
+      if (typeof this.aiEngine.generateTextViaCLI === 'function') {
+        result = await this.aiEngine.generateTextViaCLI(prompt, {
+          cwd: projectContext.workingDir,
+          timeout: 180000,
+        });
+        if (!result) console.warn('[Planner] CLI 拆分无结果，回退 HTTP API');
+      }
+      if (!result) {
+        result = await this.aiEngine.generateText(prompt);
+      }
       if (!result) {
         console.error('[Planner] AI 返回空结果');
         return null;
