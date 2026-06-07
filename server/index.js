@@ -1332,18 +1332,20 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
     const findProviderName = (url, rows) => {
       if (!url || !rows) return '未知供应商';
       const normalizedUrl = url.replace(/\/+$/, '').replace(/\/v\d+$/, '');
+      const matches = [];
       for (const row of rows) {
         try {
           if (row.settings_config) {
             const config = JSON.parse(row.settings_config);
             const providerUrl = extractProviderUrl(config).replace(/\/+$/, '').replace(/\/v\d+$/, '');
-            if (normalizedUrl === providerUrl) {
-              return row.name || '未命名';
-            }
+            if (normalizedUrl === providerUrl) matches.push(row);
           }
         } catch (e) {}
       }
-      return '未知供应商';
+      if (matches.length === 0) return '未知供应商';
+      // 多个同 URL 时优先 is_current（用户明确切换的）
+      const cur = matches.find(r => r.is_current);
+      return (cur || matches[0]).name || '未命名';
     };
 
     // 构建全局配置信息对象
@@ -1414,15 +1416,11 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         }
 
         if (urlMatches.length > 0) {
-          // 优先 URL+Key 精确匹配
+          // 多个同 URL 供应商（如 Whaty / Whaty copy，常同账号复制 URL+Key 全同）时，
+          // is_current 是用户明确切换的最权威依据，优先级最高；其次 URL+Key 精确匹配；最后第一个。
+          const currentMatch = urlMatches.find(m => m.row.is_current);
           const exactMatch = urlMatches.find(m => m.keyMatch);
-          let bestRow;
-          if (exactMatch) {
-            bestRow = exactMatch.row;
-          } else {
-            const currentMatch = urlMatches.find(m => m.row.is_current);
-            bestRow = currentMatch ? currentMatch.row : urlMatches[0].row;
-          }
+          const bestRow = (currentMatch || exactMatch || urlMatches[0]).row;
           return resolve(buildResult({
             id: bestRow.id,
             name: bestRow.name || '未命名',

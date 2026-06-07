@@ -1991,6 +1991,13 @@ export default function App() {
                         </button>
                       )}
                     </div>
+                    {/* 进程实际供应商与全局当前不一致：提示需重启会话生效（消除"当前会话不更新"的混淆） */}
+                    {isProcessConfig && globalConfig?.name && globalConfig.name !== provider?.name && (
+                      <p style={{ fontSize: '11px', marginTop: '5px', color: 'hsl(38 92% 55%)', lineHeight: 1.45 }}>
+                        ⚠ 进程仍在用 <b>{provider?.name}</b>，全局已切到 <b>{globalConfig.name}</b>。
+                        当前会话需重启 CLI（退出再进 / <code>claude -c</code>）后才会用新供应商。
+                      </p>
+                    )}
                     {provider?.isOAuth && provider?.oauthEmail && (
                       <p className="mono" style={{ fontSize: '11px', wordBreak: 'break-all', marginTop: '4px', color: '#10b981' }}>
                         {provider.oauthEmail}
