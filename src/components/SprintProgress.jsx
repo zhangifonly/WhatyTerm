@@ -16,6 +16,10 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
   const [enabledTasks, setEnabledTasks] = useState({});       // featureId -> bool（待确认勾选）
   const [pauseEach, setPauseEach] = useState(false);
   const [starting, setStarting] = useState(false);
+  // 执行实时反馈
+  const [ralphElapsed, setRalphElapsed] = useState(0); // 当前阶段已运行毫秒
+  const [ralphBytes, setRalphBytes] = useState(0);     // 当前阶段输出字节
+  const [ralphStream, setRalphStream] = useState([]);  // CLI 实时输出行
 
   useEffect(() => {
     setProgress(null);
@@ -27,6 +31,9 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
     setPlanningStatus(null);
     setPlanError('');
     setEnabledTasks({});
+    setRalphElapsed(0);
+    setRalphBytes(0);
+    setRalphStream([]);
     if (!socket || !sessionId) return;
 
     socket.emit('progress:get', sessionId);
@@ -67,6 +74,8 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
       setRalphRunning(!!data.running);
       if (data.phase) setRalphPhase(data.phase);
       if (data.currentTask !== undefined) setRalphTask(data.currentTask);
+      // 阶段切换：清空上一阶段的实时输出与计时
+      setRalphStream([]); setRalphElapsed(0); setRalphBytes(0);
       // 状态变化时刷新进度
       socket.emit('progress:get', sessionId);
     };
@@ -74,12 +83,20 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
       if (data.sessionId !== sessionId) return;
       setRalphLogs(prev => [...prev.slice(-49), data.line]);
     };
+    // CLI 实时输出流（headless 输出 + 运行计时 + 输出量）
+    const handleRalphProgress = (data) => {
+      if (data.sessionId !== sessionId) return;
+      if (typeof data.elapsedMs === 'number') setRalphElapsed(data.elapsedMs);
+      if (typeof data.bytes === 'number') setRalphBytes(data.bytes);
+      if (data.lines?.length) setRalphStream(prev => [...prev, ...data.lines].slice(-60));
+    };
 
     socket.on('progress:data', handleData);
     socket.on('progress:updated', handleUpdated);
     socket.on('ralph:state', handleRalphState);
     socket.on('ralph:log', handleRalphLog);
     socket.on('ralph:planning', handlePlanning);
+    socket.on('ralph:progress', handleRalphProgress);
 
     return () => {
       socket.off('progress:data', handleData);
@@ -87,6 +104,7 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
       socket.off('ralph:state', handleRalphState);
       socket.off('ralph:log', handleRalphLog);
       socket.off('ralph:planning', handlePlanning);
+      socket.off('ralph:progress', handleRalphProgress);
     };
   }, [socket, sessionId]);
 
@@ -167,6 +185,12 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
     };
     doStart(false);
   };
+
+  const fmtTime = (ms) => {
+    const s = Math.floor((ms || 0) / 1000);
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  };
+  const fmtBytes = (b) => (!b ? '0B' : b < 1024 ? `${b}B` : `${(b / 1024).toFixed(1)}KB`);
 
   if (!progress?.features?.length) {
     // 向导后台拆分中：即使还没任务清单也显示状态（用户此时已在会话窗口，可自由切换）
@@ -317,9 +341,21 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
                    ralphPhase === 'paused' ? '⏸ 已暂停' :
                    ralphPhase === 'done' ? '✅ 完成' : '⏳ 调度中'}
                   {ralphTask && <em> · {ralphTask.name}</em>}
+                  {(ralphPhase === 'developing' || ralphPhase === 'validating') && (
+                    <span className="ralph-meter"> · ⏱ {fmtTime(ralphElapsed)} · {fmtBytes(ralphBytes)}
+                      <span className="ralph-pulse" /></span>
+                  )}
                 </span>
               )}
             </div>
+            {/* CLI 实时输出流（让用户看到执行时正在产出什么，而非静态"开发中"） */}
+            {ralphRunning && ralphStream.length > 0 && (
+              <div className="ralph-stream" ref={el => { if (el) el.scrollTop = el.scrollHeight; }}>
+                {ralphStream.slice(-30).map((l, i) => (
+                  <div key={i} className="ralph-stream-line">{l}</div>
+                ))}
+              </div>
+            )}
             {ralphLogs.length > 0 && (
               <div className="ralph-logs">
                 {ralphLogs.slice(-8).map((l, i) => (

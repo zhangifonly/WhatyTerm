@@ -175,6 +175,20 @@
 .ralph-start-btn:disabled { opacity: 0.6; cursor: wait; transform: none; }
 .ralph-pause-toggle { display: flex; align-items: center; gap: 4px; font-size: 11px; color: hsl(var(--muted-foreground)); cursor: pointer; }
 .ralph-plan-error { font-size: 11px; color: hsl(0 70% 65%); margin-bottom: 6px; }
+/* 执行实时计时/活跃 */
+.ralph-meter { color: hsl(var(--muted-foreground)); font-size: 10px; }
+.ralph-pulse {
+  display: inline-block; width: 6px; height: 6px; margin-left: 4px; border-radius: 50%;
+  background: hsl(142 70% 50%); vertical-align: middle; animation: ralph-blink 1s ease-in-out infinite;
+}
+@keyframes ralph-blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+/* CLI 实时输出流 */
+.ralph-stream {
+  margin-top: 6px; max-height: 160px; overflow-y: auto;
+  background: #0c0c0c; border: 1px solid hsl(var(--border)); border-radius: 4px;
+  padding: 6px 8px; font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.5;
+}
+.ralph-stream-line { color: hsl(120 30% 75%); white-space: pre-wrap; word-break: break-all; }
 .ralph-controls {
   display: flex;
   align-items: center;
