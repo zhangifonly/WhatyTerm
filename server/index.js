@@ -5580,11 +5580,22 @@ io.on('connection', (socket) => {
     try {
       const session = sessionManager?.getSession(sessionId);
       const terminalOutput = session?.getRecentOutput?.(80) || '';
+      // 用会话供应商拆分（与 wizard:plan 一致）：幂等重设拿 providerEnv
+      let providerEnv = {};
+      const sp = session?.aiType === 'codex' ? session?.codexProvider
+        : session?.aiType === 'gemini' ? session?.geminiProvider
+        : session?.claudeProvider;
+      if (session && sp?.id) {
+        const r = applySessionProvider(session, session.aiType || 'claude', sp.id);
+        if (r.ok) providerEnv = r.providerEnv || {};
+      }
       const projectContext = {
         projectDesc: session?.projectDesc,
         workingDir: session?.workingDir,
         terminalOutput,
-        autonomous: true
+        autonomous: true,
+        aiType: session?.aiType || 'claude',
+        providerEnv
       };
       const progress = await plannerService.expandGoal(sessionId, goal, projectContext);
       socket.emit('progress:data', { sessionId, progress });
@@ -5672,6 +5683,18 @@ io.on('connection', (socket) => {
       sessionManager.updateSession(session);
       // 让终端进入工作目录
       setTimeout(() => { try { session.write(`cd "${workingDir}"\r`); } catch {} }, 300);
+
+      // 持久化原始需求到 doc/requirement.md：session.goal 会被项目元数据刷新成占位
+      // （extractProjectGoal），导致"重新拆分"丢失需求；落地为文档后 expandGoal 会优先读取，
+      // 重新拆分可复用原始需求、不退化。
+      try {
+        const docDir = path.join(workingDir, 'doc');
+        if (!existsSync(docDir)) mkdirSync(docDir, { recursive: true });
+        const reqPath = path.join(docDir, 'requirement.md');
+        if (!existsSync(reqPath) && requirement && requirement.trim()) {
+          writeFileSync(reqPath, `# 需求\n\n${requirement.trim()}\n`, 'utf8');
+        }
+      } catch (e) { console.warn('[Ralph向导] 写 requirement.md 失败:', e.message); }
 
       // 3.5 若指定了供应商，仅为本会话设置（不污染全局），拿到拆分阶段要注入的 env
       let providerEnv = {};
