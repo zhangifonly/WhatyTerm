@@ -175,6 +175,13 @@
 .ralph-start-btn:disabled { opacity: 0.6; cursor: wait; transform: none; }
 .ralph-pause-toggle { display: flex; align-items: center; gap: 4px; font-size: 11px; color: hsl(var(--muted-foreground)); cursor: pointer; }
 .ralph-plan-error { font-size: 11px; color: hsl(0 70% 65%); margin-bottom: 6px; }
+/* 断点继续横幅 */
+.ralph-resume-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-bottom: 8px; padding: 8px 10px; border-radius: 6px;
+  background: hsl(38 92% 50% / 0.12); border: 1px solid hsl(38 92% 50% / 0.35);
+}
+.ralph-resume-text { font-size: 12px; color: hsl(38 92% 60%); font-weight: 500; }
 /* 执行实时计时/活跃 */
 .ralph-meter { color: hsl(var(--muted-foreground)); font-size: 10px; }
 .ralph-pulse {

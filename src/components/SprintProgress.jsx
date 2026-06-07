@@ -186,6 +186,14 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
     doStart(false);
   };
 
+  // 断点继续：从未完成任务接着跑（getNextTask 天然跳过已完成，不切分支、不重做）
+  const resumeRalph = (e) => {
+    e.stopPropagation();
+    if (ralphRunning) return;
+    socket.emit('ralph:start', { sessionId, maxIterations: 100 });
+    setRalphRunning(true);
+  };
+
   const fmtTime = (ms) => {
     const s = Math.floor((ms || 0) / 1000);
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -236,6 +244,12 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
   const percent = Math.round(completed / total * 100);
   const current = progress.features.find(f => f.status === 'in_progress')
     || progress.features.find(f => f.status === 'pending');
+
+  // 断点续跑判定：自主模式 + 有未完成 + 当前没在跑 + 已跑过一部分 = 中断态
+  const unfinished = progress.features.filter(f => !f.blocked && f.status !== 'completed').length;
+  const isAutonomous = progress.mode === 'autonomous';
+  const hasStarted = completed > 0 || progress.features.some(f => f.status === 'in_progress');
+  const isInterrupted = isAutonomous && unfinished > 0 && !ralphRunning && hasStarted;
 
   return (
     <div className="sprint-progress">
@@ -307,8 +321,16 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
           {/* Ralph 自主模式控制区 */}
           <div className="ralph-panel">
             {planError && <div className="ralph-plan-error">⚠️ {planError}</div>}
-            {/* 待确认态：勾选任务 + 开始自主开发（确认入口移到会话窗口） */}
-            {!ralphRunning && (
+            {/* 中断态：一键断点继续（从未完成任务接着跑，不重做已完成） */}
+            {isInterrupted && (
+              <div className="ralph-resume-banner">
+                <span className="ralph-resume-text">⏸ 上次自主开发未完成 · 已完成 {completed}/{total}</span>
+                <button className="ralph-start-btn" onClick={resumeRalph}
+                  title="从未完成任务接着跑，已完成的不重做">🔄 断点继续</button>
+              </div>
+            )}
+            {/* 全新待确认态：勾选任务 + 开始自主开发（刚拆分完、未开始） */}
+            {!ralphRunning && !isInterrupted && (
               <div className="ralph-confirm-row">
                 <button className="ralph-start-btn" onClick={startRalphWizard} disabled={starting}
                   title="确认勾选的任务并开始自主开发（Developer→Validator 循环，带 git 干净护栏）">
