@@ -5681,16 +5681,29 @@ io.on('connection', (socket) => {
         else console.warn('[Ralph向导] 设置会话供应商失败:', r.error);
       }
 
-      // 4. 自主拆分
-      const progress = await plannerService.expandGoal(session.id, requirement, {
-        workingDir, autonomous: true, projectDesc: session.projectDesc,
-        aiType: session.aiType, providerEnv
-      });
+      // 4. 立即返回 sessionId，让前端关闭弹窗并切到会话窗口；拆分放后台异步进行。
       io.emit('sessions:updated', sessionManager.listSessions());
-      if (!progress?.features?.length) {
-        return reply({ sessionId: session.id, workingDir, features: [], error: '拆分未产生任务，请补充需求描述' });
-      }
-      reply({ sessionId: session.id, workingDir, features: progress.features, isGitRepo });
+      reply({ sessionId: session.id, workingDir, isGitRepo, planning: true });
+
+      // 5. 后台拆分（不阻塞 handler），进度/结果经事件推到会话窗口的 SprintProgress
+      (async () => {
+        io.emit('ralph:planning', { sessionId: session.id, status: 'running' });
+        try {
+          const progress = await plannerService.expandGoal(session.id, requirement, {
+            workingDir, autonomous: true, projectDesc: session.projectDesc,
+            aiType: session.aiType, providerEnv
+          });
+          if (!progress?.features?.length) {
+            io.emit('ralph:planning', { sessionId: session.id, status: 'failed', error: '拆分未产生任务，请补充需求描述' });
+            return;
+          }
+          io.emit('progress:updated', { sessionId: session.id, progress });
+          io.emit('ralph:planning', { sessionId: session.id, status: 'done' });
+        } catch (err) {
+          console.error('[Ralph向导] 后台拆分失败:', err.message);
+          io.emit('ralph:planning', { sessionId: session.id, status: 'failed', error: err.message });
+        }
+      })();
     } catch (err) {
       console.error('[Ralph向导] plan 失败:', err.message);
       reply({ error: err.message });

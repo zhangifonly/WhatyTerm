@@ -87,13 +87,12 @@ const RalphWizard = ({ socket, onClose, onStarted }) => {
         setError('🔒 自主开发是专业版功能。' + (res.subscriptionUrl ? '点这里订阅：' + res.subscriptionUrl : '请订阅后使用'));
         return;
       }
-      if (res.error && !res.features?.length) { setError(res.error); return; }
-      setSessionId(res.sessionId);
-      setFeatures(res.features || []);
-      const en = {};
-      (res.features || []).forEach(f => { en[f.id] = f.status !== 'completed'; });
-      setEnabled(en);
-      setStep(2);
+      if (res.error) { setError(res.error); return; }
+      // 会话已建好：立即关闭弹窗、切到会话窗口；拆分在后台进行，进度显示在会话窗口
+      if (res.sessionId) {
+        onStarted?.(res.sessionId);
+        onClose();
+      }
     });
   };
 

@@ -162,6 +162,19 @@
   padding-top: 8px;
   border-top: 1px dashed hsl(var(--border));
 }
+/* 任务确认勾选框 */
+.feature-check { width: 14px; height: 14px; margin-right: 2px; cursor: pointer; flex: 0 0 auto; accent-color: hsl(var(--primary)); }
+/* 待确认行：开始按钮 + 暂停选项 */
+.ralph-confirm-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.ralph-start-btn {
+  font-size: 12px; font-weight: 600; padding: 6px 14px; border-radius: 6px; border: none;
+  background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--primary) / 0.8) 100%);
+  color: #fff; cursor: pointer; box-shadow: 0 2px 8px hsl(var(--primary) / 0.3);
+}
+.ralph-start-btn:hover { transform: translateY(-1px); }
+.ralph-start-btn:disabled { opacity: 0.6; cursor: wait; transform: none; }
+.ralph-pause-toggle { display: flex; align-items: center; gap: 4px; font-size: 11px; color: hsl(var(--muted-foreground)); cursor: pointer; }
+.ralph-plan-error { font-size: 11px; color: hsl(0 70% 65%); margin-bottom: 6px; }
 .ralph-controls {
   display: flex;
   align-items: center;

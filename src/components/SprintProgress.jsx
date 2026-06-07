@@ -10,6 +10,12 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
   const [ralphPhase, setRalphPhase] = useState('idle');
   const [ralphTask, setRalphTask] = useState(null);
   const [ralphLogs, setRalphLogs] = useState([]);
+  // 向导异步拆分状态 + 任务确认
+  const [planningStatus, setPlanningStatus] = useState(null); // null|running|done|failed
+  const [planError, setPlanError] = useState('');
+  const [enabledTasks, setEnabledTasks] = useState({});       // featureId -> bool（待确认勾选）
+  const [pauseEach, setPauseEach] = useState(false);
+  const [starting, setStarting] = useState(false);
 
   useEffect(() => {
     setProgress(null);
@@ -18,21 +24,43 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
     setRalphPhase('idle');
     setRalphTask(null);
     setRalphLogs([]);
+    setPlanningStatus(null);
+    setPlanError('');
+    setEnabledTasks({});
     if (!socket || !sessionId) return;
 
     socket.emit('progress:get', sessionId);
     socket.emit('ralph:status', { sessionId });
 
+    // 收到 features 时初始化勾选（默认全选未完成的任务）
+    const initEnabled = (progress) => {
+      if (!progress?.features) return;
+      setEnabledTasks(prev => {
+        const en = { ...prev };
+        progress.features.forEach(f => { if (en[f.id] === undefined) en[f.id] = f.status !== 'completed'; });
+        return en;
+      });
+    };
     const handleData = (data) => {
       if (data.sessionId === sessionId) {
         setProgress(data.progress);
         setPlanning(false);
+        initEnabled(data.progress);
       }
     };
     const handleUpdated = (data) => {
       if (data.sessionId === sessionId) {
         setProgress(data.progress);
+        initEnabled(data.progress);
       }
+    };
+    // 向导后台拆分进度
+    const handlePlanning = (data) => {
+      if (data.sessionId !== sessionId) return;
+      setPlanningStatus(data.status);
+      if (data.status === 'running') { setPlanError(''); setCollapsed(false); }
+      if (data.status === 'failed') setPlanError(data.error || '拆分失败');
+      if (data.status === 'done') socket.emit('progress:get', sessionId);
     };
     const handleRalphState = (data) => {
       if (data.sessionId !== sessionId) return;
@@ -51,12 +79,14 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
     socket.on('progress:updated', handleUpdated);
     socket.on('ralph:state', handleRalphState);
     socket.on('ralph:log', handleRalphLog);
+    socket.on('ralph:planning', handlePlanning);
 
     return () => {
       socket.off('progress:data', handleData);
       socket.off('progress:updated', handleUpdated);
       socket.off('ralph:state', handleRalphState);
       socket.off('ralph:log', handleRalphLog);
+      socket.off('ralph:planning', handlePlanning);
     };
   }, [socket, sessionId]);
 
@@ -108,7 +138,62 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
     }
   };
 
+  // 任务确认：勾选/取消某任务
+  const toggleTask = (id, e) => {
+    e.stopPropagation();
+    setEnabledTasks(prev => ({ ...prev, [id]: !prev[id] }));
+  };
+
+  // 确认任务清单并开始自主开发（走向导执行入口，带 git 干净护栏）
+  const startRalphWizard = (e) => {
+    e.stopPropagation();
+    if (starting || ralphRunning) return;
+    const ids = (progress?.features || []).filter(f => enabledTasks[f.id]).map(f => f.id);
+    if (ids.length === 0) { setPlanError('请至少勾选一个任务'); return; }
+    setPlanError('');
+    const doStart = (ignoreDirty) => {
+      setStarting(true);
+      socket.emit('ralph:wizard:start',
+        { sessionId, enabledTaskIds: ids, pauseAfterEachTask: pauseEach, ignoreDirty },
+        (res) => {
+          setStarting(false);
+          if (res?.blocked === 'dirty') {
+            if (window.confirm('工作区有未提交改动，仍要开始吗？\n\n' + (res.files || []).join('\n'))) doStart(true);
+            return;
+          }
+          if (res?.error) { setPlanError(res.error); return; }
+          // started：ralph:state 事件会把面板切到执行态
+        });
+    };
+    doStart(false);
+  };
+
   if (!progress?.features?.length) {
+    // 向导后台拆分中：即使还没任务清单也显示状态（用户此时已在会话窗口，可自由切换）
+    if (planningStatus === 'running') {
+      return (
+        <div className="sprint-progress">
+          <div className="sprint-header">
+            <div className="sprint-title">
+              <span className="sprint-icon">⏳</span>
+              <span>正在拆分任务…（可切到其他会话，完成后回来查看）</span>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    if (planningStatus === 'failed') {
+      return (
+        <div className="sprint-progress">
+          <div className="sprint-header" onClick={ralphPlan} style={{ cursor: 'pointer' }}>
+            <div className="sprint-title">
+              <span className="sprint-icon">⚠️</span>
+              <span>{planError || '拆分失败'} · 点击重试</span>
+            </div>
+          </div>
+        </div>
+      );
+    }
     if (!goal || goal.length < 3) return null;
     return (
       <div className="sprint-progress">
@@ -151,11 +236,22 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
           <div className="sprint-features">
             {progress.features.map((f, i) => (
               <div key={f.id} className={`sprint-feature ${f.blocked ? 'blocked' : f.status}`}>
-                <span className="feature-status-icon">
-                  {f.blocked ? '🚫' :
-                   f.status === 'completed' ? '✅' :
-                   f.status === 'in_progress' ? '🔨' : '⬜'}
-                </span>
+                {!ralphRunning && f.status !== 'completed' ? (
+                  <input
+                    type="checkbox"
+                    className="feature-check"
+                    checked={!!enabledTasks[f.id]}
+                    onChange={(e) => toggleTask(f.id, e)}
+                    onClick={(e) => e.stopPropagation()}
+                    title="勾选要执行的任务"
+                  />
+                ) : (
+                  <span className="feature-status-icon">
+                    {f.blocked ? '🚫' :
+                     f.status === 'completed' ? '✅' :
+                     f.status === 'in_progress' ? '🔨' : '⬜'}
+                  </span>
+                )}
                 <span className="feature-name">{f.name}</span>
                 {f.retryCount > 0 && !f.blocked && (
                   <span className="feature-retry" title={f.validationNotes || ''}>↻{f.retryCount}</span>
@@ -186,14 +282,28 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
 
           {/* Ralph 自主模式控制区 */}
           <div className="ralph-panel">
+            {planError && <div className="ralph-plan-error">⚠️ {planError}</div>}
+            {/* 待确认态：勾选任务 + 开始自主开发（确认入口移到会话窗口） */}
+            {!ralphRunning && (
+              <div className="ralph-confirm-row">
+                <button className="ralph-start-btn" onClick={startRalphWizard} disabled={starting}
+                  title="确认勾选的任务并开始自主开发（Developer→Validator 循环，带 git 干净护栏）">
+                  {starting ? '⏳ 启动中…' : '🚀 开始自主开发'}
+                </button>
+                <label className="ralph-pause-toggle" onClick={(e) => e.stopPropagation()}>
+                  <input type="checkbox" checked={pauseEach} onChange={(e) => setPauseEach(e.target.checked)} />
+                  <span>每个任务后暂停</span>
+                </label>
+              </div>
+            )}
             <div className="ralph-controls">
               <button className="ralph-replan-btn" onClick={ralphPlan} disabled={planning}
                 title="按需求文档/设计文档拆分为带验收标准的可执行任务">
-                {planning ? '⏳ 拆分中' : '🧩 自主拆分'}
+                {planning ? '⏳ 拆分中' : '🧩 重新拆分'}
               </button>
               <button className={`ralph-run-btn ${ralphRunning ? 'running' : ''}`} onClick={toggleRalph}
-                title={ralphRunning ? '停止自主执行' : '启动自主执行（Developer→Validator 循环）'}>
-                {ralphRunning ? '⏹ 停止自主' : '🤖 自主执行'}
+                title={ralphRunning ? '停止自主执行' : '直接启动（跳过确认）'}>
+                {ralphRunning ? '⏹ 停止自主' : '🤖 直接执行'}
               </button>
               {ralphRunning && ralphPhase === 'paused' && (
                 <button className="ralph-resume-btn" onClick={togglePause} title="继续执行下一个任务">
