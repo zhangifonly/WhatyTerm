@@ -196,6 +196,13 @@
   padding: 6px 8px; font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.5;
 }
 .ralph-stream-line { color: hsl(120 30% 75%); white-space: pre-wrap; word-break: break-all; }
+/* 执行视图切换：动画 / 原始输出 */
+.ralph-view-switch { display: flex; gap: 4px; margin-top: 6px; }
+.ralph-view-switch button {
+  font-size: 10px; padding: 2px 10px; border-radius: 4px; cursor: pointer;
+  background: hsl(var(--secondary)); border: 1px solid hsl(var(--border)); color: hsl(var(--muted-foreground));
+}
+.ralph-view-switch button.active { background: hsl(var(--primary) / 0.18); border-color: hsl(var(--primary)); color: hsl(var(--primary)); }
 .ralph-controls {
   display: flex;
   align-items: center;

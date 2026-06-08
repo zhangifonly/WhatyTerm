@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import RalphOffice from './RalphOffice';
 import './SprintProgress.css';
 
 const SprintProgress = ({ socket, sessionId, goal }) => {
@@ -20,6 +21,8 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
   const [ralphElapsed, setRalphElapsed] = useState(0); // 当前阶段已运行毫秒
   const [ralphBytes, setRalphBytes] = useState(0);     // 当前阶段输出字节
   const [ralphStream, setRalphStream] = useState([]);  // CLI 实时输出行
+  const [officeView, setOfficeView] = useState('anim'); // anim|raw 执行可视化视图
+  const [theater, setTheater] = useState(false);        // 剧场模式全屏
 
   useEffect(() => {
     setProgress(null);
@@ -370,13 +373,34 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
                 </span>
               )}
             </div>
-            {/* CLI 实时输出流（让用户看到执行时正在产出什么，而非静态"开发中"） */}
-            {ralphRunning && ralphStream.length > 0 && (
-              <div className="ralph-stream" ref={el => { if (el) el.scrollTop = el.scrollHeight; }}>
-                {ralphStream.slice(-30).map((l, i) => (
-                  <div key={i} className="ralph-stream-line">{l}</div>
-                ))}
-              </div>
+            {/* 执行可视化：默认像素办公室动画，可切原始 CLI 输出流 */}
+            {ralphRunning && (
+              <>
+                <div className="ralph-view-switch">
+                  <button className={officeView === 'anim' ? 'active' : ''} onClick={() => setOfficeView('anim')}>🏭 动画</button>
+                  <button className={officeView === 'raw' ? 'active' : ''} onClick={() => setOfficeView('raw')}>📜 原始输出</button>
+                </div>
+                {officeView === 'anim' ? (
+                  <RalphOffice
+                    features={progress.features}
+                    phase={ralphPhase}
+                    currentTaskId={ralphTask?.id || progress.features.find(f => f.status === 'in_progress')?.id}
+                    elapsed={ralphElapsed}
+                    completed={completed}
+                    total={total}
+                    theater={theater}
+                    onToggleTheater={() => setTheater(t => !t)}
+                  />
+                ) : (
+                  ralphStream.length > 0 && (
+                    <div className="ralph-stream" ref={el => { if (el) el.scrollTop = el.scrollHeight; }}>
+                      {ralphStream.slice(-30).map((l, i) => (
+                        <div key={i} className="ralph-stream-line">{l}</div>
+                      ))}
+                    </div>
+                  )
+                )}
+              </>
             )}
             {ralphLogs.length > 0 && (
               <div className="ralph-logs">
