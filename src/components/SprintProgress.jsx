@@ -208,7 +208,7 @@ const SprintProgress = ({ socket, sessionId, goal }) => {
           <div className="sprint-header">
             <div className="sprint-title">
               <span className="sprint-icon">⏳</span>
-              <span>正在拆分任务…（可切到其他会话，完成后回来查看）</span>
+              <span>正在分析需求、设计技术方案与拆分任务…（可切到其他会话，完成后回来查看）</span>
             </div>
           </div>
         </div>

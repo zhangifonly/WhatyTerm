@@ -76,9 +76,15 @@ class PlannerService {
 
     const projectScan = this._scanProject(projectContext.workingDir, projectContext.terminalOutput);
 
-    // 自主模式：尝试读取设计文档（doc/design.md），需求可来自 doc/requirement.md
+    // 自主模式：拆分前先把需求专业化（补全技术方案/UI美化/完整性），避免产出简陋。
+    // 已有 doc/design.md 则视为已专业化或用户自备设计，跳过（幂等、尊重手改）。
     let designDoc = '';
     if (autonomous && projectContext.workingDir) {
+      const hasDesign = !!this._readDoc(projectContext.workingDir, ['doc/design.md', 'doc/设计文档.md', 'design.md']);
+      if (!hasDesign) {
+        await this._professionalize(sessionId, goal, projectContext, projectScan);
+      }
+      // 读取（可能刚专业化生成的）设计与需求文档
       designDoc = this._readDoc(projectContext.workingDir, ['doc/design.md', 'doc/设计文档.md', 'design.md']);
       const reqDoc = this._readDoc(projectContext.workingDir, ['doc/requirement.md', 'doc/需求文档.md', 'requirement.md']);
       if (reqDoc) goal = `${goal}\n\n${reqDoc}`;
@@ -181,6 +187,79 @@ ${goal}
 \`\`\`
 
 只输出 JSON，不要其他内容。`;
+  }
+
+  /**
+   * 需求专业化提示词：把用户的简短/简陋需求扩写成可直接据以开发的专业规格。
+   * 自动补全用户未明说的技术方案、前端 UI/UX 美化、功能完整性、质量要求。
+   */
+  _buildSpecPrompt(goal, ctx, projectScan) {
+    const projectInfo = ctx.projectDesc ? `\n项目背景: ${ctx.projectDesc}` : '';
+    const workDir = ctx.workingDir ? `\n工作目录: ${ctx.workingDir}` : '';
+    return `你是一位资深产品经理 + 软件架构师 + UI/UX 设计师。用户给出的需求往往很简短、缺少技术与设计细节。请把它扩写成一份**可直接据以开发的专业规格**，主动补全用户没有明说但专业项目必备的内容，避免最终产物简陋。
+${projectInfo}${workDir}
+${projectScan}
+
+## 用户原始需求
+${goal}
+
+## 必须补全（用户没提到也要补）
+1. **产品**：一句话定位、核心用户与使用场景、完整功能清单（核心功能 + 边界情况 + 错误/空/加载状态）。
+2. **技术方案**：选用现代主流技术栈并给出理由（语言/框架/数据库/关键库）、架构分层、数据模型(schema/字段)、关键 API 设计、目录结构。优先成熟稳定、生态好、适合该需求规模的方案。
+3. **前端 UI/UX（若该项目有前端）**：明确设计风格与视觉基调、配色方案、组件库选型、布局与响应式、关键交互与微动效、空态/错误态/加载态/骨架屏。**强调要美观、专业、有设计感，禁止使用简陋的默认样式直接堆砌**。
+4. **质量**：测试策略（单测/集成/E2E）、性能要点、可访问性、安全要点。
+5. **按项目类型自适应**：若是纯后端服务/CLI/库，则不要硬塞前端，转而强化 API 契约、错误处理、健壮性、可观测性、文档。
+
+## 输出格式（严格 Markdown，只输出文档本身，不要寒暄）
+# 需求规格
+（产品定位、用户场景、完整功能清单——尽量具体、可落地）
+
+# 技术设计
+（技术栈选型+理由、架构、数据模型、API、目录结构；有前端则含 UI/UX 设计与美化规范；质量/测试/非功能要点）`;
+  }
+
+  /**
+   * 拆分前先把需求专业化：CLI 生成专业规格并落盘 doc/requirement.md + doc/design.md。
+   * 失败时返回 false（降级为直接用原始需求拆分，不阻断）。
+   */
+  async _professionalize(sessionId, goal, ctx, projectScan) {
+    if (!ctx.workingDir) return false;
+    try {
+      const prompt = this._buildSpecPrompt(goal, ctx, projectScan);
+      console.log('[Planner] 需求专业化中（补全技术方案/UI设计/完整性）...');
+      let spec = null;
+      if (typeof this.aiEngine.generateTextViaCLI === 'function') {
+        spec = await this.aiEngine.generateTextViaCLI(prompt, {
+          cwd: ctx.workingDir,
+          aiType: ctx.aiType || 'claude',
+          providerEnv: ctx.providerEnv || {},
+          timeout: 240000,
+        });
+      }
+      if (!spec) spec = await this.aiEngine.generateText(prompt);
+      if (!spec || spec.trim().length < 50) {
+        console.warn('[Planner] 专业化无有效结果，降级用原始需求拆分');
+        return false;
+      }
+      // 切分 # 需求规格 / # 技术设计 两节
+      const docDir = path.join(ctx.workingDir, 'doc');
+      if (!fs.existsSync(docDir)) fs.mkdirSync(docDir, { recursive: true });
+      const m = spec.match(/#\s*技术设计/);
+      if (m && m.index > 0) {
+        const reqPart = spec.slice(0, m.index).trim();
+        const designPart = spec.slice(m.index).trim();
+        fs.writeFileSync(path.join(docDir, 'requirement.md'), reqPart + '\n', 'utf-8');
+        fs.writeFileSync(path.join(docDir, 'design.md'), designPart + '\n', 'utf-8');
+      } else {
+        // 切分失败：整篇作为设计文档
+        fs.writeFileSync(path.join(docDir, 'design.md'), spec.trim() + '\n', 'utf-8');
+      }
+      console.log('[Planner] 专业化完成，已写入 doc/requirement.md + doc/design.md');
+      return true;
+    } catch (e) {
+      console.error('[Planner] 专业化失败，降级:', e.message);
+      return false;
+    }
   }
 
   /**
