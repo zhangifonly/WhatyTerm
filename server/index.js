@@ -1100,6 +1100,7 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
     let actualApiKey = '';
     let actualModel = '';
     let configSource = 'global'; // 'global' 或 'local' 或 'process'
+    let localIsOAuth = false;    // 会话本地 settings.local.json 明确标记为官方 OAuth
 
     // 始终读取全局配置（用于显示和同步参考）
     let globalApiUrl = '';
@@ -1136,6 +1137,8 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
               // OAuth 供应商同步到本地：env 为空但有 _localProvider 标记
               configSource = 'local';
               actualModel = localSettings.model || '';
+              // 本地明确标记为官方 OAuth → 后续不应被全局 is_current(第三方) 覆盖
+              if (localSettings._localProvider === 'oauth') localIsOAuth = true;
             }
           } catch (e) {
             console.error('[getCurrentProvider] 读取项目本地配置失败:', e.message);
@@ -1448,6 +1451,27 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         // 优先以 DB is_current 为准（switchProviderStateMachine 切换时已更新 is_current）
         // 注意：保留前面已检测到的 configSource（可能是 'local'）
         const row = db.prepare('SELECT * FROM providers WHERE app_type = ? AND is_current = 1').get(appType);
+
+        // 会话本地明确标记为官方 OAuth：忽略全局 is_current(可能是第三方)，直接返回官方
+        // （修复：会话设为官方但全局 is_current=第三方时，侧栏误显示第三方、与 /status 不符）
+        if (appType === 'claude' && localIsOAuth) {
+          let oauthRow = null;
+          try {
+            const claudeRows = db.prepare('SELECT * FROM providers WHERE app_type = ?').all('claude');
+            oauthRow = claudeRows.find(r => {
+              try { const sc = JSON.parse(r.settings_config || '{}'); return !!sc.useOAuth || !sc.env?.ANTHROPIC_BASE_URL; }
+              catch { return false; }
+            });
+          } catch {}
+          db.close();
+          return resolve(buildResult({
+            id: oauthRow?.id,
+            name: oauthRow?.name || 'Claude Official',
+            url: '',
+            exists: true,
+            configSource: 'local'
+          }));
+        }
 
         if (appType === 'claude' && row) {
           let currentSc = {};
