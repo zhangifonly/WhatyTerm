@@ -25,3 +25,4 @@ CLAUDE.md
 # 公开壳为 server/services/ralph/loader.js（保留），核心实现排除如下：
 /server/services/RalphEngine.js
 /server/services/ralph/prompts.js
+.claude/scheduled_tasks.lock
