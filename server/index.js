@@ -7353,7 +7353,9 @@ async function startServer() {
           try {
             let needsUpdate = false;
 
-            if (!session.claudeProvider) {
+            if (session.aiType === 'claude' || !session.claudeProvider) {
+              // claude 会话启动时总是重新检测实际生效供应商（getCurrentProvider 综合本地override/
+              // 全局/进程/OAuth），自愈纠正历史残留的错误显示（如误存 is_current 第三方）
               const claudeProvider = await getCurrentProvider('claude', session.workingDir, session.tmuxSessionName);
               if (claudeProvider.exists) {
                 session.claudeProvider = claudeProvider;
@@ -7463,13 +7465,18 @@ async function startServer() {
 
         for (const session of sessions) {
           try {
-            // 先用 getCurrentProvider 检测进程实际状态（能读终端内容和进程 env）
+            // getCurrentProvider 已综合：会话本地 override > 全局 settings.json > 进程 env > OAuth 登录，
+            // 即该会话「实际生效」的供应商。优先采信它，避免把 cc-switch 名义 is_current 硬套给
+            // 实际在用官方 OAuth / 本地 override 的会话（修复侧栏显示与 /status 不一致）。
             const sessionProvider = await getCurrentProvider('claude', session.workingDir, session.tmuxSessionName);
-            if (sessionProvider.exists && sessionProvider.configSource === 'process') {
-              // 进程实际在用第三方 API（未重启），以进程状态为准
+            if (sessionProvider.exists && (
+                  sessionProvider.configSource === 'process' ||
+                  sessionProvider.configSource === 'local' ||
+                  sessionProvider.url || sessionProvider.isOAuth)) {
+              // 检测到该会话真实生效的供应商（进程第三方 / 本地 override / 有 URL / 官方 OAuth）→ 以它为准
               session.claudeProvider = sessionProvider;
             } else if (currentCcProvider) {
-              // 进程已重启或无法检测，用全局配置
+              // 实在检测不到，才回落全局 cc-switch 当前配置
               session.claudeProvider = currentCcProvider;
             } else if (sessionProvider.exists) {
               session.claudeProvider = sessionProvider;
