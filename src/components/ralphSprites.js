@@ -38,3 +38,15 @@ export function spriteToBoxShadow(rows, palette) {
     }
   return shadows.join(',');
 }
+
+// 带缓存的取 box-shadow：sprite(9个)×palette(9套) 组合固定(≤81)，算一次永久缓存，
+// 避免动画每帧(460ms)对每个小人重复拼 ~140 段阴影字符串。
+const _shadowCache = {};
+export function getSpriteShadow(spriteKey, paletteIndex) {
+  const cacheKey = `${spriteKey}_${paletteIndex}`;
+  if (!_shadowCache[cacheKey]) {
+    const rows = SPRITES[spriteKey] || SPRITES.idle;
+    _shadowCache[cacheKey] = spriteToBoxShadow(rows, PALETTES[paletteIndex % PALETTES.length]);
+  }
+  return _shadowCache[cacheKey];
+}

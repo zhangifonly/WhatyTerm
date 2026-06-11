@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { SPRITES, PALETTES, PIXEL_SCALE, spriteToBoxShadow } from './ralphSprites';
+import { PIXEL_SCALE, getSpriteShadow } from './ralphSprites';
 import './RalphOffice.css';
 
 const STATE_LABEL = { active: '开发中', validating: '验证中', passed: '已通过', failed: '未通过', blocked: '已阻塞', pending: '待执行' };
@@ -60,7 +60,7 @@ export default function RalphOffice({ features = [], phase = 'idle', currentTask
         {features.map((f, i) => {
           const st = featureState(f, currentTaskId, phase);
           const key = spriteKeyFor(st, frame);
-          const shadow = spriteToBoxShadow(SPRITES[key] || SPRITES.idle, PALETTES[i % PALETTES.length]);
+          const shadow = getSpriteShadow(key, i);
           return (
             <Workstation key={f.id || i} f={f} st={st} shadow={shadow}
               onClick={() => setSel(sel === f.id ? null : f.id)} />
