@@ -5728,6 +5728,19 @@ io.on('connection', (socket) => {
         const r = applySessionProvider(session, session.aiType, providerId);
         if (r.ok) providerEnv = r.providerEnv || {};
         else console.warn('[Ralph向导] 设置会话供应商失败:', r.error);
+      } else {
+        // 跟随当前默认：用 CC Switch 当前生效供应商初始化会话头部显示
+        // （否则新建项目的会话头部供应商未初始化、显示不正确）
+        try {
+          const prov = await getCurrentProvider(session.aiType || 'claude', workingDir, session.tmuxSessionName);
+          if (prov?.exists) {
+            const k = session.aiType === 'codex' ? 'codexProvider'
+              : session.aiType === 'gemini' ? 'geminiProvider'
+              : session.aiType === 'grok' ? 'grokProvider' : 'claudeProvider';
+            session[k] = prov;
+            sessionManager.updateSession(session);
+          }
+        } catch (e) { console.warn('[Ralph向导] 初始化默认供应商失败:', e.message); }
       }
 
       // 4. 立即返回 sessionId，让前端关闭弹窗并切到会话窗口；拆分放后台异步进行。
