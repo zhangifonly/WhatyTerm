@@ -4665,8 +4665,10 @@ function applySessionProvider(session, appType, providerId) {
       if (info.isOAuth) {
         // 官方登录：清除本地与会话 env 里的 ANTHROPIC_*，让 CLI 走订阅登录
         for (const k of keys) { delete ls.env[k]; unsetEnv(k); providerEnv[k] = null; }
+        ls._localProvider = 'oauth';   // 标记本会话为官方OAuth，供 getCurrentProvider 正确识别(不被全局is_current覆盖)
       } else {
         for (const [k, v] of Object.entries(info.env)) { ls.env[k] = v; setEnv(k, v); providerEnv[k] = v; }
+        ls._localProvider = 'relay';   // 标记本会话为第三方中转
       }
       writeFileSync(lp, JSON.stringify(ls, null, 2), 'utf8');
       session.claudeProvider = { id: info.provider.id, name: info.provider.name };
