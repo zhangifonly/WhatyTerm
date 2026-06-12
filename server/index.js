@@ -1101,6 +1101,7 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
     let actualModel = '';
     let configSource = 'global'; // 'global' 或 'local' 或 'process'
     let localIsOAuth = false;    // 会话本地 settings.local.json 明确标记为官方 OAuth
+    let localProviderId = '';    // 会话级切换记录的所选供应商 id（同URL+Key重名时精确命中）
 
     // 始终读取全局配置（用于显示和同步参考）
     let globalApiUrl = '';
@@ -1133,6 +1134,7 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
               actualApiKey = localSettings.env?.ANTHROPIC_AUTH_TOKEN || localSettings.env?.ANTHROPIC_API_KEY || '';
               actualModel = localSettings.model || '';
               configSource = 'local';
+              if (localSettings._localProviderId) localProviderId = localSettings._localProviderId;
             } else if (localSettings._localProvider) {
               // OAuth 供应商同步到本地：env 为空但有 _localProvider 标记
               configSource = 'local';
@@ -1419,11 +1421,14 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         }
 
         if (urlMatches.length > 0) {
-          // 多个同 URL 供应商（如 Whaty / Whaty copy，常同账号复制 URL+Key 全同）时，
-          // is_current 是用户明确切换的最权威依据，优先级最高；其次 URL+Key 精确匹配；最后第一个。
+          // 多个同 URL 供应商（如 Whaty / Whaty copy，常同账号复制 URL+Key 全同）时的优先级：
+          // 1) 会话级切换记录的 _localProviderId（用户明确选的那一个，URL/Key 全同也能精确命中）
+          // 2) 全局 is_current（用户全局切换的）
+          // 3) URL+Key 精确匹配；4) 第一个
+          const idMatch = localProviderId && urlMatches.find(m => m.row.id === localProviderId);
           const currentMatch = urlMatches.find(m => m.row.is_current);
           const exactMatch = urlMatches.find(m => m.keyMatch);
-          const bestRow = (currentMatch || exactMatch || urlMatches[0]).row;
+          const bestRow = (idMatch || currentMatch || exactMatch || urlMatches[0]).row;
           return resolve(buildResult({
             id: bestRow.id,
             name: bestRow.name || '未命名',
@@ -4666,9 +4671,13 @@ function applySessionProvider(session, appType, providerId) {
         // 官方登录：清除本地与会话 env 里的 ANTHROPIC_*，让 CLI 走订阅登录
         for (const k of keys) { delete ls.env[k]; unsetEnv(k); providerEnv[k] = null; }
         ls._localProvider = 'oauth';   // 标记本会话为官方OAuth，供 getCurrentProvider 正确识别(不被全局is_current覆盖)
+        delete ls._localProviderId;    // 清除第三方 id 残留
       } else {
         for (const [k, v] of Object.entries(info.env)) { ls.env[k] = v; setEnv(k, v); providerEnv[k] = v; }
         ls._localProvider = 'relay';   // 标记本会话为第三方中转
+        // 记录所选供应商 id：多个同 URL+Key 供应商(如 Whaty / Whaty copy)时，
+        // getCurrentProvider 反查按 id 精确命中，不再靠 URL/Key 猜名字
+        ls._localProviderId = info.provider.id;
       }
       writeFileSync(lp, JSON.stringify(ls, null, 2), 'utf8');
       session.claudeProvider = { id: info.provider.id, name: info.provider.name };
