@@ -23,7 +23,7 @@ import { Server } from 'socket.io';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 // Trigger restart
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, watch } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, watch, statSync } from 'fs';
 import session from 'express-session';
 import crypto from 'crypto';
 import { execSync } from 'child_process';
@@ -1089,6 +1089,42 @@ function readClaudeProcessEnv(tmuxSessionName) {
   return null;
 }
 
+// 取 tmux 会话内 claude 进程的启动时间（epoch 秒）。用 etime（locale 无关）反推：
+// 进程早于全局配置变更 → 运行中进程仍用切换前的供应商（Claude Code 启动时读一次配置，不热更新）。
+function getClaudeProcStartEpoch(tmuxSessionName) {
+  if (!tmuxSessionName || process.platform === 'win32') return 0;
+  try {
+    const panePid = execSync(`${getTmuxPrefix()} list-panes -t "${tmuxSessionName}" -F "#{pane_pid}"`, {
+      encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe']
+    }).trim();
+    if (!panePid) return 0;
+    const descendants = execSync(`{ pgrep -P ${panePid}; pgrep -g ${panePid}; } 2>/dev/null || true`, {
+      encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'], shell: '/bin/bash'
+    }).trim().split('\n').filter(Boolean);
+    const allPids = [...new Set([panePid, ...descendants])].join(',');
+    const psOut = execSync(`ps -o pid=,comm=,etime= -p ${allPids} 2>/dev/null || true`, {
+      encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe']
+    }).trim();
+    for (const line of psOut.split('\n')) {
+      const m = line.trim().match(/^(\d+)\s+(.+?)\s+([\d:-]+)$/);
+      if (!m || !/claude/i.test(m[2])) continue;
+      // etime: [[DD-]HH:]MM:SS
+      const parts = m[3].split('-');
+      let days = 0, hms = m[3];
+      if (parts.length === 2) { days = parseInt(parts[0], 10) || 0; hms = parts[1]; }
+      const seg = hms.split(':').map(n => parseInt(n, 10) || 0);
+      let secs = 0;
+      if (seg.length === 3) secs = seg[0] * 3600 + seg[1] * 60 + seg[2];
+      else if (seg.length === 2) secs = seg[0] * 60 + seg[1];
+      secs += days * 86400;
+      return Math.floor(Date.now() / 1000) - secs;
+    }
+  } catch (e) {
+    // 静默：取不到就当无法判断陈旧
+  }
+  return 0;
+}
+
 // workingDir: 可选，用于检测项目本地配置
 // tmuxSessionName: 可选，用于读取运行中 claude 进程的真实 env（优先级最高）
 function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) {
@@ -1300,10 +1336,29 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
     // apiType 直接由 appType 决定：claude→'claude'、codex→'openai'、gemini→'gemini'
     // URL 包含 /v1/messages 的启发式不可靠（Claude Relay 常为 /api/）
     const computeApiType = () => appType === 'gemini' ? 'gemini' : (appType === 'claude' ? 'claude' : 'openai');
-    // 统一的返回构造器：补齐所有分支缺失的字段（apiType / isOAuth / oauthEmail）
+
+    // 陈旧检测（懒计算一次）：仅 claude、仅当显示的是全局供应商(configSource==='global')时有意义。
+    // 运行中 claude 进程启动早于 ~/.claude/settings.json 最近变更 → 它仍用切换前的供应商、重启才生效。
+    let _staleChecked = false, _globalStale = false;
+    const isGlobalStale = () => {
+      if (_staleChecked) return _globalStale;
+      _staleChecked = true;
+      if (appType !== 'claude' || !tmuxSessionName) return false;
+      try {
+        const startEpoch = getClaudeProcStartEpoch(tmuxSessionName);
+        if (!startEpoch) return false;
+        const sp = path.join(os.homedir(), '.claude', 'settings.json');
+        const mtime = existsSync(sp) ? Math.floor(statSync(sp).mtimeMs / 1000) : 0;
+        if (mtime && startEpoch < mtime - 2) _globalStale = true; // -2s 容差，避免文件系统时序误判
+      } catch {}
+      return _globalStale;
+    };
+
+    // 统一的返回构造器：补齐所有分支缺失的字段（apiType / isOAuth / oauthEmail / stale）
     const buildResult = (extras) => {
       const url = extras.url !== undefined ? extras.url : '';
       const isOAuth = !url && appType === 'claude' && !!extras.exists;
+      const cs = extras.configSource || 'global';
       return {
         id: extras.id,
         name: extras.name,
@@ -1313,9 +1368,11 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         apiType: extras.apiType || computeApiType(),
         app: appType,
         exists: !!extras.exists,
-        configSource: extras.configSource || 'global',
+        configSource: cs,
         isOAuth,
         oauthEmail: isOAuth ? readOAuthEmail() : '',
+        // 显示全局供应商但运行中进程早于配置变更 → 标记陈旧，前端提示"重启会话生效"
+        stale: cs === 'global' && !!extras.exists ? isGlobalStale() : false,
         ...(extras.globalConfig !== undefined ? { globalConfig: extras.globalConfig } : {})
       };
     };

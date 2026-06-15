@@ -1952,6 +1952,22 @@ export default function App() {
                            t('aiPanel.global')}
                         </span>
                       )}
+                      {/* 陈旧提示：显示全局供应商但运行中进程早于配置变更 → 仍是切换前供应商，重启生效 */}
+                      {provider?.stale && (
+                        <span
+                          title="运行中的 claude 进程在切换全局供应商之前启动，仍在使用切换前的供应商。重启该会话（/quit 后 claude -c）才会用上新供应商。"
+                          style={{
+                            fontSize: '9px',
+                            padding: '1px 5px',
+                            borderRadius: '3px',
+                            background: 'hsl(38 92% 50% / 0.2)',
+                            color: 'hsl(38 92% 60%)',
+                            cursor: 'help'
+                          }}
+                        >
+                          ⚠️ 旧供应商·重启生效
+                        </span>
+                      )}
                       {/* 本地配置时显示红色删除按钮 */}
                       {isLocalConfig && currentSession?.workingDir && (
                         <button
