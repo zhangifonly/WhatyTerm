@@ -3,9 +3,12 @@
 # 公开仓 zhangifonly/WhatyTerm 的 master 不含核心；本地 master 历史含明文核心(2563a85)。
 # 一旦误推即泄露闭源核心，故拦截向公开 origin 推送 master。
 # 安装：bash scripts/install-git-hooks.sh
+# 精确匹配公开仓（…/WhatyTerm.git 或 …/WhatyTerm 结尾），放行私有仓（WhatyTerm-Private、
+# WhatyTerm-Ralph-Private 等，它们就是用来存核心的）。早期用通配 *WhatyTerm* 会误拦
+# 向私有构建仓推送 master。
 remote_url="$2"
 case "$remote_url" in
-  *zhangifonly/WhatyTerm*)
+  *zhangifonly/WhatyTerm.git|*zhangifonly/WhatyTerm)
     while read local_ref local_sha remote_ref remote_sha; do
       case "$remote_ref" in
         refs/heads/master|refs/heads/main)
