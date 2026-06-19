@@ -26,7 +26,7 @@ import { dirname, join } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, watch, statSync } from 'fs';
 import session from 'express-session';
 import crypto from 'crypto';
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import Database from 'better-sqlite3';
 import os from 'os';
 import path from 'path';
@@ -48,6 +48,31 @@ function getTmuxPrefix() {
     }
   } catch {}
   return 'tmux';
+}
+
+// 返回 tmux 可执行文件与前置参数的数组形式，供 spawnSync 数组传参使用，
+// 避免把 provider URL/Key 等含特殊字符的值拼进 shell 命令（注入/破命令）。
+function getTmuxArgv() {
+  if (useWSL) return { bin: 'wsl', baseArgs: ['tmux'] };
+  const webtmuxTmux = path.join(os.homedir(), '.webtmux', 'bin', 'tmux');
+  try {
+    if (existsSync(webtmuxTmux)) {
+      execSync(`"${webtmuxTmux}" -V`, { stdio: 'pipe' });
+      return { bin: webtmuxTmux, baseArgs: [] };
+    }
+  } catch {}
+  return { bin: 'tmux', baseArgs: [] };
+}
+
+// 安全设置 tmux 环境变量（数组传参，无 shell，免转义）。scope: '-g' 全局 / '' 会话级。
+function tmuxSetEnv({ target, scope = '', name, value }) {
+  const { bin, baseArgs } = getTmuxArgv();
+  const targetArgs = target ? ['-t', target] : [];
+  const scopeArgs = scope ? [scope] : [];
+  const args = value == null
+    ? [...baseArgs, 'set-environment', ...targetArgs, ...scopeArgs, '-u', name]
+    : [...baseArgs, 'set-environment', ...targetArgs, ...scopeArgs, name, String(value)];
+  spawnSync(bin, args, { stdio: 'ignore' });
 }
 
 // 从 PowerShell 终端输出中解析工作目录
@@ -4204,8 +4229,23 @@ async function runBackgroundAutoAction() {
   }
 }
 
+// 全局重入守卫：单次扫描含 await(AI 分析)+execSync，常 >1s。若不守卫，
+// 1s 定时器会让多次扫描重叠并发，对不同会话的 AI 分析调用堆叠 → 成本/资源放大。
+let _autoSweepRunning = false;
+async function runBackgroundAutoActionGuarded() {
+  if (_autoSweepRunning) return;
+  _autoSweepRunning = true;
+  try {
+    await runBackgroundAutoAction();
+  } catch (e) {
+    console.error('[后台自动操作] 扫描异常:', e?.message || e);
+  } finally {
+    _autoSweepRunning = false;
+  }
+}
+
 // 每 1 秒检查一次（实际检测由 sessionCheckState 控制，支持爆发模式的 3 秒间隔）
-setInterval(runBackgroundAutoAction, 1000);
+setInterval(runBackgroundAutoActionGuarded, 1000);
 
 // 主动扫描修复会话文件：每 30 分钟扫描一次，在错误发生前清理 thinking 块和空 text 块
 let lastProactiveScanTime = 0;
@@ -4370,6 +4410,7 @@ function cleanupAllSessionCache(sessionId) {
   aiStatusCache.delete(sessionId);
   aiContentHashCache.delete(sessionId);
   aiNoChangeStartTime.delete(sessionId);
+  memoryLimitState.delete(sessionId);
 }
 let nextAiAnalysisTime = Date.now() + AI_ANALYSIS_INTERVAL; // 下次分析时间
 
@@ -4707,11 +4748,11 @@ function applySessionProvider(session, appType, providerId) {
   const tmux = session.tmuxSessionName;
   const setEnv = (k, v) => {
     if (!tmux) return;
-    try { execSync(`${getTmuxPrefix()} set-environment -t "${tmux}" ${k} "${v}"`, { stdio: 'ignore' }); } catch {}
+    try { tmuxSetEnv({ target: tmux, name: k, value: v }); } catch {}
   };
   const unsetEnv = (k) => {
     if (!tmux) return;
-    try { execSync(`${getTmuxPrefix()} set-environment -t "${tmux}" -u ${k}`, { stdio: 'ignore' }); } catch {}
+    try { tmuxSetEnv({ target: tmux, name: k, value: null }); } catch {}
   };
 
   let providerEnv = {};
@@ -5008,11 +5049,7 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
                         'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'];
       for (const varName of tmuxVars) {
         try {
-          if (newEnv[varName]) {
-            execSync(`${getTmuxPrefix()} set-environment -g ${varName} "${newEnv[varName]}"`, { stdio: 'ignore' });
-          } else {
-            execSync(`${getTmuxPrefix()} set-environment -g -u ${varName}`, { stdio: 'ignore' });
-          }
+          tmuxSetEnv({ scope: '-g', name: varName, value: newEnv[varName] || null });
         } catch (e) {}
       }
       console.log('[Provider Switch] 已同步 tmux 全局环境变量');
@@ -7544,11 +7581,7 @@ async function startServer() {
           const tmuxVars = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
                             'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'];
           for (const varName of tmuxVars) {
-            if (newEnv[varName]) {
-              execSync(`${getTmuxPrefix()} set-environment -g ${varName} "${newEnv[varName]}"`, { stdio: 'ignore' });
-            } else {
-              execSync(`${getTmuxPrefix()} set-environment -g -u ${varName}`, { stdio: 'ignore' });
-            }
+            tmuxSetEnv({ scope: '-g', name: varName, value: newEnv[varName] || null });
           }
           console.log('[配置监听] 已同步 tmux 全局环境变量');
         } catch (e) {}
