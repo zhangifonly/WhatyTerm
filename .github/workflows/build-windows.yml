@@ -14,7 +14,9 @@ env:
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    # 固定 windows-2022：windows-latest 升级到 2025 后 node-gyp 找不到 Visual Studio，
+    # node-pty/better-sqlite3 原生模块重建失败（Could not find any Visual Studio installation）。
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
