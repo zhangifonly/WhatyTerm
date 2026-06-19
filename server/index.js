@@ -5710,6 +5710,16 @@ io.on('connection', (socket) => {
       return;
     }
     // 非阻塞启动
+    // Ralph 自主模式联动开启监控自动操作：自主会话若回退到交互式 claude 弹确认框，
+    // 也能被自动放行，不会卡住（headless 模式本身不弹框，开启无副作用）
+    try {
+      const s = sessionManager.getSession(sessionId);
+      if (s && !s.autoActionEnabled) {
+        s.updateSettings({ autoActionEnabled: true });
+        sessionManager.updateSession(s);
+        io.emit('sessions:updated', sessionManager.listSessions());
+      }
+    } catch {}
     ralphEngine.start(sessionId, maxIterations || 100);
   });
 
@@ -5884,6 +5894,15 @@ io.on('connection', (socket) => {
       const progress = progressManager.loadProgress(sessionId);
       const branch = progress?.features?.find(f => f.branch)?.branch || `ralph/${Date.now().toString(36)}`;
 
+      // Ralph 自主模式联动开启监控自动操作（同 ralph:start，避免自主会话弹确认框卡住）
+      try {
+        const s = sessionManager.getSession(sessionId);
+        if (s && !s.autoActionEnabled) {
+          s.updateSettings({ autoActionEnabled: true });
+          sessionManager.updateSession(s);
+          io.emit('sessions:updated', sessionManager.listSessions());
+        }
+      } catch {}
       ralphEngine.start(sessionId, { maxIterations: 100, branch, pauseAfterEachTask: !!pauseAfterEachTask });
       reply({ started: true, branch });
     } catch (err) {
@@ -6495,7 +6514,11 @@ ${terminalContext ? terminalContext : '（无）'}
       const desired = st ? st.targetEnabled : targetEnabled;
 
       // 仅在最终目标值与当前状态不同时才写入，避免无谓的状态变更/持久化
-      if (session.autoActionEnabled === desired) return;
+      if (session.autoActionEnabled === desired) {
+        // 即使无需写入，也回推一次真实状态，纠正前端可能的乐观/陈旧显示（显示开实际关）
+        socket.emit('session:updated', session.toJSON());
+        return;
+      }
 
       session.updateSettings({ autoActionEnabled: desired });
       sessionManager.updateSession(session);
