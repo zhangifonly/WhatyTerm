@@ -1517,6 +1517,36 @@ ${historyText || '(空)'}
     // Tab 通过 tmux send-keys 发送给 Claude Code (Ink 应用) 不可靠，
     // 而发"继续"既能让 Claude 继续工作，也能间接接受编辑。
 
+    // === 高优先级：检测 AI 明确"待命/无任务可做"的空闲，停手而非反复发"继续" ===
+    // 场景：Ralph 自主会话或普通会话开发告一段落后，Claude 回复"待命中。需要具体任务。"
+    // 之类，表示它没有可推进的工作、在等用户给方向。此时若继续自动发"继续"，Claude 只会
+    // 再次回"待命中"，形成 继续→待命→继续 的死循环空转，白烧 API。应识别后停手并提示用户。
+    {
+      const idleTail = earlyCleanContent.slice(-800);
+      const idleLast6 = earlyCleanContent.split('\n').slice(-6).join('\n');
+      const hasIdlePromptHere = /^[❯>]\s*$/m.test(idleLast6) || /\n[❯>]\s*$/m.test(idleLast6);
+      const isRunningHere = /\.{2,3}\s*\(\d+[ms]/i.test(idleTail) || /esc to interrupt/i.test(idleLast6);
+      // AI 主动表示"待命/无事可做/需要任务/已完成在等指示"的措辞
+      const awaitingTask = /待命中|需要具体任务|需要(您|你)?(提供|给出|明确)(具体)?任务|没有(更多|可执行的)?任务|暂无任务|等待(您|你)?(的)?(指示|指令|下一步|进一步)(说明|要求)?|请(告诉|提供|给).{0,8}(任务|需求|指示)|awaiting (your )?(instructions?|task)|no (further )?task|standing by|let me know what|what would you like (me )?to/i.test(idleTail);
+      if (hasIdlePromptHere && !isRunningHere && awaitingTask) {
+        console.log('[AIEngine] 检测到 AI 待命/无任务空闲，停止自动发"继续"，提示用户介入');
+        return {
+          currentState: `${cliNameEarly}待命中（等待用户下达任务）`,
+          workingDir: '未显示',
+          recentAction: 'AI 表示无任务可推进',
+          needsAction: false,
+          actionType: 'none',
+          suggestedAction: null,
+          actionReason: 'AI 已明确表示待命、需要用户提供具体任务；继续自动发"继续"只会空转，已停手等待用户介入',
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI,
+          ...pluginInfo
+        };
+      }
+    }
+
     // === 高优先级：检测"列出多个下一步方向/选项让用户选择"的场景 ===
     // Claude 完成一轮开发后常列出"下一步可选方向/接下来可以..."等编号清单等待选择。
     // 这种场景应自动回复"按建议顺序继续开发"，让开发持续推进（优先于插件阶段判断，
