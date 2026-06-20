@@ -4999,8 +4999,10 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
       console.log('[Provider Switch] Gemini 配置已更新:', targetProvider.name);
     }
 
-    // 同步更新 DB 的 is_current，保持 DB 与 settings.json 一致
-    // 如果是 OAuth provider，同时保留 useOAuth 标记（防止 CC Switch 覆盖后丢失）
+    // 同步更新 DB 的 is_current，保持 DB 与 settings.json 一致。
+    // 注意：仅更新 is_current（选中标记），绝不回写 settings_config/env，
+    // 避免动到 CC Switch 里供应商的 API key（官方 OAuth 该清的是本地 settings.json，
+    // 在上方已处理，无需反写数据库清 env）。
     try {
       const dbW = builtinProviderDB.getDB(false);
       dbW.prepare('UPDATE providers SET is_current = 0 WHERE app_type = ?').run(appType);
@@ -5008,22 +5010,6 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
       ccSwitchAudit.log('switchProviderStateMachine', 'UPDATE is_current', {
         appType, targetId: targetProvider.id, targetName: targetProvider.name, sessionId
       });
-      if (sc.useOAuth) {
-        // 保留 useOAuth 标记，防止 CC Switch 同步时覆盖
-        const currentScRow = dbW.prepare('SELECT settings_config FROM providers WHERE id = ? AND app_type = ?').get(targetProvider.id, appType);
-        if (currentScRow) {
-          let currentSc = {};
-          try { currentSc = JSON.parse(currentScRow.settings_config); } catch {}
-          currentSc.useOAuth = true;
-          currentSc.env = {};
-          dbW.prepare('UPDATE providers SET settings_config = ? WHERE id = ? AND app_type = ?').run(
-            JSON.stringify(currentSc), targetProvider.id, appType
-          );
-          ccSwitchAudit.log('switchProviderStateMachine', 'UPDATE settings_config (useOAuth)', {
-            targetId: targetProvider.id, targetName: targetProvider.name
-          });
-        }
-      }
       dbW.close();
       console.log('[Provider Switch] DB is_current 已更新为:', targetProvider.name);
     } catch (dbErr) {
