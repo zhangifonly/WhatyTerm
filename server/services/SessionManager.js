@@ -619,12 +619,24 @@ export class Session {
       return this.getRecentOutput(50);
     }
 
+    // 短 TTL 缓存：后台 AI 分析每秒对每个会话多次抓屏（错误检测循环 + 自动操作循环），
+    // 每次都是同步 execSync(tmux capture-pane) fork 子进程，会话一多就周期性阻塞主线程、
+    // 拖慢 socket 响应（界面卡顿）。同一会话在 800ms 内复用上次快照，把每秒 execSync 次数
+    // 从"几十次"降到"每会话约 1 次"。前端 xterm 实时数据走 node-pty onData 流，与此无关。
+    const nowTs = Date.now();
+    if (this._paneCache && (nowTs - this._paneCacheTime) < 800) {
+      return this._paneCache;
+    }
+
     try {
       const content = execSync(
         `tmux capture-pane -t "${this.tmuxSessionName}" -p -e`,
         { encoding: 'utf-8' }
       );
-      return content.replace(/\n/g, '\r\n');
+      const result = content.replace(/\n/g, '\r\n');
+      this._paneCache = result;
+      this._paneCacheTime = nowTs;
+      return result;
     } catch {
       return '';
     }

@@ -60,7 +60,7 @@ export class RecentProjectsService {
    * 获取所有 CLI 的最近项目
    * @param {number} limit - 每个 CLI 返回的最大项目数
    */
-  static async getAllRecentProjects(limit = 10) {
+  static async getAllRecentProjects(limit = 200) {
     const [claude, codex, gemini, grok] = await Promise.all([
       this.getClaudeProjects(limit),
       this.getCodexProjects(limit),

@@ -5631,7 +5631,9 @@ io.on('connection', (socket) => {
   // 获取最近项目列表
   socket.on('recentProjects:get', async (options = {}) => {
     try {
-      const limit = options.limit || 50;  // 默认返回 50 个项目
+      // 默认 200：用户常有数十个历史项目（实测单 Claude 就 55+），旧值 50 会截断"很多项目不显示"。
+      // 前端 RecentProjects 有展开/收起控制实际渲染量，后端给全集即可。
+      const limit = options.limit || 200;
       const projects = await RecentProjectsService.getAllRecentProjects(limit);
       socket.emit('recentProjects:list', projects);
     } catch (error) {
