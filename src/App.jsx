@@ -23,10 +23,7 @@ import RalphWizard from './components/RalphWizard';
 
 const socket = io();
 
-// 防止终端输入重复发送（解决 React StrictMode / HMR 导致的重复问题）
-let lastInputTime = 0;
-let lastInputData = '';
-const INPUT_DEBOUNCE_MS = 50; // 50ms 内的相同输入视为重复
+// IME 组合状态：组合输入（中文等）期间不向后端发送，等组合完成
 
 // IME 输入法状态跟踪
 let isComposing = false;
@@ -839,14 +836,9 @@ export default function App() {
           return;
         }
 
-        // 防止重复发送（React StrictMode / HMR 可能导致重复注册监听器）
-        const now = Date.now();
-        if (data === lastInputData && now - lastInputTime < INPUT_DEBOUNCE_MS) {
-          return; // 跳过重复输入
-        }
-        lastInputTime = now;
-        lastInputData = data;
-
+        // 注意：不要按"相同内容+时间窗"去重——term 实例全局只创建一次（上方 777 行守卫），
+        // onData 只注册一次，不存在 StrictMode 重复注册。旧的 50ms 去重会把用户快速连打的
+        // 相同字符（如 "ll"/"oo"/连续空格/连按回车）误判为重复而吞掉，表现为"输入很卡/丢字"。
         socket.emit('terminal:input', {
           sessionId: session.id,
           input: data

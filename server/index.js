@@ -3176,6 +3176,12 @@ setTimeout(updateAllSessionsProjectInfo, 3000);
 const userInputPauseState = new Map();
 const USER_INPUT_PAUSE_DURATION = 5000; // 用户输入后暂停 5 秒
 
+// 错误检测循环节流：sessionId -> 上次错误检测时间戳。
+// 错误检测对每个会话做抓屏+进程检测(同步execSync)，会话多时每秒串行跑全部会话会
+// 周期性阻塞主线程、拖慢输入回显。错误不是高频事件，每会话 4 秒检一次足够。
+const errorCheckLastTime = new Map();
+const ERROR_CHECK_INTERVAL = 4000;
+
 // 记录用户输入，暂停自动操作
 function pauseAutoActionForUserInput(sessionId) {
   const existing = userInputPauseState.get(sessionId);
@@ -3292,6 +3298,12 @@ async function runBackgroundAutoAction() {
     }
     // 跳过已经发送过修复建议的会话（等待用户确认，仅非自动模式）
     if (session.pendingFixSuggestion) continue;
+
+    // 节流：每会话错误检测最多每 4 秒一次，避免每秒对全部会话同步抓屏+进程检测阻塞主线程。
+    // 但有 hook working 状态或自动操作开启的会话不受影响（它们另有更及时的处理路径）。
+    const lastErrChk = errorCheckLastTime.get(sessionData.id) || 0;
+    if (now - lastErrChk < ERROR_CHECK_INTERVAL) continue;
+    errorCheckLastTime.set(sessionData.id, now);
 
     const terminalContent = session.getScreenContent();
     if (!terminalContent || terminalContent.length < 50) continue;
@@ -4411,6 +4423,7 @@ function cleanupAllSessionCache(sessionId) {
   aiContentHashCache.delete(sessionId);
   aiNoChangeStartTime.delete(sessionId);
   memoryLimitState.delete(sessionId);
+  errorCheckLastTime.delete(sessionId);
 }
 let nextAiAnalysisTime = Date.now() + AI_ANALYSIS_INTERVAL; // 下次分析时间
 

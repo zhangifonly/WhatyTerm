@@ -624,7 +624,7 @@ export class Session {
     // 拖慢 socket 响应（界面卡顿）。同一会话在 800ms 内复用上次快照，把每秒 execSync 次数
     // 从"几十次"降到"每会话约 1 次"。前端 xterm 实时数据走 node-pty onData 流，与此无关。
     const nowTs = Date.now();
-    if (this._paneCache && (nowTs - this._paneCacheTime) < 800) {
+    if (this._paneCache && (nowTs - this._paneCacheTime) < 1500) {
       return this._paneCache;
     }
 

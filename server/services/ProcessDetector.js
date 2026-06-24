@@ -55,9 +55,9 @@ class ProcessDetector {
       return { detected: false, cli: null, processName: null, pid: null };
     }
 
-    // 短 TTL 缓存（1s）：避免后台每秒循环对每个会话重复 3 次 execSync
+    // 短 TTL 缓存（2s）：避免后台每秒循环对每个会话重复 3 次 execSync
     const cached = this._detectCache.get(tmuxSession);
-    if (cached && (Date.now() - cached.time) < 1000) {
+    if (cached && (Date.now() - cached.time) < 2000) {
       return cached.result;
     }
     const cacheAndReturn = (result) => {
