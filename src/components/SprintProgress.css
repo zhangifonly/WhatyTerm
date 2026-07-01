@@ -149,3 +149,109 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ───────── Ralph 自主模式 ───────── */
+.sprint-feature.blocked { opacity: 0.6; }
+.feature-retry {
+  font-size: 10px;
+  color: hsl(38 92% 50%);
+  margin-left: 4px;
+}
+.ralph-panel {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed hsl(var(--border));
+}
+/* 任务确认勾选框 */
+.feature-check { width: 14px; height: 14px; margin-right: 2px; cursor: pointer; flex: 0 0 auto; accent-color: hsl(var(--primary)); }
+/* 待确认行：开始按钮 + 暂停选项 */
+.ralph-confirm-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.ralph-start-btn {
+  font-size: 12px; font-weight: 600; padding: 6px 14px; border-radius: 6px; border: none;
+  background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--primary) / 0.8) 100%);
+  color: #fff; cursor: pointer; box-shadow: 0 2px 8px hsl(var(--primary) / 0.3);
+}
+.ralph-start-btn:hover { transform: translateY(-1px); }
+.ralph-start-btn:disabled { opacity: 0.6; cursor: wait; transform: none; }
+.ralph-pause-toggle { display: flex; align-items: center; gap: 4px; font-size: 11px; color: hsl(var(--muted-foreground)); cursor: pointer; }
+.ralph-plan-error { font-size: 11px; color: hsl(0 70% 65%); margin-bottom: 6px; }
+/* 断点继续横幅 */
+.ralph-resume-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-bottom: 8px; padding: 8px 10px; border-radius: 6px;
+  background: hsl(38 92% 50% / 0.12); border: 1px solid hsl(38 92% 50% / 0.35);
+}
+.ralph-resume-text { font-size: 12px; color: hsl(38 92% 60%); font-weight: 500; }
+/* 执行实时计时/活跃 */
+.ralph-meter { color: hsl(var(--muted-foreground)); font-size: 10px; }
+.ralph-pulse {
+  display: inline-block; width: 6px; height: 6px; margin-left: 4px; border-radius: 50%;
+  background: hsl(142 70% 50%); vertical-align: middle; animation: ralph-blink 1s ease-in-out infinite;
+}
+@keyframes ralph-blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+/* CLI 实时输出流 */
+.ralph-stream {
+  margin-top: 6px; max-height: 160px; overflow-y: auto;
+  background: #0c0c0c; border: 1px solid hsl(var(--border)); border-radius: 4px;
+  padding: 6px 8px; font-family: ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.5;
+}
+.ralph-stream-line { color: hsl(120 30% 75%); white-space: pre-wrap; word-break: break-all; }
+/* 执行视图切换：动画 / 原始输出 */
+.ralph-view-switch { display: flex; gap: 4px; margin-top: 6px; }
+.ralph-view-switch button {
+  font-size: 10px; padding: 2px 10px; border-radius: 4px; cursor: pointer;
+  background: hsl(var(--secondary)); border: 1px solid hsl(var(--border)); color: hsl(var(--muted-foreground));
+}
+.ralph-view-switch button.active { background: hsl(var(--primary) / 0.18); border-color: hsl(var(--primary)); color: hsl(var(--primary)); }
+.ralph-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ralph-replan-btn, .ralph-run-btn {
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--secondary));
+  color: hsl(var(--foreground));
+  cursor: pointer;
+}
+.ralph-replan-btn:disabled { opacity: 0.6; cursor: wait; }
+.ralph-run-btn.running {
+  background: hsl(0 70% 45% / 0.2);
+  border-color: hsl(0 70% 50%);
+  color: hsl(0 70% 70%);
+}
+.ralph-phase {
+  font-size: 11px;
+  color: hsl(var(--primary));
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.ralph-phase em { color: hsl(var(--muted-foreground)); font-style: normal; }
+.ralph-logs {
+  margin-top: 6px;
+  max-height: 120px;
+  overflow-y: auto;
+  background: hsl(220 14% 10%);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: monospace;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.ralph-log-line {
+  color: hsl(var(--muted-foreground));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ralph-resume-btn {
+  font-size: 11px; padding: 4px 10px; border-radius: 4px;
+  background: hsl(142 70% 45% / 0.2); border: 1px solid hsl(142 70% 50%);
+  color: hsl(142 70% 65%); cursor: pointer;
+}
+.ralph-phase-paused { color: hsl(38 92% 55%); }

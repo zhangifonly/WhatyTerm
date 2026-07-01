@@ -60,14 +60,15 @@ export class RecentProjectsService {
    * 获取所有 CLI 的最近项目
    * @param {number} limit - 每个 CLI 返回的最大项目数
    */
-  static async getAllRecentProjects(limit = 10) {
-    const [claude, codex, gemini] = await Promise.all([
+  static async getAllRecentProjects(limit = 200) {
+    const [claude, codex, gemini, grok] = await Promise.all([
       this.getClaudeProjects(limit),
       this.getCodexProjects(limit),
-      this.getGeminiProjects(limit)
+      this.getGeminiProjects(limit),
+      this.getGrokProjects(limit)
     ]);
 
-    return { claude, codex, gemini };
+    return { claude, codex, gemini, grok };
   }
 
   /**
@@ -244,32 +245,94 @@ export class RecentProjectsService {
 
   /**
    * 从 Codex jsonl 文件提取 cwd
-   * session_meta 总是在第一行
-   * 优化：使用流式读取只获取第一行，避免读取整个文件
+   * session_meta 总是在第一行，但该行可能很大（base_instructions 常达 20KB+），
+   * 无法保证在固定缓冲区内读到换行，因此不整体 JSON.parse，
+   * 而是从开头缓冲区里用正则直接抓 "cwd"（payload 中 cwd 字段总在前部，约 150 字节处）。
    */
   static _extractCodexCwd(filePath) {
     try {
-      // 使用 Buffer 只读取文件开头部分（足够包含 session_meta）
+      // 读取文件开头 16KB：cwd 字段在 payload 前部，远在此范围内
       const fd = fs.openSync(filePath, 'r');
-      const buffer = Buffer.alloc(4096); // 4KB 足够读取第一行
-      const bytesRead = fs.readSync(fd, buffer, 0, 4096, 0);
+      const buffer = Buffer.alloc(16384);
+      const bytesRead = fs.readSync(fd, buffer, 0, 16384, 0);
       fs.closeSync(fd);
 
       if (bytesRead === 0) return null;
 
       const content = buffer.toString('utf-8', 0, bytesRead);
-      const newlineIndex = content.indexOf('\n');
-      const firstLine = newlineIndex > 0 ? content.slice(0, newlineIndex) : content;
 
-      if (!firstLine) return null;
+      // 仅处理 session_meta 行（首行）
+      if (!content.includes('"session_meta"')) return null;
 
-      const data = JSON.parse(firstLine);
-      if (data.type === 'session_meta' && data.payload?.cwd) {
-        return data.payload.cwd;
+      // 正则抓取 "cwd":"...."（支持 JSON 转义，如 Windows 的 \\）
+      const m = content.match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if (!m) return null;
+
+      // 反转义 JSON 字符串字面量
+      try {
+        return JSON.parse('"' + m[1] + '"');
+      } catch {
+        return m[1];
       }
-      return null;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * 获取 Grok CLI 最近项目
+   * Grok 会话目录：~/.grok/sessions/<URL编码的工作目录>/
+   *   例如 %2FUsers%2Fzhangzhen%2FDocuments%2Fxxx -> /Users/zhangzhen/Documents/xxx
+   * 目录 mtime 即最后使用时间。
+   */
+  static async getGrokProjects(limit = 10) {
+    const sessionsDir = path.join(HOME_DIR, '.grok', 'sessions');
+
+    if (!fs.existsSync(sessionsDir)) {
+      return [];
+    }
+
+    try {
+      const entries = fs.readdirSync(sessionsDir, { withFileTypes: true });
+      const projects = [];
+
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        // 跳过非路径条目（如 session_search.sqlite 等）
+        if (!entry.name.includes('%2F') && !entry.name.startsWith('/')) continue;
+
+        let projectPath;
+        try {
+          projectPath = decodeURIComponent(entry.name);
+        } catch {
+          continue;
+        }
+
+        if (!projectPath || !fs.existsSync(projectPath)) continue;
+
+        // 排除系统/临时目录（与其它 CLI 一致：只展示真实项目）
+        const parts = projectPath.split(path.sep).filter(Boolean);
+        if (parts.length < 2) continue;
+        if (/^\/(private\/)?(tmp|var|etc)\b/.test(projectPath)) continue;
+
+        const dirPath = path.join(sessionsDir, entry.name);
+        const stat = fs.statSync(dirPath);
+
+        projects.push({
+          name: path.basename(projectPath),
+          path: projectPath,
+          description: this._getProjectDescription(projectPath),
+          lastUsed: stat.mtime.getTime(),
+          aiType: 'grok',
+          resumeCommand: 'grok -c'
+        });
+      }
+
+      projects.sort((a, b) => b.lastUsed - a.lastUsed);
+      return projects.slice(0, limit);
+    } catch (error) {
+      console.error('[RecentProjects] 获取 Grok 项目失败:', error);
+      return [];
     }
   }
 

@@ -27,7 +27,9 @@ extraResources:
     to: icon.ico
   - from: build/icon.icns
     to: icon.icns
-  # 服务器代码
+  # 服务器代码（明文打包；付费文件随后由 afterPack 钩子用 dist 混淆版就地覆盖）
+  # 注：extraResources 多条目目标重叠不保证覆盖，故 premium 保护改在 scripts/rebuild-native.cjs
+  #     的 applyPremiumObfuscation() 里对真实打包产物执行，确保生效。
   - from: server
     to: server
   # 前端构建产物（Express 需要直接访问文件系统）

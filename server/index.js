@@ -23,10 +23,10 @@ import { Server } from 'socket.io';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 // Trigger restart
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, watch } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, watch, statSync } from 'fs';
 import session from 'express-session';
 import crypto from 'crypto';
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import Database from 'better-sqlite3';
 import os from 'os';
 import path from 'path';
@@ -48,6 +48,31 @@ function getTmuxPrefix() {
     }
   } catch {}
   return 'tmux';
+}
+
+// 返回 tmux 可执行文件与前置参数的数组形式，供 spawnSync 数组传参使用，
+// 避免把 provider URL/Key 等含特殊字符的值拼进 shell 命令（注入/破命令）。
+function getTmuxArgv() {
+  if (useWSL) return { bin: 'wsl', baseArgs: ['tmux'] };
+  const webtmuxTmux = path.join(os.homedir(), '.webtmux', 'bin', 'tmux');
+  try {
+    if (existsSync(webtmuxTmux)) {
+      execSync(`"${webtmuxTmux}" -V`, { stdio: 'pipe' });
+      return { bin: webtmuxTmux, baseArgs: [] };
+    }
+  } catch {}
+  return { bin: 'tmux', baseArgs: [] };
+}
+
+// 安全设置 tmux 环境变量（数组传参，无 shell，免转义）。scope: '-g' 全局 / '' 会话级。
+function tmuxSetEnv({ target, scope = '', name, value }) {
+  const { bin, baseArgs } = getTmuxArgv();
+  const targetArgs = target ? ['-t', target] : [];
+  const scopeArgs = scope ? [scope] : [];
+  const args = value == null
+    ? [...baseArgs, 'set-environment', ...targetArgs, ...scopeArgs, '-u', name]
+    : [...baseArgs, 'set-environment', ...targetArgs, ...scopeArgs, name, String(value)];
+  spawnSync(bin, args, { stdio: 'ignore' });
 }
 
 // 从 PowerShell 终端输出中解析工作目录
@@ -110,11 +135,11 @@ import tokenStatsService from './services/TokenStatsService.js';
 import builtinProviderDB from './services/BuiltinProviderDB.js';
 import ccSwitchAudit from './services/CCSwitchAudit.js';
 import configService from './services/ConfigService.js';
-import TeamManager from './services/TeamManager.js';
-import TaskOrchestrator from './services/TaskOrchestrator.js';
 import progressManager from './services/ProgressManager.js';
 import PlannerService from './services/PlannerService.js';
 import EvaluatorService from './services/EvaluatorService.js';
+// Ralph 自主开发：经公开壳 loader 加载付费闭源核心（缺失时优雅降级）
+import { RalphEngine, RALPH_CORE_PRESENT } from './services/ralph/loader.js';
 import telemetryService from './services/TelemetryService.js';
 import crashReporter from './services/CrashReporter.js';
 import sleepPrevention from './services/SleepPreventionService.js';
@@ -839,7 +864,7 @@ app.post('/api/sessions/:sessionId/analyze-now', async (req, res) => {
   }
 });
 
-/** 将 HookServer 事件接入 session 状态 + TaskOrchestrator */
+/** 将 HookServer 事件接入 session 状态 */
 function _wireHookServer() {
   if (!hookServer) return;
 
@@ -860,11 +885,6 @@ function _wireHookServer() {
       : (ev === 'PostToolUse' || ev === 'Stop') ? 'idle'
       : session.hookState;
 
-    // Team Member 事件转发给 TaskOrchestrator
-    if (session.teamRole === 'member' && taskOrchestrator) {
-      taskOrchestrator.onHookEvent(event, session);
-    }
-
     // 广播给前端（可选，用于实时状态显示）
     io.to(`session:${session.id}`).emit('session:hookEvent', { sessionId: session.id, event: ev });
   });
@@ -882,8 +902,7 @@ const authService = new AuthService();
 const providerService = new ProviderService(io);
 const healthCheckScheduler = new HealthCheckScheduler(io);
 const scheduleManager = new ScheduleManager();
-let teamManager = null; // TeamManager 在 SessionManager 初始化后创建
-let taskOrchestrator = null; // TaskOrchestrator 在 TeamManager 初始化后创建
+let ralphEngine = null; // RalphEngine 自主模式引擎，在 SessionManager 初始化后创建
 let hookServer = null; // HookServer：Claude Code 官方 Hooks 集成
 
 // 异步初始化 SessionManager
@@ -893,12 +912,8 @@ let sessionManagerReady = false;
     sessionManager = await SessionManager.create();
     sessionManagerReady = true;
     console.log('[Server] SessionManager 初始化完成');
-    // 初始化 TeamManager（复用 SessionManager 的数据库）
-    teamManager = new TeamManager(sessionManager.db, sessionManager, aiEngine);
-    console.log('[Server] TeamManager 初始化完成');
-    taskOrchestrator = new TaskOrchestrator(teamManager, sessionManager, aiEngine);
-    console.log('[Server] TaskOrchestrator 初始化完成');
-    teamManager.recoverStaleTeams();
+    ralphEngine = new RalphEngine(sessionManager, io);
+    console.log('[Server] RalphEngine 初始化完成');
     hookServer = new HookServer(currentPort);
     hookServer.install();
     _wireHookServer();
@@ -908,9 +923,7 @@ let sessionManagerReady = false;
     sessionManager = new SessionManager();
     await sessionManager.init().catch(e => console.error('[Server] SessionManager.init() 失败:', e));
     sessionManagerReady = true;
-    teamManager = new TeamManager(sessionManager.db, sessionManager, aiEngine);
-    taskOrchestrator = new TaskOrchestrator(teamManager, sessionManager, aiEngine);
-    teamManager.recoverStaleTeams();
+    ralphEngine = new RalphEngine(sessionManager, io);
     hookServer = new HookServer(currentPort);
     hookServer.install();
     _wireHookServer();
@@ -1101,6 +1114,42 @@ function readClaudeProcessEnv(tmuxSessionName) {
   return null;
 }
 
+// 取 tmux 会话内 claude 进程的启动时间（epoch 秒）。用 etime（locale 无关）反推：
+// 进程早于全局配置变更 → 运行中进程仍用切换前的供应商（Claude Code 启动时读一次配置，不热更新）。
+function getClaudeProcStartEpoch(tmuxSessionName) {
+  if (!tmuxSessionName || process.platform === 'win32') return 0;
+  try {
+    const panePid = execSync(`${getTmuxPrefix()} list-panes -t "${tmuxSessionName}" -F "#{pane_pid}"`, {
+      encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe']
+    }).trim();
+    if (!panePid) return 0;
+    const descendants = execSync(`{ pgrep -P ${panePid}; pgrep -g ${panePid}; } 2>/dev/null || true`, {
+      encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'], shell: '/bin/bash'
+    }).trim().split('\n').filter(Boolean);
+    const allPids = [...new Set([panePid, ...descendants])].join(',');
+    const psOut = execSync(`ps -o pid=,comm=,etime= -p ${allPids} 2>/dev/null || true`, {
+      encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe']
+    }).trim();
+    for (const line of psOut.split('\n')) {
+      const m = line.trim().match(/^(\d+)\s+(.+?)\s+([\d:-]+)$/);
+      if (!m || !/claude/i.test(m[2])) continue;
+      // etime: [[DD-]HH:]MM:SS
+      const parts = m[3].split('-');
+      let days = 0, hms = m[3];
+      if (parts.length === 2) { days = parseInt(parts[0], 10) || 0; hms = parts[1]; }
+      const seg = hms.split(':').map(n => parseInt(n, 10) || 0);
+      let secs = 0;
+      if (seg.length === 3) secs = seg[0] * 3600 + seg[1] * 60 + seg[2];
+      else if (seg.length === 2) secs = seg[0] * 60 + seg[1];
+      secs += days * 86400;
+      return Math.floor(Date.now() / 1000) - secs;
+    }
+  } catch (e) {
+    // 静默：取不到就当无法判断陈旧
+  }
+  return 0;
+}
+
 // workingDir: 可选，用于检测项目本地配置
 // tmuxSessionName: 可选，用于读取运行中 claude 进程的真实 env（优先级最高）
 function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) {
@@ -1112,6 +1161,8 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
     let actualApiKey = '';
     let actualModel = '';
     let configSource = 'global'; // 'global' 或 'local' 或 'process'
+    let localIsOAuth = false;    // 会话本地 settings.local.json 明确标记为官方 OAuth
+    let localProviderId = '';    // 会话级切换记录的所选供应商 id（同URL+Key重名时精确命中）
 
     // 始终读取全局配置（用于显示和同步参考）
     let globalApiUrl = '';
@@ -1144,10 +1195,13 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
               actualApiKey = localSettings.env?.ANTHROPIC_AUTH_TOKEN || localSettings.env?.ANTHROPIC_API_KEY || '';
               actualModel = localSettings.model || '';
               configSource = 'local';
+              if (localSettings._localProviderId) localProviderId = localSettings._localProviderId;
             } else if (localSettings._localProvider) {
               // OAuth 供应商同步到本地：env 为空但有 _localProvider 标记
               configSource = 'local';
               actualModel = localSettings.model || '';
+              // 本地明确标记为官方 OAuth → 后续不应被全局 is_current(第三方) 覆盖
+              if (localSettings._localProvider === 'oauth') localIsOAuth = true;
             }
           } catch (e) {
             console.error('[getCurrentProvider] 读取项目本地配置失败:', e.message);
@@ -1307,10 +1361,29 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
     // apiType 直接由 appType 决定：claude→'claude'、codex→'openai'、gemini→'gemini'
     // URL 包含 /v1/messages 的启发式不可靠（Claude Relay 常为 /api/）
     const computeApiType = () => appType === 'gemini' ? 'gemini' : (appType === 'claude' ? 'claude' : 'openai');
-    // 统一的返回构造器：补齐所有分支缺失的字段（apiType / isOAuth / oauthEmail）
+
+    // 陈旧检测（懒计算一次）：仅 claude、仅当显示的是全局供应商(configSource==='global')时有意义。
+    // 运行中 claude 进程启动早于 ~/.claude/settings.json 最近变更 → 它仍用切换前的供应商、重启才生效。
+    let _staleChecked = false, _globalStale = false;
+    const isGlobalStale = () => {
+      if (_staleChecked) return _globalStale;
+      _staleChecked = true;
+      if (appType !== 'claude' || !tmuxSessionName) return false;
+      try {
+        const startEpoch = getClaudeProcStartEpoch(tmuxSessionName);
+        if (!startEpoch) return false;
+        const sp = path.join(os.homedir(), '.claude', 'settings.json');
+        const mtime = existsSync(sp) ? Math.floor(statSync(sp).mtimeMs / 1000) : 0;
+        if (mtime && startEpoch < mtime - 2) _globalStale = true; // -2s 容差，避免文件系统时序误判
+      } catch {}
+      return _globalStale;
+    };
+
+    // 统一的返回构造器：补齐所有分支缺失的字段（apiType / isOAuth / oauthEmail / stale）
     const buildResult = (extras) => {
       const url = extras.url !== undefined ? extras.url : '';
       const isOAuth = !url && appType === 'claude' && !!extras.exists;
+      const cs = extras.configSource || 'global';
       return {
         id: extras.id,
         name: extras.name,
@@ -1320,9 +1393,11 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         apiType: extras.apiType || computeApiType(),
         app: appType,
         exists: !!extras.exists,
-        configSource: extras.configSource || 'global',
+        configSource: cs,
         isOAuth,
         oauthEmail: isOAuth ? readOAuthEmail() : '',
+        // 显示全局供应商但运行中进程早于配置变更 → 标记陈旧，前端提示"重启会话生效"
+        stale: cs === 'global' && !!extras.exists ? isGlobalStale() : false,
         ...(extras.globalConfig !== undefined ? { globalConfig: extras.globalConfig } : {})
       };
     };
@@ -1344,18 +1419,20 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
     const findProviderName = (url, rows) => {
       if (!url || !rows) return '未知供应商';
       const normalizedUrl = url.replace(/\/+$/, '').replace(/\/v\d+$/, '');
+      const matches = [];
       for (const row of rows) {
         try {
           if (row.settings_config) {
             const config = JSON.parse(row.settings_config);
             const providerUrl = extractProviderUrl(config).replace(/\/+$/, '').replace(/\/v\d+$/, '');
-            if (normalizedUrl === providerUrl) {
-              return row.name || '未命名';
-            }
+            if (normalizedUrl === providerUrl) matches.push(row);
           }
         } catch (e) {}
       }
-      return '未知供应商';
+      if (matches.length === 0) return '未知供应商';
+      // 多个同 URL 时优先 is_current（用户明确切换的）
+      const cur = matches.find(r => r.is_current);
+      return (cur || matches[0]).name || '未命名';
     };
 
     // 构建全局配置信息对象
@@ -1426,15 +1503,14 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         }
 
         if (urlMatches.length > 0) {
-          // 优先 URL+Key 精确匹配
+          // 多个同 URL 供应商（如 Whaty / Whaty copy，常同账号复制 URL+Key 全同）时的优先级：
+          // 1) 会话级切换记录的 _localProviderId（用户明确选的那一个，URL/Key 全同也能精确命中）
+          // 2) 全局 is_current（用户全局切换的）
+          // 3) URL+Key 精确匹配；4) 第一个
+          const idMatch = localProviderId && urlMatches.find(m => m.row.id === localProviderId);
+          const currentMatch = urlMatches.find(m => m.row.is_current);
           const exactMatch = urlMatches.find(m => m.keyMatch);
-          let bestRow;
-          if (exactMatch) {
-            bestRow = exactMatch.row;
-          } else {
-            const currentMatch = urlMatches.find(m => m.row.is_current);
-            bestRow = currentMatch ? currentMatch.row : urlMatches[0].row;
-          }
+          const bestRow = (idMatch || currentMatch || exactMatch || urlMatches[0]).row;
           return resolve(buildResult({
             id: bestRow.id,
             name: bestRow.name || '未命名',
@@ -1462,6 +1538,27 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         // 优先以 DB is_current 为准（switchProviderStateMachine 切换时已更新 is_current）
         // 注意：保留前面已检测到的 configSource（可能是 'local'）
         const row = db.prepare('SELECT * FROM providers WHERE app_type = ? AND is_current = 1').get(appType);
+
+        // 会话本地明确标记为官方 OAuth：忽略全局 is_current(可能是第三方)，直接返回官方
+        // （修复：会话设为官方但全局 is_current=第三方时，侧栏误显示第三方、与 /status 不符）
+        if (appType === 'claude' && localIsOAuth) {
+          let oauthRow = null;
+          try {
+            const claudeRows = db.prepare('SELECT * FROM providers WHERE app_type = ?').all('claude');
+            oauthRow = claudeRows.find(r => {
+              try { const sc = JSON.parse(r.settings_config || '{}'); return !!sc.useOAuth || !sc.env?.ANTHROPIC_BASE_URL; }
+              catch { return false; }
+            });
+          } catch {}
+          db.close();
+          return resolve(buildResult({
+            id: oauthRow?.id,
+            name: oauthRow?.name || 'Claude Official',
+            url: '',
+            exists: true,
+            configSource: 'local'
+          }));
+        }
 
         if (appType === 'claude' && row) {
           let currentSc = {};
@@ -2548,6 +2645,10 @@ setupRoutes(app, getSessionManager, historyLogger, io, aiEngine, healthCheckSche
 // 记录每个会话最后执行的操作和时间，用于防止重复执行
 const lastActionMap = new Map();
 
+// 后台自动操作开关的去抖（模块级，跨所有 socket 连接共享，避免多客户端/重连导致状态 flip-flop）
+// 结构：sessionId -> { timer, targetEnabled }
+const autoActionToggleState = new Map();
+
 // 记录每个会话的检测状态，用于动态调整检测周期
 const sessionCheckState = new Map();
 
@@ -3075,6 +3176,12 @@ setTimeout(updateAllSessionsProjectInfo, 3000);
 const userInputPauseState = new Map();
 const USER_INPUT_PAUSE_DURATION = 5000; // 用户输入后暂停 5 秒
 
+// 错误检测循环节流：sessionId -> 上次错误检测时间戳。
+// 错误检测对每个会话做抓屏+进程检测(同步execSync)，会话多时每秒串行跑全部会话会
+// 周期性阻塞主线程、拖慢输入回显。错误不是高频事件，每会话 4 秒检一次足够。
+const errorCheckLastTime = new Map();
+const ERROR_CHECK_INTERVAL = 4000;
+
 // 记录用户输入，暂停自动操作
 function pauseAutoActionForUserInput(sessionId) {
   const existing = userInputPauseState.get(sessionId);
@@ -3191,6 +3298,12 @@ async function runBackgroundAutoAction() {
     }
     // 跳过已经发送过修复建议的会话（等待用户确认，仅非自动模式）
     if (session.pendingFixSuggestion) continue;
+
+    // 节流：每会话错误检测最多每 4 秒一次，避免每秒对全部会话同步抓屏+进程检测阻塞主线程。
+    // 但有 hook working 状态或自动操作开启的会话不受影响（它们另有更及时的处理路径）。
+    const lastErrChk = errorCheckLastTime.get(sessionData.id) || 0;
+    if (now - lastErrChk < ERROR_CHECK_INTERVAL) continue;
+    errorCheckLastTime.set(sessionData.id, now);
 
     const terminalContent = session.getScreenContent();
     if (!terminalContent || terminalContent.length < 50) continue;
@@ -3508,18 +3621,6 @@ async function runBackgroundAutoAction() {
       continue;
     }
 
-    // Team Member 会话交给 TaskOrchestrator 处理
-    if (session.teamId && session.teamRole === 'member' && taskOrchestrator) {
-      try {
-        const terminalContent = session.getScreenContent();
-        if (terminalContent && terminalContent.length >= 10) {
-          await taskOrchestrator.handleMemberTick(session, terminalContent);
-        }
-      } catch (err) {
-        console.error(`[TaskOrchestrator] 会话 ${session.name} 处理异常:`, err.message);
-      }
-      continue; // 跳过普通 auto-action 逻辑
-    }
 
     // 检查是否因用户输入而暂停
     if (isAutoActionPausedByUserInput(sessionData.id)) {
@@ -4140,8 +4241,23 @@ async function runBackgroundAutoAction() {
   }
 }
 
+// 全局重入守卫：单次扫描含 await(AI 分析)+execSync，常 >1s。若不守卫，
+// 1s 定时器会让多次扫描重叠并发，对不同会话的 AI 分析调用堆叠 → 成本/资源放大。
+let _autoSweepRunning = false;
+async function runBackgroundAutoActionGuarded() {
+  if (_autoSweepRunning) return;
+  _autoSweepRunning = true;
+  try {
+    await runBackgroundAutoAction();
+  } catch (e) {
+    console.error('[后台自动操作] 扫描异常:', e?.message || e);
+  } finally {
+    _autoSweepRunning = false;
+  }
+}
+
 // 每 1 秒检查一次（实际检测由 sessionCheckState 控制，支持爆发模式的 3 秒间隔）
-setInterval(runBackgroundAutoAction, 1000);
+setInterval(runBackgroundAutoActionGuarded, 1000);
 
 // 主动扫描修复会话文件：每 30 分钟扫描一次，在错误发生前清理 thinking 块和空 text 块
 let lastProactiveScanTime = 0;
@@ -4159,17 +4275,6 @@ setInterval(async () => {
     console.error('[主动扫描] 扫描失败:', err.message);
   }
 }, 60000);
-
-// Team 协调：TaskOrchestrator 已在 runBackgroundAutoAction 的 1 秒循环中统一处理
-// 保留 runCoordination 作为 Lead 会话的协调（非 member 任务分配）
-setInterval(async () => {
-  if (!teamManager) return;
-  try {
-    await teamManager.runCoordination();
-  } catch (err) {
-    console.error('[TeamManager] 协调循环错误:', err.message);
-  }
-}, 10000);
 
 // 内存限制状态跟踪
 const memoryLimitState = new Map(); // sessionId -> { warned: boolean, limited: boolean }
@@ -4317,6 +4422,8 @@ function cleanupAllSessionCache(sessionId) {
   aiStatusCache.delete(sessionId);
   aiContentHashCache.delete(sessionId);
   aiNoChangeStartTime.delete(sessionId);
+  memoryLimitState.delete(sessionId);
+  errorCheckLastTime.delete(sessionId);
 }
 let nextAiAnalysisTime = Date.now() + AI_ANALYSIS_INTERVAL; // 下次分析时间
 
@@ -4589,6 +4696,134 @@ setInterval(() => {
 let _providerSwitchInProgress = false;
 
 /**
+ * 按 providerId 读取供应商配置并解析出可用于子进程/会话的信息。
+ * 与 switchProviderStateMachine 同源（BuiltinProviderDB → providers.json 兜底）。
+ * @returns {{ provider, settingsConfig, env, isOAuth }|null}
+ *   env: Claude 为 { ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN } 等（OAuth 时为空对象）
+ */
+function resolveProviderInfo(appType, providerId) {
+  if (!providerId) return null;
+  let targetProvider = null;
+  try {
+    const db = builtinProviderDB.getDB(true);
+    const row = db.prepare('SELECT * FROM providers WHERE id = ? AND app_type = ?').get(providerId, appType);
+    db.close();
+    if (row) {
+      let settingsConfig = {};
+      try {
+        if (row.settings_config) {
+          settingsConfig = typeof row.settings_config === 'string'
+            ? JSON.parse(row.settings_config) : row.settings_config;
+        }
+      } catch {}
+      targetProvider = { id: row.id, name: row.name, appType: row.app_type, settingsConfig };
+    }
+  } catch (e) {
+    console.error('[resolveProviderInfo] 读取 BuiltinProviderDB 失败:', e.message);
+  }
+  if (!targetProvider) {
+    targetProvider = providerService.getById(appType, providerId);
+  }
+  if (!targetProvider) return null;
+
+  const sc = targetProvider.settingsConfig || {};
+  let env = {};
+  if (appType === 'claude') {
+    if (sc.env && Object.keys(sc.env).length > 0) {
+      env = { ...sc.env };
+    } else {
+      const apiType = sc.apiType || 'openai';
+      const apiConf = sc[apiType] || {};
+      if (apiConf.apiUrl) env.ANTHROPIC_BASE_URL = apiConf.apiUrl;
+      if (apiConf.apiKey) env.ANTHROPIC_AUTH_TOKEN = apiConf.apiKey;
+    }
+  } else if (appType === 'gemini') {
+    if (sc.env && Object.keys(sc.env).length > 0) env = { ...sc.env };
+  }
+  // codex 用 auth.json/config.toml（非 env），由 applySessionProvider 写会话目录
+  const isOAuth = appType === 'claude' && (!!sc.useOAuth || !env.ANTHROPIC_BASE_URL);
+  return { provider: targetProvider, settingsConfig: sc, env, isOAuth };
+}
+
+/**
+ * 为单个会话设置 API 供应商（仅影响本会话，不动全局配置）。
+ * Claude: 写 <workdir>/.claude/settings.local.json + 会话级 tmux env
+ * Codex:  会话专属 CODEX_HOME 目录(auth.json/config.toml) + 会话级 tmux env CODEX_HOME
+ * Gemini: 写 <workdir>/.gemini/settings.json + 会话级 tmux env
+ * @returns {{ ok:boolean, providerEnv?:object, error?:string }}
+ *   providerEnv 用于拆分阶段 spawn 注入（值为 null 表示从继承 env 中删除该键）
+ */
+function applySessionProvider(session, appType, providerId) {
+  const info = resolveProviderInfo(appType, providerId);
+  if (!info) return { ok: false, error: '供应商不存在' };
+
+  const workdir = session.workingDir;
+  const tmux = session.tmuxSessionName;
+  const setEnv = (k, v) => {
+    if (!tmux) return;
+    try { tmuxSetEnv({ target: tmux, name: k, value: v }); } catch {}
+  };
+  const unsetEnv = (k) => {
+    if (!tmux) return;
+    try { tmuxSetEnv({ target: tmux, name: k, value: null }); } catch {}
+  };
+
+  let providerEnv = {};
+  try {
+    if (appType === 'claude') {
+      const localDir = path.join(workdir, '.claude');
+      if (!existsSync(localDir)) mkdirSync(localDir, { recursive: true });
+      const lp = path.join(localDir, 'settings.local.json');
+      let ls = {};
+      if (existsSync(lp)) { try { ls = JSON.parse(readFileSync(lp, 'utf-8')); } catch {} }
+      ls.env = ls.env || {};
+      const keys = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL'];
+      if (info.isOAuth) {
+        // 官方登录：清除本地与会话 env 里的 ANTHROPIC_*，让 CLI 走订阅登录
+        for (const k of keys) { delete ls.env[k]; unsetEnv(k); providerEnv[k] = null; }
+        ls._localProvider = 'oauth';   // 标记本会话为官方OAuth，供 getCurrentProvider 正确识别(不被全局is_current覆盖)
+        delete ls._localProviderId;    // 清除第三方 id 残留
+      } else {
+        for (const [k, v] of Object.entries(info.env)) { ls.env[k] = v; setEnv(k, v); providerEnv[k] = v; }
+        ls._localProvider = 'relay';   // 标记本会话为第三方中转
+        // 记录所选供应商 id：多个同 URL+Key 供应商(如 Whaty / Whaty copy)时，
+        // getCurrentProvider 反查按 id 精确命中，不再靠 URL/Key 猜名字
+        ls._localProviderId = info.provider.id;
+      }
+      writeFileSync(lp, JSON.stringify(ls, null, 2), 'utf8');
+      session.claudeProvider = { id: info.provider.id, name: info.provider.name };
+    } else if (appType === 'codex') {
+      // 会话专属 CODEX_HOME，避免污染 ~/.codex
+      const codexHome = path.join(os.homedir(), '.webtmux', 'sessions', session.id, 'codex');
+      if (!existsSync(codexHome)) mkdirSync(codexHome, { recursive: true });
+      const sc = info.settingsConfig;
+      if (sc.auth) writeFileSync(path.join(codexHome, 'auth.json'), JSON.stringify(sc.auth, null, 2), 'utf8');
+      if (sc.config) writeFileSync(path.join(codexHome, 'config.toml'), sc.config, 'utf8');
+      setEnv('CODEX_HOME', codexHome);
+      providerEnv.CODEX_HOME = codexHome;
+      session.codexProvider = { id: info.provider.id, name: info.provider.name };
+    } else if (appType === 'gemini') {
+      // 项目级 .gemini（实现时验证 gemini 是否读取；至少 env 经 tmux/spawn 生效）
+      const gdir = path.join(workdir, '.gemini');
+      if (!existsSync(gdir)) mkdirSync(gdir, { recursive: true });
+      const sc = info.settingsConfig;
+      const settings = (sc.config && typeof sc.config === 'object') ? { ...sc.config } : {};
+      writeFileSync(path.join(gdir, 'settings.json'), JSON.stringify(settings, null, 2), 'utf8');
+      for (const [k, v] of Object.entries(info.env)) { setEnv(k, v); providerEnv[k] = v; }
+      session.geminiProvider = { id: info.provider.id, name: info.provider.name };
+    } else {
+      return { ok: false, error: `不支持的 CLI: ${appType}` };
+    }
+    try { sessionManager.updateSession(session); } catch {}
+    console.log(`[applySessionProvider] 会话 ${session.name} 设置 ${appType} 供应商: ${info.provider.name}`);
+    return { ok: true, providerEnv };
+  } catch (e) {
+    console.error('[applySessionProvider] 失败:', e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+/**
  * 切换供应商 - 简化版：直接将选中供应商的配置写入本地配置文件
  */
 async function switchProviderStateMachine(session, appType, providerId, socket) {
@@ -4777,8 +5012,10 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
       console.log('[Provider Switch] Gemini 配置已更新:', targetProvider.name);
     }
 
-    // 同步更新 DB 的 is_current，保持 DB 与 settings.json 一致
-    // 如果是 OAuth provider，同时保留 useOAuth 标记（防止 CC Switch 覆盖后丢失）
+    // 同步更新 DB 的 is_current，保持 DB 与 settings.json 一致。
+    // 注意：仅更新 is_current（选中标记），绝不回写 settings_config/env，
+    // 避免动到 CC Switch 里供应商的 API key（官方 OAuth 该清的是本地 settings.json，
+    // 在上方已处理，无需反写数据库清 env）。
     try {
       const dbW = builtinProviderDB.getDB(false);
       dbW.prepare('UPDATE providers SET is_current = 0 WHERE app_type = ?').run(appType);
@@ -4786,22 +5023,6 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
       ccSwitchAudit.log('switchProviderStateMachine', 'UPDATE is_current', {
         appType, targetId: targetProvider.id, targetName: targetProvider.name, sessionId
       });
-      if (sc.useOAuth) {
-        // 保留 useOAuth 标记，防止 CC Switch 同步时覆盖
-        const currentScRow = dbW.prepare('SELECT settings_config FROM providers WHERE id = ? AND app_type = ?').get(targetProvider.id, appType);
-        if (currentScRow) {
-          let currentSc = {};
-          try { currentSc = JSON.parse(currentScRow.settings_config); } catch {}
-          currentSc.useOAuth = true;
-          currentSc.env = {};
-          dbW.prepare('UPDATE providers SET settings_config = ? WHERE id = ? AND app_type = ?').run(
-            JSON.stringify(currentSc), targetProvider.id, appType
-          );
-          ccSwitchAudit.log('switchProviderStateMachine', 'UPDATE settings_config (useOAuth)', {
-            targetId: targetProvider.id, targetName: targetProvider.name
-          });
-        }
-      }
       dbW.close();
       console.log('[Provider Switch] DB is_current 已更新为:', targetProvider.name);
     } catch (dbErr) {
@@ -4827,11 +5048,7 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
                         'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'];
       for (const varName of tmuxVars) {
         try {
-          if (newEnv[varName]) {
-            execSync(`${getTmuxPrefix()} set-environment -g ${varName} "${newEnv[varName]}"`, { stdio: 'ignore' });
-          } else {
-            execSync(`${getTmuxPrefix()} set-environment -g -u ${varName}`, { stdio: 'ignore' });
-          }
+          tmuxSetEnv({ scope: '-g', name: varName, value: newEnv[varName] || null });
         } catch (e) {}
       }
       console.log('[Provider Switch] 已同步 tmux 全局环境变量');
@@ -5344,10 +5561,6 @@ io.on('connection', (socket) => {
     if (result.success) {
       // 清理会话相关的缓存数据
       cleanupAllSessionCache(sessionId);
-      // 清理 TaskOrchestrator 中的 Agent 状态
-      if (taskOrchestrator) {
-        taskOrchestrator.cleanupSession(sessionId);
-      }
       console.log(`会话已关闭（可恢复）: ${sessionId}`);
       io.emit('sessions:updated', sessionManager.listSessions());
       socket.emit('session:closed', result.closedSession);
@@ -5431,12 +5644,14 @@ io.on('connection', (socket) => {
   // 获取最近项目列表
   socket.on('recentProjects:get', async (options = {}) => {
     try {
-      const limit = options.limit || 50;  // 默认返回 50 个项目
+      // 默认 200：用户常有数十个历史项目（实测单 Claude 就 55+），旧值 50 会截断"很多项目不显示"。
+      // 前端 RecentProjects 有展开/收起控制实际渲染量，后端给全集即可。
+      const limit = options.limit || 200;
       const projects = await RecentProjectsService.getAllRecentProjects(limit);
       socket.emit('recentProjects:list', projects);
     } catch (error) {
       console.error('[RecentProjects] 获取失败:', error);
-      socket.emit('recentProjects:list', { claude: [], codex: [], gemini: [] });
+      socket.emit('recentProjects:list', { claude: [], codex: [], gemini: [], grok: [] });
     }
   });
 
@@ -5471,6 +5686,267 @@ io.on('connection', (socket) => {
   socket.on('evaluator:toggle', ({ sessionId, enabled }) => {
     evaluatorService.setEnabled(sessionId, enabled);
     socket.emit('evaluator:status', { sessionId, enabled });
+  });
+
+  // ───────── Ralph 自主模式 ─────────
+
+  // 付费门禁：未订阅则拦截并引导订阅。返回 true 表示已拦截（调用方应 return）
+  const ralphGate = (socket, sessionId) => {
+    if (RALPH_CORE_PRESENT && subscriptionService.isRalphAvailable()) return false;
+    const payload = {
+      sessionId,
+      error: 'premium_required',
+      message: '自主开发是专业版功能，请订阅后使用',
+      subscriptionUrl: subscriptionService.getSubscriptionUrl?.() || ''
+    };
+    socket.emit('ralph:state', { ...payload, running: false });
+    socket.emit('ralph:premium_required', payload);
+    return true;
+  };
+
+  // 自主模式任务拆分（带 acceptanceCriteria/dependsOn/branch）
+  socket.on('ralph:plan', async ({ sessionId, goal }) => {
+    if (ralphGate(socket, sessionId)) return;
+    try {
+      const session = sessionManager?.getSession(sessionId);
+      const terminalOutput = session?.getRecentOutput?.(80) || '';
+      // 用会话供应商拆分（与 wizard:plan 一致）：幂等重设拿 providerEnv
+      let providerEnv = {};
+      const sp = session?.aiType === 'codex' ? session?.codexProvider
+        : session?.aiType === 'gemini' ? session?.geminiProvider
+        : session?.claudeProvider;
+      if (session && sp?.id) {
+        const r = applySessionProvider(session, session.aiType || 'claude', sp.id);
+        if (r.ok) providerEnv = r.providerEnv || {};
+      }
+      const projectContext = {
+        projectDesc: session?.projectDesc,
+        workingDir: session?.workingDir,
+        terminalOutput,
+        autonomous: true,
+        aiType: session?.aiType || 'claude',
+        providerEnv
+      };
+      const progress = await plannerService.expandGoal(sessionId, goal, projectContext);
+      socket.emit('progress:data', { sessionId, progress });
+      io.to(`session:${sessionId}`).emit('progress:updated', { sessionId, progress });
+    } catch (err) {
+      console.error('[Ralph] 拆分失败:', err.message);
+      socket.emit('progress:data', { sessionId, progress: null, error: err.message });
+    }
+  });
+
+  // 启动自主执行循环
+  socket.on('ralph:start', ({ sessionId, maxIterations }) => {
+    if (ralphGate(socket, sessionId)) return;
+    if (!ralphEngine) {
+      socket.emit('ralph:state', { sessionId, running: false, error: '引擎未就绪' });
+      return;
+    }
+    if (ralphEngine.isRunning(sessionId)) {
+      socket.emit('ralph:state', { sessionId, running: true, phase: 'idle' });
+      return;
+    }
+    // 非阻塞启动
+    // Ralph 自主模式联动开启监控自动操作：自主会话若回退到交互式 claude 弹确认框，
+    // 也能被自动放行，不会卡住（headless 模式本身不弹框，开启无副作用）
+    try {
+      const s = sessionManager.getSession(sessionId);
+      if (s && !s.autoActionEnabled) {
+        s.updateSettings({ autoActionEnabled: true });
+        sessionManager.updateSession(s);
+        io.emit('sessions:updated', sessionManager.listSessions());
+      }
+    } catch {}
+    ralphEngine.start(sessionId, maxIterations || 100);
+  });
+
+  // 停止自主执行
+  socket.on('ralph:stop', ({ sessionId }) => {
+    if (ralphEngine) ralphEngine.stop(sessionId);
+    socket.emit('ralph:state', { sessionId, running: false, phase: 'stopped' });
+  });
+
+  // 查询自主模式状态
+  socket.on('ralph:status', ({ sessionId }) => {
+    const running = ralphEngine ? ralphEngine.isRunning(sessionId) : false;
+    socket.emit('ralph:state', { sessionId, running });
+  });
+
+  // 暂停后恢复
+  socket.on('ralph:resume', ({ sessionId }) => {
+    if (ralphEngine) ralphEngine.resume(sessionId);
+  });
+
+  // ───────── 自主开发一键向导 ─────────
+
+  // 向导 Step1→Step2：建目录 + git init + 建会话 + 自主拆分，返回任务清单
+  socket.on('ralph:wizard:plan', async ({ projectName, parentDir, requirement, existingDir, aiType, providerId }, cb) => {
+    const reply = (data) => { socket.emit('ralph:wizard:planned', data); if (typeof cb === 'function') cb(data); };
+    if (!RALPH_CORE_PRESENT || !subscriptionService.isRalphAvailable()) {
+      return reply({ error: 'premium_required', message: '自主开发是专业版功能，请订阅后使用', subscriptionUrl: subscriptionService.getSubscriptionUrl?.() || '' });
+    }
+    try {
+      await waitForSessionManager();
+      // 1. 确定 workingDir
+      let workingDir;
+      if (existingDir) {
+        workingDir = existingDir;
+      } else {
+        if (!parentDir || !projectName) return reply({ error: '缺少项目名或位置' });
+        workingDir = path.join(parentDir.replace(/^~/, os.homedir()), projectName);
+        if (!existsSync(workingDir)) mkdirSync(workingDir, { recursive: true });
+      }
+      if (!existsSync(workingDir)) return reply({ error: `目录不存在: ${workingDir}` });
+
+      // 2. 非 git 仓库则 git init（后续要建分支/提交）
+      const isGitRepo = existsSync(path.join(workingDir, '.git'));
+      if (!isGitRepo) {
+        try {
+          execSync('git init', { cwd: workingDir, encoding: 'utf-8' });
+          // 建一个初始提交，确保后续能建分支
+          execSync('git add -A && git commit -m "chore: 初始化项目" --allow-empty', { cwd: workingDir, encoding: 'utf-8' });
+        } catch (e) { console.error('[Ralph向导] git init 失败:', e.message); }
+      }
+
+      // 3. 建会话并设工作目录
+      const session = await sessionManager.createSession({
+        name: projectName || path.basename(workingDir),
+        goal: requirement || '',
+        systemPrompt: ''
+      });
+      registerBellCallback(session);
+      registerExitCallback(session);
+      session.aiType = aiType || 'claude';
+      session.workingDir = workingDir;
+      session.projectName = projectName || path.basename(workingDir);
+      sessionManager.updateSession(session);
+      // 让终端进入工作目录
+      setTimeout(() => { try { session.write(`cd "${workingDir}"\r`); } catch {} }, 300);
+
+      // 持久化原始需求到 doc/requirement.md：session.goal 会被项目元数据刷新成占位
+      // （extractProjectGoal），导致"重新拆分"丢失需求；落地为文档后 expandGoal 会优先读取，
+      // 重新拆分可复用原始需求、不退化。
+      try {
+        const docDir = path.join(workingDir, 'doc');
+        if (!existsSync(docDir)) mkdirSync(docDir, { recursive: true });
+        const reqPath = path.join(docDir, 'requirement.md');
+        if (!existsSync(reqPath) && requirement && requirement.trim()) {
+          writeFileSync(reqPath, `# 需求\n\n${requirement.trim()}\n`, 'utf8');
+        }
+      } catch (e) { console.warn('[Ralph向导] 写 requirement.md 失败:', e.message); }
+
+      // 3.5 若指定了供应商，仅为本会话设置（不污染全局），拿到拆分阶段要注入的 env
+      let providerEnv = {};
+      if (providerId) {
+        const r = applySessionProvider(session, session.aiType, providerId);
+        if (r.ok) providerEnv = r.providerEnv || {};
+        else console.warn('[Ralph向导] 设置会话供应商失败:', r.error);
+      } else {
+        // 跟随当前默认：用 CC Switch 当前生效供应商初始化会话头部显示
+        // （否则新建项目的会话头部供应商未初始化、显示不正确）
+        try {
+          const prov = await getCurrentProvider(session.aiType || 'claude', workingDir, session.tmuxSessionName);
+          if (prov?.exists) {
+            const k = session.aiType === 'codex' ? 'codexProvider'
+              : session.aiType === 'gemini' ? 'geminiProvider'
+              : session.aiType === 'grok' ? 'grokProvider' : 'claudeProvider';
+            session[k] = prov;
+            sessionManager.updateSession(session);
+          }
+        } catch (e) { console.warn('[Ralph向导] 初始化默认供应商失败:', e.message); }
+      }
+
+      // 4. 立即返回 sessionId，让前端关闭弹窗并切到会话窗口；拆分放后台异步进行。
+      io.emit('sessions:updated', sessionManager.listSessions());
+      reply({ sessionId: session.id, workingDir, isGitRepo, planning: true });
+
+      // 5. 后台拆分（不阻塞 handler），进度/结果经事件推到会话窗口的 SprintProgress
+      (async () => {
+        io.emit('ralph:planning', { sessionId: session.id, status: 'running' });
+        try {
+          const progress = await plannerService.expandGoal(session.id, requirement, {
+            workingDir, autonomous: true, projectDesc: session.projectDesc,
+            aiType: session.aiType, providerEnv
+          });
+          if (!progress?.features?.length) {
+            io.emit('ralph:planning', { sessionId: session.id, status: 'failed', error: '拆分未产生任务，请补充需求描述' });
+            return;
+          }
+          io.emit('progress:updated', { sessionId: session.id, progress });
+          io.emit('ralph:planning', { sessionId: session.id, status: 'done' });
+        } catch (err) {
+          console.error('[Ralph向导] 后台拆分失败:', err.message);
+          io.emit('ralph:planning', { sessionId: session.id, status: 'failed', error: err.message });
+        }
+      })();
+    } catch (err) {
+      console.error('[Ralph向导] plan 失败:', err.message);
+      reply({ error: err.message });
+    }
+  });
+
+  // 向导 Step2 确认：git 干净检查 + 建分支 + 启动执行
+  socket.on('ralph:wizard:start', ({ sessionId, enabledTaskIds, pauseAfterEachTask, ignoreDirty }, cb) => {
+    const reply = (data) => { socket.emit('ralph:wizard:started', { sessionId, ...data }); if (typeof cb === 'function') cb(data); };
+    if (!RALPH_CORE_PRESENT || !subscriptionService.isRalphAvailable()) {
+      return reply({ error: 'premium_required', message: '自主开发是专业版功能，请订阅后使用', subscriptionUrl: subscriptionService.getSubscriptionUrl?.() || '' });
+    }
+    try {
+      if (!ralphEngine) return reply({ error: '引擎未就绪' });
+      const session = sessionManager.getSession(sessionId);
+      if (!session?.workingDir) return reply({ error: '会话或工作目录无效' });
+
+      // 幂等重设会话供应商：确保执行阶段 tmux env（如 codex CODEX_HOME）就绪
+      // （拆分阶段已在 wizard:plan 设过；此处保险，主要为依赖 tmux env 的 codex）
+      const sessProvider = session.aiType === 'codex' ? session.codexProvider
+        : session.aiType === 'gemini' ? session.geminiProvider
+        : session.claudeProvider;
+      if (sessProvider?.id) {
+        applySessionProvider(session, session.aiType || 'claude', sessProvider.id);
+      }
+
+      // 取消未勾选的任务
+      if (Array.isArray(enabledTaskIds)) {
+        const progress = progressManager.loadProgress(sessionId);
+        if (progress?.features) {
+          for (const f of progress.features) {
+            if (!enabledTaskIds.includes(f.id) && f.status !== 'completed') {
+              progressManager.updateFeatureStatus(sessionId, f.id, { blocked: true });
+            }
+          }
+        }
+      }
+
+      // 护栏1：git 干净检查
+      if (!ignoreDirty) {
+        try {
+          const dirty = execSync('git status --porcelain', { cwd: session.workingDir, encoding: 'utf-8' }).trim();
+          if (dirty) {
+            return reply({ blocked: 'dirty', files: dirty.split('\n').slice(0, 20) });
+          }
+        } catch {}
+      }
+
+      // 护栏2：分支名取自 features 的 branch
+      const progress = progressManager.loadProgress(sessionId);
+      const branch = progress?.features?.find(f => f.branch)?.branch || `ralph/${Date.now().toString(36)}`;
+
+      // Ralph 自主模式联动开启监控自动操作（同 ralph:start，避免自主会话弹确认框卡住）
+      try {
+        const s = sessionManager.getSession(sessionId);
+        if (s && !s.autoActionEnabled) {
+          s.updateSettings({ autoActionEnabled: true });
+          sessionManager.updateSession(s);
+          io.emit('sessions:updated', sessionManager.listSessions());
+        }
+      } catch {}
+      ralphEngine.start(sessionId, { maxIterations: 100, branch, pauseAfterEachTask: !!pauseAfterEachTask });
+      reply({ started: true, branch });
+    } catch (err) {
+      console.error('[Ralph向导] start 失败:', err.message);
+      reply({ error: err.message });
+    }
   });
 
   // 获取进度摘要
@@ -6059,36 +6535,44 @@ ${terminalContext ? terminalContext : '（无）'}
   });
 
   // 切换后台自动操作开关（带去抖，防止多客户端/快速切换导致状态循环）
-  const autoActionToggleTimers = new Map();
+  // 去抖状态存于模块级 autoActionToggleState，跨所有连接共享，确保「最后一次意图」胜出
   socket.on('ai:toggleAutoAction', (data) => {
     const session = sessionManager.getSession(data.sessionId);
-    if (session) {
-      // 如果状态没变化，忽略
-      if (session.autoActionEnabled === data.enabled) return;
+    if (!session) return;
 
-      // 去抖：300ms 内的重复切换只执行最后一次
-      const timerId = autoActionToggleTimers.get(data.sessionId);
-      if (timerId) clearTimeout(timerId);
+    const targetEnabled = !!data.enabled;
+    const existing = autoActionToggleState.get(data.sessionId);
 
-      autoActionToggleTimers.set(data.sessionId, setTimeout(() => {
-        autoActionToggleTimers.delete(data.sessionId);
-        // 再次检查状态是否已经是目标值（可能已被其他请求处理）
-        if (session.autoActionEnabled === data.enabled) return;
+    // 始终记录「最新意图」为目标值，并重置去抖计时器（last-write-wins）
+    if (existing?.timer) clearTimeout(existing.timer);
 
-        session.updateSettings({ autoActionEnabled: data.enabled });
-        sessionManager.updateSession(session);
+    const timer = setTimeout(() => {
+      const st = autoActionToggleState.get(data.sessionId);
+      autoActionToggleState.delete(data.sessionId);
+      const desired = st ? st.targetEnabled : targetEnabled;
 
-        io.to(`session:${data.sessionId}`).emit('session:updated', session.toJSON());
-        io.emit('sessions:updated', sessionManager.listSessions());
+      // 仅在最终目标值与当前状态不同时才写入，避免无谓的状态变更/持久化
+      if (session.autoActionEnabled === desired) {
+        // 即使无需写入，也回推一次真实状态，纠正前端可能的乐观/陈旧显示（显示开实际关）
+        socket.emit('session:updated', session.toJSON());
+        return;
+      }
 
-        historyLogger.log(data.sessionId, {
-          type: 'system',
-          content: `后台自动操作${data.enabled ? '开启' : '关闭'}`
-        });
+      session.updateSettings({ autoActionEnabled: desired });
+      sessionManager.updateSession(session);
 
-        console.log(`[自动操作] 会话 ${session.name}: ${data.enabled ? '开启' : '关闭'}`);
-      }, 300));
-    }
+      io.to(`session:${data.sessionId}`).emit('session:updated', session.toJSON());
+      io.emit('sessions:updated', sessionManager.listSessions());
+
+      historyLogger.log(data.sessionId, {
+        type: 'system',
+        content: `后台自动操作${desired ? '开启' : '关闭'}`
+      });
+
+      console.log(`[自动操作] 会话 ${session.name}: ${desired ? '开启' : '关闭'}`);
+    }, 300);
+
+    autoActionToggleState.set(data.sessionId, { timer, targetEnabled });
   });
 
   // ========== 预约管理事件 ==========
@@ -6630,307 +7114,9 @@ ${terminalContext ? terminalContext : '（无）'}
     });
   });
 
-  // ==================== Team 事件 ====================
-
-  // 获取团队列表
-  socket.on('teams:list', async () => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager) { socket.emit('teams:list', []); return; }
-      socket.emit('teams:list', teamManager.listTeams());
-    } catch (err) {
-      console.error('[teams:list] 错误:', err.message);
-      socket.emit('teams:list', []);
-    }
-  });
-
-  // 创建团队
-  socket.on('team:create', async (data, ack) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager) {
-        socket.emit('error', { message: 'TeamManager 未初始化' });
-        if (typeof ack === 'function') ack({ error: 'TeamManager 未初始化' });
-        return;
-      }
-      console.log('[team:create] 开始创建团队:', data.name);
-      const team = await teamManager.createTeam({
-        name: data.name,
-        goal: data.goal,
-        workingDir: data.workingDir || '',
-        memberCount: data.memberCount || 2
-      });
-      console.log('[team:create] 团队创建成功:', team.id);
-      socket.emit('team:created', team);
-      if (typeof ack === 'function') ack({ team });
-      io.emit('teams:updated', teamManager.listTeams());
-      io.emit('sessions:updated', sessionManager.listSessions());
-    } catch (err) {
-      console.error('[team:create] 错误:', err.message);
-      socket.emit('error', { message: `创建团队失败: ${err.message}` });
-      if (typeof ack === 'function') ack({ error: err.message });
-    }
-  });
-
-  // 从现有会话创建团队
-  socket.on('team:createFromSession', async (data, ack) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager) {
-        if (typeof ack === 'function') ack({ error: 'TeamManager 未初始化' });
-        return;
-      }
-
-      const { sessionId, goal, memberCount } = data;
-      if (!sessionId || !goal) {
-        if (typeof ack === 'function') ack({ error: '缺少必要参数: sessionId, goal' });
-        return;
-      }
-
-      const existingSession = sessionManager.getSession(sessionId);
-      if (!existingSession) {
-        if (typeof ack === 'function') ack({ error: '会话不存在' });
-        return;
-      }
-
-      if (existingSession.teamId) {
-        if (typeof ack === 'function') ack({ error: '该会话已属于一个团队' });
-        return;
-      }
-
-      console.log('[team:createFromSession] 从现有会话创建团队:', existingSession.name);
-
-      const team = await teamManager.createTeamFromSession(
-        existingSession,
-        { goal, memberCount: memberCount || 2 },
-        (memberSession) => {
-          registerBellCallback(memberSession);
-          registerExitCallback(memberSession);
-        }
-      );
-
-      console.log('[team:createFromSession] 团队创建成功:', team.id);
-      if (typeof ack === 'function') ack({ team });
-      io.emit('teams:updated', teamManager.listTeams());
-      io.emit('sessions:updated', sessionManager.listSessions());
-    } catch (err) {
-      console.error('[team:createFromSession] 错误:', err.message);
-      if (typeof ack === 'function') ack({ error: err.message });
-    }
-  });
-
-  // 进入 Team 视图（加入 room，监听所有成员输出）
-  socket.on('team:attach', async (teamId) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager) return;
-      const team = teamManager.getTeam(teamId);
-      if (!team) { socket.emit('error', { message: '团队不存在' }); return; }
-
-      // 清理旧的 attach（防止重复 attach 导致事件重复）
-      if (socket.data.currentTeamId) {
-        const oldCallbacks = socket.data.teamOutputCallbacks || {};
-        for (const [sid, cb] of Object.entries(oldCallbacks)) {
-          const s = sessionManager?.getSession(sid);
-          if (s) s.offOutput(cb);
-        }
-        socket.data.teamOutputCallbacks = {};
-        if (socket.data.currentTeamId !== teamId) {
-          socket.leave(`team:${socket.data.currentTeamId}`);
-        }
-      }
-
-      socket.join(`team:${teamId}`);
-      socket.data.currentTeamId = teamId;
-
-      // 为每个成员注册输出转发
-      const allSessionIds = [team.leadSessionId, ...team.memberSessionIds];
-      const teamOutputCallbacks = {};
-
-      for (const sid of allSessionIds) {
-        const session = sessionManager.getSession(sid);
-        if (!session) continue;
-
-        const callback = (data) => {
-          socket.emit('team:terminalOutput', { sessionId: sid, data });
-        };
-        session.onOutput(callback);
-        teamOutputCallbacks[sid] = callback;
-
-        // 发送现有 buffer
-        if (session.outputBuffer) {
-          socket.emit('team:terminalOutput', { sessionId: sid, data: session.outputBuffer });
-        }
-      }
-
-      socket.data.teamOutputCallbacks = teamOutputCallbacks;
-
-      // 发送任务和消息
-      socket.emit('team:tasks', teamManager.getTasksByTeam(teamId));
-      socket.emit('team:messages', teamManager.getTeamMessages(teamId));
-      // 发送编排器状态
-      if (taskOrchestrator) {
-        socket.emit('team:orchestrator:status', taskOrchestrator.getStatus());
-      }
-    } catch (err) {
-      console.error('[team:attach] 错误:', err.message);
-    }
-  });
-
-  // 离开 Team 视图
-  socket.on('team:detach', () => {
-    const teamId = socket.data.currentTeamId;
-    if (!teamId) return;
-
-    // 清理输出回调
-    const callbacks = socket.data.teamOutputCallbacks || {};
-    for (const [sid, cb] of Object.entries(callbacks)) {
-      const session = sessionManager?.getSession(sid);
-      if (session) session.offOutput(cb);
-    }
-
-    socket.leave(`team:${teamId}`);
-    socket.data.currentTeamId = null;
-    socket.data.teamOutputCallbacks = null;
-  });
-
-  // 向指定成员终端输入
-  socket.on('team:terminalInput', async (data) => {
-    try {
-      await waitForSessionManager();
-      if (!data || typeof data.sessionId !== 'string' || typeof data.input !== 'string') return;
-      if (data.input.length > 10000) return; // 防止超大输入
-      const session = sessionManager.getSession(data.sessionId);
-      if (session) {
-        session.write(data.input);
-      }
-    } catch (err) {
-      console.error('[team:terminalInput] 错误:', err.message);
-    }
-  });
-
-  // 暂停团队
-  socket.on('team:pause', async (teamId) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager) return;
-      const team = teamManager.pauseTeam(teamId);
-      if (team) {
-        io.to(`team:${teamId}`).emit('team:updated', team);
-        io.emit('teams:updated', teamManager.listTeams());
-        io.emit('sessions:updated', sessionManager.listSessions());
-      }
-    } catch (err) {
-      console.error('[team:pause] 错误:', err.message);
-    }
-  });
-
-  // 恢复团队
-  socket.on('team:resume', async (teamId) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager) return;
-      const team = teamManager.resumeTeam(teamId);
-      if (team) {
-        io.to(`team:${teamId}`).emit('team:updated', team);
-        io.emit('teams:updated', teamManager.listTeams());
-        io.emit('sessions:updated', sessionManager.listSessions());
-      }
-    } catch (err) {
-      console.error('[team:resume] 错误:', err.message);
-    }
-  });
-
-  // 销毁团队
-  socket.on('team:destroy', async (teamId) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager) return;
-      const team = await teamManager.destroyTeam(teamId);
-      // 清理编排器中的 Agent 状态
-      if (team && taskOrchestrator) {
-        const memberIds = team.memberSessionIds || [];
-        for (const sid of memberIds) {
-          taskOrchestrator.cleanupSession(sid);
-        }
-        taskOrchestrator.cleanupTeam(teamId);
-      }
-      if (team) {
-        io.to(`team:${teamId}`).emit('team:updated', team);
-        io.emit('teams:updated', teamManager.listTeams());
-        io.emit('sessions:updated', sessionManager.listSessions());
-      }
-    } catch (err) {
-      console.error('[team:destroy] 错误:', err.message);
-    }
-  });
-
-  // 手动创建任务
-  socket.on('team:task:create', async (data) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager || !data) return;
-      if (typeof data.teamId !== 'string' || typeof data.subject !== 'string') return;
-      const subject = data.subject.trim().slice(0, 500);
-      if (!subject) return;
-      const task = teamManager.createTask(data.teamId, {
-        subject,
-        description: typeof data.description === 'string' ? data.description.slice(0, 5000) : '',
-        priority: typeof data.priority === 'number' ? data.priority : 0,
-        blockedBy: Array.isArray(data.blockedBy) ? data.blockedBy : []
-      });
-      io.to(`team:${data.teamId}`).emit('team:taskUpdated', task);
-    } catch (err) {
-      console.error('[team:task:create] 错误:', err.message);
-    }
-  });
-
-  // 更新任务
-  socket.on('team:task:update', async (data) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager || !data) return;
-      if (typeof data.taskId !== 'string' && typeof data.taskId !== 'number') return;
-      if (!data.updates || typeof data.updates !== 'object') return;
-      const task = teamManager.updateTask(data.taskId, data.updates);
-      if (task) {
-        io.to(`team:${task.teamId}`).emit('team:taskUpdated', task);
-      }
-    } catch (err) {
-      console.error('[team:task:update] 错误:', err.message);
-    }
-  });
-
-  // 发送团队消息
-  socket.on('team:message', async (data) => {
-    try {
-      await waitForSessionManager();
-      if (!teamManager || !data) return;
-      if (typeof data.teamId !== 'string') return;
-      const content = typeof data.content === 'string' ? data.content.slice(0, 5000) : '';
-      if (!content) return;
-      const msg = teamManager.sendMessage(
-        data.teamId, data.fromSessionId || null,
-        data.toSessionId || null, content, data.type || 'info'
-      );
-      io.to(`team:${data.teamId}`).emit('team:messageReceived', msg);
-    } catch (err) {
-      console.error('[team:message] 错误:', err.message);
-    }
-  });
-
   // 断开连接
   socket.on('disconnect', () => {
     console.log(`客户端断开: ${socket.id}`);
-    // 清理 Team 输出回调
-    if (socket.data.currentTeamId) {
-      const callbacks = socket.data.teamOutputCallbacks || {};
-      for (const [sid, cb] of Object.entries(callbacks)) {
-        const session = sessionManager?.getSession(sid);
-        if (session) session.offOutput(cb);
-      }
-      socket.leave(`team:${socket.data.currentTeamId}`);
-    }
     if (socket.data.currentSessionId) {
       const session = sessionManager.getSession(socket.data.currentSessionId);
       if (session) {
@@ -7333,7 +7519,9 @@ async function startServer() {
           try {
             let needsUpdate = false;
 
-            if (!session.claudeProvider) {
+            if (session.aiType === 'claude' || !session.claudeProvider) {
+              // claude 会话启动时总是重新检测实际生效供应商（getCurrentProvider 综合本地override/
+              // 全局/进程/OAuth），自愈纠正历史残留的错误显示（如误存 is_current 第三方）
               const claudeProvider = await getCurrentProvider('claude', session.workingDir, session.tmuxSessionName);
               if (claudeProvider.exists) {
                 session.claudeProvider = claudeProvider;
@@ -7394,11 +7582,7 @@ async function startServer() {
           const tmuxVars = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
                             'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'];
           for (const varName of tmuxVars) {
-            if (newEnv[varName]) {
-              execSync(`${getTmuxPrefix()} set-environment -g ${varName} "${newEnv[varName]}"`, { stdio: 'ignore' });
-            } else {
-              execSync(`${getTmuxPrefix()} set-environment -g -u ${varName}`, { stdio: 'ignore' });
-            }
+            tmuxSetEnv({ scope: '-g', name: varName, value: newEnv[varName] || null });
           }
           console.log('[配置监听] 已同步 tmux 全局环境变量');
         } catch (e) {}
@@ -7443,13 +7627,18 @@ async function startServer() {
 
         for (const session of sessions) {
           try {
-            // 先用 getCurrentProvider 检测进程实际状态（能读终端内容和进程 env）
+            // getCurrentProvider 已综合：会话本地 override > 全局 settings.json > 进程 env > OAuth 登录，
+            // 即该会话「实际生效」的供应商。优先采信它，避免把 cc-switch 名义 is_current 硬套给
+            // 实际在用官方 OAuth / 本地 override 的会话（修复侧栏显示与 /status 不一致）。
             const sessionProvider = await getCurrentProvider('claude', session.workingDir, session.tmuxSessionName);
-            if (sessionProvider.exists && sessionProvider.configSource === 'process') {
-              // 进程实际在用第三方 API（未重启），以进程状态为准
+            if (sessionProvider.exists && (
+                  sessionProvider.configSource === 'process' ||
+                  sessionProvider.configSource === 'local' ||
+                  sessionProvider.url || sessionProvider.isOAuth)) {
+              // 检测到该会话真实生效的供应商（进程第三方 / 本地 override / 有 URL / 官方 OAuth）→ 以它为准
               session.claudeProvider = sessionProvider;
             } else if (currentCcProvider) {
-              // 进程已重启或无法检测，用全局配置
+              // 实在检测不到，才回落全局 cc-switch 当前配置
               session.claudeProvider = currentCcProvider;
             } else if (sessionProvider.exists) {
               session.claudeProvider = sessionProvider;

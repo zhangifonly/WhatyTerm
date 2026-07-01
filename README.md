@@ -132,9 +132,14 @@ npm run electron:build:all
 
 ## License
 
-[MIT](LICENSE)
+本项目源码开放，采用 **[PolyForm Noncommercial 1.0.0](LICENSE)**：
+
+- **个人 / 非营利 / 教育科研 / 政府等非商业用途 —— 免费**（可自由使用、修改、分发）
+- **商业用途（含企业内部经营性使用）—— 需商业许可**，见 [LICENSE-COMMERCIAL](LICENSE-COMMERCIAL)
+
+商业授权咨询请联系下方邮箱。
 
 ## 联系
 
-- 官网：https://term.whaty.org
-- 邮箱：zhangzhen@gmail.com
+- 官网：https://whatyterm.whaty.org
+- 邮箱：nuannuan@gmail.com

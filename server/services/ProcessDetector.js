@@ -23,6 +23,10 @@ class ProcessDetector {
   constructor() {
     // 未知进程的学习记录
     this.unknownProcesses = new Map();
+    // 进程检测短 TTL 缓存：tmuxSession -> { result, time }
+    // detectCLI 每次 3 个同步 execSync(tmux/pgrep/ps)，后台循环每秒 × N会话 都调，
+    // 是主线程周期性阻塞的第二大来源。运行中的 CLI 进程 1 秒内不会变，缓存复用。
+    this._detectCache = new Map();
   }
 
   /**
@@ -51,6 +55,16 @@ class ProcessDetector {
       return { detected: false, cli: null, processName: null, pid: null };
     }
 
+    // 短 TTL 缓存（2s）：避免后台每秒循环对每个会话重复 3 次 execSync
+    const cached = this._detectCache.get(tmuxSession);
+    if (cached && (Date.now() - cached.time) < 2000) {
+      return cached.result;
+    }
+    const cacheAndReturn = (result) => {
+      this._detectCache.set(tmuxSession, { result, time: Date.now() });
+      return result;
+    };
+
     const cmdPrefix = getUnixCmdPrefix();
 
     try {
@@ -61,7 +75,7 @@ class ProcessDetector {
       ).trim();
 
       if (!panePid) {
-        return { detected: false, cli: null, processName: null, pid: null };
+        return cacheAndReturn({ detected: false, cli: null, processName: null, pid: null });
       }
 
       // 获取所有子进程
@@ -71,7 +85,7 @@ class ProcessDetector {
       ).trim();
 
       if (!childPids) {
-        return { detected: false, cli: null, processName: null, pid: null };
+        return cacheAndReturn({ detected: false, cli: null, processName: null, pid: null });
       }
 
       // 获取子进程的名称和完整命令行
@@ -82,7 +96,7 @@ class ProcessDetector {
       ).trim();
 
       if (!processInfo) {
-        return { detected: false, cli: null, processName: null, pid: null };
+        return cacheAndReturn({ detected: false, cli: null, processName: null, pid: null });
       }
 
       // 解析进程信息，检测 CLI 工具
@@ -98,7 +112,7 @@ class ProcessDetector {
           const cliProcessNames = this.getCliProcessNames();
           for (const [cli, names] of Object.entries(cliProcessNames)) {
             if (names.some(name => processName.includes(name) || fullCmd.includes(`/bin/${name}`) || fullCmd.includes(`/${name}/`))) {
-              return { detected: true, cli, processName: match[2].split(/\s+/)[0].split('/').pop(), pid };
+              return cacheAndReturn({ detected: true, cli, processName: match[2].split(/\s+/)[0].split('/').pop(), pid });
             }
           }
 
@@ -107,7 +121,7 @@ class ProcessDetector {
         }
       }
 
-      return { detected: false, cli: null, processName: null, pid: null };
+      return cacheAndReturn({ detected: false, cli: null, processName: null, pid: null });
     } catch (err) {
       console.error(`[ProcessDetector] 检测失败: ${err.message}`);
       return { detected: false, cli: null, processName: null, pid: null, error: err.message };

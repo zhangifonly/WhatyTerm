@@ -5,6 +5,20 @@ import ccSwitchAudit from '../services/CCSwitchAudit.js';
 
 const router = express.Router();
 
+// 写保护：仅允许写入程序自带的内置兜底库，绝不写用户真实的 ~/.cc-switch/cc-switch.db。
+// 防止 add/update/delete 接口误改/清空用户在 CC Switch 里维护的供应商 key。
+// 返回 true 表示已拦截（调用方应直接 return）。
+function guardRealCcSwitchWrite(res) {
+  if (!builtinProviderDB.isUsingBuiltin()) {
+    res.status(403).json({
+      success: false,
+      error: '为保护数据，禁止通过本接口写入真实 CC Switch 数据库；请在 CC Switch 应用内管理供应商。'
+    });
+    return true;
+  }
+  return false;
+}
+
 // ==================== Providers API ====================
 
 // GET /api/cc-switch/providers - 列出所有 CC Switch providers
@@ -206,6 +220,7 @@ router.post('/add', (req, res) => {
       });
     }
 
+    if (guardRealCcSwitchWrite(res)) return;
     const db = builtinProviderDB.getDB(false);
 
     const stmt = db.prepare(`INSERT INTO providers
@@ -259,6 +274,7 @@ router.put('/update/:id', (req, res) => {
       });
     }
 
+    if (guardRealCcSwitchWrite(res)) return;
     const db = builtinProviderDB.getDB(false);
 
     const stmt = db.prepare(`UPDATE providers SET
@@ -326,6 +342,7 @@ router.delete('/delete/:id', (req, res) => {
       });
     }
 
+    if (guardRealCcSwitchWrite(res)) return;
     const db = builtinProviderDB.getDB(false);
 
     const result = db.prepare('DELETE FROM providers WHERE id = ? AND app_type = ?').run(id, app);

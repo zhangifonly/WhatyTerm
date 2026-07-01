@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { spawn } from 'child_process';
 import { ProxyAgent, Agent } from 'undici';
 import Database from 'better-sqlite3';
 import ProviderService from './ProviderService.js';
@@ -1516,6 +1517,36 @@ ${historyText || '(空)'}
     // Tab 通过 tmux send-keys 发送给 Claude Code (Ink 应用) 不可靠，
     // 而发"继续"既能让 Claude 继续工作，也能间接接受编辑。
 
+    // === 高优先级：检测 AI 明确"待命/无任务可做"的空闲，停手而非反复发"继续" ===
+    // 场景：Ralph 自主会话或普通会话开发告一段落后，Claude 回复"待命中。需要具体任务。"
+    // 之类，表示它没有可推进的工作、在等用户给方向。此时若继续自动发"继续"，Claude 只会
+    // 再次回"待命中"，形成 继续→待命→继续 的死循环空转，白烧 API。应识别后停手并提示用户。
+    {
+      const idleTail = earlyCleanContent.slice(-800);
+      const idleLast6 = earlyCleanContent.split('\n').slice(-6).join('\n');
+      const hasIdlePromptHere = /^[❯>]\s*$/m.test(idleLast6) || /\n[❯>]\s*$/m.test(idleLast6);
+      const isRunningHere = /\.{2,3}\s*\(\d+[ms]/i.test(idleTail) || /esc to interrupt/i.test(idleLast6);
+      // AI 主动表示"待命/无事可做/需要任务/已完成在等指示"的措辞
+      const awaitingTask = /待命中|需要具体任务|需要(您|你)?(提供|给出|明确)(具体)?任务|没有(更多|可执行的)?任务|暂无任务|等待(您|你)?(的)?(指示|指令|下一步|进一步)(说明|要求)?|请(告诉|提供|给).{0,8}(任务|需求|指示)|awaiting (your )?(instructions?|task)|no (further )?task|standing by|let me know what|what would you like (me )?to/i.test(idleTail);
+      if (hasIdlePromptHere && !isRunningHere && awaitingTask) {
+        console.log('[AIEngine] 检测到 AI 待命/无任务空闲，停止自动发"继续"，提示用户介入');
+        return {
+          currentState: `${cliNameEarly}待命中（等待用户下达任务）`,
+          workingDir: '未显示',
+          recentAction: 'AI 表示无任务可推进',
+          needsAction: false,
+          actionType: 'none',
+          suggestedAction: null,
+          actionReason: 'AI 已明确表示待命、需要用户提供具体任务；继续自动发"继续"只会空转，已停手等待用户介入',
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI,
+          ...pluginInfo
+        };
+      }
+    }
+
     // === 高优先级：检测"列出多个下一步方向/选项让用户选择"的场景 ===
     // Claude 完成一轮开发后常列出"下一步可选方向/接下来可以..."等编号清单等待选择。
     // 这种场景应自动回复"按建议顺序继续开发"，让开发持续推进（优先于插件阶段判断，
@@ -2723,6 +2754,125 @@ ${this._buildProgressContext(projectContext)}
       } catch (err) {
         console.error('[AIEngine] 文本生成失败:', err.message);
         return null;
+      }
+    });
+  }
+
+  /**
+   * 解析指定 CLI 的可执行文件路径（兼容 Electron 打包后 PATH 受限）
+   */
+  _resolveCliExe(aiType = 'claude') {
+    const home = os.homedir();
+    const map = {
+      claude: [join(home, '.local/bin/claude'), '/opt/homebrew/bin/claude', '/usr/local/bin/claude', join(home, '.claude/local/claude')],
+      codex: [join(home, '.local/bin/codex'), '/opt/homebrew/bin/codex', '/usr/local/bin/codex'],
+      gemini: [join(home, '.local/bin/gemini'), '/opt/homebrew/bin/gemini', '/usr/local/bin/gemini'],
+      grok: [join(home, '.grok/bin/grok'), join(home, '.local/bin/grok'), '/opt/homebrew/bin/grok'],
+    };
+    for (const p of (map[aiType] || [])) {
+      try { if (fs.existsSync(p)) return p; } catch {}
+    }
+    return aiType; // 兜底走 PATH
+  }
+
+  /**
+   * 各 CLI 的非交互参数与输出解析模式。
+   * claude 用 stream-json（结构化、可靠）；其余捕获 stdout 纯文本。
+   */
+  _cliArgs(aiType) {
+    switch (aiType) {
+      case 'codex': return { args: ['exec', '--dangerously-bypass-approvals-and-sandbox'], mode: 'text' };
+      case 'gemini': return { args: ['-p'], mode: 'text' };
+      case 'grok': return { args: ['-p'], mode: 'text' };
+      default: return { args: ['--print', '--output-format', 'stream-json', '--verbose'], mode: 'stream-json' };
+    }
+  }
+
+  /**
+   * 通过 CLI 子进程生成文本（照搬 WhatRalph 原版方式）。
+   * 复用对应 CLI 的供应商与登录态（官方订阅 / 中转 key 均可），不直连 HTTP API，
+   * 因此不受单个中转 504 影响、官方登录也能用。支持每会话供应商：通过 providerEnv 注入。
+   * @param {string} prompt
+   * @param {object} options { timeout=180000, cwd, aiType='claude', providerEnv={} }
+   *   providerEnv: 注入子进程的环境变量；值为 null 表示从继承 env 中删除该键（用于切官方登录）
+   * @returns {Promise<string|null>} 最终文本，失败返回 null
+   */
+  generateTextViaCLI(prompt, options = {}) {
+    const timeout = options.timeout || 180000;
+    const aiType = options.aiType || 'claude';
+    const cwd = (options.cwd && fs.existsSync(options.cwd)) ? options.cwd : os.tmpdir();
+    const exe = this._resolveCliExe(aiType);
+    const { args, mode } = this._cliArgs(aiType);
+
+    // 构造 env：继承 process.env，叠加 providerEnv（值为 null 表示删除该键）
+    const env = { ...process.env };
+    for (const [k, v] of Object.entries(options.providerEnv || {})) {
+      if (v == null) delete env[k];
+      else env[k] = String(v);
+    }
+
+    return new Promise((resolve) => {
+      let proc;
+      try {
+        proc = spawn(exe, args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], env });
+      } catch (err) {
+        console.error(`[AIEngine] 启动 ${aiType} CLI 失败:`, err.message);
+        return resolve(null);
+      }
+
+      let finalText = null;
+      let buf = '';
+      let rawOut = '';
+      let settled = false;
+      const done = (val) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try { proc.kill('SIGTERM'); } catch {}
+        resolve(val);
+      };
+
+      const timer = setTimeout(() => {
+        console.error(`[AIEngine] ${aiType} CLI 超时(${timeout}ms)`);
+        done(finalText || (rawOut.trim() || null));
+      }, timeout);
+
+      proc.stdout.on('data', (chunk) => {
+        const s = chunk.toString('utf-8');
+        rawOut += s;
+        if (mode === 'stream-json') {
+          buf += s;
+          let nl;
+          while ((nl = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, nl).trim();
+            buf = buf.slice(nl + 1);
+            if (!line) continue;
+            try {
+              const obj = JSON.parse(line);
+              if (obj.type === 'result' && typeof obj.result === 'string') {
+                finalText = obj.result;
+                if (obj.subtype === 'success' && !obj.is_error) done(finalText);
+              }
+            } catch { /* 非完整 JSON 行，忽略 */ }
+          }
+        }
+      });
+
+      proc.on('error', (err) => {
+        console.error(`[AIEngine] ${aiType} CLI 进程错误:`, err.message);
+        done(null);
+      });
+      proc.on('close', () => {
+        // text 模式：用捕获的 stdout 全文；stream-json：用解析到的 result
+        done(mode === 'text' ? (rawOut.trim() || null) : finalText);
+      });
+
+      try {
+        proc.stdin.write(prompt);
+        proc.stdin.end();
+      } catch (err) {
+        console.error('[AIEngine] 写入 prompt 失败:', err.message);
+        done(null);
       }
     });
   }

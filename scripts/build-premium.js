@@ -20,6 +20,13 @@ const FREE_PLUGINS = ['DefaultPlugin.js', 'BasePlugin.js'];
 const PLUGINS_SRC = path.join(rootDir, 'server/services/MonitorPlugins/plugins');
 const PLUGINS_DIST = path.join(rootDir, 'dist/server/services/MonitorPlugins/plugins');
 
+// 独立的付费文件（相对 server/ 的路径），逐个混淆到 dist/server/ 对应位置
+// 打包时由 electron-builder.yml 的覆盖条目用混淆版替换明文版
+const PREMIUM_FILES = [
+  'services/RalphEngine.js',
+  'services/ralph/prompts.js'
+];
+
 // 混淆配置
 const OBFUSCATOR_CONFIG = {
   compact: true,
@@ -171,10 +178,25 @@ async function buildPlugins() {
     }
   }
 
+  // 混淆独立的付费文件（Ralph 等）
+  let extraCount = 0;
+  for (const rel of PREMIUM_FILES) {
+    const srcPath = path.join(rootDir, 'server', rel);
+    const destPath = path.join(rootDir, 'dist/server', rel);
+    if (!fs.existsSync(srcPath)) {
+      console.warn(`  ⚠ 跳过(不存在): server/${rel}`);
+      continue;
+    }
+    ensureDir(path.dirname(destPath));
+    await obfuscateFile(srcPath, destPath);
+    extraCount++;
+  }
+
   console.log('\n========================================');
   console.log(`构建完成！`);
   console.log(`  免费插件: ${freeCount} 个`);
   console.log(`  高级插件: ${premiumCount} 个（已加密）`);
+  console.log(`  付费文件: ${extraCount} 个（已加密）`);
   console.log('========================================\n');
 }
 

@@ -253,11 +253,21 @@ class FullStackDevPlugin extends BasePlugin {
 
     // 关键前置：先判断 Claude Code 是否在运行中。运行中绝不发任何指令。
     // Claude Code 运行时会显示 "Xxxing... (1m 29s · ↑ 5.2k tokens)" + "esc to interrupt"
+    // 注意：Claude Code 空闲时底部状态栏也常驻 "esc to interrupt"（accept edits 行），
+    // 因此 esc to interrupt 只有在「没有空闲提示符」时才算运行中，否则会把空闲误判为运行。
     const fullyClean = terminalContent
       .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-      .replace(/\x1b\][^\x07]*\x07/g, '');
+      .replace(/\x1b\][^\x07]*\x07/g, '')
+      .replace(/\r/g, '');
     const tail800 = fullyClean.slice(-800);
-    const isRunning = /\.{2,3}\s*\(\d+[ms]/i.test(tail800) || /esc to interrupt/i.test(tail800);
+    // 空闲提示符：最后若干行出现独立的 ❯ / > 行（行内除提示符外只有空白/光标）
+    const last6Lines = fullyClean.split('\n').slice(-6).join('\n');
+    const hasIdlePromptEarly = /^\s*[>❯]\s*$/m.test(last6Lines) || /\n\s*[>❯]\s*$/.test(last6Lines);
+    // 活跃运行：有 "...(Ns)" 进度指示器（这是真正运行中的可靠标志）
+    const isActivelyRunning = /\.{2,3}\s*\(\d+[ms]/i.test(tail800);
+    // esc to interrupt 仅在「无空闲提示符」时才作为运行依据（空闲时状态栏也常驻该文案）
+    const escInterruptRunning = /esc to interrupt/i.test(tail800) && !hasIdlePromptEarly;
+    const isRunning = isActivelyRunning || escInterruptRunning;
     const hasQueued = /Press up to edit queued messages/i.test(fullyClean);
     if (isRunning || hasQueued) {
       return {
@@ -291,7 +301,10 @@ class FullStackDevPlugin extends BasePlugin {
     // 进一步：必须出现空闲提示符 "> " 或 "❯ " 才认为可以发指令
     // 这避免了在滚动输出中段误识别错误关键字
     const last10Lines = fullyClean.split('\n').slice(-10).join('\n');
-    const hasIdlePrompt = /^\s*[>❯]\s*$/m.test(last10Lines) || /╭─+╮[\s\S]{0,200}[>❯]\s/m.test(last10Lines);
+    const hasIdlePrompt = hasIdlePromptEarly
+      || /^\s*[>❯]\s*$/m.test(last10Lines)
+      || /╭─+╮[\s\S]{0,200}[>❯]\s/m.test(last10Lines)
+      || /[─-]{10,}[\s\S]{0,80}[>❯]\s*[\s\S]{0,80}[─-]{10,}/m.test(last10Lines);
     if (!hasIdlePrompt) {
       return {
         needsAction: false,

@@ -596,11 +596,8 @@ export class Session {
     if (settings.autoActionEnabled !== undefined) {
       const oldValue = this.autoActionEnabled;
       this.autoActionEnabled = settings.autoActionEnabled;
-      // 记录状态变化，便于调试
       if (oldValue !== settings.autoActionEnabled) {
         console.log(`[Session ${this.name}] autoActionEnabled 变化: ${oldValue} -> ${settings.autoActionEnabled}`);
-        // 打印调用栈，追踪变化来源
-        console.log(new Error('autoActionEnabled 变化调用栈').stack);
       }
     }
     if (settings.monitorPluginId !== undefined) {
@@ -622,12 +619,24 @@ export class Session {
       return this.getRecentOutput(50);
     }
 
+    // 短 TTL 缓存：后台 AI 分析每秒对每个会话多次抓屏（错误检测循环 + 自动操作循环），
+    // 每次都是同步 execSync(tmux capture-pane) fork 子进程，会话一多就周期性阻塞主线程、
+    // 拖慢 socket 响应（界面卡顿）。同一会话在 800ms 内复用上次快照，把每秒 execSync 次数
+    // 从"几十次"降到"每会话约 1 次"。前端 xterm 实时数据走 node-pty onData 流，与此无关。
+    const nowTs = Date.now();
+    if (this._paneCache && (nowTs - this._paneCacheTime) < 1500) {
+      return this._paneCache;
+    }
+
     try {
       const content = execSync(
         `tmux capture-pane -t "${this.tmuxSessionName}" -p -e`,
         { encoding: 'utf-8' }
       );
-      return content.replace(/\n/g, '\r\n');
+      const result = content.replace(/\n/g, '\r\n');
+      this._paneCache = result;
+      this._paneCacheTime = nowTs;
+      return result;
     } catch {
       return '';
     }
@@ -1779,6 +1788,13 @@ export class SessionManager {
       // 停止 pty 但不杀 tmux 会话
       session.destroy();
 
+      // provider 字段可能是对象（每会话供应商）或字符串，统一序列化为字符串再入库，
+      // 否则 better-sqlite3 会把对象当成命名参数报错 "named parameters in two different objects"。
+      const toProviderStr = (v) => {
+        if (v == null) return '';
+        return typeof v === 'object' ? JSON.stringify(v) : String(v);
+      };
+
       // 保存到 closed_sessions 表
       const stmt = this.db.prepare(`
         INSERT OR REPLACE INTO closed_sessions
@@ -1804,9 +1820,9 @@ export class SessionManager {
         session.projectDesc || '',
         session.workingDir || '',
         session.workingDir || '',
-        session.claudeProvider || '',
-        session.codexProvider || '',
-        session.geminiProvider || '',
+        toProviderStr(session.claudeProvider),
+        toProviderStr(session.codexProvider),
+        toProviderStr(session.geminiProvider),
         session.stats?.total || 0,
         session.stats?.success || 0,
         Date.now()
