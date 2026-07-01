@@ -21,8 +21,4 @@ CLAUDE.md
 .env
 **/.env
 
-# Ralph 自主开发核心：已按 PolyForm Noncommercial 1.0.0 源码开放（非商业免费，
-# 商业用途见 LICENSE-COMMERCIAL）。以下文件现随仓库发布，不再排除。
-# server/services/RalphEngine.js
-# server/services/ralph/prompts.js
 .claude/scheduled_tasks.lock

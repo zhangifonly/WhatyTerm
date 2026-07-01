@@ -18,4 +18,4 @@ for hook in "$SRC"/*; do
   echo "✅ 已安装 hook: $name"
 done
 
-echo "完成。pre-push 将拦截向公开主仓推送 master/main，防止泄露闭源核心。"
+echo "完成。当前仅安装标准 git-lfs pre-push（Ralph 核心已源码开放，防泄露拦截已移除）。"

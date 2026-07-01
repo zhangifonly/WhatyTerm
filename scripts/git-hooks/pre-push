@@ -1,27 +1,4 @@
 #!/bin/sh
-# ── 防误推保护：禁止把含明文 Ralph 闭源核心的历史推到公开主仓 ──
-# 公开仓 zhangifonly/WhatyTerm 的 master 不含核心；本地 master 历史含明文核心(2563a85)。
-# 一旦误推即泄露闭源核心，故拦截向公开 origin 推送 master。
-# 安装：bash scripts/install-git-hooks.sh
-# 精确匹配公开仓（…/WhatyTerm.git 或 …/WhatyTerm 结尾），放行私有仓（WhatyTerm-Private、
-# WhatyTerm-Ralph-Private 等，它们就是用来存核心的）。早期用通配 *WhatyTerm* 会误拦
-# 向私有构建仓推送 master。
-remote_url="$2"
-case "$remote_url" in
-  *zhangifonly/WhatyTerm.git|*zhangifonly/WhatyTerm)
-    while read local_ref local_sha remote_ref remote_sha; do
-      case "$remote_ref" in
-        refs/heads/master|refs/heads/main)
-          echo >&2 "🛑 已拦截：禁止向公开主仓 ($remote_url) 推送 $remote_ref"
-          echo >&2 "   本地历史含明文 Ralph 闭源核心(2563a85)，推送会泄露。"
-          echo >&2 "   如确需推送公开版，请用清洗过历史的专用分支，或注释此 hook。"
-          exit 1
-          ;;
-      esac
-    done
-    ;;
-esac
-
-# 保留原 git-lfs 行为
+# 标准 git-lfs pre-push（Ralph 核心已源码开放，原防泄露拦截逻辑已移除）
 command -v git-lfs >/dev/null 2>&1 || { echo >&2 "\nThis repository is configured for Git LFS but 'git-lfs' was not found on your path. If you no longer wish to use Git LFS, remove this hook by deleting '.git/hooks/pre-push'.\n"; exit 2; }
 git lfs pre-push "$@"
