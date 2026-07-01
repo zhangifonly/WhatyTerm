@@ -1,4 +1,9 @@
 /**
+ * Required Notice: Copyright (c) 2025 WhatyTerm (https://whatyterm.whaty.org)
+ * SPDX-License-Identifier: LicenseRef-PolyForm-Noncommercial-1.0.0
+ * 本文件按 PolyForm Noncommercial 1.0.0 授权（见根目录 LICENSE）：
+ * 非商业用途免费；商业用途需商业许可（见 LICENSE-COMMERCIAL）。
+ *
  * Ralph Agent 指令模板（移植自 whaty-ralph 的 CLAUDE.md / VALIDATOR.md）
  * Developer 负责实现单个任务并自检；Validator 逐条核验验收标准。
  */

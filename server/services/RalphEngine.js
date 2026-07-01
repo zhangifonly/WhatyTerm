@@ -1,4 +1,9 @@
 /**
+ * Required Notice: Copyright (c) 2025 WhatyTerm (https://whatyterm.whaty.org)
+ * SPDX-License-Identifier: LicenseRef-PolyForm-Noncommercial-1.0.0
+ * 本文件按 PolyForm Noncommercial 1.0.0 授权（见根目录 LICENSE）：
+ * 非商业用途免费；商业用途需商业许可（见 LICENSE-COMMERCIAL）。
+ *
  * RalphEngine - 自主软件工厂引擎（移植自 Ralph）
  *
  * 在可观看的 tmux 会话内，用 headless CLI 逐个执行任务队列：
