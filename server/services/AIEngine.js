@@ -1638,7 +1638,8 @@ ${historyText || '(空)'}
         const phaseConfig = plugin.getPhaseConfig(phase);
 
         // 使用插件分析状态（包括默认插件）
-        const pluginResult = plugin.analyzeStatus(terminalContent, phase, projectContext || {});
+        // 注入 aiType，供插件在 shell 提示符下构造正确的 CLI 重启命令
+        const pluginResult = plugin.analyzeStatus(terminalContent, phase, { ...(projectContext || {}), aiType });
         if (pluginResult) {
           // Harness: Sprint feature 指令只在 feature 切换时注入一次
           // 之后用普通"继续"，避免重复发送导致 Claude "第 N 次重复，未执行"

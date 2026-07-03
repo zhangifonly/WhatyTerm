@@ -143,6 +143,7 @@ import { RalphEngine, RALPH_CORE_PRESENT } from './services/ralph/loader.js';
 import telemetryService from './services/TelemetryService.js';
 import crashReporter from './services/CrashReporter.js';
 import sleepPrevention from './services/SleepPreventionService.js';
+import PuppeteerReaper from './services/PuppeteerReaper.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -4691,6 +4692,10 @@ setInterval(() => {
   const sessions = Array.from(sessionManager.sessions.values());
   sleepPrevention.update(sessions);
 }, 60000);
+
+// 看门狗：自动回收失控/孤儿的 puppeteer Chrome，避免其吃满 CPU 拖垮终端输入
+const puppeteerReaper = new PuppeteerReaper();
+puppeteerReaper.start();
 
 // 标志位：switchProviderStateMachine 执行期间为 true，防止 watchFile 触发 refreshAllProviders 重复重启
 let _providerSwitchInProgress = false;

@@ -2627,26 +2627,43 @@ body {
   color: hsl(var(--success));
 }
 
-/* 自动模式激活状态 - 终端与设置面板之间 */
-.ai-suggestion.auto-mode-active {
-  padding: 8px 14px;
-  margin-top: 8px;
-  border-color: hsl(var(--success) / 0.4);
+/* 自动模式激活状态 - 紧凑单行条，尽量少占终端可视空间 */
+.auto-mode-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 12px;
+  margin-top: 6px;
+  border: 1px solid hsl(var(--success) / 0.35);
+  border-left: 3px solid hsl(var(--success));
+  border-radius: 8px;
   background: rgba(74, 222, 128, 0.08);
+  font-size: 12.5px;
+  line-height: 1.4;
 }
 
-.ai-suggestion.auto-mode-active .ai-suggestion-header {
-  margin-bottom: 0;
-}
-
-.ai-suggestion.auto-mode-active .ai-reasoning {
-  margin-bottom: 0;
-  margin-top: 4px;
-  font-size: 12px;
-}
-
-.ai-suggestion.auto-mode-active .ai-suggestion-title {
+.auto-mode-strip-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   color: hsl(var(--success));
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.auto-mode-strip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: hsl(var(--success));
+  animation: auto-mode-pulse 1.8s ease-out infinite;
+}
+
+@keyframes auto-mode-pulse {
+  0% { box-shadow: 0 0 0 0 hsl(var(--success) / 0.5); }
+  70% { box-shadow: 0 0 0 6px hsl(var(--success) / 0); }
+  100% { box-shadow: 0 0 0 0 hsl(var(--success) / 0); }
 }
 
 /* 加载屏幕 */

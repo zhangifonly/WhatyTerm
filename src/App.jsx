@@ -228,6 +228,34 @@ export default function App() {
     currentSessionRef.current = currentSession;
   }, [currentSession]);
 
+  // 统一「fit + 同步后端尺寸」：任何改变 xterm 尺寸的路径都必须走这里。
+  // 若只 fit 不同步，xterm 变窄而后端 pty/tmux 仍停在旧的更宽列数，
+  // 远端程序（如 Claude Code）会按旧宽度渲染，导致前端右侧字被裁切「遮住」。
+  const fitAndSyncSize = useCallback(() => {
+    const term = terminalInstance.current;
+    if (!fitAddon.current || !term) return;
+    try {
+      fitAddon.current.fit();
+    } catch {}
+    const session = currentSessionRef.current;
+    if (session) {
+      socket.emit('terminal:resize', {
+        sessionId: session.id,
+        cols: term.cols,
+        rows: term.rows
+      });
+    }
+  }, []);
+
+  // AI 面板 / 侧边栏折叠会改变终端可用宽度（CSS width 过渡 0.3s）。
+  // ResizeObserver 在过渡中可能收敛到中间值，这里在过渡结束后再显式 fit + 同步一次，
+  // 确保后端 pty 列数与最终的 xterm 宽度一致，杜绝右侧内容被裁。
+  useEffect(() => {
+    if (!terminalInstance.current) return;
+    const timer = setTimeout(() => fitAndSyncSize(), 350);
+    return () => clearTimeout(timer);
+  }, [aiPanelCollapsed, sidebarCollapsed, fitAndSyncSize]);
+
   // 保存二维码折叠偏好到 localStorage
   useEffect(() => {
     localStorage.setItem('webtmux_qr_expanded', qrCodeExpanded.toString());
@@ -800,11 +828,9 @@ export default function App() {
     term.unicode.activeVersion = '11';
     term.open(terminalRef.current);
 
-    // 延迟调用 fit，确保 DOM 已完全渲染
+    // 延迟调用 fit，确保 DOM 已完全渲染；fit 后立即把尺寸同步到后端 pty
     requestAnimationFrame(() => {
-      if (fitAddon.current) {
-        fitAddon.current.fit();
-      }
+      fitAndSyncSize();
     });
 
     // 获取终端的 textarea 元素，用于监听 IME 事件
@@ -853,17 +879,7 @@ export default function App() {
     term.focus();
 
     const handleResize = () => {
-      if (fitAddon.current && terminalInstance.current) {
-        fitAddon.current.fit();
-        const session = currentSessionRef.current;
-        if (session && terminalInstance.current) {
-          socket.emit('terminal:resize', {
-            sessionId: session.id,
-            cols: terminalInstance.current.cols,
-            rows: terminalInstance.current.rows
-          });
-        }
-      }
+      fitAndSyncSize();
     };
 
     window.addEventListener('resize', handleResize);
@@ -925,10 +941,8 @@ export default function App() {
       // 然后写入新会话的完整历史，这样用户可以向上滚动查看
       term.clear();
 
-      // 先调用 fit 确保尺寸正确
-      if (fitAddon.current) {
-        fitAddon.current.fit();
-      }
+      // 先调用 fit 确保尺寸正确，并同步到后端 pty（避免写入按旧宽度渲染的历史后右侧被裁）
+      fitAndSyncSize();
 
       // 写入当前可见区域内容
       let content = contentToWrite.replace(/\r\n$/, '');
@@ -1441,23 +1455,19 @@ export default function App() {
               </div>
             )}
 
-            {/* 自动模式运行状态提示 */}
+            {/* 自动模式运行状态提示（紧凑单行，避免挤占终端可视区域；完整说明见 hover 提示） */}
             {currentSession.autoActionEnabled && (
-              <div className="ai-suggestion auto-mode-active">
-                <div className="ai-suggestion-header">
-                  <span className="ai-suggestion-title">
-                    <span>🤖</span> {t('controls.autoRunning')}
-                  </span>
-                  <button
-                    className="btn btn-secondary btn-small"
-                    onClick={() => toggleAutoAction(currentSession.id, false)}
-                  >
-                    {t('controls.pause')}
-                  </button>
-                </div>
-                <div className="ai-reasoning">
-                  {t('aiPanel.aiMonitoring')}
-                </div>
+              <div className="auto-mode-strip" title={t('aiPanel.aiMonitoring')}>
+                <span className="auto-mode-strip-title">
+                  <span className="auto-mode-strip-dot" />
+                  <span>🤖</span> {t('controls.autoRunning')}
+                </span>
+                <button
+                  className="btn btn-secondary btn-small"
+                  onClick={() => toggleAutoAction(currentSession.id, false)}
+                >
+                  {t('controls.pause')}
+                </button>
               </div>
             )}
 

@@ -306,6 +306,19 @@ class FullStackDevPlugin extends BasePlugin {
       || /╭─+╮[\s\S]{0,200}[>❯]\s/m.test(last10Lines)
       || /[─-]{10,}[\s\S]{0,80}[>❯]\s*[\s\S]{0,80}[─-]{10,}/m.test(last10Lines);
     if (!hasIdlePrompt) {
+      // Claude Code 已退出到 shell（不是 Claude 的 > / ❯ 空闲符）：自主开发模式应自动重启 CLI 继续，
+      // 而不是干等。若 claude -c 因无历史会话失败（No conversation found to continue），改用全新 claude 启动。
+      const restart = this._detectShellRestart(fullyClean, context);
+      if (restart) {
+        return {
+          needsAction: true,
+          actionType: 'text_input',
+          suggestedAction: restart.cmd,
+          phase,
+          phaseConfig: config,
+          message: restart.message
+        };
+      }
       return {
         needsAction: false,
         actionType: null,
@@ -424,6 +437,35 @@ class FullStackDevPlugin extends BasePlugin {
     }
 
     return null;
+  }
+
+  /**
+   * shell 提示符检测 → 返回重启 CLI 的命令；claude -c 无历史会话时回退到 claude
+   * @returns {{cmd:string, message:string}|null}
+   */
+  _detectShellRestart(cleanContent, context = {}) {
+    const nonEmpty = cleanContent.split('\n')
+      .map(l => l.replace(/[\s ]+$/, ''))
+      .filter(l => l.trim().length > 0);
+    const lastLine = nonEmpty[nonEmpty.length - 1] || '';
+    // 典型 shell 提示符：user@host ... % / $ / #（Claude 的 > / ❯ 已在上层排除）
+    const isShellPrompt = /[\w.-]+@[\w.-]+.*[%$#]\s*$/.test(lastLine)
+      || /^[~/][^\n]*[%$#]\s*$/.test(lastLine)
+      || /^[%$#]\s*$/.test(lastLine);
+    if (!isShellPrompt) return null;
+
+    const aiType = context.aiType || 'claude';
+    const RESUME = { claude: 'claude -c', grok: 'grok -c', codex: 'codex', gemini: 'gemini', droid: 'droid', opencode: 'opencode' };
+    const FRESH = { claude: 'claude', grok: 'grok', codex: 'codex', gemini: 'gemini', droid: 'droid', opencode: 'opencode' };
+    const resumeCmd = RESUME[aiType] || RESUME.claude;
+    const freshCmd = FRESH[aiType] || FRESH.claude;
+
+    // claude -c 无历史会话失败特征
+    const resumeFailed = /No conversation found to continue|No previous conversation|No conversations? found|没有找到.*会话/i.test(cleanContent.slice(-1200));
+    if (resumeFailed && freshCmd !== resumeCmd) {
+      return { cmd: freshCmd, message: `${resumeCmd} 无历史会话，改用 ${freshCmd} 全新启动继续开发` };
+    }
+    return { cmd: resumeCmd, message: `已退出到 shell，执行 ${resumeCmd} 重新启动继续开发` };
   }
 
   /**
