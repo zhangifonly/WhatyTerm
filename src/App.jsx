@@ -1929,7 +1929,18 @@ export default function App() {
 
                 const isLocalConfig = provider?.configSource === 'local';
                 const isProcessConfig = provider?.configSource === 'process';
+                const isRelayConfig = provider?.configSource === 'relay';
+                const isRelayLost = provider?.configSource === 'relay-lost';
                 const globalConfig = provider?.globalConfig;
+                // 反代实测提示：最近一次真实转发的时间/状态
+                const relayTip = (() => {
+                  if (!isRelayConfig) return '';
+                  const r = provider?.relay;
+                  if (!r?.lastAt) return '本会话 API 流量经 WebTmux 本地反代转发，显示的目标即实际转发目标（尚无请求经过）';
+                  const ago = Math.max(0, Math.round((Date.now() - r.lastAt) / 1000));
+                  const agoText = ago < 60 ? `${ago}秒前` : ago < 3600 ? `${Math.round(ago / 60)}分钟前` : `${Math.round(ago / 3600)}小时前`;
+                  return `实测：${agoText}向 ${r.lastTarget || '目标'} 转发了第 ${r.count} 个请求（HTTP ${r.lastStatus || '失败'}）。显示的目标即实际转发目标。`;
+                })();
 
                 return (
                   <>
@@ -1938,20 +1949,33 @@ export default function App() {
                         {provider?.name || t('common.notConfigured')}
                       </p>
                       {provider?.configSource && (
-                        <span style={{
+                        <span
+                          title={isRelayConfig ? relayTip :
+                                 isRelayLost ? '反代映射丢失（服务重启所致），请重新为本会话选择供应商' :
+                                 isProcessConfig ? '从运行中 CLI 进程的环境变量实测读取' :
+                                 isLocalConfig ? '依据本会话项目配置推断' :
+                                 '依据全局配置文件推断，可能与运行中进程实际使用的不一致'}
+                          style={{
                           fontSize: '9px',
                           padding: '1px 4px',
                           borderRadius: '3px',
-                          background: isLocalConfig ? 'hsl(142 70% 45% / 0.2)' :
-                                     isProcessConfig ? 'hsl(45 93% 47% / 0.2)' :
+                          cursor: 'help',
+                          background: isRelayConfig ? 'hsl(142 70% 45% / 0.25)' :
+                                     isRelayLost ? 'hsl(0 84% 60% / 0.2)' :
+                                     isLocalConfig ? 'hsl(142 70% 45% / 0.2)' :
+                                     isProcessConfig ? 'hsl(200 90% 50% / 0.2)' :
                                      'hsl(220 14% 40% / 0.3)',
-                          color: isLocalConfig ? 'hsl(142 70% 55%)' :
-                                isProcessConfig ? 'hsl(45 93% 60%)' :
+                          color: isRelayConfig ? 'hsl(142 70% 55%)' :
+                                isRelayLost ? 'hsl(0 84% 65%)' :
+                                isLocalConfig ? 'hsl(142 70% 55%)' :
+                                isProcessConfig ? 'hsl(200 90% 60%)' :
                                 'hsl(220 14% 70%)'
                         }}>
-                          {isLocalConfig ? t('aiPanel.local') :
-                           isProcessConfig ? '进程' :
-                           t('aiPanel.global')}
+                          {isRelayConfig ? '代理·实测' :
+                           isRelayLost ? '代理失联' :
+                           isProcessConfig ? 'env·实测' :
+                           isLocalConfig ? `${t('aiPanel.local')}·推断` :
+                           `${t('aiPanel.global')}·推断`}
                         </span>
                       )}
                       {/* 陈旧提示：显示全局供应商但运行中进程早于配置变更 → 仍是切换前供应商，重启生效 */}
