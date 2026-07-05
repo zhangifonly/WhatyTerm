@@ -147,6 +147,7 @@ import telemetryService from './services/TelemetryService.js';
 import crashReporter from './services/CrashReporter.js';
 import sleepPrevention from './services/SleepPreventionService.js';
 import PuppeteerReaper from './services/PuppeteerReaper.js';
+import SessionRelay from './services/SessionRelay.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -718,6 +719,13 @@ const sessionMiddleware = session({
   }
 });
 
+// 会话级 API 反代（"显示即转发"）：必须注册在 body parser 之前，原始流透传支持 SSE
+const sessionRelay = new SessionRelay();
+app.use('/relay', (req, res) => {
+  req.url = '/relay' + req.url; // 还原被 app.use 剥掉的挂载前缀，交给 handle 统一解析
+  sessionRelay.handle(req, res);
+});
+
 app.use(express.json());
 app.use(sessionMiddleware);
 
@@ -1167,9 +1175,10 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
     let actualApiUrl = '';
     let actualApiKey = '';
     let actualModel = '';
-    let configSource = 'global'; // 'global' 或 'local' 或 'process'
+    let configSource = 'global'; // 'global' | 'local' | 'process' | 'relay'(反代实测) | 'relay-lost'
     let localIsOAuth = false;    // 会话本地 settings.local.json 明确标记为官方 OAuth
     let localProviderId = '';    // 会话级切换记录的所选供应商 id（同URL+Key重名时精确命中）
+    let relayInfo = null;        // 反代实测信息 { stats: {lastAt,lastTarget,lastStatus,count}, providerName }
 
     // 始终读取全局配置（用于显示和同步参考）
     let globalApiUrl = '';
@@ -1228,30 +1237,34 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         actualApiKey = globalApiKey;
       }
 
-      // 最高优先级：读取正在运行的 claude 进程的真实环境变量（异步，不阻塞事件循环）
+      // 进程环境变量：只作"启动时快照"证据，不再当最高优先级——
+      // Claude Code v2.0.1 起 settings.json env 块会覆盖进程 env（官方 issue #8500），
+      // settings 有值时以 settings 为准；仅 settings 全空时才回退到进程 env。
       const procEnv = await readClaudeProcessEnv(tmuxSessionName);
       if (procEnv && procEnv.ANTHROPIC_BASE_URL) {
         const procUrl = procEnv.ANTHROPIC_BASE_URL.replace(/\/+$/, '');
         const settingsUrl = actualApiUrl.replace(/\/+$/, '');
         if (procUrl === settingsUrl) {
+          // env 与 settings 一致 → 实测确认，补充 key/model 细节
           actualApiKey = procEnv.ANTHROPIC_AUTH_TOKEN || procEnv.ANTHROPIC_API_KEY || actualApiKey;
           actualModel = procEnv.ANTHROPIC_MODEL || actualModel;
           configSource = 'process';
         } else if (!actualApiUrl) {
-          // settings.json env 为空（已切到 OAuth），但进程还在用旧的第三方 API
+          // settings env 全空（如已切到 OAuth），进程 env 是唯一线索
           actualApiUrl = procUrl;
           actualApiKey = procEnv.ANTHROPIC_AUTH_TOKEN || procEnv.ANTHROPIC_API_KEY || '';
           actualModel = procEnv.ANTHROPIC_MODEL || '';
           configSource = 'process';
         }
+        // procUrl ≠ settingsUrl 且 settings 有值：settings 生效（v2.0.1+ 行为），维持 settings 值
       }
 
       // 补充：如果 procEnv 读不到（macOS 限制），从终端 /status 输出中解析
       if (!actualApiUrl && tmuxSessionName) {
         try {
-          const paneContent = execSync(
+          const { stdout: paneContent } = await execAsync(
             `${getTmuxPrefix()} capture-pane -t "${tmuxSessionName}" -p -S -30 2>/dev/null`,
-            { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }
+            { encoding: 'utf-8', timeout: 3000 }
           );
           const baseUrlMatch = paneContent.match(/Anthropic base URL:\s+(https?:\/\/\S+)/i);
           if (baseUrlMatch) {
@@ -1260,6 +1273,25 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
             console.log(`[getCurrentProvider] 从终端内容解析到 base URL: ${actualApiUrl}`);
           }
         } catch {}
+      }
+
+      // 本地反代识别（最高真实级）：URL 指向 /relay/<sessionId> 时，从服务端映射
+      // 取真实供应商——面板显示的目标与实际转发目标物理上是同一份数据。
+      {
+        const relayMatch = (actualApiUrl || '').match(/^https?:\/\/127\.0\.0\.1:\d+\/relay\/([^/\s]+)/);
+        if (relayMatch) {
+          const relayTarget = sessionRelay.get(relayMatch[1]);
+          if (relayTarget) {
+            actualApiUrl = relayTarget.url;
+            actualApiKey = relayTarget.key || actualApiKey;
+            configSource = 'relay';
+            if (relayTarget.providerId) localProviderId = relayTarget.providerId;
+            relayInfo = { stats: sessionRelay.getStats(relayMatch[1]), providerName: relayTarget.providerName };
+          } else {
+            // 映射丢失（异常）：如实显示反代地址并标注，请用户重选供应商
+            configSource = 'relay-lost';
+          }
+        }
       }
 
       // 最后兜底：如果仍无 URL，检查 WebTmux 服务进程自身的环境变量
@@ -1408,6 +1440,8 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         oauthEmail: isOAuth ? readOAuthEmail() : '',
         // 显示全局供应商但运行中进程早于配置变更 → 标记陈旧，前端提示"重启会话生效"
         stale: cs === 'global' && !!extras.exists ? isGlobalStale() : false,
+        // 反代实测信息：面板据此显示"代理·实测"徽标 + 最近转发时间/状态
+        ...(relayInfo ? { relay: { ...(relayInfo.stats || {}), providerName: relayInfo.providerName } } : {}),
         ...(extras.globalConfig !== undefined ? { globalConfig: extras.globalConfig } : {})
       };
     };
@@ -4801,13 +4835,34 @@ function applySessionProvider(session, appType, providerId) {
       ls.env = ls.env || {};
       const keys = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL'];
       if (info.isOAuth) {
-        // 官方登录：清除本地与会话 env 里的 ANTHROPIC_*，让 CLI 走订阅登录
+        // 官方登录：清除本地与会话 env 里的 ANTHROPIC_*，让 CLI 走订阅登录（不经反代）
         for (const k of keys) { delete ls.env[k]; unsetEnv(k); providerEnv[k] = null; }
         ls._localProvider = 'oauth';   // 标记本会话为官方OAuth，供 getCurrentProvider 正确识别(不被全局is_current覆盖)
         delete ls._localProviderId;    // 清除第三方 id 残留
+        sessionRelay.clear(session.id);
       } else {
-        for (const [k, v] of Object.entries(info.env)) { ls.env[k] = v; setEnv(k, v); providerEnv[k] = v; }
-        ls._localProvider = 'relay';   // 标记本会话为第三方中转
+        // 第三方供应商走本地反代（"显示即转发"）：终端 env 只有反代地址+占位密钥，
+        // 真实 URL/密钥留在服务端映射；面板显示的目标 = 实际转发目标，物理一致。
+        // 附带收益：热切换供应商只改映射、无需重启 CLI；API 错误在 HTTP 层直接捕获。
+        const realUrl = info.env.ANTHROPIC_BASE_URL || '';
+        const realKey = info.env.ANTHROPIC_AUTH_TOKEN || info.env.ANTHROPIC_API_KEY || '';
+        const keyMode = info.env.ANTHROPIC_AUTH_TOKEN ? 'bearer' : 'x-api-key';
+        const relayPort = parseInt(process.env.PORT) || 3928;
+        const relayUrl = `http://127.0.0.1:${relayPort}/relay/${session.id}`;
+        sessionRelay.setProvider(session.id, {
+          url: realUrl, key: realKey, keyMode,
+          providerId: info.provider.id, providerName: info.provider.name
+        });
+        for (const k of keys) { delete ls.env[k]; unsetEnv(k); }
+        ls.env.ANTHROPIC_BASE_URL = relayUrl;
+        ls.env.ANTHROPIC_AUTH_TOKEN = `webtmux-relay-${session.id}`;
+        if (info.env.ANTHROPIC_MODEL) ls.env.ANTHROPIC_MODEL = info.env.ANTHROPIC_MODEL;
+        setEnv('ANTHROPIC_BASE_URL', relayUrl);
+        setEnv('ANTHROPIC_AUTH_TOKEN', `webtmux-relay-${session.id}`);
+        if (info.env.ANTHROPIC_MODEL) setEnv('ANTHROPIC_MODEL', info.env.ANTHROPIC_MODEL);
+        providerEnv.ANTHROPIC_BASE_URL = relayUrl;
+        providerEnv.ANTHROPIC_AUTH_TOKEN = `webtmux-relay-${session.id}`;
+        ls._localProvider = 'relay-proxy'; // 本会话经 WebTmux 本地反代
         // 记录所选供应商 id：多个同 URL+Key 供应商(如 Whaty / Whaty copy)时，
         // getCurrentProvider 反查按 id 精确命中，不再靠 URL/Key 猜名字
         ls._localProviderId = info.provider.id;
