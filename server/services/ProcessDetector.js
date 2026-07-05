@@ -5,8 +5,11 @@
  * 支持从 CliRegistry 动态加载 CLI 工具配置
  */
 
-import { execSync } from 'child_process';
+import { execSync, exec } from 'child_process';
+import { promisify } from 'util';
 import cliRegistry from './CliRegistry.js';
+
+const execAsync = promisify(exec);
 
 // Windows/WSL 兼容层
 const isWindows = process.platform === 'win32';
@@ -27,6 +30,8 @@ class ProcessDetector {
     // detectCLI 每次 3 个同步 execSync(tmux/pgrep/ps)，后台循环每秒 × N会话 都调，
     // 是主线程周期性阻塞的第二大来源。运行中的 CLI 进程 1 秒内不会变，缓存复用。
     this._detectCache = new Map();
+    // 异步检测进行中的 Promise：tmuxSession -> Promise（并发去重）
+    this._detectPending = new Map();
   }
 
   /**
@@ -126,6 +131,105 @@ class ProcessDetector {
       console.error(`[ProcessDetector] 检测失败: ${err.message}`);
       return { detected: false, cli: null, processName: null, pid: null, error: err.message };
     }
+  }
+
+  /**
+   * detectCLI 的异步版：后台循环专用，不阻塞事件循环。
+   * 与同步版共享 _detectCache（2s TTL）；同一会话并发调用共享同一个进行中的检测。
+   */
+  async detectCLIAsync(tmuxSession) {
+    if (useWindowsNative) {
+      return { detected: false, cli: null, processName: null, pid: null, reason: 'windows_native' };
+    }
+    if (!tmuxSession) {
+      return { detected: false, cli: null, processName: null, pid: null };
+    }
+
+    const cached = this._detectCache.get(tmuxSession);
+    if (cached && (Date.now() - cached.time) < 2000) {
+      return cached.result;
+    }
+    if (this._detectPending.has(tmuxSession)) {
+      return this._detectPending.get(tmuxSession);
+    }
+
+    const cmdPrefix = getUnixCmdPrefix();
+    const opts = { encoding: 'utf-8', timeout: 5000 };
+    const cacheAndReturn = (result) => {
+      this._detectCache.set(tmuxSession, { result, time: Date.now() });
+      return result;
+    };
+
+    const task = (async () => {
+      try {
+        const { stdout: paneOut } = await execAsync(
+          `${cmdPrefix}tmux list-panes -t "${tmuxSession}" -F "#{pane_pid}"`, opts
+        );
+        const panePid = paneOut.trim();
+        if (!panePid) {
+          return cacheAndReturn({ detected: false, cli: null, processName: null, pid: null });
+        }
+        const { stdout: childOut } = await execAsync(
+          `${cmdPrefix}pgrep -P ${panePid} || true`, opts
+        );
+        const childPids = childOut.trim();
+        if (!childPids) {
+          return cacheAndReturn({ detected: false, cli: null, processName: null, pid: null });
+        }
+        const pidList = childPids.split('\n').filter(p => p).join(',');
+        const { stdout: psOut } = await execAsync(
+          `${cmdPrefix}ps -o pid=,args= -p ${pidList} || true`, opts
+        );
+        const processInfo = psOut.trim();
+        if (!processInfo) {
+          return cacheAndReturn({ detected: false, cli: null, processName: null, pid: null });
+        }
+        const cliProcessNames = this.getCliProcessNames();
+        for (const line of processInfo.split('\n')) {
+          const match = line.trim().match(/^(\d+)\s+(.+)$/);
+          if (!match) continue;
+          const pid = parseInt(match[1]);
+          const fullCmd = match[2].toLowerCase();
+          const processName = fullCmd.split(/\s+/)[0].split('/').pop();
+          for (const [cli, names] of Object.entries(cliProcessNames)) {
+            if (names.some(name => processName.includes(name) || fullCmd.includes(`/bin/${name}`) || fullCmd.includes(`/${name}/`))) {
+              return cacheAndReturn({ detected: true, cli, processName: match[2].split(/\s+/)[0].split('/').pop(), pid });
+            }
+          }
+          this._recordUnknownProcess(match[2].split(/\s+/)[0].split('/').pop(), tmuxSession);
+        }
+        return cacheAndReturn({ detected: false, cli: null, processName: null, pid: null });
+      } catch (err) {
+        return { detected: false, cli: null, processName: null, pid: null, error: err.message };
+      } finally {
+        this._detectPending.delete(tmuxSession);
+      }
+    })();
+    this._detectPending.set(tmuxSession, task);
+    return task;
+  }
+
+  /**
+   * detectWithFallback 的异步版：后台循环专用
+   */
+  async detectWithFallbackAsync(tmuxSession, terminalContent = '') {
+    const processResult = await this.detectCLIAsync(tmuxSession);
+    if (processResult.detected) {
+      return {
+        method: 'process',
+        detected: true,
+        cli: processResult.cli,
+        processName: processResult.processName,
+        pid: processResult.pid
+      };
+    }
+    if (terminalContent) {
+      const cli = this.detectFromTerminalContent(terminalContent);
+      if (cli) {
+        return { method: 'terminal', detected: true, cli, processName: null, pid: null };
+      }
+    }
+    return { method: 'none', detected: false, cli: null, processName: null, pid: null };
   }
 
   /**

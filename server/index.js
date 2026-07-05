@@ -26,8 +26,11 @@ import { dirname, join } from 'path';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, watch, statSync } from 'fs';
 import session from 'express-session';
 import crypto from 'crypto';
-import { execSync, spawnSync } from 'child_process';
+import { execSync, spawnSync, exec as execCb } from 'child_process';
+import { promisify } from 'util';
 import Database from 'better-sqlite3';
+
+const execAsync = promisify(execCb);
 import os from 'os';
 import path from 'path';
 
@@ -484,26 +487,27 @@ function cleanupOrphanProcesses(workDir, sessionName = '') {
  * @param {string} workDir - 会话工作目录（用于匹配孤儿进程）
  * @returns {{ memory: number, processCount: number }}
  */
-function getSessionMemory(tmuxSessionName, workDir = '') {
+async function getSessionMemory(tmuxSessionName, workDir = '') {
   if (!useTmux) return { memory: 0, processCount: 0 };
 
   try {
-    // 获取 pane PID
-    const panePid = execSync(
+    // 获取 pane PID（异步：60s 全量轮询曾对 27 会话跑 ~81 次同步 fork，阻塞主线程数百毫秒）
+    const { stdout: paneOut } = await execAsync(
       `${getTmuxPrefix()} list-panes -t "${tmuxSessionName}" -F "#{pane_pid}" 2>/dev/null | head -1`,
       { encoding: 'utf-8', timeout: 3000 }
-    ).trim();
+    );
+    const panePid = paneOut.trim();
 
     if (!panePid) return { memory: 0, processCount: 0 };
 
-    // 使用单次 ps 命令获取所有后代进程（避免递归 execSync）
-    // pgrep -g 0 获取同进程组，或用 ps 的 ppid 过滤
+    // 使用单次 ps 命令获取所有后代进程（避免递归调用）
     let allPids = [panePid];
     try {
-      const descendants = execSync(
+      const { stdout: descOut } = await execAsync(
         `pgrep -P ${panePid} 2>/dev/null`,
         { encoding: 'utf-8', timeout: 2000 }
-      ).trim();
+      );
+      const descendants = descOut.trim();
       if (descendants) {
         allPids.push(...descendants.split('\n').filter(p => p));
       }
@@ -512,7 +516,7 @@ function getSessionMemory(tmuxSessionName, workDir = '') {
     const processCount = allPids.length;
 
     // 获取总内存（KB）
-    const rssOutput = execSync(
+    const { stdout: rssOutput } = await execAsync(
       `ps -o rss= -p ${allPids.join(',')} 2>/dev/null`,
       { encoding: 'utf-8', timeout: 2000 }
     );
@@ -528,16 +532,16 @@ function getSessionMemory(tmuxSessionName, workDir = '') {
 }
 
 /**
- * 获取所有会话的内存占用
+ * 获取所有会话的内存占用（异步串行，事件循环在 await 间隙可处理按键输入）
  */
-function getAllSessionsMemory() {
+async function getAllSessionsMemory() {
   const memoryMap = {};
 
   if (!sessionManager) return memoryMap;
 
   const sessions = sessionManager.listSessions();
   for (const session of sessions) {
-    const memory = getSessionMemory(session.tmuxSessionName, session.workingDir);
+    const memory = await getSessionMemory(session.tmuxSessionName, session.workingDir);
     memoryMap[session.id] = memory;
   }
 
@@ -1075,27 +1079,27 @@ function isLocalRequest(req) {
 }
 
 // 从运行中的 claude 进程读取实际环境变量（最高优先级，反映真实在用配置）
-function readClaudeProcessEnv(tmuxSessionName) {
+async function readClaudeProcessEnv(tmuxSessionName) {
   if (!tmuxSessionName || process.platform === 'win32') return null;
   try {
-    const panePid = execSync(`${getTmuxPrefix()} list-panes -t "${tmuxSessionName}" -F "#{pane_pid}"`, {
-      encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe']
-    }).trim();
+    const panePid = (await execAsync(`${getTmuxPrefix()} list-panes -t "${tmuxSessionName}" -F "#{pane_pid}"`, {
+      encoding: 'utf-8', timeout: 3000
+    })).stdout.trim();
     if (!panePid) return null;
-    const descendants = execSync(`{ pgrep -P ${panePid}; pgrep -g ${panePid}; } 2>/dev/null || true`, {
-      encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'], shell: '/bin/bash'
-    }).trim().split('\n').filter(Boolean);
+    const descendants = (await execAsync(`{ pgrep -P ${panePid}; pgrep -g ${panePid}; } 2>/dev/null || true`, {
+      encoding: 'utf-8', timeout: 3000, shell: '/bin/bash'
+    })).stdout.trim().split('\n').filter(Boolean);
     const allPids = [...new Set([panePid, ...descendants])].join(',');
-    const psOut = execSync(`ps -o pid=,comm= -p ${allPids} 2>/dev/null || true`, {
-      encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe']
-    }).trim();
+    const psOut = (await execAsync(`ps -o pid=,comm= -p ${allPids} 2>/dev/null || true`, {
+      encoding: 'utf-8', timeout: 3000
+    })).stdout.trim();
     for (const line of psOut.split('\n')) {
       const m = line.trim().match(/^(\d+)\s+(.+)$/);
       if (!m) continue;
       const [, pid, comm] = m;
       if (!/claude/i.test(comm)) continue;
-      const envOut = execSync(`ps eww -p ${pid} 2>/dev/null || true`, {
-        encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe']
+      const { stdout: envOut } = await execAsync(`ps eww -p ${pid} 2>/dev/null || true`, {
+        encoding: 'utf-8', timeout: 3000, maxBuffer: 4 * 1024 * 1024
       });
       const env = {};
       for (const tok of envOut.split(/\s+/)) {
@@ -1117,20 +1121,20 @@ function readClaudeProcessEnv(tmuxSessionName) {
 
 // 取 tmux 会话内 claude 进程的启动时间（epoch 秒）。用 etime（locale 无关）反推：
 // 进程早于全局配置变更 → 运行中进程仍用切换前的供应商（Claude Code 启动时读一次配置，不热更新）。
-function getClaudeProcStartEpoch(tmuxSessionName) {
+async function getClaudeProcStartEpoch(tmuxSessionName) {
   if (!tmuxSessionName || process.platform === 'win32') return 0;
   try {
-    const panePid = execSync(`${getTmuxPrefix()} list-panes -t "${tmuxSessionName}" -F "#{pane_pid}"`, {
-      encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe']
-    }).trim();
+    const panePid = (await execAsync(`${getTmuxPrefix()} list-panes -t "${tmuxSessionName}" -F "#{pane_pid}"`, {
+      encoding: 'utf-8', timeout: 3000
+    })).stdout.trim();
     if (!panePid) return 0;
-    const descendants = execSync(`{ pgrep -P ${panePid}; pgrep -g ${panePid}; } 2>/dev/null || true`, {
-      encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'], shell: '/bin/bash'
-    }).trim().split('\n').filter(Boolean);
+    const descendants = (await execAsync(`{ pgrep -P ${panePid}; pgrep -g ${panePid}; } 2>/dev/null || true`, {
+      encoding: 'utf-8', timeout: 3000, shell: '/bin/bash'
+    })).stdout.trim().split('\n').filter(Boolean);
     const allPids = [...new Set([panePid, ...descendants])].join(',');
-    const psOut = execSync(`ps -o pid=,comm=,etime= -p ${allPids} 2>/dev/null || true`, {
-      encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe']
-    }).trim();
+    const psOut = (await execAsync(`ps -o pid=,comm=,etime= -p ${allPids} 2>/dev/null || true`, {
+      encoding: 'utf-8', timeout: 3000
+    })).stdout.trim();
     for (const line of psOut.split('\n')) {
       const m = line.trim().match(/^(\d+)\s+(.+?)\s+([\d:-]+)$/);
       if (!m || !/claude/i.test(m[2])) continue;
@@ -1154,7 +1158,9 @@ function getClaudeProcStartEpoch(tmuxSessionName) {
 // workingDir: 可选，用于检测项目本地配置
 // tmuxSessionName: 可选，用于读取运行中 claude 进程的真实 env（优先级最高）
 function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) {
-  return new Promise((resolve) => {
+  // 注意：executor 为 async——内部 await 的两个进程探测函数自身永不抛异常
+  //（各自内部 try/catch 兜底返回 null/0），不会产生未 resolve 的悬挂 Promise。
+  return new Promise(async (resolve) => {
     const ccSwitchDbPath = path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
 
     // 首先读取实际的配置文件，获取当前使用的 API URL
@@ -1222,8 +1228,8 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         actualApiKey = globalApiKey;
       }
 
-      // 最高优先级：读取正在运行的 claude 进程的真实环境变量
-      const procEnv = readClaudeProcessEnv(tmuxSessionName);
+      // 最高优先级：读取正在运行的 claude 进程的真实环境变量（异步，不阻塞事件循环）
+      const procEnv = await readClaudeProcessEnv(tmuxSessionName);
       if (procEnv && procEnv.ANTHROPIC_BASE_URL) {
         const procUrl = procEnv.ANTHROPIC_BASE_URL.replace(/\/+$/, '');
         const settingsUrl = actualApiUrl.replace(/\/+$/, '');
@@ -1365,17 +1371,20 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
 
     // 陈旧检测（懒计算一次）：仅 claude、仅当显示的是全局供应商(configSource==='global')时有意义。
     // 运行中 claude 进程启动早于 ~/.claude/settings.json 最近变更 → 它仍用切换前的供应商、重启才生效。
+    // 预取 claude 进程启动时间（异步探测，不阻塞事件循环）；isGlobalStale 用预取值同步判断
+    let _procStartEpoch = 0;
+    if (appType === 'claude' && tmuxSessionName) {
+      _procStartEpoch = await getClaudeProcStartEpoch(tmuxSessionName);
+    }
     let _staleChecked = false, _globalStale = false;
     const isGlobalStale = () => {
       if (_staleChecked) return _globalStale;
       _staleChecked = true;
-      if (appType !== 'claude' || !tmuxSessionName) return false;
+      if (!_procStartEpoch) return false;
       try {
-        const startEpoch = getClaudeProcStartEpoch(tmuxSessionName);
-        if (!startEpoch) return false;
         const sp = path.join(os.homedir(), '.claude', 'settings.json');
         const mtime = existsSync(sp) ? Math.floor(statSync(sp).mtimeMs / 1000) : 0;
-        if (mtime && startEpoch < mtime - 2) _globalStale = true; // -2s 容差，避免文件系统时序误判
+        if (mtime && _procStartEpoch < mtime - 2) _globalStale = true; // -2s 容差，避免文件系统时序误判
       } catch {}
       return _globalStale;
     };
@@ -3029,9 +3038,10 @@ async function updateAllSessionsProjectInfo() {
     let workingDir = '';
 
     if (useTmux && hasTmux) {
-      // tmux 模式：从 tmux 获取当前工作目录
+      // tmux 模式：从 tmux 获取当前工作目录（异步，避免每 30s × N 会话同步 fork 阻塞主线程）
       try {
-        workingDir = execSync(`${getTmuxPrefix()} display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
+        const { stdout } = await execAsync(`${getTmuxPrefix()} display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8', timeout: 3000 });
+        workingDir = stdout.trim();
       } catch { continue; }
     } else {
       // Windows 原生模式 / mux-server 模式：从终端输出解析工作目录
@@ -3302,11 +3312,18 @@ async function runBackgroundAutoAction() {
 
     // 节流：每会话错误检测最多每 4 秒一次，避免每秒对全部会话同步抓屏+进程检测阻塞主线程。
     // 但有 hook working 状态或自动操作开启的会话不受影响（它们另有更及时的处理路径）。
-    const lastErrChk = errorCheckLastTime.get(sessionData.id) || 0;
+    // 错峰：首次见到的会话给随机初始偏移，避免全部会话在同一个 4 秒边界集中爆发
+    //（集中爆发时 27 会话 × 抓屏+进程检测一次性串行跑完，曾实测阻塞主线程 0.8~1.3 秒）。
+    let lastErrChk = errorCheckLastTime.get(sessionData.id);
+    if (lastErrChk === undefined) {
+      lastErrChk = now - Math.floor(Math.random() * ERROR_CHECK_INTERVAL);
+      errorCheckLastTime.set(sessionData.id, lastErrChk);
+    }
     if (now - lastErrChk < ERROR_CHECK_INTERVAL) continue;
     errorCheckLastTime.set(sessionData.id, now);
 
-    const terminalContent = session.getScreenContent();
+    // 异步抓屏+进程检测：不阻塞事件循环，按键输入可在 await 间隙即时处理
+    const terminalContent = await session.getScreenContentAsync();
     if (!terminalContent || terminalContent.length < 50) continue;
 
     // 检测 Claude Code API 错误
@@ -3315,7 +3332,7 @@ async function runBackgroundAutoAction() {
 
     // 检测 CLI 工具是否在运行 - 使用统一的 ProcessDetector 服务
     const tmuxSession = session.tmuxSessionName;
-    const cliDetection = processDetector.detectWithFallback(tmuxSession, last20Lines);
+    const cliDetection = await processDetector.detectWithFallbackAsync(tmuxSession, last20Lines);
     const isClaudeCodePresent = cliDetection.detected;
 
     const lastFixTime = session.lastClaudeFixTime || 0;
@@ -3466,7 +3483,7 @@ async function runBackgroundAutoAction() {
     if (!session || !session.isFixingClaudeError || !session.fixContext) continue;
 
     const ctx = session.fixContext;
-    const terminalContent = session.getScreenContent();
+    const terminalContent = await session.getScreenContentAsync();
     const lines = terminalContent?.trim().split('\n') || [];
     const lastLines = lines.slice(-5).join('\n');
     const lastLine = lines[lines.length - 1] || '';
@@ -3628,8 +3645,8 @@ async function runBackgroundAutoAction() {
       continue; // 用户正在输入，跳过自动操作
     }
 
-    // 先快速检查终端内容是否变化（每次循环都检查）
-    const quickContent = session.getScreenContent();
+    // 先快速检查终端内容是否变化（每次循环都检查，异步抓屏不阻塞事件循环）
+    const quickContent = await session.getScreenContentAsync();
     if (quickContent && quickContent.length >= 10) {
       const contentHash = computeContentHash(quickContent, 1000);
       const state = sessionCheckState.get(sessionData.id) || {
@@ -3658,7 +3675,7 @@ async function runBackgroundAutoAction() {
     session.isAutoActioning = true;
 
     try {
-      const terminalContent = quickContent || session.getScreenContent();
+      const terminalContent = quickContent || await session.getScreenContentAsync();
       if (!terminalContent || terminalContent.length < 10) {
         session.isAutoActioning = false;
         updateCheckState(sessionData.id, false, null);
@@ -4390,7 +4407,7 @@ function killSessionProcesses(tmuxSessionName) {
 setInterval(async () => {
   if (!io || !sessionManager) return;
   try {
-    const memoryMap = getAllSessionsMemory();
+    const memoryMap = await getAllSessionsMemory();
     io.emit('sessions:memory', memoryMap);
     checkMemoryLimits(memoryMap);
   } catch (err) {
@@ -4399,10 +4416,10 @@ setInterval(async () => {
 }, 60000);
 
 // 启动后 10 秒发送一次内存数据
-setTimeout(() => {
+setTimeout(async () => {
   if (!io || !sessionManager) return;
   try {
-    const memoryMap = getAllSessionsMemory();
+    const memoryMap = await getAllSessionsMemory();
     io.emit('sessions:memory', memoryMap);
   } catch (err) {
     console.error('[内存监控] 启动时获取内存数据失败:', err.message);
@@ -4495,7 +4512,7 @@ async function runBackgroundStatusAnalysis() {
     }
 
     try {
-      const terminalContent = session.getScreenContent();
+      const terminalContent = await session.getScreenContentAsync();
       if (!terminalContent || terminalContent.length < 10) {
         continue;
       }
@@ -6239,9 +6256,13 @@ io.on('connection', (socket) => {
         // 回车时检查缓冲区
         const cmd = session._inputBuffer.trim();
 
-        // 使用 CliRegistry 动态检测 CLI 命令
+        // 使用 CliRegistry 动态检测 CLI 命令。
+        // 注意：检测/供应商读取全部放到写入 pty 之后异步执行——
+        // 旧实现把 execSync(display-message) + await getCurrentProvider 挡在
+        // session.write 之前，输入命中 CLI 命令时回车回显有明显延迟。
         const detectedTool = cliRegistry.findByCommand(cmd);
-        if (detectedTool) {
+        if (detectedTool) setImmediate(async () => {
+          try {
           const cliType = detectedTool.id;
           console.log(`[CLI检测] 检测到 ${detectedTool.name} (${cliType}) 启动命令`);
           session.aiType = cliType;
@@ -6250,7 +6271,8 @@ io.on('connection', (socket) => {
           let cliWorkingDir = session.workingDir;
           if (useTmux) {
             try {
-              cliWorkingDir = execSync(`${getTmuxPrefix()} display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8' }).trim();
+              const { stdout } = await execAsync(`${getTmuxPrefix()} display-message -t "${session.tmuxSessionName}" -p "#{pane_current_path}"`, { encoding: 'utf-8', timeout: 3000 });
+              cliWorkingDir = stdout.trim();
               if (cliWorkingDir) {
                 session.workingDir = cliWorkingDir;
                 session.projectName = path.basename(cliWorkingDir) || cliWorkingDir;
@@ -6318,7 +6340,10 @@ io.on('connection', (socket) => {
           if (cliType === 'opencode' && hookServer && cliWorkingDir) {
             hookServer.deployOpenCodePlugin(cliWorkingDir);
           }
-        }
+          } catch (err) {
+            console.error('[CLI检测] 异步处理失败:', err.message);
+          }
+        });
 
         // 清空缓冲区
         session._inputBuffer = '';

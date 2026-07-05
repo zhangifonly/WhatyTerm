@@ -3,8 +3,11 @@ import { v4 as uuidv4 } from 'uuid';
 import Database from 'better-sqlite3';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { execSync } from 'child_process';
+import { execSync, exec } from 'child_process';
+import { promisify } from 'util';
 import path from 'path';
+
+const execAsync = promisify(exec);
 import os from 'os';
 import fs from 'fs';
 
@@ -642,6 +645,33 @@ export class Session {
     }
   }
 
+  // capturePane 的异步版：供后台循环（错误检测/AI 分析）使用，不阻塞事件循环。
+  // 与同步版共享 _paneCache；并发调用共享同一个进行中的 exec（避免重复 fork）。
+  async capturePaneAsync() {
+    if (!useTmux) {
+      return this.getRecentOutput(50);
+    }
+    const nowTs = Date.now();
+    if (this._paneCache && (nowTs - this._paneCacheTime) < 1500) {
+      return this._paneCache;
+    }
+    if (this._paneCapturePromise) {
+      return this._paneCapturePromise;
+    }
+    this._paneCapturePromise = execAsync(
+      `tmux capture-pane -t "${this.tmuxSessionName}" -p -e`,
+      { encoding: 'utf-8', timeout: 5000, maxBuffer: 4 * 1024 * 1024 }
+    ).then(({ stdout }) => {
+      const result = stdout.replace(/\n/g, '\r\n');
+      this._paneCache = result;
+      this._paneCacheTime = Date.now();
+      return result;
+    }).catch(() => (this._paneCache || '')).finally(() => {
+      this._paneCapturePromise = null;
+    });
+    return this._paneCapturePromise;
+  }
+
   // 获取 tmux 面板的完整内容（包含滚动历史）
   captureFullPane() {
     // Windows 原生模式：返回完整输出缓冲区
@@ -714,6 +744,11 @@ export class Session {
 
   getScreenContent() {
     return this.capturePane();
+  }
+
+  // 异步版抓屏：后台循环专用，避免 execSync 阻塞主线程
+  getScreenContentAsync() {
+    return this.capturePaneAsync();
   }
 
   destroy() {
