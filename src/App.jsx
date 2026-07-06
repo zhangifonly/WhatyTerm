@@ -256,6 +256,19 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [aiPanelCollapsed, sidebarCollapsed, fitAndSyncSize]);
 
+  // 自动模式状态条 / AI 建议卡片插入或消失会改变终端可用高度。
+  // ResizeObserver 时机在 DOM 插入 + 样式过渡下不总可靠，曾出现状态条把终端
+  // 底部行盖住（xterm 画布仍是旧高度被裁切）。这里在渲染后与过渡结束后各强制
+  // fit 一次，保证行数与容器最终高度一致。
+  const suggestionVisible = !!suggestion;
+  const autoStripVisible = !!currentSession?.autoActionEnabled;
+  useEffect(() => {
+    if (!terminalInstance.current) return;
+    const raf = requestAnimationFrame(() => fitAndSyncSize());
+    const timer = setTimeout(() => fitAndSyncSize(), 400);
+    return () => { cancelAnimationFrame(raf); clearTimeout(timer); };
+  }, [autoStripVisible, suggestionVisible, fitAndSyncSize]);
+
   // 保存二维码折叠偏好到 localStorage
   useEffect(() => {
     localStorage.setItem('webtmux_qr_expanded', qrCodeExpanded.toString());

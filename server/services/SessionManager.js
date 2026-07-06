@@ -460,12 +460,8 @@ export class Session {
       return;
     }
 
-    // 同时调整 tmux 窗口大小
-    try {
-      execSync(`${getTmuxPrefix()} resize-window -t "${this.tmuxSessionName}" -x ${cols} -y ${rows}`, {
-        stdio: 'ignore'
-      });
-    } catch {}
+    // 同时调整 tmux 窗口大小（异步：拖拽窗口时 resize 高频触发，同步 fork 会卡输入）
+    exec(`${getTmuxPrefix()} resize-window -t "${this.tmuxSessionName}" -x ${cols} -y ${rows}`, { timeout: 3000 }, () => {});
   }
 
   onOutput(callback) {
