@@ -23,7 +23,7 @@ import { Server } from 'socket.io';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 // Trigger restart
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, watch, statSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, watch, statSync, promises as fsp } from 'fs';
 import session from 'express-session';
 import crypto from 'crypto';
 import { execSync, spawnSync, exec as execCb } from 'child_process';
@@ -877,6 +877,33 @@ app.post('/api/sessions/:sessionId/analyze-now', async (req, res) => {
   }
 });
 
+/**
+ * 从 Claude Code 会话 transcript JSONL 尾部提取最近一次实际使用的模型。
+ * transcript 每条 assistant 消息都带 message.model（如 "claude-fable-5"），
+ * 这是"实测"模型——settings/env 里通常拿不到（尤其 OAuth 官方登录）。
+ */
+async function probeModelFromTranscript(transcriptPath) {
+  try {
+    const st = await fsp.stat(transcriptPath);
+    if (!st.size) return null;
+    const readLen = Math.min(st.size, 64 * 1024);
+    const fh = await fsp.open(transcriptPath, 'r');
+    const buf = Buffer.alloc(readLen);
+    await fh.read(buf, 0, readLen, st.size - readLen);
+    await fh.close();
+    const tail = buf.toString('utf-8');
+    let model = null;
+    for (const m of tail.matchAll(/"model"\s*:\s*"([^"]+)"/g)) {
+      // 排除 Claude Code 错误占位的 "<synthetic>" 等非模型值；
+      // 不限定 claude 前缀（第三方中转可能返回 glm/kimi 等模型名）
+      if (/^[a-z0-9][\w.:/-]{2,63}$/i.test(m[1])) model = m[1];
+    }
+    return model;
+  } catch {
+    return null;
+  }
+}
+
 /** 将 HookServer 事件接入 session 状态 */
 function _wireHookServer() {
   if (!hookServer) return;
@@ -897,6 +924,27 @@ function _wireHookServer() {
     session.hookState = (ev === 'PreToolUse') ? 'working'
       : (ev === 'PostToolUse' || ev === 'Stop') ? 'idle'
       : session.hookState;
+
+    // 实测模型：hook 载荷带 transcript_path，节流(30s/会话)读取尾部提取实际模型，
+    // 填充面板"模型"字段（OAuth 官方登录时 settings/env 均无模型信息，只有这条实测路径）
+    if (event.transcript_path) {
+      session.claudeTranscriptPath = event.transcript_path;
+      const lastProbe = session._modelProbeAt || 0;
+      if (Date.now() - lastProbe > 30000) {
+        session._modelProbeAt = Date.now();
+        probeModelFromTranscript(event.transcript_path).then((model) => {
+          if (model && model !== session.currentModel) {
+            session.currentModel = model;
+            if (session.claudeProvider) {
+              session.claudeProvider = { ...session.claudeProvider, model };
+            }
+            console.log(`[实测模型] 会话 ${session.name}: ${model}`);
+            io.emit('sessions:updated', sessionManager.listSessions());
+            io.to(`session:${session.id}`).emit('session:updated', session.toJSON());
+          }
+        }).catch(() => {});
+      }
+    }
 
     // 广播给前端（可选，用于实时状态显示）
     io.to(`session:${session.id}`).emit('session:hookEvent', { sessionId: session.id, event: ev });
@@ -1286,7 +1334,9 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
             actualApiKey = relayTarget.key || actualApiKey;
             configSource = 'relay';
             if (relayTarget.providerId) localProviderId = relayTarget.providerId;
-            relayInfo = { stats: sessionRelay.getStats(relayMatch[1]), providerName: relayTarget.providerName };
+            const relayStats = sessionRelay.getStats(relayMatch[1]);
+            if (relayStats?.lastModel) actualModel = relayStats.lastModel; // 请求体嗅探的实测模型
+            relayInfo = { stats: relayStats, providerName: relayTarget.providerName };
           } else {
             // 映射丢失（异常）：如实显示反代地址并标注，请用户重选供应商
             configSource = 'relay-lost';
@@ -7716,6 +7766,8 @@ async function startServer() {
             // 即该会话「实际生效」的供应商。优先采信它，避免把 cc-switch 名义 is_current 硬套给
             // 实际在用官方 OAuth / 本地 override 的会话（修复侧栏显示与 /status 不一致）。
             const sessionProvider = await getCurrentProvider('claude', session.workingDir, session.tmuxSessionName);
+            // 实测模型优先：transcript 尾部提取的实际模型（hook 路径填充）覆盖配置推断值
+            if (session.currentModel) sessionProvider.model = session.currentModel;
             if (sessionProvider.exists && (
                   sessionProvider.configSource === 'process' ||
                   sessionProvider.configSource === 'local' ||

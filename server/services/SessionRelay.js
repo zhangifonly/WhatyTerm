@@ -136,6 +136,22 @@ class SessionRelay {
       pres.pipe(res);
     });
 
+    // 嗅探请求体开头的 model 字段（实测模型，供面板显示）；只看前 4KB，不影响透传
+    let sniffBuf = '';
+    const sniff = (chunk) => {
+      sniffBuf += chunk.toString('utf-8', 0, Math.min(chunk.length, 4096));
+      const mm = sniffBuf.match(/"model"\s*:\s*"([^"]+)"/);
+      if (mm || sniffBuf.length >= 4096) {
+        req.off('data', sniff);
+        if (mm) {
+          const s = this.stats.get(sessionId) || { count: 0 };
+          s.lastModel = mm[1];
+          this.stats.set(sessionId, s);
+        }
+      }
+    };
+    req.on('data', sniff);
+
     preq.on('timeout', () => preq.destroy(new Error('upstream timeout')));
     preq.on('error', (e) => {
       this.log(`转发失败 ${sessionId} → ${upstream.host}: ${e.message}`);
