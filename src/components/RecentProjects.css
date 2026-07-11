@@ -459,3 +459,72 @@
     background-position: -200% 0;
   }
 }
+
+/* 项目搜索框（支持拼音首字母） */
+.recent-search {
+  position: relative;
+  margin-bottom: 0.6rem;
+}
+
+.recent-search-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.78rem;
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.recent-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 28px 8px 30px;
+  font-size: 0.82rem;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.recent-search-input:focus {
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-color) 25%, transparent);
+}
+
+.recent-search-input::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
+.recent-search-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 16px;
+  line-height: 14px;
+  text-align: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--border-color);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.recent-search-clear:hover {
+  background: var(--accent-color);
+  color: #fff;
+}
+
+.recent-search-empty {
+  padding: 0.75rem;
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}

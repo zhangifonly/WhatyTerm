@@ -329,6 +329,8 @@
       "minutes": "{{count}} 分钟前",
       "hours": "{{count}} 小时前",
       "days": "{{count}} 天前"
-    }
+    },
+    "searchPlaceholder": "搜索项目（支持拼音首字母，如 xj）",
+    "noMatch": "没有匹配的项目"
   }
 }

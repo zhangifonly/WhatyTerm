@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from '../i18n';
+import { matchPinyin } from '../utils/pinyin';
 import './RecentProjects.css';
 
 const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) => {
@@ -8,6 +9,13 @@ const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) 
   const [activeTab, setActiveTab] = useState('claude');
   const [loading, setLoading] = useState(true);
   const [expandedSections, setExpandedSections] = useState({});
+  const [query, setQuery] = useState('');
+
+  // 项目命中搜索：名称/路径/描述任一（支持中文原文、英文、拼音首字母如 xj→心镜）
+  const projectMatches = (p) =>
+    matchPinyin(p.name, query) ||
+    matchPinyin(p.path, query) ||
+    matchPinyin(p.description, query);
 
   useEffect(() => {
     if (!socket) return;
@@ -111,18 +119,35 @@ const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) 
   // Compact 模式：VS Code 风格，分类显示 Claude/Codex/Gemini 各最多 5 个
   if (compact) {
     const aiTypes = [
-      { key: 'claude', label: 'Claude', data: projects.claude || [] },
-      { key: 'codex', label: 'Codex', data: projects.codex || [] },
-      { key: 'gemini', label: 'Gemini', data: projects.gemini || [] },
-      { key: 'grok', label: 'Grok', data: projects.grok || [] }
+      { key: 'claude', label: 'Claude', data: (projects.claude || []).filter(projectMatches) },
+      { key: 'codex', label: 'Codex', data: (projects.codex || []).filter(projectMatches) },
+      { key: 'gemini', label: 'Gemini', data: (projects.gemini || []).filter(projectMatches) },
+      { key: 'grok', label: 'Grok', data: (projects.grok || []).filter(projectMatches) }
     ].filter(ai => ai.data.length > 0);
 
     return (
       <div className="recent-projects compact">
+        <div className="recent-search">
+          <span className="recent-search-icon">🔍</span>
+          <input
+            type="text"
+            className="recent-search-input"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t('recentProjects.searchPlaceholder', '搜索项目（支持拼音首字母，如 xj）')}
+          />
+          {query && (
+            <button className="recent-search-clear" onClick={() => setQuery('')} title={t('common.clear', '清除')}>×</button>
+          )}
+        </div>
+        {aiTypes.length === 0 && (
+          <div className="recent-search-empty">{t('recentProjects.noMatch', '没有匹配的项目')}</div>
+        )}
         {aiTypes.map(ai => {
-          const isExpanded = expandedSections[ai.key];
+          // 搜索时展示全部匹配项（不受默认 5 条限制），避免命中项被折叠
+          const isExpanded = expandedSections[ai.key] || !!query.trim();
           const displayItems = isExpanded ? ai.data : ai.data.slice(0, 5);
-          const hasMore = ai.data.length > 5;
+          const hasMore = !query.trim() && ai.data.length > 5;
 
           return (
             <div key={ai.key} className="compact-section">
@@ -222,8 +247,22 @@ const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) 
         )}
       </div>
 
+      <div className="recent-search">
+        <span className="recent-search-icon">🔍</span>
+        <input
+          type="text"
+          className="recent-search-input"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={t('recentProjects.searchPlaceholder', '搜索项目（支持拼音首字母，如 xj）')}
+        />
+        {query && (
+          <button className="recent-search-clear" onClick={() => setQuery('')} title={t('common.clear', '清除')}>×</button>
+        )}
+      </div>
+
       <div className="recent-projects-list">
-        {currentProjects.map((project, index) => (
+        {currentProjects.filter(projectMatches).map((project, index) => (
           <div
             key={`${project.aiType}-${project.path}-${index}`}
             className="project-card"

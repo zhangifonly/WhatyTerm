@@ -329,6 +329,8 @@
       "minutes": "{{count}}分前",
       "hours": "{{count}}時間前",
       "days": "{{count}}日前"
-    }
+    },
+    "searchPlaceholder": "プロジェクトを検索（ピンイン頭文字対応）",
+    "noMatch": "一致するプロジェクトがありません"
   }
 }

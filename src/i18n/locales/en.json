@@ -329,6 +329,8 @@
       "minutes": "{{count}} minutes ago",
       "hours": "{{count}} hours ago",
       "days": "{{count}} days ago"
-    }
+    },
+    "searchPlaceholder": "Search projects (pinyin initials supported)",
+    "noMatch": "No matching projects"
   }
 }
