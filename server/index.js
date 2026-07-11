@@ -1756,6 +1756,41 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
           }));
         }
 
+        // 【统一判据】settings env 全空且无任何实测第三方 URL 证据时：
+        // Claude Code 的实际行为是「没有 ANTHROPIC_BASE_URL 就用已登录的官方账号」，
+        // 它**根本不读** cc-switch 的 is_current（那只是本面板的全局状态）。所以只要
+        // ~/.claude.json 有 oauthAccount（用户登录了官方），本会话就是官方 OAuth——
+        // 必须优先于 DB is_current 的第三方判定，否则大量「没配第三方+登录官方」的会话
+        // 会被 cc-switch 当前第三方误显示（本次问题根因，批量修复而非逐个纠正）。
+        if (appType === 'claude') {
+          let hasOAuth = false;
+          try {
+            const cj = JSON.parse(readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'));
+            hasOAuth = !!cj.oauthAccount;
+          } catch {}
+          if (hasOAuth) {
+            let oauthRow = null;
+            try {
+              const claudeRows = db.prepare('SELECT * FROM providers WHERE app_type = ?').all('claude');
+              oauthRow = claudeRows.find(r => {
+                try { const sc = JSON.parse(r.settings_config || '{}'); return !!sc.useOAuth || !sc.env?.ANTHROPIC_BASE_URL; }
+                catch { return false; }
+              });
+            } catch {}
+            db.close();
+            return resolve(buildResult({
+              id: oauthRow?.id,
+              name: oauthRow?.name || 'Claude Official',
+              url: '',
+              model: actualModel,
+              exists: true,
+              // 据官方登录账号判定（可靠文件实证）；若前面已有 hook/status 实测则保留
+              configSource: (configSource === 'global') ? 'login' : configSource
+            }));
+          }
+        }
+
+        // 未登录官方：才回落 cc-switch is_current（第三方）——此时它是唯一线索
         if (appType === 'claude' && row) {
           let currentSc = {};
           try { currentSc = JSON.parse(row.settings_config || '{}'); } catch {}
@@ -1770,26 +1805,6 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
               url: currentUrl,
               apiKey: maskApiKey(currentSc.env?.ANTHROPIC_AUTH_TOKEN || currentSc.env?.ANTHROPIC_API_KEY || ''),
               model: currentSc.model || '',
-              exists: true,
-              configSource
-            }));
-          }
-        }
-
-        if (appType === 'claude') {
-          let hasOAuth = false;
-          try {
-            const cj = JSON.parse(readFileSync(path.join(os.homedir(), '.claude.json'), 'utf8'));
-            hasOAuth = !!cj.oauthAccount;
-          } catch {}
-
-          if (hasOAuth) {
-            db.close();
-            const oauthName = row?.name || 'Claude Official';
-            return resolve(buildResult({
-              id: row?.id,
-              name: oauthName,
-              url: '',
               exists: true,
               configSource
             }));
