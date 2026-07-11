@@ -751,6 +751,11 @@ app.post('/hooks', (req, res) => {
         keyPrefix: kv.key || ''
       };
     }
+    // tmux pane id（如 %25）：hook 继承 CLI 的 $TMUX_PANE，是精确定位所属会话的锚点
+    const paneHeader = req.headers['x-webtmux-tmux-pane'];
+    if (typeof paneHeader === 'string' && /^%\d+$/.test(paneHeader.trim())) {
+      event._tmuxPane = paneHeader.trim();
+    }
     hookServer.dispatch(event);
   } catch {}
   res.status(200).end();
@@ -926,11 +931,39 @@ async function probeModelFromTranscript(transcriptPath) {
 function _wireHookServer() {
   if (!hookServer) return;
 
-  hookServer.on('*', (event) => {
+  hookServer.on('*', async (event) => {
     const { hook_event_name: ev, cwd, session_id: claudeId } = event;
-    // 找到对应 WhatyTerm session（按 workingDir 匹配）
     const sessions = sessionManager?.listSessions() || [];
-    const sessionData = sessions.find(s => s.workingDir && cwd?.startsWith(s.workingDir));
+
+    // 匹配对应 WhatyTerm session。两级：
+    // ① tmux pane 精确定位（最可靠）：hook 继承 CLI 的 $TMUX_PANE（如 %25），反查它属于哪个
+    //    tmux session_name，直接命中——彻底解决「同一目录跑多个 claude」时按 cwd 无法区分、
+    //    模型/供应商被别的 claude 反复冲掉的问题。
+    // ② 回落 workingDir「路径边界 + 最长前缀」（非 tmux / 反查失败时），杜绝 /a/b 命中 /a/bcd。
+    let sessionData = null;
+    let paneResolved = false; // pane 反查是否明确得到了 tmux session_name
+    if (event._tmuxPane) {
+      try {
+        const { stdout } = await execAsync(
+          `${getTmuxPrefix()} display-message -t "${event._tmuxPane}" -p "#{session_name}"`,
+          { encoding: 'utf-8', timeout: 2000 }
+        );
+        const sname = stdout.trim();
+        if (sname) {
+          paneResolved = true;
+          sessionData = sessions.find(s => s.tmuxSessionName === sname) || null;
+        }
+      } catch {}
+    }
+    // pane 明确反查到某 tmux 会话，但它不是 WhatyTerm 管理的会话（如用户在独立 tmux 里
+    // 对同一目录另跑的 claude）→ 直接丢弃，绝不回落 workingDir（否则会污染同目录的面板会话）。
+    if (paneResolved && !sessionData) return;
+    // 仅当完全没有 pane 信息（非 tmux 运行 / 反查失败）时，才回落 workingDir 最长前缀匹配。
+    if (!sessionData && !paneResolved) {
+      sessionData = sessions
+        .filter(s => s.workingDir && cwd && (cwd === s.workingDir || cwd.startsWith(s.workingDir + '/')))
+        .sort((a, b) => b.workingDir.length - a.workingDir.length)[0];
+    }
     if (!sessionData) return;
 
     // 获取真实 session 实例（listSessions 返回的是 JSON 副本，设置属性无效）
@@ -1348,9 +1381,12 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         } catch {}
       }
 
-      // ── 实测覆盖（优先于一切配置推断）────────────────────────────
-      // 来源一 hook env 快照：hook 是 CLI 子进程，其 env = CLI 实际生效配置；
-      // 来源二 /status 屏幕解析：hooks 缺席的存量会话兜底（30 分钟内有效）。
+      // ── 实测覆盖（优先于配置推断）────────────────────────────────
+      // 关键教训：Claude Code 读 settings.json 的 env 块是**内部行为，不 export 到子进程**。
+      // 所以 hook 脚本继承的环境里读不到 settings 里配的 ANTHROPIC_BASE_URL——读到空**不代表 OAuth**，
+      // 只代表"没通过 shell export"。hook 空 URL 曾把第三方(settings 里配的)误显示成官方 OAuth。
+      // 优先级：/status 屏幕解析（CLI 自报事实，最权威）> hook 非空 URL（仅 shell export 场景）
+      //         > 前面已算好的 settings 推断（能正确读到 settings.local.json 的第三方 URL）。
       {
         const liveSession = (tmuxSessionName && sessionManager)
           ? (() => {
@@ -1360,20 +1396,9 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
           : null;
         const he = liveSession?.effectiveEnv;
         const sp = liveSession?.statusProbe;
-        if (he) {
-          if (he.baseUrl) {
-            actualApiUrl = he.baseUrl;
-            if (he.tokenPrefix || he.keyPrefix) actualApiKey = he.tokenPrefix || he.keyPrefix;
-            localIsOAuth = false;
-          } else {
-            // 有效 env 无 BASE_URL = 官方 OAuth 登录
-            actualApiUrl = '';
-            actualApiKey = '';
-            localIsOAuth = true;
-          }
-          if (he.model) actualModel = he.model;
-          configSource = 'hook';
-        } else if (sp && Date.now() - sp.at < 30 * 60 * 1000) {
+
+        // 1) /status 解析：CLI 亲口报告的 base URL / 登录方式 / 模型，最可信
+        if (sp && Date.now() - sp.at < 30 * 60 * 1000) {
           if (sp.baseUrl) {
             actualApiUrl = sp.baseUrl;
             localIsOAuth = false;
@@ -1386,6 +1411,17 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
           }
           if (sp.model) actualModel = sp.model;
         }
+
+        // 2) hook env：仅在读到**非空** BASE_URL 时可信（shell 里 export 后启动 CLI 的场景）。
+        //    读到空一律忽略——绝不据此判 OAuth（否则 settings 配置的第三方会被误显示成官方）。
+        if (he && he.baseUrl && configSource !== 'status') {
+          actualApiUrl = he.baseUrl;
+          if (he.tokenPrefix || he.keyPrefix) actualApiKey = he.tokenPrefix || he.keyPrefix;
+          localIsOAuth = false;
+          configSource = 'hook';
+        }
+        // hook 带回的实测模型即便 URL 为空也可用（settings 常不配 ANTHROPIC_MODEL）
+        if (he && he.model && !actualModel) actualModel = he.model;
       }
 
       // 本地反代识别（最高真实级）：URL 指向 /relay/<sessionId> 时，从服务端映射
@@ -3476,15 +3512,17 @@ async function runBackgroundAutoAction() {
     const terminalContent = await session.getScreenContentAsync();
     if (!terminalContent || terminalContent.length < 50) continue;
 
-    // 实测供应商兜底：终端出现 /status 输出时解析登录方式/base URL/模型。
-    // 存量会话可能在 hooks 安装前启动（收不到 hook env 快照），/status 是它们唯一实测来源。
-    if (terminalContent.includes('Login method:')) {
+    // 实测供应商（最权威非侵入源）：终端出现 /status 输出时解析 base URL/登录方式/模型。
+    // 触发认多种行——第三方 token 登录的 /status 只有 "Auth token:" + "Anthropic base URL:"，
+    // 没有 "Login method:"（那是官方账号登录才有），三者任一出现即解析。
+    if (/\b(Anthropic base URL|Login method|Auth token):/.test(terminalContent)) {
       const spURL = terminalContent.match(/Anthropic base URL:\s+(https?:\/\/\S+)/i);
       const spLogin = terminalContent.match(/Login method:\s+([^\r\n]+)/);
       const spModel = terminalContent.match(/^\s*Model:\s+(\S+)/m);
+      // 有 base URL → 第三方；无 base URL 但登录方式是账号 → 官方 OAuth
       session.statusProbe = {
         baseUrl: spURL ? spURL[1].replace(/\/+$/, '') : '',
-        isOAuth: !spURL && /account|max|pro|subscription/i.test(spLogin?.[1] || ''),
+        isOAuth: !spURL && /account|max|pro|subscription|claude\.ai/i.test(spLogin?.[1] || ''),
         model: spModel ? spModel[1] : '',
         at: Date.now()
       };
@@ -7846,8 +7884,11 @@ async function startServer() {
             // 即该会话「实际生效」的供应商。优先采信它，避免把 cc-switch 名义 is_current 硬套给
             // 实际在用官方 OAuth / 本地 override 的会话（修复侧栏显示与 /status 不一致）。
             const sessionProvider = await getCurrentProvider('claude', session.workingDir, session.tmuxSessionName);
-            // 实测模型优先：transcript 尾部提取的实际模型（hook 路径填充）覆盖配置推断值
-            if (session.currentModel) sessionProvider.model = session.currentModel;
+            // 模型来源优先级：/status 与 relay 是最权威的实测（CLI 自报/反代嗅探），
+            // 不被 transcript 的 currentModel 覆盖；其余情况才用 transcript 兜底/覆盖配置推断值。
+            if (session.currentModel && !['status', 'relay'].includes(sessionProvider.configSource)) {
+              sessionProvider.model = session.currentModel;
+            }
             if (sessionProvider.exists && (
                   sessionProvider.configSource === 'process' ||
                   sessionProvider.configSource === 'local' ||

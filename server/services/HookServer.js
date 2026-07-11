@@ -145,6 +145,7 @@ curl -s --max-time 2 -X POST "http://127.0.0.1:${this.serverPort}/hooks" \\
   -H "Content-Type: application/json" \\
   -H "X-WebtmuxToken: ${this.token}" \\
   -H "X-Webtmux-Effective-Env: url=\${ANTHROPIC_BASE_URL};model=\${ANTHROPIC_MODEL};tok=\${ANTHROPIC_AUTH_TOKEN:0:12};key=\${ANTHROPIC_API_KEY:0:12}" \\
+  -H "X-Webtmux-Tmux-Pane: \${TMUX_PANE}" \\
   -d "$INPUT" &
 exit 0
 `;
@@ -162,6 +163,7 @@ try {
   $tok = if ($env:ANTHROPIC_AUTH_TOKEN) { $env:ANTHROPIC_AUTH_TOKEN.Substring(0, [Math]::Min(12, $env:ANTHROPIC_AUTH_TOKEN.Length)) } else { "" }
   $key = if ($env:ANTHROPIC_API_KEY) { $env:ANTHROPIC_API_KEY.Substring(0, [Math]::Min(12, $env:ANTHROPIC_API_KEY.Length)) } else { "" }
   $req.Headers.Add("X-Webtmux-Effective-Env", "url=$($env:ANTHROPIC_BASE_URL);model=$($env:ANTHROPIC_MODEL);tok=$tok;key=$key")
+  $req.Headers.Add("X-Webtmux-Tmux-Pane", "$($env:TMUX_PANE)")
   $req.Timeout = 2000
   $stream = $req.GetRequestStream()
   $stream.Write($body, 0, $body.Length)
