@@ -1483,8 +1483,17 @@ ${historyText || '(空)'}
     // 检测选项 2 是否是"永久允许某命令模式"（don't ask again for: 具体命令）
     // 这种情况不应自动选 2，因为会永久跳过该命令的确认
     const isOption2PermanentAllowEarly = /2\.\s*Yes,\s*and\s+don.t\s+ask\s+again\s+for:/i.test(earlyLast3000);
+    // 长说明型选项菜单兜底：标题问号与选项间隔大段说明文字（如 workflow 确认
+    // "Run a dynamic workflow?" ... "1. Yes, run it / 2. View raw script / 3. No"），
+    // isGenericConfirmEarly 的 100 字符窗口覆盖不到。用"1. Yes 选项 + 2. 选项 + 底部
+    // Esc to cancel"这一确认菜单通用特征识别；选项 2 非 Yes 时下方逻辑自动落到选 1。
+    // ⚠️ 只认 cancel/amend——"Esc to interrupt" 是运行中状态的常驻底栏，若把它算作
+    // 确认菜单特征，AI 正在输出含 "1. Yes/2. ..." 的列表时会被误判成确认界面。
+    const hasOptionMenuEarly = hasOption1YesEarly
+      && /^\s*[❯>]?\s*2\.\s+\S/im.test(earlyLast3000)
+      && /Esc to (cancel|amend)\b/i.test(earlyLast3000);
 
-    if ((isEditConfirmEarly || isProceedConfirmEarly || isPlanExecuteEarly || isGenericConfirmEarly) && hasOption1YesEarly) {
+    if ((isEditConfirmEarly || isProceedConfirmEarly || isPlanExecuteEarly || isGenericConfirmEarly || hasOptionMenuEarly) && hasOption1YesEarly) {
       // Plan 执行确认（auto-accept edits）：选 1
       // 文件操作确认（allow all edits this session）：选 2
       // 永久允许某命令模式：选 1（避免永久跳过确认）
