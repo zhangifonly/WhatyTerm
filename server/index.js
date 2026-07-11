@@ -927,6 +927,32 @@ async function probeModelFromTranscript(transcriptPath) {
   }
 }
 
+/**
+ * 主动按 workingDir 探测该会话最近实际使用的模型（不依赖 hook）。
+ * Claude Code transcript 路径规律：~/.claude/projects/<cwd 的 / 和 . 换成 ->/<session_id>.jsonl。
+ * 取该目录最新修改的 jsonl 读尾部 model——settings.json 的 model 字段是"最后一次 /model
+ * 选择"的持久值、常陈旧（如 opus[1m]），transcript 才是实际在跑的模型。
+ * 用于 hook 未收到事件（会话在 hook 安装前启动）的会话兜底。
+ */
+async function probeModelByWorkingDir(workingDir) {
+  if (!workingDir) return null;
+  try {
+    const escaped = workingDir.replace(/[/.]/g, '-');
+    const dir = path.join(os.homedir(), '.claude', 'projects', escaped);
+    const files = await fsp.readdir(dir);
+    let newest = null, newestMs = 0;
+    for (const f of files) {
+      if (!f.endsWith('.jsonl')) continue;
+      const st = await fsp.stat(path.join(dir, f));
+      if (st.mtimeMs > newestMs) { newestMs = st.mtimeMs; newest = path.join(dir, f); }
+    }
+    if (!newest) return null;
+    return await probeModelFromTranscript(newest);
+  } catch {
+    return null;
+  }
+}
+
 /** 将 HookServer 事件接入 session 状态 */
 function _wireHookServer() {
   if (!hookServer) return;
@@ -4632,6 +4658,32 @@ setInterval(async () => {
   }
 }, 60000);
 
+// 模型实测周期刷新（每 25s）：主动读各会话 transcript 最新 model，捕获无 hook 会话的
+// /model 中途切换 / Fable 促销自动切换。有 hook 会话 hook 更实时（探测同值不触发广播，无害）。
+// settings.json 的 model 字段是"最后一次 /model 选择"的持久值、常陈旧，不能作为显示依据。
+setInterval(async () => {
+  if (!io || !sessionManager) return;
+  for (const sd of sessionManager.listSessions()) {
+    try {
+      const session = sessionManager.getSession(sd.id);
+      if (!session || !session.workingDir) continue;
+      if (session.aiType && session.aiType !== 'claude') continue;
+      // status/relay 有更权威的实测来源，不覆盖
+      if (['status', 'relay'].includes(session.claudeProvider?.configSource)) continue;
+      const model = await probeModelByWorkingDir(session.workingDir);
+      if (model && model !== session.currentModel) {
+        session.currentModel = model;
+        if (session.claudeProvider) {
+          session.claudeProvider = { ...session.claudeProvider, model };
+          io.emit('sessions:updated', sessionManager.listSessions());
+          io.to(`session:${session.id}`).emit('session:updated', session.toJSON());
+        }
+        console.log(`[模型周期刷新] 会话 ${session.name}: ${model}`);
+      }
+    } catch {}
+  }
+}, 25000);
+
 // 启动后 10 秒发送一次内存数据
 setTimeout(async () => {
   if (!io || !sessionManager) return;
@@ -7899,10 +7951,16 @@ async function startServer() {
             // 即该会话「实际生效」的供应商。优先采信它，避免把 cc-switch 名义 is_current 硬套给
             // 实际在用官方 OAuth / 本地 override 的会话（修复侧栏显示与 /status 不一致）。
             const sessionProvider = await getCurrentProvider('claude', session.workingDir, session.tmuxSessionName);
-            // 模型来源优先级：/status 与 relay 是最权威的实测（CLI 自报/反代嗅探），
-            // 不被 transcript 的 currentModel 覆盖；其余情况才用 transcript 兜底/覆盖配置推断值。
-            if (session.currentModel && !['status', 'relay'].includes(sessionProvider.configSource)) {
-              sessionProvider.model = session.currentModel;
+            const cs = sessionProvider.configSource;
+            // 模型来源优先级：/status 与 relay 是最权威的实测（CLI 自报/反代嗅探），保持不动；
+            // 其余会话主动按 workingDir 读 transcript 最新 model（不依赖 hook，每轮刷新以
+            // 捕获 /model 中途切换），覆盖 settings.json 陈旧的 model 字段（如 opus[1m]）。
+            if (!['status', 'relay'].includes(cs)) {
+              if (session.workingDir) {
+                const m = await probeModelByWorkingDir(session.workingDir);
+                if (m) session.currentModel = m;
+              }
+              if (session.currentModel) sessionProvider.model = session.currentModel;
             }
             if (sessionProvider.exists && (
                   sessionProvider.configSource === 'process' ||
