@@ -734,7 +734,25 @@ app.post('/hooks', (req, res) => {
   if (!hookServer?.validateToken(req.headers['x-webtmuxtoken'])) {
     return res.status(403).end();
   }
-  try { hookServer.dispatch(req.body); } catch {}
+  try {
+    const event = req.body || {};
+    // 解析 hook 子进程带来的 CLI 有效环境变量快照（实测供应商/模型的最可靠来源）
+    const envHeader = req.headers['x-webtmux-effective-env'];
+    if (typeof envHeader === 'string') {
+      const kv = {};
+      for (const part of envHeader.split(';')) {
+        const eq = part.indexOf('=');
+        if (eq > 0) kv[part.slice(0, eq)] = part.slice(eq + 1).trim();
+      }
+      event._effectiveEnv = {
+        baseUrl: (kv.url || '').replace(/\/+$/, ''),
+        model: kv.model || '',
+        tokenPrefix: kv.tok || '',
+        keyPrefix: kv.key || ''
+      };
+    }
+    hookServer.dispatch(event);
+  } catch {}
   res.status(200).end();
 });
 
@@ -924,6 +942,13 @@ function _wireHookServer() {
     session.hookState = (ev === 'PreToolUse') ? 'working'
       : (ev === 'PostToolUse' || ev === 'Stop') ? 'idle'
       : session.hookState;
+
+    // 实测有效环境：hook 是 CLI 子进程，其 env = CLI 实际生效配置（settings env 块
+    // 会被 Claude Code 注入自身 process.env）。baseUrl 空 = 官方 OAuth。
+    // 这是面板供应商显示的最高优先级证据（getCurrentProvider 消费）。
+    if (event._effectiveEnv) {
+      session.effectiveEnv = { ...event._effectiveEnv, at: Date.now(), claudeSessionId: claudeId };
+    }
 
     // 实测模型：hook 载荷带 transcript_path，节流(30s/会话)读取尾部提取实际模型，
     // 填充面板"模型"字段（OAuth 官方登录时 settings/env 均无模型信息，只有这条实测路径）
@@ -1323,6 +1348,46 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         } catch {}
       }
 
+      // ── 实测覆盖（优先于一切配置推断）────────────────────────────
+      // 来源一 hook env 快照：hook 是 CLI 子进程，其 env = CLI 实际生效配置；
+      // 来源二 /status 屏幕解析：hooks 缺席的存量会话兜底（30 分钟内有效）。
+      {
+        const liveSession = (tmuxSessionName && sessionManager)
+          ? (() => {
+              const sd = sessionManager.listSessions().find(s => s.tmuxSessionName === tmuxSessionName);
+              return sd ? sessionManager.getSession(sd.id) : null;
+            })()
+          : null;
+        const he = liveSession?.effectiveEnv;
+        const sp = liveSession?.statusProbe;
+        if (he) {
+          if (he.baseUrl) {
+            actualApiUrl = he.baseUrl;
+            if (he.tokenPrefix || he.keyPrefix) actualApiKey = he.tokenPrefix || he.keyPrefix;
+            localIsOAuth = false;
+          } else {
+            // 有效 env 无 BASE_URL = 官方 OAuth 登录
+            actualApiUrl = '';
+            actualApiKey = '';
+            localIsOAuth = true;
+          }
+          if (he.model) actualModel = he.model;
+          configSource = 'hook';
+        } else if (sp && Date.now() - sp.at < 30 * 60 * 1000) {
+          if (sp.baseUrl) {
+            actualApiUrl = sp.baseUrl;
+            localIsOAuth = false;
+            configSource = 'status';
+          } else if (sp.isOAuth) {
+            actualApiUrl = '';
+            actualApiKey = '';
+            localIsOAuth = true;
+            configSource = 'status';
+          }
+          if (sp.model) actualModel = sp.model;
+        }
+      }
+
       // 本地反代识别（最高真实级）：URL 指向 /relay/<sessionId> 时，从服务端映射
       // 取真实供应商——面板显示的目标与实际转发目标物理上是同一份数据。
       {
@@ -1649,8 +1714,9 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
             id: oauthRow?.id,
             name: oauthRow?.name || 'Claude Official',
             url: '',
+            model: actualModel,
             exists: true,
-            configSource: 'local'
+            configSource // 透传实测来源（hook/status）或 local，前端徽标如实标注
           }));
         }
 
@@ -3409,6 +3475,20 @@ async function runBackgroundAutoAction() {
     // 异步抓屏+进程检测：不阻塞事件循环，按键输入可在 await 间隙即时处理
     const terminalContent = await session.getScreenContentAsync();
     if (!terminalContent || terminalContent.length < 50) continue;
+
+    // 实测供应商兜底：终端出现 /status 输出时解析登录方式/base URL/模型。
+    // 存量会话可能在 hooks 安装前启动（收不到 hook env 快照），/status 是它们唯一实测来源。
+    if (terminalContent.includes('Login method:')) {
+      const spURL = terminalContent.match(/Anthropic base URL:\s+(https?:\/\/\S+)/i);
+      const spLogin = terminalContent.match(/Login method:\s+([^\r\n]+)/);
+      const spModel = terminalContent.match(/^\s*Model:\s+(\S+)/m);
+      session.statusProbe = {
+        baseUrl: spURL ? spURL[1].replace(/\/+$/, '') : '',
+        isOAuth: !spURL && /account|max|pro|subscription/i.test(spLogin?.[1] || ''),
+        model: spModel ? spModel[1] : '',
+        at: Date.now()
+      };
+    }
 
     // 检测 Claude Code API 错误
     const terminalLines = terminalContent.split('\n');

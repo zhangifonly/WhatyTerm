@@ -135,12 +135,16 @@ class HookServer {
   }
 
   _buildBashScript() {
+    // X-Webtmux-Effective-Env：hook 是 CLI 的子进程，继承其"实际生效"的环境变量
+    //（Claude Code 启动时会把 settings env 块注入自身 process.env，子进程可见）。
+    // BASE_URL 为空 = 官方 OAuth 登录。密钥只带前 12 位用于供应商反查，不落全量。
     return `#!/bin/bash
 # WhatyTerm hook script - auto-generated, do not edit manually
 INPUT=$(cat)
 curl -s --max-time 2 -X POST "http://127.0.0.1:${this.serverPort}/hooks" \\
   -H "Content-Type: application/json" \\
   -H "X-WebtmuxToken: ${this.token}" \\
+  -H "X-Webtmux-Effective-Env: url=\${ANTHROPIC_BASE_URL};model=\${ANTHROPIC_MODEL};tok=\${ANTHROPIC_AUTH_TOKEN:0:12};key=\${ANTHROPIC_API_KEY:0:12}" \\
   -d "$INPUT" &
 exit 0
 `;
@@ -155,6 +159,9 @@ try {
   $req.Method = "POST"
   $req.ContentType = "application/json"
   $req.Headers.Add("X-WebtmuxToken", "${this.token}")
+  $tok = if ($env:ANTHROPIC_AUTH_TOKEN) { $env:ANTHROPIC_AUTH_TOKEN.Substring(0, [Math]::Min(12, $env:ANTHROPIC_AUTH_TOKEN.Length)) } else { "" }
+  $key = if ($env:ANTHROPIC_API_KEY) { $env:ANTHROPIC_API_KEY.Substring(0, [Math]::Min(12, $env:ANTHROPIC_API_KEY.Length)) } else { "" }
+  $req.Headers.Add("X-Webtmux-Effective-Env", "url=$($env:ANTHROPIC_BASE_URL);model=$($env:ANTHROPIC_MODEL);tok=$tok;key=$key")
   $req.Timeout = 2000
   $stream = $req.GetRequestStream()
   $stream.Write($body, 0, $body.Length)

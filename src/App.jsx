@@ -1944,6 +1944,8 @@ export default function App() {
                 const isProcessConfig = provider?.configSource === 'process';
                 const isRelayConfig = provider?.configSource === 'relay';
                 const isRelayLost = provider?.configSource === 'relay-lost';
+                const isHookConfig = provider?.configSource === 'hook';
+                const isStatusConfig = provider?.configSource === 'status';
                 const globalConfig = provider?.globalConfig;
                 // 反代实测提示：最近一次真实转发的时间/状态
                 const relayTip = (() => {
@@ -1965,6 +1967,8 @@ export default function App() {
                         <span
                           title={isRelayConfig ? relayTip :
                                  isRelayLost ? '反代映射丢失（服务重启所致），请重新为本会话选择供应商' :
+                                 isHookConfig ? '从 CLI 子进程（hook）继承的有效环境变量实测读取——即 CLI 实际生效配置' :
+                                 isStatusConfig ? '从终端 /status 输出实测解析（30 分钟内有效）' :
                                  isProcessConfig ? '从运行中 CLI 进程的环境变量实测读取' :
                                  isLocalConfig ? '依据本会话项目配置推断' :
                                  '依据全局配置文件推断，可能与运行中进程实际使用的不一致'}
@@ -1973,19 +1977,21 @@ export default function App() {
                           padding: '1px 4px',
                           borderRadius: '3px',
                           cursor: 'help',
-                          background: isRelayConfig ? 'hsl(142 70% 45% / 0.25)' :
+                          background: (isRelayConfig || isHookConfig) ? 'hsl(142 70% 45% / 0.25)' :
                                      isRelayLost ? 'hsl(0 84% 60% / 0.2)' :
                                      isLocalConfig ? 'hsl(142 70% 45% / 0.2)' :
-                                     isProcessConfig ? 'hsl(200 90% 50% / 0.2)' :
+                                     (isProcessConfig || isStatusConfig) ? 'hsl(200 90% 50% / 0.2)' :
                                      'hsl(220 14% 40% / 0.3)',
-                          color: isRelayConfig ? 'hsl(142 70% 55%)' :
+                          color: (isRelayConfig || isHookConfig) ? 'hsl(142 70% 55%)' :
                                 isRelayLost ? 'hsl(0 84% 65%)' :
                                 isLocalConfig ? 'hsl(142 70% 55%)' :
-                                isProcessConfig ? 'hsl(200 90% 60%)' :
+                                (isProcessConfig || isStatusConfig) ? 'hsl(200 90% 60%)' :
                                 'hsl(220 14% 70%)'
                         }}>
                           {isRelayConfig ? '代理·实测' :
                            isRelayLost ? '代理失联' :
+                           isHookConfig ? 'hook·实测' :
+                           isStatusConfig ? '/status·实测' :
                            isProcessConfig ? 'env·实测' :
                            isLocalConfig ? `${t('aiPanel.local')}·推断` :
                            `${t('aiPanel.global')}·推断`}
