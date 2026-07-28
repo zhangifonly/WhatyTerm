@@ -13,6 +13,7 @@ import CliToolsManager from './components/CliToolsManager';
 import MonitorPluginsManager from './components/MonitorPluginsManager';
 import ProviderPriority from './components/ProviderPriority';
 import TerminalPlayback from './components/TerminalPlayback';
+import { fetchWxStatus, startWxAuth, handleWxCallback } from './utils/wxAuth';
 import StorageManager from './components/StorageManager';
 import AdvancedSettings from './components/ProviderManager/AdvancedSettings';
 import ProviderManager from './components/ProviderManager/ProviderManager';
@@ -181,6 +182,8 @@ export default function App() {
     return saved === 'true';
   });
   const [aiStatusMap, setAiStatusMap] = useState({});
+  // 扫码免密登录：手机发起的待确认请求 { id, code, ip, ua }（仅本机桌面端收到）
+  const [scanLoginReq, setScanLoginReq] = useState(null);
   const [hookStateMap, setHookStateMap] = useState({}); // sessionId -> { state, event, ts }
   const [monitorPlugins, setMonitorPlugins] = useState([]); // 监控策略插件列表
   const [sessionMemory, setSessionMemory] = useState({}); // 会话内存占用 {sessionId: {memory, processCount}}
@@ -287,6 +290,11 @@ export default function App() {
     // 规范化路径（去除末尾斜杠）
     const normalizePath = (p) => p ? p.replace(/\/+$/, '') : '';
 
+    // 「重启恢复」只允许在首次拿到会话列表时执行一次。
+    // 否则之后每次 sessions:updated（例如刚从历史项目新建会话）都会在
+    // currentSession 还没设上时，用 localStorage 里的旧 ID attach 到别的项目。
+    let lastSessionRestoreTried = false;
+
     // 更新会话列表并缓存到 localStorage
     const handleSessionsList = (data) => {
       setSessions(data);
@@ -313,7 +321,8 @@ export default function App() {
         return updated ? { ...prev, ...updated } : prev;
       });
       // 重启恢复：首次加载会话列表时，自动 attach 上次活跃的会话
-      if (!currentSessionRef.current) {
+      if (!currentSessionRef.current && !lastSessionRestoreTried) {
+        lastSessionRestoreTried = true;
         try {
           const lastId = localStorage.getItem('webtmux_last_session_id');
           if (lastId && data.find(s => s.id === lastId)) {
@@ -364,6 +373,28 @@ export default function App() {
       setCurrentSession(data.session);
       // 持久化上次活跃会话 ID，重启后自动恢复
       try { localStorage.setItem('webtmux_last_session_id', data.session.id); } catch { /* 忽略 */ }
+    });
+
+    // 新建会话完成后自动 attach，切到该项目的终端界面。
+    // session:created 只发给发起方 socket，所以这里无条件跳转是安全的：
+    // 覆盖「+ 新建会话」弹窗和点击历史项目（session:createAndResume）两条路径。
+    socket.on('session:created', (session) => {
+      const newId = session?.id;
+      if (!newId) return;
+      console.log('[App] 会话已创建，自动切换:', newId);
+      // 不在这里清终端，由 session:attached 的 pendingScreenContent 统一处理
+      setSuggestion(null);
+      socket.emit('session:attach', newId);
+    });
+
+    // 扫码免密登录：手机发起请求时，本机桌面端弹确认框（服务端只推给 local 房间）
+    socket.on('auth:scanLoginRequest', (req) => {
+      console.log('[App] 收到扫码登录请求:', req?.id?.slice(0, 8));
+      setScanLoginReq(req);
+    });
+    // 其他本机窗口已处理时，同步关闭弹窗
+    socket.on('auth:scanLoginResolved', ({ id }) => {
+      setScanLoginReq(prev => (prev?.id === id ? null : prev));
     });
 
     socket.on('session:updated', (sessionUpdate) => {
@@ -471,6 +502,9 @@ export default function App() {
       socket.off('sessions:list');
       socket.off('sessions:updated');
       socket.off('session:attached');
+      socket.off('session:created');
+      socket.off('auth:scanLoginRequest');
+      socket.off('auth:scanLoginResolved');
       socket.off('session:updated');
       socket.off('session:exited');
       socket.off('terminal:output');
@@ -2610,6 +2644,50 @@ export default function App() {
         </div>
       )}
 
+      {/* 扫码免密登录确认弹窗（仅本机桌面端会收到请求） */}
+      {scanLoginReq && (
+        <div className="modal-overlay">
+          <div className="modal confirm-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '420px' }}>
+            <h2 style={{ marginBottom: '12px', fontSize: '18px' }}>📱 手机请求免密登录</h2>
+            <p style={{ marginBottom: '8px', color: 'var(--text-secondary)', fontSize: '13px' }}>
+              有设备扫码请求登录本终端，请核对手机上显示的确认码一致后再允许：
+            </p>
+            <div style={{
+              textAlign: 'center', fontSize: '32px', fontWeight: 700,
+              letterSpacing: '8px', margin: '12px 0', color: '#4a9eff'
+            }}>
+              {scanLoginReq.code}
+            </div>
+            <p style={{ marginBottom: '20px', color: 'var(--text-secondary)', fontSize: '12px', wordBreak: 'break-all' }}>
+              来源 IP：{scanLoginReq.ip}<br />设备：{scanLoginReq.ua}
+            </p>
+            <div className="modal-actions" style={{ justifyContent: 'flex-end', gap: '12px' }}>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={() => {
+                  socket.emit('auth:scanLoginRespond', { id: scanLoginReq.id, approved: false });
+                  setScanLoginReq(null);
+                }}
+                style={{ background: '#dc2626', borderColor: '#dc2626' }}
+              >
+                拒绝
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  socket.emit('auth:scanLoginRespond', { id: scanLoginReq.id, approved: true });
+                  setScanLoginReq(null);
+                }}
+              >
+                允许登录
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 全局会话悬停提示 - 使用 fixed 定位避免被遮挡 */}
       {hoveredSession && (
         <div
@@ -3167,6 +3245,43 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
   const [providerTestMessage, setProviderTestMessage] = useState('');
   // 测试模型选择状态
   const [testModel, setTestModel] = useState('');
+  // 微信免密登录（绑定本人 openid 白名单）
+  const [wxStatus, setWxStatus] = useState(null);
+  const [wxBindUrl, setWxBindUrl] = useState('');
+
+  useEffect(() => {
+    fetchWxStatus().then(setWxStatus);
+  }, []);
+
+  // 发起绑定：签发一次性令牌 → 生成微信授权二维码（回跳走隧道 URL）
+  const handleWxBindStart = async () => {
+    if (!localTunnelUrl) {
+      setAuthMessage('请先启动隧道并保存 URL，绑定回跳需要经过隧道地址');
+      return;
+    }
+    try {
+      const res = await fetch('/api/auth/wx-bind-start', { method: 'POST' });
+      const data = await res.json();
+      if (!data.bindToken) throw new Error(data.error || '获取绑定令牌失败');
+      const u = new URL('/wxauth/start', wxStatus.relayBase);
+      u.searchParams.set('redirect', localTunnelUrl);
+      u.searchParams.set('mode', 'bind');
+      u.searchParams.set('bt', data.bindToken);
+      setWxBindUrl(u.toString());
+    } catch (err) {
+      setAuthMessage(`发起微信绑定失败: ${err.message}`);
+    }
+  };
+
+  const handleWxUnbind = async () => {
+    await fetch('/api/auth/wx-unbind', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    setWxBindUrl('');
+    fetchWxStatus().then(setWxStatus);
+  };
 
   // 预设模型列表
   const MODEL_OPTIONS = {
@@ -3581,6 +3696,42 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
                 {auth.enabled ? t('auth.updatePassword') : t('auth.enablePassword')}
               </button>
             </div>
+
+            {wxStatus?.configured && (
+              <>
+                <div style={{ borderTop: '1px solid #333', margin: '20px 0' }}></div>
+                <div className="auth-status">
+                  <div>
+                    <span>微信免密登录: </span>
+                    <span className={wxStatus.bound ? 'status-enabled' : 'status-disabled'}>
+                      {wxStatus.bound ? `已绑定 ${wxStatus.openids.length} 个微信` : '未绑定'}
+                    </span>
+                  </div>
+                  <div className="local-hint">
+                    绑定本人微信后，手机扫左下角二维码可微信授权免密登录；其他微信一律拒绝
+                  </div>
+                </div>
+                {wxBindUrl ? (
+                  <div style={{ textAlign: 'center', margin: '12px 0' }}>
+                    <QRCodeDisplay url={wxBindUrl} />
+                    <small style={{ color: '#888', fontSize: '12px', display: 'block', marginTop: '8px' }}>
+                      请用本人手机<b>微信扫一扫</b>此码并授权（10 分钟内有效），完成后此处状态会更新
+                    </small>
+                  </div>
+                ) : (
+                  <div className="modal-actions" style={{ marginTop: '12px' }}>
+                    {wxStatus.bound && (
+                      <button type="button" className="btn btn-danger" onClick={handleWxUnbind}>
+                        解绑全部微信
+                      </button>
+                    )}
+                    <button type="button" className="btn btn-primary" onClick={handleWxBindStart}>
+                      {wxStatus.bound ? '绑定另一个微信' : '绑定微信'}
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
 
@@ -4328,6 +4479,68 @@ function LoginPage({ auth }) {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [remainingAttempts, setRemainingAttempts] = useState(null);
+  const [wxStatus, setWxStatus] = useState(null);
+  const [wxNotice, setWxNotice] = useState('');
+
+  // 微信授权回跳处理：URL 带 wx_* 参数时完成登录/绑定
+  useEffect(() => {
+    fetchWxStatus().then(setWxStatus);
+    handleWxCallback().then((result) => {
+      if (!result) return;
+      if (result.mode === 'bind') {
+        if (result.ok) {
+          setWxNotice('微信绑定成功！现在可以点击「微信登录」免密进入');
+          fetchWxStatus().then(setWxStatus);
+        } else {
+          setError(result.error || '微信绑定失败');
+        }
+      } else if (result.ok) {
+        auth.checkAuth();  // 登录成功，刷新认证状态进入应用
+      } else {
+        setError(result.error || '微信登录失败');
+      }
+    });
+  }, []);
+
+  const handleWxLogin = () => {
+    if (!wxStatus?.relayBase) return;
+    startWxAuth(wxStatus.relayBase, 'login');
+  };
+
+  // ─── 扫码免密登录（电脑端弹窗确认）───────────────────────────
+  const [scan, setScan] = useState({ state: 'idle', code: '' });
+  const scanTimer = useRef(null);
+  useEffect(() => () => clearInterval(scanTimer.current), []);
+
+  const handleScanLogin = async () => {
+    setError('');
+    try {
+      const res = await fetch('/api/auth/scan-login-request', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok || !data.id) {
+        setError(data.error || '发起免密登录失败');
+        return;
+      }
+      setScan({ state: 'waiting', code: data.code });
+      clearInterval(scanTimer.current);
+      scanTimer.current = setInterval(async () => {
+        try {
+          const r = await fetch(`/api/auth/scan-login-status?id=${data.id}`);
+          const s = await r.json();
+          if (s.status === 'approved') {
+            clearInterval(scanTimer.current);
+            auth.checkAuth();  // 已放行，刷新认证状态进入应用
+          } else if (s.status === 'denied' || s.status === 'expired') {
+            clearInterval(scanTimer.current);
+            setScan({ state: 'idle', code: '' });
+            setError(s.status === 'denied' ? '电脑端拒绝了本次登录' : '请求已过期，请重新发起');
+          }
+        } catch { /* 网络抖动，下一轮再试 */ }
+      }, 1500);
+    } catch {
+      setError('网络错误，请重试');
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -4395,6 +4608,58 @@ function LoginPage({ auth }) {
             {loading ? t('auth.loggingIn') : t('auth.login')}
           </button>
         </form>
+        {wxNotice && (
+          <div style={{ marginTop: '12px', padding: '8px 12px', background: 'rgba(7,193,96,0.12)', border: '1px solid #07c160', borderRadius: '6px', color: '#07c160', fontSize: '13px' }}>
+            {wxNotice}
+          </div>
+        )}
+        {wxStatus?.configured && wxStatus?.bound && (
+          <button
+            type="button"
+            className="btn btn-block"
+            style={{ marginTop: '12px', background: '#07c160', color: '#fff' }}
+            onClick={handleWxLogin}
+          >
+            微信登录（已绑定，免密）
+          </button>
+        )}
+        {/* 扫码免密登录：请求发到本机桌面端弹窗确认，无需密码 */}
+        {scan.state === 'waiting' ? (
+          <div style={{
+            marginTop: '12px', padding: '14px', textAlign: 'center',
+            background: 'rgba(74,158,255,0.08)', border: '1px solid #4a9eff', borderRadius: '8px'
+          }}>
+            <div style={{ fontSize: '13px', color: '#4a9eff', marginBottom: '6px' }}>
+              请在电脑上确认登录，核对确认码：
+            </div>
+            <div style={{ fontSize: '30px', fontWeight: 700, letterSpacing: '8px', color: '#4a9eff' }}>
+              {scan.code}
+            </div>
+            <div style={{ fontSize: '12px', color: '#888', marginTop: '6px' }}>
+              等待电脑端点击「允许登录」…（2 分钟内有效）
+            </div>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              style={{ marginTop: '10px', fontSize: '12px' }}
+              onClick={() => {
+                clearInterval(scanTimer.current);
+                setScan({ state: 'idle', code: '' });
+              }}
+            >
+              取消
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="btn btn-block"
+            style={{ marginTop: '12px', background: '#4a9eff', color: '#fff' }}
+            onClick={handleScanLogin}
+          >
+            🔓 免密登录（在电脑上确认）
+          </button>
+        )}
         <div style={{ marginTop: '16px', textAlign: 'center' }}>
           <a
             href="https://term.whaty.org"

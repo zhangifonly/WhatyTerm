@@ -1,8 +1,18 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
+const root = new URL('.', import.meta.url).pathname;
+
 export default defineConfig({
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      input: {
+        main: `${root}index.html`,
+        mobile: `${root}m/index.html`  // 移动版入口 → dist/m/index.html
+      }
+    }
+  },
   server: {
     port: 5050,
     proxy: {

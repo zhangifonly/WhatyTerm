@@ -2,6 +2,20 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
+  <script>
+    // 手机 UA 自动跳转移动版（在下载桌面 bundle 之前执行）。
+    // 逃生口：?desktop=1 记住偏好留在桌面版；移动版页头有「桌面版」链接。
+    (function () {
+      try {
+        if (location.search.indexOf('desktop=1') !== -1) {
+          localStorage.setItem('wt_force_desktop', '1');
+        } else if (!localStorage.getItem('wt_force_desktop') &&
+                   /Mobi|Android|iPhone|iPod/i.test(navigator.userAgent)) {
+          location.replace('/m/');
+        }
+      } catch (e) { /* localStorage 不可用时放行桌面版 */ }
+    })();
+  </script>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>网梯终端 - WhatyTerm</title>
   <link rel="icon" type="image/png" href="/favicon.png">

@@ -2044,12 +2044,25 @@ const authMiddleware = (req, res, next) => {
   // 登录相关路由不需要认证
   if (req.path === '/api/auth/login' ||
       req.path === '/api/auth/status' ||
-      req.path === '/api/auth/logout') {
+      req.path === '/api/auth/logout' ||
+      req.path === '/api/auth/wx-status' ||
+      req.path === '/api/auth/wx-login' ||
+      req.path === '/api/auth/wx-bind' ||
+      req.path === '/api/auth/scan-login-request' ||
+      req.path === '/api/auth/scan-login-status') {
+    // wx-login 由签名+白名单保护；wx-bind 由签名+一次性绑定令牌保护
+    // scan-login-* 由本机桌面端人工确认保护（绑定发起方 session）
     return next();
   }
 
   // 本机访问自动放行
   if (isLocalRequest(req)) {
+    return next();
+  }
+
+  // 远程访问：已认证 session 直接放行（含扫码免密登录批准的会话，
+  // 提前到密码检查之前——扫码授权模式下可以从未设置过密码）
+  if (req.session && req.session.authenticated) {
     return next();
   }
 
@@ -2059,11 +2072,6 @@ const authMiddleware = (req, res, next) => {
       error: '请到本机设置管理员密码后再远程访问',
       requirePasswordSetup: true
     });
-  }
-
-  // 远程访问：检查 session
-  if (req.session && req.session.authenticated) {
-    return next();
   }
 
   // 未认证
@@ -2186,6 +2194,141 @@ app.post('/api/auth/setup', (req, res) => {
   authService.setPassword(username, password);
   req.session.authenticated = true;
   res.json({ success: true, message: '密码已设置' });
+});
+
+// ─── 微信认证（云端中转换 openid + 本机白名单，详见 docs/wechat-login.md）───
+// 绑定一次性令牌：设置页发起绑定时签发，手机授权回跳后凭它写入白名单
+const wxBindTokens = new Map();  // token -> expireAt
+const WX_BIND_TOKEN_TTL = 10 * 60 * 1000;
+
+app.get('/api/auth/wx-status', (req, res) => {
+  res.json({
+    configured: authService.isWxConfigured(),
+    bound: authService.hasWxBound(),
+    relayBase: authService.getWxRelayBase(),
+    openids: authService.getWxOpenids()
+  });
+});
+
+// 本机（或已登录会话）发起绑定，签发一次性令牌
+app.post('/api/auth/wx-bind-start', (req, res) => {
+  if (!isLocalRequest(req) && !req.session?.authenticated) {
+    return res.status(401).json({ error: '需要登录' });
+  }
+  const token = authService.generateToken();
+  wxBindTokens.set(token, Date.now() + WX_BIND_TOKEN_TTL);
+  res.json({ bindToken: token });
+});
+
+// 手机授权回跳后绑定 openid（签名 + 一次性令牌双重校验）
+app.post('/api/auth/wx-bind', (req, res) => {
+  const { openid, ts, sig, bindToken } = req.body || {};
+  if (!authService.verifyWxSignature(openid, ts, sig)) {
+    return res.status(401).json({ error: '签名无效或已过期' });
+  }
+  const expireAt = wxBindTokens.get(bindToken);
+  const localOk = isLocalRequest(req) || req.session?.authenticated;
+  if (!localOk && (!expireAt || Date.now() > expireAt)) {
+    return res.status(403).json({ error: '绑定令牌无效，请重新在设置里发起绑定' });
+  }
+  wxBindTokens.delete(bindToken);
+  authService.bindWxOpenid(openid);
+  console.log(`[微信认证] 已绑定 openid: ${openid.slice(0, 4)}****`);
+  res.json({ success: true });
+});
+
+// 远程微信免密登录：签名 + openid 白名单
+app.post('/api/auth/wx-login', (req, res) => {
+  const { openid, ts, sig } = req.body || {};
+  if (!authService.verifyWxSignature(openid, ts, sig)) {
+    return res.status(401).json({ error: '签名无效或已过期' });
+  }
+  if (!authService.isWxOpenidAllowed(openid)) {
+    console.log(`[微信认证] 拒绝未绑定的 openid: ${String(openid).slice(0, 4)}****`);
+    return res.status(403).json({ error: '该微信未被授权，请先在本机绑定' });
+  }
+  req.session.authenticated = true;
+  req.session.username = 'wx';
+  console.log(`[微信认证] 微信免密登录成功: ${openid.slice(0, 4)}****`);
+  res.json({ success: true });
+});
+
+// 解绑（仅本机/已登录）
+app.post('/api/auth/wx-unbind', (req, res) => {
+  if (!isLocalRequest(req) && !req.session?.authenticated) {
+    return res.status(401).json({ error: '需要登录' });
+  }
+  const { openid } = req.body || {};
+  if (openid) {
+    authService.unbindWxOpenid(openid);
+  } else {
+    // 不带参数 = 全部解绑
+    (authService.settings.wxOpenids || []).slice().forEach(o => authService.unbindWxOpenid(o));
+  }
+  res.json({ success: true, openids: authService.getWxOpenids() });
+});
+
+// ─── 扫码免密登录（手机发起 → 本机桌面弹窗确认）─────────────────
+// 请求绑定发起方 session：批准后只有扫码的那台手机能进入
+const scanLoginRequests = new Map();  // id -> { code, sessionID, ip, ua, createdAt, status }
+const SCAN_LOGIN_TTL = 2 * 60 * 1000;         // 2 分钟过期
+const scanLoginRate = new Map();               // ip -> { count, windowStart }
+
+function cleanScanLoginRequests() {
+  const now = Date.now();
+  for (const [id, r] of scanLoginRequests) {
+    if (now - r.createdAt > SCAN_LOGIN_TTL) scanLoginRequests.delete(id);
+  }
+}
+
+// 手机端发起免密登录请求（无需认证，靠桌面端人工确认把关）
+app.post('/api/auth/scan-login-request', (req, res) => {
+  cleanScanLoginRequests();
+  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
+             req.ip || req.connection?.remoteAddress || '未知';
+  // 限频：同一 IP 每分钟最多 3 次
+  const rate = scanLoginRate.get(ip) || { count: 0, windowStart: Date.now() };
+  if (Date.now() - rate.windowStart > 60000) { rate.count = 0; rate.windowStart = Date.now(); }
+  if (++rate.count > 3) {
+    scanLoginRate.set(ip, rate);
+    return res.status(429).json({ error: '请求过于频繁，请稍后再试' });
+  }
+  scanLoginRate.set(ip, rate);
+
+  const id = authService.generateToken();
+  const code = String(Math.floor(1000 + Math.random() * 9000));  // 4 位确认码
+  const ua = String(req.headers['user-agent'] || '').slice(0, 120);
+  // saveUninitialized:false 下必须写一笔 session 才会下发 cookie，
+  // 否则手机端每次请求都是新 sessionID，轮询时对不上发起方
+  req.session.scanLoginPending = true;
+  scanLoginRequests.set(id, {
+    code, sessionID: req.sessionID, ip, ua,
+    createdAt: Date.now(), status: 'pending'
+  });
+  // 只推给本机桌面端（local 房间），远程客户端收不到
+  io.to('local').emit('auth:scanLoginRequest', { id, code, ip, ua });
+  console.log(`[扫码登录] 收到请求 ${id.slice(0, 8)}… 来自 ${ip}，确认码 ${code}`);
+  res.json({ id, code, expiresIn: SCAN_LOGIN_TTL });
+});
+
+// 手机端轮询审批结果（必须与发起方同一 session 才能兑换登录态）
+app.get('/api/auth/scan-login-status', (req, res) => {
+  cleanScanLoginRequests();
+  const r = scanLoginRequests.get(req.query.id);
+  if (!r) return res.json({ status: 'expired' });
+  if (r.sessionID !== req.sessionID) return res.status(403).json({ status: 'denied' });
+  if (r.status === 'approved') {
+    scanLoginRequests.delete(req.query.id);  // 一次性
+    req.session.authenticated = true;
+    req.session.username = 'scan';
+    console.log(`[扫码登录] 已放行 ${r.ip}`);
+    return res.json({ status: 'approved' });
+  }
+  if (r.status === 'denied') {
+    scanLoginRequests.delete(req.query.id);
+    return res.json({ status: 'denied' });
+  }
+  res.json({ status: 'pending' });
 });
 
 // Tunnel URL API - 直接从 ai-settings.json 读取，不依赖 ProviderService
@@ -5656,6 +5799,27 @@ io.use((socket, next) => {
 io.on('connection', (socket) => {
   console.log(`客户端连接: ${socket.id}`);
 
+  // 标记本机连接：无代理头 + 回环地址。只有本机桌面端能收到并批准扫码登录请求
+  {
+    const h = socket.request.headers || {};
+    const addr = socket.request.socket?.remoteAddress || '';
+    const isLocalSocket = !h['x-forwarded-for'] && !h['cf-connecting-ip'] &&
+      ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(addr);
+    socket.data.isLocal = isLocalSocket;
+    if (isLocalSocket) socket.join('local');
+  }
+
+  // 桌面端批准/拒绝扫码免密登录（仅本机连接有效）
+  socket.on('auth:scanLoginRespond', ({ id, approved } = {}) => {
+    if (!socket.data.isLocal) return;
+    const r = scanLoginRequests.get(id);
+    if (!r || r.status !== 'pending') return;
+    r.status = approved ? 'approved' : 'denied';
+    console.log(`[扫码登录] 桌面端${approved ? '批准' : '拒绝'}: ${String(id).slice(0, 8)}…`);
+    // 同步告知其他本机窗口关闭弹窗
+    io.to('local').emit('auth:scanLoginResolved', { id, approved: !!approved });
+  });
+
   // 发送下次 AI 分析时间
   socket.emit('ai:nextAnalysisTime', { nextTime: nextAiAnalysisTime });
 
@@ -6310,8 +6474,34 @@ io.on('connection', (socket) => {
   });
 
   // 附加到会话
+  // ─── 移动端轻量接口 ───────────────────────────────────────
+  // 屏幕快照：移动端不渲染增量流，收到 terminal:output 后节流请求一次当前屏幕
+  socket.on('session:screen', (sessionId) => {
+    if (!sessionId || socket.data.currentSessionId !== sessionId) return;
+    const session = sessionManager?.getSession(sessionId);
+    if (!session) return;
+    socket.emit('session:screen', { sessionId, screenContent: session.capturePane() });
+  });
+
+  // 批量返回所有会话的缓存 AI 状态（列表页首屏用，直接回给请求方）
+  socket.on('ai:statusAll', () => {
+    if (!sessionManager) return;
+    for (const s of sessionManager.listSessions()) {
+      const cached = aiStatusCache.get(s.id);
+      if (cached) {
+        socket.emit('ai:status', { sessionId: s.id, ...cached, ...getAIProviderInfo() });
+      }
+    }
+  });
+
   socket.on('session:attach', async (sessionId) => {
-    console.log(`[session:attach] 收到附加请求: ${sessionId}`);
+    // 参数归一化：移动端传 {sessionId, lite:true}（跳过滚动历史），桌面端传字符串
+    let lite = false;
+    if (sessionId && typeof sessionId === 'object') {
+      lite = !!sessionId.lite;
+      sessionId = sessionId.sessionId;
+    }
+    console.log(`[session:attach] 收到附加请求: ${sessionId}${lite ? ' (lite)' : ''}`);
 
     // 等待 SessionManager 初始化完成
     try {
@@ -6363,7 +6553,8 @@ io.on('connection', (socket) => {
     const paneTime = Date.now() - captureStart;
 
     const fullStart = Date.now();
-    let fullContent = session.captureFullPane(); // 包含滚动历史
+    // lite 模式（移动端）跳过滚动历史采集，首屏只用当前屏幕内容
+    let fullContent = lite ? null : session.captureFullPane();
     const fullTime = Date.now() - fullStart;
 
     // 限制 fullContent 大小，避免传输过大内容导致卡顿

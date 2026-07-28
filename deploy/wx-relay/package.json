@@ -1,0 +1,8 @@
+{
+  "name": "whatyterm-wx-relay",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "WhatyTerm 微信 OAuth 云端中转（CN-BJ crs.owly.cn/wxauth/*）",
+  "engines": { "node": ">=18" }
+}
