@@ -4366,7 +4366,12 @@ async function runBackgroundAutoAction() {
               const screenLast800 = fullyClean.slice(-800);
               // Claude Code 运行中的三种明确证据（任一成立即拦截）
               const isRunning = /\.{2,3}\s*\(\d+[ms]/i.test(screenLast800);
-              const hasEscToInterrupt = /esc to interrupt/i.test(screenLast800);
+              // "esc to interrupt" 要按行甄别：后台 agents 存在时空闲状态栏也带这串字
+              // （"accept edits on … · esc to interrupt · ← 4 agents"，指可中断 agents），
+              // 只有不属于状态栏的 esc to interrupt（如运行计时器行）才算主循环运行证据
+              const hasEscToInterrupt = screenLast800.split('\n')
+                .filter(l => /esc to interrupt/i.test(l))
+                .some(l => !/accept edits on|shift\+tab|←\s*\d+\s+agents?/i.test(l));
               const hasQueuedMessages = /Press up to edit queued messages/i.test(currentScreen);
               if (isRunning || hasEscToInterrupt || hasQueuedMessages) {
                 const reason = isRunning ? '运行状态指示器' :

@@ -1847,8 +1847,13 @@ ${historyText || '(空)'}
     const last5Lines = cleanContent.split('\n').slice(-5).join('\n');
     const hasIdlePromptForAccept = /^[❯>]\s*$/m.test(last5Lines) || /\n[❯>]\s*$/m.test(last5Lines);
     const isWaitingForAccept = !hasIdlePromptForAccept && /accept edits on|shift\+tab to cycle/i.test(cleanContent);
-    // 检查是否有 Brewed for（任务完成标志）
-    const hasBrewedFor = /Brewed for \d+m\s*\d+s/i.test(cleanContent);
+    // 检查是否有"<过去式动词> for <时长>"任务完成标志。Claude Code 每轮结束随机用
+    // 烹饪动词（Brewed/Baked/Sautéed/Cooked/Simmered...），运行中则是进行时
+    // "Sautéing… (10s · esc to interrupt)"。只认 Brewed 曾导致 "Sautéed for 10m 29s"
+    // 的时长被误判为运行时间，会话卡死在"程序运行中"永不发继续。
+    // \S+ed 兼容含重音字符的动词（Sautéed）；时长兼容纯秒("30s")与分秒("10m 29s")。
+    // 只看末尾 600 字符：完成标志总在提示符正上方，历史轮次的旧标志不该抵消当前运行状态
+    const hasBrewedFor = /\b\S+ed for (\d+m\s*)?\d+s\b/i.test(cleanContent.slice(-600));
 
     // 提前声明 isCompacting，供后续 stateDesc 使用（跨 aiType 分支）
     let isCompacting = false;
