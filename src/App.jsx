@@ -2034,6 +2034,22 @@ export default function App() {
                            `${t('aiPanel.global')}·推断`}
                         </span>
                       )}
+                      {/* 同址多供应商无法区分：URL 是实测事实，但多个供应商共用此地址且密钥无法实测 */}
+                      {provider?.nameAmbiguous && (
+                        <span
+                          title={`该地址对应 ${provider.sameUrlCandidates?.length || 0} 个供应商（${(provider.sameUrlCandidates || []).join(' / ')}），它们仅密钥不同，而运行中进程的密钥无法实测，故只显示地址、不猜名字。在本会话的供应商菜单里选一次即可精确显示。`}
+                          style={{
+                            fontSize: '9px',
+                            padding: '1px 5px',
+                            borderRadius: '3px',
+                            background: 'hsl(38 92% 50% / 0.2)',
+                            color: 'hsl(38 92% 60%)',
+                            cursor: 'help'
+                          }}
+                        >
+                          同址{provider.sameUrlCandidates?.length || ''}选1
+                        </span>
+                      )}
                       {/* 陈旧提示：显示全局供应商但运行中进程早于配置变更 → 仍是切换前供应商，重启生效 */}
                       {provider?.stale && (
                         <span

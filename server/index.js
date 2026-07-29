@@ -1423,8 +1423,18 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         const he = liveSession?.effectiveEnv;
         const sp = liveSession?.statusProbe;
 
-        // 1) /status 解析：CLI 亲口报告的 base URL / 登录方式 / 模型，最可信
-        if (sp && Date.now() - sp.at < 30 * 60 * 1000) {
+        // 预取当前 claude 进程启动时间（陈旧检测与 probe 有效期共用）
+        var _procStartEpoch = 0;
+        if (tmuxSessionName) {
+          _procStartEpoch = await getClaudeProcStartEpoch(tmuxSessionName);
+        }
+
+        // 1) /status 解析：CLI 亲口报告的 base URL / 登录方式 / 模型，最可信。
+        // 有效期钉在进程生命周期上：CLI 配置读入内存后至进程退出不会变，
+        // 同一进程 → probe 永久有效（修复：滚屏/超30分钟后回落成「官方登录」的显示摆动）；
+        // 进程已换（重启）→ 回退 30 分钟 TTL 兜底判定。
+        const spSameProc = sp?.procStart && _procStartEpoch && sp.procStart === _procStartEpoch;
+        if (sp && (spSameProc || Date.now() - sp.at < 30 * 60 * 1000)) {
           if (sp.baseUrl) {
             actualApiUrl = sp.baseUrl;
             localIsOAuth = false;
@@ -1448,6 +1458,25 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         }
         // hook 带回的实测模型即便 URL 为空也可用（settings 常不配 ANTHROPIC_MODEL）
         if (he && he.model && !actualModel) actualModel = he.model;
+        // 2b) /status 只报 URL 不报密钥：同 URL 时用 hook 上报的 token 前 12 位补上
+        //     密钥证据——这是区分「同地址不同 key」多个供应商（Whaty 系列共用 zjz-ai）的唯一实测手段
+        if (configSource === 'status' && !actualApiKey && he && he.baseUrl &&
+            he.baseUrl === actualApiUrl && (he.tokenPrefix || he.keyPrefix)) {
+          actualApiKey = he.tokenPrefix || he.keyPrefix;
+        }
+
+        // 3) 屏幕解析结果持久化：capture-pane 从 /status 输出解析到的 URL（configSource
+        //    ='process'）只在输出还在屏幕上时才拿得到——写入 statusProbe 钉到进程生命周期，
+        //    滚屏后不丢，也不会回落到「官方登录」兜底
+        if (liveSession && !spSameProc && configSource === 'process' && actualApiUrl && _procStartEpoch) {
+          liveSession.statusProbe = {
+            baseUrl: actualApiUrl.replace(/\/+$/, ''),
+            isOAuth: false,
+            model: actualModel || '',
+            at: Date.now(),
+            procStart: _procStartEpoch
+          };
+        }
       }
 
       // 本地反代识别（最高真实级）：URL 指向 /relay/<sessionId> 时，从服务端映射
@@ -1578,12 +1607,11 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
     // URL 包含 /v1/messages 的启发式不可靠（Claude Relay 常为 /api/）
     const computeApiType = () => appType === 'gemini' ? 'gemini' : (appType === 'claude' ? 'claude' : 'openai');
 
-    // 陈旧检测（懒计算一次）：仅 claude、仅当显示的是全局供应商(configSource==='global')时有意义。
-    // 运行中 claude 进程启动早于 ~/.claude/settings.json 最近变更 → 它仍用切换前的供应商、重启才生效。
-    // 预取 claude 进程启动时间（异步探测，不阻塞事件循环）；isGlobalStale 用预取值同步判断
-    let _procStartEpoch = 0;
-    if (appType === 'claude' && tmuxSessionName) {
-      _procStartEpoch = await getClaudeProcStartEpoch(tmuxSessionName);
+    // 陈旧检测（懒计算一次）：仅 claude 有意义。运行中 claude 进程启动早于
+    // ~/.claude/settings.json 最近变更 → 它仍用切换前的供应商、重启才生效。
+    // _procStartEpoch 已在实测覆盖块预取（var 声明，函数级作用域），此处只兜底补取
+    if (appType === 'claude' && tmuxSessionName && typeof _procStartEpoch === 'undefined') {
+      var _procStartEpoch = await getClaudeProcStartEpoch(tmuxSessionName);
     }
     let _staleChecked = false, _globalStale = false;
     const isGlobalStale = () => {
@@ -1615,10 +1643,13 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         configSource: cs,
         isOAuth,
         oauthEmail: isOAuth ? readOAuthEmail() : '',
-        // 显示全局供应商但运行中进程早于配置变更 → 标记陈旧，前端提示"重启会话生效"
-        stale: cs === 'global' && !!extras.exists ? isGlobalStale() : false,
+        // 显示全局供应商/官方登录兜底，但运行中进程早于配置变更 → 标记陈旧，
+        // 前端提示"重启会话生效"（login 也要标：切官方前启动的进程仍在用旧第三方配置）
+        stale: (cs === 'global' || cs === 'login') && !!extras.exists ? isGlobalStale() : false,
         // 反代实测信息：面板据此显示"代理·实测"徽标 + 最近转发时间/状态
         ...(relayInfo ? { relay: { ...(relayInfo.stats || {}), providerName: relayInfo.providerName } } : {}),
+        // 同址多供应商无法区分时的如实标注（名称为主机名，候选列表给前端展示）
+        ...(extras.nameAmbiguous ? { nameAmbiguous: true, sameUrlCandidates: extras.sameUrlCandidates || [] } : {}),
         ...(extras.globalConfig !== undefined ? { globalConfig: extras.globalConfig } : {})
       };
     };
@@ -1717,7 +1748,11 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
               const providerUrl = normalizeUrl(extractProviderUrl(config));
               if (normalizedActual === providerUrl) {
                 const providerKey = config.env?.ANTHROPIC_AUTH_TOKEN || config.env?.ANTHROPIC_API_KEY || config.auth?.OPENAI_API_KEY || '';
-                urlMatches.push({ row, keyMatch: providerKey === actualApiKey });
+                // hook 只上报 key 前 12 位——前缀命中同样算精确匹配（≥8 位防误判）
+                const keyMatch = !!providerKey && !!actualApiKey &&
+                  (providerKey === actualApiKey ||
+                   (actualApiKey.length >= 8 && providerKey.startsWith(actualApiKey)));
+                urlMatches.push({ row, keyMatch });
               }
             }
           } catch (parseError) {}
@@ -1731,6 +1766,25 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
           const idMatch = localProviderId && urlMatches.find(m => m.row.id === localProviderId);
           const currentMatch = urlMatches.find(m => m.row.is_current);
           const exactMatch = urlMatches.find(m => m.keyMatch);
+          // 同 URL 多个供应商且 id/is_current/key 全都区分不了时**不猜名字**——
+          // key 无法从运行中进程实测（settings env 不导出、/status 屏蔽 token），
+          // 猜 DB 第一行会报出用户没选的那一个。显示主机名 + 候选列表，如实告知
+          if (!idMatch && !currentMatch && !exactMatch && urlMatches.length > 1) {
+            const candidates = urlMatches.map(m => m.row.name || '未命名');
+            let host = actualApiUrl;
+            try { host = new URL(actualApiUrl).host; } catch {}
+            return resolve(buildResult({
+              name: host,
+              url: actualApiUrl,
+              apiKey: maskApiKey(actualApiKey),
+              model: actualModel,
+              exists: true,
+              configSource,
+              nameAmbiguous: true,
+              sameUrlCandidates: candidates,
+              globalConfig: globalInfo
+            }));
+          }
           const bestRow = (idMatch || currentMatch || exactMatch || urlMatches[0]).row;
           return resolve(buildResult({
             id: bestRow.id,
@@ -3704,11 +3758,14 @@ async function runBackgroundAutoAction() {
       const spLogin = terminalContent.match(/Login method:\s+([^\r\n]+)/);
       const spModel = terminalContent.match(/^\s*Model:\s+(\S+)/m);
       // 有 base URL → 第三方；无 base URL 但登录方式是账号 → 官方 OAuth
+      // procStart：钉住当时的 claude 进程——CLI 配置读进内存后至进程退出都不变，
+      // 所以只要进程没换，这份实测就持续有效（不受滚屏/时间流逝影响）
       session.statusProbe = {
         baseUrl: spURL ? spURL[1].replace(/\/+$/, '') : '',
         isOAuth: !spURL && /account|max|pro|subscription|claude\.ai/i.test(spLogin?.[1] || ''),
         model: spModel ? spModel[1] : '',
-        at: Date.now()
+        at: Date.now(),
+        procStart: await getClaudeProcStartEpoch(session.tmuxSessionName)
       };
     }
 
@@ -4093,9 +4150,11 @@ async function runBackgroundAutoAction() {
 
         if (continueCount >= 2) {
           const lastReply = getLastClaudeReply(terminalContent);
-          if (lastReply.length < 20) {
-            console.log(`[循环检测] 会话 ${session.name}: 连续${continueCount}次"继续"且回复"${lastReply}"很短，交给AI判断`);
-            preResult = null; // 清除 preResult，走 AI 分析路径
+          // 等待型回复：CLI 在告诉我们"别催了，我在等后台任务/通知"——继续发只会复读
+          const replyIsWaiting = /等(候|待)?.{0,6}通知|不空转|轮询不出|后台.{0,6}(进行|运行|生成)中|还在(生成|执行|运行)|等(它|其)?(跑完|完成|结束)|正常范围|等通知即可/.test(lastReply);
+          if (lastReply.length < 20 || replyIsWaiting || continueCount >= 4) {
+            console.log(`[循环检测] 会话 ${session.name}: 连续${continueCount}次"继续"（回复${replyIsWaiting ? '为等待型' : `"${lastReply.slice(0, 30)}"`}），停止机械继续，交给AI判断`);
+            preResult = null; // 清除 preResult，走 AI 分析路径（提示词含后台等待判则）
           }
         }
       }

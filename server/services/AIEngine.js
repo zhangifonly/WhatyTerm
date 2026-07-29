@@ -1526,6 +1526,40 @@ ${historyText || '(空)'}
     // Tab 通过 tmux send-keys 发送给 Claude Code (Ink 应用) 不可靠，
     // 而发"继续"既能让 Claude 继续工作，也能间接接受编辑。
 
+    // === 高优先级：检测"后台任务运行中 + CLI 自述等通知"，不发"继续" ===
+    // 场景：CLI 把长任务放后台（run_in_background shell / agents），自己回到提示符，
+    // 状态栏显示"N shell(s) still running / · N shell · / ← N agents"，且最近回复明确
+    // 说"等循环通知，没有新信息前不空转"。此时发"继续"只会让 CLI 再回一句"等通知即可"，
+    // 形成 继续→等通知→继续 的空转循环。两个信号必须同时满足才停手——只有后台任务
+    // 而无等待措辞时不拦截（如常驻 dev server 场景，发"继续"仍是合理推进）。
+    {
+      const bgTail = earlyCleanContent.slice(-1500);
+      const bgLast8 = earlyCleanContent.split('\n').slice(-8).join('\n');
+      const hasBgRunning = /\d+\s+(shells?|tasks?|agents?)\s+still\s+running/i.test(bgTail)
+        || /·\s*\d+\s+shells?\s*·/i.test(bgLast8)
+        || /←\s*\d+\s+agents?/i.test(bgLast8);
+      const saysWaitNotify = /等(候|待)?(循环|完成|任务)?通知|完成会有通知|等通知即可|不空转|轮询不出新信息|无人值守(推进|运行)|等(它|其|任务|后台)?(跑完|完成|结束)|后台(任务|批次|生成|执行)?(仍在|正在|进行中|运行中)|wait(ing)? for (the )?(task|notification|background)/i.test(bgTail);
+      // 护栏：屏幕底部若出现确认菜单/选项界面，必须交给确认处理逻辑，不能在这里停手
+      const hasConfirmMenu = /Do you want to|❯\s*1\.|\b1\.\s+(Yes|允许)|\[Y\/n\]/i.test(earlyCleanContent.slice(-600));
+      if (hasBgRunning && saysWaitNotify && !hasConfirmMenu) {
+        console.log('[AIEngine] 检测到后台任务运行中且 CLI 自述等通知，不发"继续"，等待任务完成');
+        return {
+          currentState: '后台任务运行中（CLI 等待完成通知）',
+          workingDir: '未显示',
+          recentAction: '后台 shell/agent 执行中',
+          needsAction: false,
+          actionType: 'none',
+          suggestedAction: null,
+          actionReason: 'CLI 已明确表示在等后台任务的完成通知、无新信息前不空转；此时发"继续"只会得到又一句"等通知即可"，属无效空转。后台任务完成会自动唤醒 CLI，无需干预',
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI,
+          ...pluginInfo
+        };
+      }
+    }
+
     // === 高优先级：检测 AI 明确"待命/无任务可做"的空闲，停手而非反复发"继续" ===
     // 场景：Ralph 自主会话或普通会话开发告一段落后，Claude 回复"待命中。需要具体任务。"
     // 之类，表示它没有可推进的工作、在等用户给方向。此时若继续自动发"继续"，Claude 只会
@@ -2600,6 +2634,7 @@ JSON格式：
 
 判断优先级（按顺序）：
 1. 程序运行中（"esc to interrupt"或运行时间如"2m 29s"）→ needsAction:false
+1.5 后台任务等待中（状态栏有"N shells still running"/"· N shell ·"/"← N agents"，或最近回复明确说"等通知/不空转/后台任务进行中/等它跑完"）→ needsAction:false, suggestion:"后台任务运行中，CLI 在等完成通知，发继续只会空转"。注意：若同时弹出确认菜单则确认优先，不适用本条
 2. 质量调查/评分界面 → needsAction:false
 3. ${cliName}确认界面（"Do you want to make/run"+"1. Yes"+"2. Yes, allow for this session"）→ needsAction:true, actionType:"select", suggestedAction:"2"
 4. 普通确认界面（"Do you want to proceed?"+"1. Yes"）→ needsAction:true, actionType:"select", suggestedAction:"1"
