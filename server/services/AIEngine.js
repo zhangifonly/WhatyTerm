@@ -1526,6 +1526,32 @@ ${historyText || '(空)'}
     // Tab 通过 tmux send-keys 发送给 Claude Code (Ink 应用) 不可靠，
     // 而发"继续"既能让 Claude 继续工作，也能间接接受编辑。
 
+    // === 高优先级：连环打断熔断器 ===
+    // 自动发的"继续"落在运行中的 CLI 上会打断工作（Interrupted · What should Claude
+    // do instead?）。若近屏出现 ≥2 次该痕迹，说明自动操作正在反复打断真实工作，
+    // 必须立即停手——哪怕当前看似空闲也不再发，等新输出把打断痕迹滚出屏幕再恢复。
+    {
+      const interruptCount = (earlyCleanContent.slice(-1500)
+        .match(/Interrupted\s*[·•]\s*What should Claude do instead/gi) || []).length;
+      if (interruptCount >= 2) {
+        console.log(`[AIEngine] 熔断：近屏 ${interruptCount} 次 Interrupted 打断痕迹，停止自动操作`);
+        return {
+          currentState: `自动操作连续打断工作（${interruptCount} 次），已熔断停手`,
+          workingDir: '未显示',
+          recentAction: '自动"继续"打断了运行中的任务',
+          needsAction: false,
+          actionType: 'none',
+          suggestedAction: null,
+          actionReason: '检测到多次 Interrupted 痕迹——自动发送的"继续"正落在运行中的 CLI 上反复打断工作。已停止自动操作，待 CLI 自行推进、打断痕迹滚出屏幕后恢复',
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI,
+          ...pluginInfo
+        };
+      }
+    }
+
     // === 高优先级：检测"后台任务运行中 + CLI 自述等通知"，不发"继续" ===
     // 场景：CLI 把长任务放后台（run_in_background shell / agents），自己回到提示符，
     // 状态栏显示"N shell(s) still running / · N shell · / ← N agents"，且最近回复明确
@@ -1851,9 +1877,10 @@ ${historyText || '(空)'}
     // 烹饪动词（Brewed/Baked/Sautéed/Cooked/Simmered...），运行中则是进行时
     // "Sautéing… (10s · esc to interrupt)"。只认 Brewed 曾导致 "Sautéed for 10m 29s"
     // 的时长被误判为运行时间，会话卡死在"程序运行中"永不发继续。
-    // \S+ed 兼容含重音字符的动词（Sautéed）；时长兼容纯秒("30s")与分秒("10m 29s")。
+    // \S+ed 兼容含重音字符的动词（Sautéed）；时长兼容 "30s" / "10m 29s" / "1h 21m 8s"
+    // （长任务会出现小时级，漏掉 h 会导致完成标志识别不出、时长被当运行计时器）。
     // 只看末尾 600 字符：完成标志总在提示符正上方，历史轮次的旧标志不该抵消当前运行状态
-    const hasBrewedFor = /\b\S+ed for (\d+m\s*)?\d+s\b/i.test(cleanContent.slice(-600));
+    const hasBrewedFor = /\b\S+ed for (\d+h\s*)?(\d+m\s*)?\d+s\b/i.test(cleanContent.slice(-600));
 
     // 提前声明 isCompacting，供后续 stateDesc 使用（跨 aiType 分支）
     let isCompacting = false;
@@ -1866,7 +1893,11 @@ ${historyText || '(空)'}
       // 活跃运行状态词：Claude Code 运行时显示任意文本 + "..." + 时间/token 指示器
       // 使用 fullyCleanContent 避免光标移动等 ANSI 序列破坏运行状态文本
       const last500 = fullyCleanContent.slice(-500);
-      const isActivelyRunning = /\.{2,3}\s*\(\d+[ms]/i.test(last500);
+      // 进行时 spinner（"✢ Frolicking…"）可能不带计时器后缀也表示运行中——
+      // 注意运行中屏幕上输入框 ❯ 依然存在，"有空闲提示符"不构成空闲证据，
+      // 进行时(…ing) vs 过去式(Xxxed for Ys) 才是运行/完成的可靠区分
+      const isActivelyRunning = /\.{2,3}\s*\(\d+[ms]/i.test(last500) ||
+        /[✢✻✽✳·+*]\s*[A-Z][a-zé]*ing(…|\.{3})/.test(last500);
       const hasRunningIndicator = !hasIdlePromptForAccept && (
         /esc to interrupt/i.test(cleanContent) ||
         /ctrl\+t to show todos/i.test(cleanContent)
@@ -1874,7 +1905,11 @@ ${historyText || '(空)'}
       // 运行时间只在最后500字符内检测，避免匹配到历史 timeout 参数
       // 但要排除 "Brewed for" 这种完成时间
       // 如果有 Brewed for 或 accept edits，说明任务已完成，不是运行中
-      const hasRecentRuntime = /\(\d+m\s*\d+s\)|\d+m\s+\d+s/.test(last500) && !hasBrewedFor && !isWaitingForAccept;
+      // 裸时长文本（"21m 8s"）不算运行证据——它同样出现在完成行 "Cooked for 1h 21m 8s"
+      // 和正文里。真正的运行计时器一定带括号形式 "(2m 29s · ↓ tokens · esc to interrupt)"，
+      // 故只认括号包裹的时长；裸时长曾使 1 小时长任务完成后被判成运行中、永不发继续
+      const hasRecentRuntime = /\(\s*(\d+h\s*)?(\d+m\s*)?\d+s\s*[·•)]/.test(last500)
+        && !hasBrewedFor && !isWaitingForAccept;
 
       // isActivelyRunning 优先级最高：即使屏幕残留 accept edits 文本，只要有活跃运行状态词就判定为运行中
       isRunning = !isConfirmDialog && (isActivelyRunning || isCompacting || (!isWaitingForAccept && (hasRunningIndicator || hasRecentRuntime)));

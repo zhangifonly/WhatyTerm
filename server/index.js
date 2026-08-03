@@ -4069,17 +4069,24 @@ async function runBackgroundAutoAction() {
     // 工具可能执行几分钟（bash 命令等），不能用时间限制，直接跳过直到收到完成事件
     // 但例外：如果 working 超过 8 秒，可能是确认界面（Claude Code 弹出 "Do you want to proceed?"）
     // 此时 PreToolUse 已触发但命令等待用户确认，需要自动操作来处理
-    if (session.hookState === 'working') {
-      const hookAge = Date.now() - (session.lastHookEventAt || 0);
-      if (hookAge < 8000) {
-        continue;
-      }
-      // 超过 8 秒仍在 working，可能是确认界面，继续检测
-    }
-    // hookState === 'idle' 但事件很新（5s内），也跳过避免误判
-    const idleAge = Date.now() - (session.lastHookEventAt || 0);
-    if (session.hookState === 'idle' && idleAge < 5000) {
-      continue;
+    // 确认界面探针：PreToolUse 已触发但工具没跑，往往正是 Claude Code 在等确认
+    // （"Do you want to proceed?"）。这两道 hook 门原本会 continue 掉、连抓屏都不做，
+    // 于是确认界面弹出时内容变化重置也拿不到，只能等 3秒爆发/30秒默认周期轮到——
+    // 实测曾空等 75 秒才确认。故先廉价抓屏探一眼：确认菜单在屏上就立即放行检测。
+    const hookGateAge = Date.now() - (session.lastHookEventAt || 0);
+    const inHookGate = (session.hookState === 'working' && hookGateAge < 8000)
+      || (session.hookState === 'idle' && hookGateAge < 5000);
+    if (inHookGate) {
+      let confirmOnScreen = false;
+      try {
+        const probe = await session.getScreenContentAsync();
+        const tail = (probe || '').slice(-700);
+        confirmOnScreen = /Do you want to|Esc to cancel/i.test(tail) && /^\s*[❯>]?\s*1\.\s/m.test(tail);
+      } catch {}
+      if (!confirmOnScreen) continue;
+      console.log(`[后台自动操作] 会话 ${session.name}: hook 门内探到确认界面，立即处理`);
+      const st = sessionCheckState.get(sessionData.id);
+      if (st) { st.nextCheckTime = Date.now(); sessionCheckState.set(sessionData.id, st); }
     }
 
 
@@ -4104,6 +4111,14 @@ async function runBackgroundAutoAction() {
         state.nextCheckTime = now;
         sessionCheckState.set(sessionData.id, state);
         console.log(`[检测周期] 会话 ${sessionData.id}: 终端内容变化，重置检测间隔`);
+      } else {
+        // 内容没变但屏上挂着确认菜单 → 说明上一次发送没生效（或界面持续等待），
+        // 不能让它继续等 30 秒默认周期：确认界面阻塞整条开发流水线，必须插队重试
+        const cTail = quickContent.slice(-700);
+        if (/Do you want to|Esc to cancel/i.test(cTail) && /^\s*[❯>]?\s*1\.\s/m.test(cTail)) {
+          state.nextCheckTime = now;
+          sessionCheckState.set(sessionData.id, state);
+        }
       }
       state.lastContentHash = contentHash;
       sessionCheckState.set(sessionData.id, state);
@@ -4309,9 +4324,9 @@ async function runBackgroundAutoAction() {
           const lastAction = lastActionMap.get(session.id);
           const contentHash = computeContentHash(terminalContent, 500);
 
-          // 对于选项选择操作，使用更短的冷却时间（3秒）
-          // 因为如果内容没变化，可能是操作没成功，需要重试
-          const cooldownTime = (status.actionType === 'select') ? 15000 : (status.actionType === 'single_char') ? 3000 : 30000;
+          // 选项选择冷却 5 秒（原 15 秒过长）：确认界面阻塞整条流水线，
+          // 内容没变说明上次按键没被 Ink 收到，应尽快重试而不是干等
+          const cooldownTime = (status.actionType === 'select') ? 5000 : (status.actionType === 'single_char') ? 3000 : 30000;
 
           if (lastAction && lastAction.action === action && lastAction.contentHash === contentHash && (now - lastAction.time) < cooldownTime) {
             console.log(`[后台自动操作] 会话 ${session.name}: 跳过重复操作 \"${action}\" (冷却${cooldownTime/1000}秒)`);
@@ -4366,12 +4381,11 @@ async function runBackgroundAutoAction() {
               const screenLast800 = fullyClean.slice(-800);
               // Claude Code 运行中的三种明确证据（任一成立即拦截）
               const isRunning = /\.{2,3}\s*\(\d+[ms]/i.test(screenLast800);
-              // "esc to interrupt" 要按行甄别：后台 agents 存在时空闲状态栏也带这串字
-              // （"accept edits on … · esc to interrupt · ← 4 agents"，指可中断 agents），
-              // 只有不属于状态栏的 esc to interrupt（如运行计时器行）才算主循环运行证据
-              const hasEscToInterrupt = screenLast800.split('\n')
-                .filter(l => /esc to interrupt/i.test(l))
-                .some(l => !/accept edits on|shift\+tab|←\s*\d+\s+agents?/i.test(l));
+              // esc to interrupt 无条件拦截（v1.2.41 撤销 v1.2.40 的按行豁免——那是误判）：
+              // 状态栏只在主循环或 agents 确实在跑时才显示这串字，此时发文本会打断工作
+              // （paperflow 案例：继续→Interrupted→继续 连环打断）。真空闲时状态栏没有它，
+              // agents 跑完后它消失、发送自然放行，卡住场景靠等待即可自愈
+              const hasEscToInterrupt = /esc to interrupt/i.test(screenLast800);
               const hasQueuedMessages = /Press up to edit queued messages/i.test(currentScreen);
               if (isRunning || hasEscToInterrupt || hasQueuedMessages) {
                 const reason = isRunning ? '运行状态指示器' :
@@ -4484,7 +4498,7 @@ async function runBackgroundAutoAction() {
 
           const lastAction = lastActionMap.get(session.id);
           const contentHash = computeContentHash(terminalContent, 500);
-          const cooldownTime = (status.actionType === 'select') ? 15000 : (status.actionType === 'single_char') ? 3000 : 30000;
+          const cooldownTime = (status.actionType === 'select') ? 5000 : (status.actionType === 'single_char') ? 3000 : 30000;
 
           if (lastAction && lastAction.action === action && lastAction.contentHash === contentHash && (now - lastAction.time) < cooldownTime) {
             console.log(`[后台自动操作] 会话 ${session.name}: 跳过重复操作 "${action}" (冷却${cooldownTime/1000}秒)`);
@@ -4593,7 +4607,7 @@ async function runBackgroundAutoAction() {
         const lastAction = lastActionMap.get(session.id);
         const now = Date.now();
         const contentHash = computeContentHash(terminalContent, 500);
-        const cooldownTime = (status.actionType === 'select') ? 15000 : (status.actionType === 'single_char') ? 3000 : 30000;
+        const cooldownTime = (status.actionType === 'select') ? 5000 : (status.actionType === 'single_char') ? 3000 : 30000;
 
         if (lastAction && lastAction.action === action && lastAction.contentHash === contentHash && (now - lastAction.time) < cooldownTime) {
           console.log(`[后台自动操作] 会话 ${session.name}: 跳过重复操作 "${action}" (冷却${cooldownTime/1000}秒，剩余 ${Math.ceil((cooldownTime - (now - lastAction.time)) / 1000)}秒)`);

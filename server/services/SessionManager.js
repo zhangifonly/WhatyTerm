@@ -13,6 +13,8 @@ import fs from 'fs';
 
 // 导入 Mux 模块桥接（新架构：mux-server 守护进程）
 import { getMuxAdapter, isMuxAvailable, initMuxServerMode, isMuxServerModeAvailable, getMuxClient } from './daemon-bridge.js';
+// CLI 注册表：重建会话后按 aiType 取对应的启动/续接命令
+import cliRegistry from './CliRegistry.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1087,8 +1089,53 @@ export class SessionManager {
     try { this.db.exec(`ALTER TABLE closed_sessions ADD COLUMN stats_success INTEGER DEFAULT 0`); } catch {}
   }
 
+  /**
+   * 重建 tmux 会话（电脑重启后 tmux server 消失，但会话元数据仍在库里）
+   * 在原工作目录重新拉起同名 tmux 会话，让上层恢复流程能照常接管。
+   * @returns {boolean} 是否重建成功
+   */
+  _recreateTmuxSession(row) {
+    const tmuxName = sanitizeTmuxSessionName(row.tmux_session_name || '');
+    if (!tmuxName) return false;
+
+    // 工作目录必须仍然存在，否则重建出来的会话是错的（落在 home 里跑错项目）
+    const workingDir = row.working_dir || '';
+    if (!workingDir || !fs.existsSync(workingDir)) {
+      console.log(`[SessionManager] 会话 "${row.name}" 工作目录不存在，跳过重建: ${workingDir || '(空)'}`);
+      return false;
+    }
+
+    const tmuxCmd = getTmuxPrefix();
+    try {
+      let defaultTerminal = 'tmux-256color';
+      try { execSync('infocmp tmux-256color', { stdio: 'pipe' }); }
+      catch { defaultTerminal = 'screen-256color'; }
+
+      // -c 指定工作目录，保证 CLI 在原项目里启动
+      execSync(`${tmuxCmd} new-session -d -s "${tmuxName}" -x 80 -y 24 -c "${workingDir}"`, {
+        stdio: 'ignore',
+        env: { ...process.env, CLAUDECODE: undefined }
+      });
+      try {
+        execSync(`${tmuxCmd} set-option -t "${tmuxName}" default-terminal "${defaultTerminal}"`, { stdio: 'ignore' });
+      } catch {}
+      // 清除 CLAUDECODE，避免 CLI 误判为嵌套会话
+      try {
+        execSync(`${tmuxCmd} set-environment -t "${tmuxName}" -u CLAUDECODE`, { stdio: 'ignore' });
+      } catch {}
+
+      console.log(`[SessionManager] 已重建 tmux 会话: ${tmuxName} (工作目录: ${workingDir})`);
+      return true;
+    } catch (err) {
+      console.error(`[SessionManager] 重建 tmux 会话 "${tmuxName}" 失败: ${err.message}`);
+      return false;
+    }
+  }
+
   _loadSessions() {
     const rows = this.db.prepare('SELECT * FROM sessions WHERE status = ?').all('running');
+    // 本轮被重建的会话，稍后统一拉起 CLI（见 _resumeCliForRecreated）
+    this._pendingCliResume = [];
 
     // mux-server 模式：尝试从守护进程恢复会话
     if (useMuxServerMode && muxClient && rows.length > 0) {
@@ -1147,9 +1194,25 @@ export class SessionManager {
         tmuxExists = false;
       }
 
-      // 如果 tmux 会话不存在，移动到已关闭列表
+      // tmux 会话不存在（最常见原因：电脑重启，tmux server 随之消失）：
+      // 先尝试按元数据在原工作目录重建，重建成功则照常恢复，失败才移到已关闭列表。
+      // 这样"重启电脑 → 打开应用"能回到退出前的会话，而不是一片空白。
+      let recreated = false;
       if (!tmuxExists) {
-        console.log(`[SessionManager] tmux 会话 "${row.tmux_session_name}" 不存在，移动到已关闭列表`);
+        recreated = this._recreateTmuxSession(row);
+        if (recreated) {
+          tmuxExists = true;
+          this._pendingCliResume.push({
+            tmuxSessionName: sanitizeTmuxSessionName(row.tmux_session_name || ''),
+            aiType: row.ai_type || 'claude',
+            name: row.name
+          });
+        }
+      }
+
+      // 重建也失败（工作目录已删除等），移动到已关闭列表
+      if (!tmuxExists) {
+        console.log(`[SessionManager] tmux 会话 "${row.tmux_session_name}" 不存在且无法重建，移动到已关闭列表`);
         try {
           const stmt = this.db.prepare(`
             INSERT OR REPLACE INTO closed_sessions
@@ -1223,6 +1286,43 @@ export class SessionManager {
       this.sessions.set(session.id, session);
       console.log(`恢复会话: ${session.name} (tmux: ${session.tmuxSessionName}, AI: ${session.aiType}, 自动操作: ${session.autoActionEnabled ? '开' : '关'}, 工作目录: ${session.workingDir || '未知'})`);
     }
+
+    // 重建出来的 tmux 里只有空 shell，还需把 CLI 拉起来才算真正"还原到退出前"
+    if (this._pendingCliResume.length > 0) {
+      this._resumeCliForRecreated();
+    }
+  }
+
+  /**
+   * 为重建的会话拉起 CLI，续接退出前的对话。
+   * 命令取自 CliRegistry（claude 为 `claude -c`、grok 为 `grok -c`，本身即续接上次会话）。
+   * 错峰发送：一次性拉起十几个 CLI 会瞬间打满 CPU / API 并发。
+   */
+  _resumeCliForRecreated() {
+    const list = this._pendingCliResume;
+    this._pendingCliResume = [];
+    console.log(`[SessionManager] 将为 ${list.length} 个重建会话续接 CLI 对话`);
+
+    list.forEach((item, index) => {
+      // 首个延迟 1.5s 等 shell 初始化完成，其后每个再错开 1.2s
+      setTimeout(() => {
+        let startCmd = 'claude -c';
+        try {
+          startCmd = cliRegistry.getTool(item.aiType)?.commands?.start || startCmd;
+        } catch {}
+        const tmuxCmd = getTmuxPrefix();
+        try {
+          execSync(`${tmuxCmd} send-keys -t "${item.tmuxSessionName}" ${JSON.stringify(startCmd)}`, { stdio: 'ignore' });
+          // 命令与回车分开发送（与项目内其它 CLI 启动路径保持一致）
+          setTimeout(() => {
+            try { execSync(`${tmuxCmd} send-keys -t "${item.tmuxSessionName}" Enter`, { stdio: 'ignore' }); } catch {}
+          }, 100);
+          console.log(`[SessionManager] 会话 "${item.name}" 已续接: ${startCmd}`);
+        } catch (err) {
+          console.error(`[SessionManager] 会话 "${item.name}" 续接 CLI 失败: ${err.message}`);
+        }
+      }, 1500 + index * 1200);
+    });
   }
 
   /**
