@@ -89,7 +89,13 @@ class CodeReviewPlugin extends BasePlugin {
           '是否符合代码规范'
         ],
         warningPatterns: [],
-        autoActionEnabled: false,
+        // v1.2.47：原为 false，会造成"占位不动手"死锁——detectPhase 用宽泛正则
+        // /fix|修复|resolved|已解决/ 匹配最后 40 行，代码审查场景几乎必然命中，
+        // 于是会话被永久锁在 fixing；而该阶段关掉自动操作后 analyzeStatus 返回 null，
+        // 执行器却仍把它当有效结论（打印"代码审查 - 问题修复"），既不按键也不交还给
+        // 通用确认界面逻辑。实测 RustCandance 因此挂在 Do you want to proceed? 上
+        // 3 小时零按键（06:06→09:08，19 轮插件占位 vs 仅 1 轮认出确认界面）。
+        autoActionEnabled: true,
         requireConfirmation: true,
         idleTimeout: 30000
       }

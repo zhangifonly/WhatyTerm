@@ -1776,7 +1776,19 @@ ${historyText || '(空)'}
         }
 
         // 如果插件没有返回结果但阶段配置禁用自动操作，返回不操作状态
-        if (phaseConfig.autoActionEnabled === false) {
+        // ⚠️ v1.2.47：这个提前 return 会截断后面**所有**通用检测（确认界面、错误恢复、
+        //    运行中判定…）。当屏上正挂着"Do you want to proceed?"确认菜单时，
+        //    据此返回 needsAction:false 等于让整条流水线停摆——CLI 在等按键，
+        //    而我们回一句"当前阶段不自动操作"，谁也不会去按，会话就无限期挂着。
+        //    实测 RustCandance 挂 3 小时零按键（19 轮走到这里 vs 仅 1 轮认出确认界面）。
+        //    确认菜单是"CLI 阻塞等输入"的硬信号，与阶段策略无关：此时必须放行，
+        //    让下方高优先级确认界面逻辑接手按键。
+        const blockedByConfirmMenu = /(Do you want to|Would you like to)[\s\S]{0,400}?^\s*[❯>]?\s*1\.\s+\S/im
+          .test(earlyLast3000) && /Esc to (cancel|amend)\b/i.test(earlyLast3000);
+        if (phaseConfig.autoActionEnabled === false && blockedByConfirmMenu) {
+          console.log(`[AIEngine] 插件 ${plugin.name}(${phase}) 阶段禁用自动操作，但屏上挂着确认菜单 → 放行给通用确认逻辑`);
+        }
+        if (phaseConfig.autoActionEnabled === false && !blockedByConfirmMenu) {
           return {
             currentState: `${plugin.name} - ${plugin.phases.find(p => p.id === phase)?.name || phase}`,
             workingDir: '未显示',

@@ -4466,7 +4466,20 @@ async function runBackgroundAutoAction() {
                                hasEscToInterrupt ? 'esc to interrupt' :
                                '排队消息';
                 console.log(`[后台自动操作] 会话 ${session.name}: 末端保护拦截 (${reason})，取消发送 "${String(action).slice(0, 40)}"`);
-                return;
+                // ⚠️ v1.2.48：这里原来是 `return`——一个会话被拦截，整轮扫描当场结束，
+                //    排在它后面的会话本轮连抓屏都不做。会话数组里 StellarForge(#8)、
+                //    mathviz(#9) 长期在跑（状态栏常挂 esc to interrupt），而
+                //    cadance(#16)/phyviz(#19)/paperflow(#20) 全排在后面 → 它们的确认框
+                //    被系统性饿死。实测全日志 7901 次拦截 = 7901 轮扫描被截断，
+                //    cadance 因此出现 2分14秒、21分钟两段零检测空窗。
+                // 另一半故障：return 跳过了 updateCheckState，lastCheck 不更新、
+                //    nextCheckTime 仍是 now，于是 1 秒定时器每次都重跑同一会话，
+                //    日志里 105 次预判断配 105 次拦截（一秒一发）就是这么刷出来的。
+                // 正解：只跳过当前会话（continue），并照常推进检测状态。
+                //    status.needsAction 为真 → updateCheckState 会把间隔压到 MIN(15秒)，
+                //    等运行结束后自然放行，不再空转刷屏。
+                updateCheckState(sessionData.id, false, status);
+                continue;
               }
             }
 
