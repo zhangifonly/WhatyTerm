@@ -14,8 +14,42 @@ process.on('unhandledRejection', (reason, promise) => {
   getCrashReporter()?.report('unhandledRejection', reason instanceof Error ? reason : new Error(String(reason))).catch(() => {});
 });
 
-process.on('SIGTERM', () => { sleepPrevention?.destroy(); process.exit(0); });
-process.on('SIGINT', () => { sleepPrevention?.destroy(); process.exit(0); });
+// 退出信号现场记录（v1.2.45 诊断）：进程被外部定向终止时留下取证信息。
+// 排查「后端反复消失但零崩溃痕迹」用——SIGTERM 只说明有人杀我，不说明是谁，
+// 记下父进程链与信号时刻，配合系统日志即可指名道姓。同步写盘（异步在 exit 前来不及）。
+const SIGNAL_FORENSIC_PATH = '/tmp/webtmux-signal-forensics.log';
+function recordSignalForensics(sig) {
+  const lines = [`\n===== ${new Date().toISOString()} 收到 ${sig} =====`,
+                 `self pid=${process.pid} ppid=${process.ppid} uptime=${Math.round(process.uptime())}s`];
+  try {
+    // 父进程链：逐级上溯，看是谁的子树里挂着我（npm/concurrently/tmux/Electron/launchd…）
+    let p = process.ppid, depth = 0;
+    while (p && p > 1 && depth++ < 8) {
+      // 用 spawnSync 直接调 ps（不经 shell）：信号处理器里 execSync 的 stdio 继承
+      // 已被拆除，走 shell 会失败（实测 "Command failed"）
+      const r = spawnSync('/bin/ps', ['-o', 'pid=,ppid=,command=', '-p', String(p)],
+                          { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+      const out = (r.stdout || '').trim();
+      if (!out) break;
+      lines.push(`  ancestor[${depth}] ${out.slice(0, 220)}`);
+      p = parseInt(out.trim().split(/\s+/)[1], 10);
+    }
+    const mem = process.memoryUsage();
+    lines.push(`memory rss=${(mem.rss / 1048576).toFixed(0)}MB heapUsed=${(mem.heapUsed / 1048576).toFixed(0)}MB`);
+    lines.push(`load=${os.loadavg().map(n => n.toFixed(2)).join(' ')}`);
+  } catch (e) { lines.push(`  取证失败: ${e.message}`); }
+  const text = lines.join('\n') + '\n';
+  try { appendFileSync(SIGNAL_FORENSIC_PATH, text); } catch {}
+  console.error(text);
+}
+
+process.on('SIGTERM', () => { recordSignalForensics('SIGTERM'); sleepPrevention?.destroy(); process.exit(0); });
+process.on('SIGINT', () => { recordSignalForensics('SIGINT'); sleepPrevention?.destroy(); process.exit(0); });
+process.on('SIGHUP', () => { recordSignalForensics('SIGHUP'); sleepPrevention?.destroy(); process.exit(0); });
+process.on('exit', (code) => {
+  if (code !== 0) { try { appendFileSync(SIGNAL_FORENSIC_PATH,
+    `\n===== ${new Date().toISOString()} process.exit(${code}) uptime=${Math.round(process.uptime())}s =====\n`); } catch {} }
+});
 
 import express from 'express';
 import { createServer } from 'http';
@@ -23,7 +57,7 @@ import { Server } from 'socket.io';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 // Trigger restart
-import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync, watch, statSync, promises as fsp } from 'fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, unlinkSync, watch, statSync, promises as fsp } from 'fs';
 import session from 'express-session';
 import crypto from 'crypto';
 import { execSync, spawnSync, exec as execCb } from 'child_process';
@@ -726,7 +760,10 @@ app.use('/relay', (req, res) => {
   sessionRelay.handle(req, res);
 });
 
-app.use(express.json());
+// 上限 10MB：默认 100KB 对本项目太小——终端屏幕内容、AI 分析载荷、hook 事件
+// 都可能超限，实测日志里反复出现 PayloadTooLargeError（请求被静默丢弃，
+// 表现为前端某些操作无响应而后端只打一条栈）。
+app.use(express.json({ limit: '10mb' }));
 app.use(sessionMiddleware);
 
 // ── Claude Code 官方 Hooks 接收端点 ──────────────────────────────
@@ -1259,6 +1296,17 @@ async function readClaudeProcessEnv(tmuxSessionName) {
   return null;
 }
 
+// 剥离 ANSI 转义序列（CSI + OSC + 单字符转义），供 /status 等结构化屏幕解析使用。
+// tmux capture-pane -e 保留颜色码，Claude Code 的 /status 面板字段名一律加粗，
+// 形如 "Login method:\x1b[0m   Claude Max account" —— 不剥码则冒号后是 ESC，正则必失配。
+function stripAnsiForProbe(text) {
+  if (!text) return '';
+  return text
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')  // OSC
+    .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')          // CSI
+    .replace(/\x1b[@-Z\\-_]/g, '');                      // 其他单字符转义
+}
+
 // 取 tmux 会话内 claude 进程的启动时间（epoch 秒）。用 etime（locale 无关）反推：
 // 进程早于全局配置变更 → 运行中进程仍用切换前的供应商（Claude Code 启动时读一次配置，不热更新）。
 async function getClaudeProcStartEpoch(tmuxSessionName) {
@@ -1398,7 +1446,7 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
             `${getTmuxPrefix()} capture-pane -t "${tmuxSessionName}" -p -S -30 2>/dev/null`,
             { encoding: 'utf-8', timeout: 3000 }
           );
-          const baseUrlMatch = paneContent.match(/Anthropic base URL:\s+(https?:\/\/\S+)/i);
+          const baseUrlMatch = stripAnsiForProbe(paneContent).match(/Anthropic base URL:\s+(https?:\/\/\S+)/i);
           if (baseUrlMatch) {
             actualApiUrl = baseUrlMatch[1].replace(/\/+$/, '');
             configSource = 'process';
@@ -1434,7 +1482,10 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         // 同一进程 → probe 永久有效（修复：滚屏/超30分钟后回落成「官方登录」的显示摆动）；
         // 进程已换（重启）→ 回退 30 分钟 TTL 兜底判定。
         const spSameProc = sp?.procStart && _procStartEpoch && sp.procStart === _procStartEpoch;
-        if (sp && (spSameProc || Date.now() - sp.at < 30 * 60 * 1000)) {
+        // 进程已换（两边启动时间都拿到了且不相等）→ 这份实测属于上一个 CLI 进程，作废。
+        // 30 分钟 TTL 只在「进程启动时间取不到」时兜底，绝不用来跨进程续命（同 hookStale 原则）
+        const spDeadProc = !!(sp?.procStart && _procStartEpoch && sp.procStart !== _procStartEpoch);
+        if (sp && !spDeadProc && (spSameProc || Date.now() - sp.at < 30 * 60 * 1000)) {
           if (sp.baseUrl) {
             actualApiUrl = sp.baseUrl;
             localIsOAuth = false;
@@ -1450,17 +1501,26 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
 
         // 2) hook env：仅在读到**非空** BASE_URL 时可信（shell 里 export 后启动 CLI 的场景）。
         //    读到空一律忽略——绝不据此判 OAuth（否则 settings 配置的第三方会被误显示成官方）。
-        if (he && he.baseUrl && configSource !== 'status') {
+        // hook 陈旧性（v1.2.45）：hook env 来自**当时那个** CLI 进程。CLI 重启（换供应商、
+        // /exit 后 claude -c、崩溃恢复）后旧 hook 值不再代表现状——事件时间早于当前进程启动
+        // 时间即判定失效，绝不采信（实测：22:11 的 hook 值把 22:33 起的官方账号会话
+        // 误显示成第三方 Whaty）。留 5 秒容差吸收 etime 取整与时钟抖动。
+        const hookStale = !!(he && he.at && _procStartEpoch &&
+                             he.at < (_procStartEpoch - 5) * 1000);
+        if (hookStale) {
+          console.log(`[getCurrentProvider] hook 实测早于当前 CLI 进程启动（hook=${new Date(he.at).toISOString()} < proc=${new Date(_procStartEpoch * 1000).toISOString()}），忽略`);
+        }
+        if (he && he.baseUrl && !hookStale && configSource !== 'status') {
           actualApiUrl = he.baseUrl;
           if (he.tokenPrefix || he.keyPrefix) actualApiKey = he.tokenPrefix || he.keyPrefix;
           localIsOAuth = false;
           configSource = 'hook';
         }
         // hook 带回的实测模型即便 URL 为空也可用（settings 常不配 ANTHROPIC_MODEL）
-        if (he && he.model && !actualModel) actualModel = he.model;
+        if (he && he.model && !hookStale && !actualModel) actualModel = he.model;
         // 2b) /status 只报 URL 不报密钥：同 URL 时用 hook 上报的 token 前 12 位补上
         //     密钥证据——这是区分「同地址不同 key」多个供应商（Whaty 系列共用 zjz-ai）的唯一实测手段
-        if (configSource === 'status' && !actualApiKey && he && he.baseUrl &&
+        if (configSource === 'status' && !actualApiKey && he && !hookStale && he.baseUrl &&
             he.baseUrl === actualApiUrl && (he.tokenPrefix || he.keyPrefix)) {
           actualApiKey = he.tokenPrefix || he.keyPrefix;
         }
@@ -3753,17 +3813,29 @@ async function runBackgroundAutoAction() {
     // 实测供应商（最权威非侵入源）：终端出现 /status 输出时解析 base URL/登录方式/模型。
     // 触发认多种行——第三方 token 登录的 /status 只有 "Auth token:" + "Anthropic base URL:"，
     // 没有 "Login method:"（那是官方账号登录才有），三者任一出现即解析。
-    if (/\b(Anthropic base URL|Login method|Auth token):/.test(terminalContent)) {
-      const spURL = terminalContent.match(/Anthropic base URL:\s+(https?:\/\/\S+)/i);
-      const spLogin = terminalContent.match(/Login method:\s+([^\r\n]+)/);
-      const spModel = terminalContent.match(/^\s*Model:\s+(\S+)/m);
+    // ⚠️ 必须先剥 ANSI：/status 面板每个字段名都带加粗码，冒号后紧跟的是 ESC 不是空格
+    //（实测 "Login method:\x1b[0m   Claude Max account"），带码匹配 \s+ 会全部失配，
+    //   导致这条最权威证据长期静默失效、面板回落到陈旧 hook 值（v1.2.45 修复）
+    const statusPlain = stripAnsiForProbe(terminalContent);
+    if (/\b(Anthropic base URL|Login method|Auth token):/.test(statusPlain)) {
+      const spURL = statusPlain.match(/Anthropic base URL:\s+(https?:\/\/\S+)/i);
+      const spLogin = statusPlain.match(/Login method:\s+([^\r\n]+)/);
+      // Model 行形如 "claude-fable-5[1m] (claude-fable-5)"——括号里是 CLI 解析后的真实
+      // 模型 id，方括号 [1m] 只是 1M 上下文标记（字面文本，非 ANSI），优先取括号内的值
+      const spModelLine = statusPlain.match(/^\s*Model:\s+([^\r\n]+)/m);
+      const spModel = spModelLine
+        // 括号内必须长得像模型 id（带连字符的标识符）才取——排除 "Default (recommended)"
+        // 这类说明性括注被当成模型名
+        ? (spModelLine[1].match(/\(([a-z0-9][\w.]*-[\w.-]+)\)\s*$/i)?.[1]
+           || spModelLine[1].trim().split(/\s+/)[0])
+        : null;
       // 有 base URL → 第三方；无 base URL 但登录方式是账号 → 官方 OAuth
       // procStart：钉住当时的 claude 进程——CLI 配置读进内存后至进程退出都不变，
       // 所以只要进程没换，这份实测就持续有效（不受滚屏/时间流逝影响）
       session.statusProbe = {
         baseUrl: spURL ? spURL[1].replace(/\/+$/, '') : '',
         isOAuth: !spURL && /account|max|pro|subscription|claude\.ai/i.test(spLogin?.[1] || ''),
-        model: spModel ? spModel[1] : '',
+        model: spModel || '',
         at: Date.now(),
         procStart: await getClaudeProcStartEpoch(session.tmuxSessionName)
       };
@@ -4080,8 +4152,7 @@ async function runBackgroundAutoAction() {
       let confirmOnScreen = false;
       try {
         const probe = await session.getScreenContentAsync();
-        const tail = (probe || '').slice(-700);
-        confirmOnScreen = /Do you want to|Esc to cancel/i.test(tail) && /^\s*[❯>]?\s*1\.\s/m.test(tail);
+        confirmOnScreen = hasConfirmMenuOnScreen(probe);
       } catch {}
       if (!confirmOnScreen) continue;
       console.log(`[后台自动操作] 会话 ${session.name}: hook 门内探到确认界面，立即处理`);
@@ -4114,8 +4185,11 @@ async function runBackgroundAutoAction() {
       } else {
         // 内容没变但屏上挂着确认菜单 → 说明上一次发送没生效（或界面持续等待），
         // 不能让它继续等 30 秒默认周期：确认界面阻塞整条开发流水线，必须插队重试
-        const cTail = quickContent.slice(-700);
-        if (/Do you want to|Esc to cancel/i.test(cTail) && /^\s*[❯>]?\s*1\.\s/m.test(cTail)) {
+        // 注意必须同时清零 noActionCount：否则退避已翻倍到几十分钟时，只把
+        // nextCheckTime 拉到现在，本轮跑完又按旧 interval 推回未来，确认框继续挂着
+        if (hasConfirmMenuOnScreen(quickContent)) {
+          state.noActionCount = 0;
+          state.interval = CHECK_INTERVALS.MIN;
           state.nextCheckTime = now;
           sessionCheckState.set(sessionData.id, state);
         }
@@ -4962,6 +5036,26 @@ function getLastClaudeReply(terminalContent) {
   return replyLines.join('\n').trim();
 }
 
+// 廉价探针：屏幕上是否挂着"等用户选"的确认菜单（不调 AI，纯正则）
+// 用于自动操作循环的两处插队放行（hook 门逃生口、内容无变化插队）。
+// ⚠️ v1.2.46 修致命误判：此前该探针实测从未返回过 true（854k 行日志里
+//    "hook 门内探到确认界面" 零命中），根因是**没剥 ANSI 转义码**。
+//    抓屏走 capturePaneAsync = `tmux capture-pane -p -e`，-e 保留颜色码，
+//    于是同一个确认框：不带 -e 是 1373 字符，带 -e 膨胀到 3155（2.3 倍）。
+//    旧写法 `content.slice(-700)` + /^\s*[❯>]?\s*1\.\s/m 因此双双失效：
+//      ① 700 字符窗口被转义码吃掉，够到 "Do you want" 但够不到 "1. Yes" 那行；
+//      ② 行首不再是空白/❯ 而是 ESC 序列，^ 锚点永不命中。
+//    对比：AIEngine 的判定一直是对的，因为它先 cleanContent 剥了码——
+//    所以面板显示"建议操作 2"，执行器却一个键都不发（用户报"还是卡着"）。
+// 修法：先剥码再切窗口（窗口按可见字符计），并放宽为任意序号的选项行。
+function hasConfirmMenuOnScreen(content) {
+  const plain = stripAnsiForProbe(content || '');
+  const tail = plain.slice(-1500);
+  if (!/Do you want to|Would you like to|Esc to cancel|Tab to amend/i.test(tail)) return false;
+  // 选项行：允许行首空白/光标 ❯ 或 >，序号不限定为 1（3 选 1 的框首项也可能被选中）
+  return /^\s*[❯>]?\s*[1-9]\.\s+\S/m.test(tail);
+}
+
 // 计算内容哈希（用于检测终端内容是否变化）
 // sliceLength: 可选，截取最后 N 个字符计算哈希（用于快速检测）
 function computeContentHash(content, sliceLength = 0) {
@@ -5075,7 +5169,13 @@ async function runBackgroundStatusAnalysis() {
             // 防止 OAuth 误判覆盖：如果 session 已有非 OAuth provider（有 URL），
             // 但 getCurrentProvider 返回 OAuth（无 URL），说明配置文件被清除但 DB is_current 未变，
             // 此时应以 DB is_current 为准，不覆盖
-            const shouldSkipUpdate = cliType === 'claude' && currentProvider?.url && !provider.url && provider.isOAuth;
+            // ⚠️ 但实测证据（/status 屏幕自报、本地反代嗅探）必须放行——它比"旧值有 URL"
+            //    可信得多。否则用户 /exit 换到官方账号后，会话里存的是换号**之前**那次算出的
+            //    第三方对象，这条守卫会永久拒绝写入正确结果，面板冻结在死值上
+            //   （实测：/status 明写 Login method: Claude Max account，面板仍报 zjz-ai，v1.2.45）
+            const newIsMeasured = ['status', 'relay'].includes(provider.configSource);
+            const shouldSkipUpdate = cliType === 'claude' && currentProvider?.url &&
+                                     !provider.url && provider.isOAuth && !newIsMeasured;
             if (shouldSkipUpdate) {
               // 不覆盖，保留 switchProviderStateMachine 设置的值
             } else {

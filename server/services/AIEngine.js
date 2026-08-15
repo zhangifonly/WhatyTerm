@@ -1526,6 +1526,40 @@ ${historyText || '(空)'}
     // Tab 通过 tmux send-keys 发送给 Claude Code (Ink 应用) 不可靠，
     // 而发"继续"既能让 Claude 继续工作，也能间接接受编辑。
 
+    // === 高优先级：CLI 内置对话框开着（/status、/config、/model 等）===
+    // 这类面板是 CLI 自己的模态界面，末尾提示 "Esc to cancel"。开着时屏幕全是设置内容，
+    // 看不到任何工作进展，AI 只能判「状态不明确」而无限空转（实测挂了 20+ 分钟）。
+    // 正确动作是按 Esc 关掉对话框，让真实终端内容重新露出来，下一轮再正常判定。
+    // Esc 在此处无副作用（对话框取消，不提交任何设置变更）。
+    {
+      const dlgTail = earlyCleanContent.slice(-1200);
+      const hasEscToCancel = /Esc to cancel/i.test(dlgTail);
+      // 面板特征：settings/status/config 面板的 Tab 行，或 /model 的选择列表标题
+      const looksLikeDialog = /Settings\s+Status\s+Config/i.test(dlgTail)
+        || /^\s*(Version|Session ID|Setting sources|Login method|Auth token):/m.test(dlgTail)
+        || /Select (Model|Style|Theme)/i.test(dlgTail);
+      // 确认菜单也带 Esc 提示，必须排除——那是要选 1/2 的，另有专门分支处理
+      const isConfirmMenu = /Do you want to|Would you like to/i.test(dlgTail)
+        && /^\s*[❯>]?\s*1\.\s/m.test(dlgTail);
+      if (hasEscToCancel && looksLikeDialog && !isConfirmMenu) {
+        console.log('[AIEngine] CLI 内置对话框开着（Esc to cancel），发 Esc 关闭以恢复正常判定');
+        return {
+          currentState: 'CLI 设置对话框开着（/status 等），屏幕被面板占满无法判断工作状态',
+          workingDir: '未显示',
+          recentAction: '打开了 CLI 内置对话框',
+          needsAction: true,
+          actionType: 'key',
+          suggestedAction: 'Escape',
+          actionReason: '对话框遮挡了真实终端内容，AI 无法判断会话进展。按 Esc 取消对话框（无副作用，不提交任何设置），下一轮即可正常判定',
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI,
+          ...pluginInfo
+        };
+      }
+    }
+
     // === 高优先级：连环打断熔断器 ===
     // 自动发的"继续"落在运行中的 CLI 上会打断工作（Interrupted · What should Claude
     // do instead?）。若近屏出现 ≥2 次该痕迹，说明自动操作正在反复打断真实工作，
