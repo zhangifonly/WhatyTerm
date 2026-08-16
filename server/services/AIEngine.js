@@ -112,12 +112,184 @@ JSON 格式：
 示例输出：
 {"currentState":"用户在家目录执行了ls命令，终端空闲等待输入","workingDir":"~","recentAction":"ls","suggestion":null}`;
 
+/**
+ * 运行中计时器：CLI 工作时在 spinner 行尾显示 "… (2m 29s · ↓ 13.5k tokens)"。
+ *
+ * 三个必须兼容的点，每一个都曾漏判并导致自动"继续"打断正在跑的任务：
+ *   1. 省略号是 **U+2026 单字符 `…`**，不是三个点。原来只写 \.{2,3}，
+ *      于是所有 Claude Code 的运行计时器一律匹配不上。
+ *   2. 时长有小时级（"(13h 26m 12s)"）。原来只认 [ms]，13h 开头的直接漏。
+ *   3. 括号内可能有空格。
+ */
+const RUNNING_TIMER_RE = /(?:\.{2,3}|…)\s*\(\s*\d+\s*[hms]/i;
+
+/**
+ * 进行时 spinner：不带计时器后缀时的运行标志，如 "✽ Skedaddling…"。
+ *
+ * ⚠️ 这条只是**补充**证据，不可作为主判据——Claude Code 现在会把动词本地化
+ * （实测 "✶ 构建数学实验课程… (53m 38s)"），中文动词没有 -ing 形态，
+ * 任何 [A-Z][a-z]*ing 模式结构上都匹配不到。真正可靠的是 RUNNING_TIMER_RE。
+ *
+ * 字符集只收状态行的 spinner 符号，**不含 `⎿`**——那是工具输出的树形前缀，
+ * "⎿ Waiting…" 是已结束工具调用的输出文本，不代表 CLI 在运行。
+ * 行首锚定同样是为了排除正文里出现的同形文本。
+ */
+const RUNNING_SPINNER_RE = /(?:^|\n)\s*[✢✻✽✳✶✴✵✷·+*]\s*[A-Za-z一-龥][^\n]{0,30}?(?:…|\.{3})/;
+
+/** 屏幕尾部是否有运行迹象（计时器或进行时 spinner） */
+export function hasRunningTimer(text) {
+  return RUNNING_TIMER_RE.test(text) || RUNNING_SPINNER_RE.test(text);
+}
+
+/**
+ * CLI 是否正忙（判"能不能发文本"的唯一口径，各分支必须统一用它）。
+ *
+ * 除计时器/spinner 外还认状态栏的 esc to interrupt——CLI 重试网络错误时
+ * （"✻ 504 · Retrying in 31s · attempt 8/10"）没有 spinner 计时器，只有这句话。
+ * 只查计时器会把它判成空闲并发"继续"，正好打断 CLI 自己的重试。
+ *
+ * ⚠️ 运行中屏幕上 ❯ 输入框依然存在，所以"有提示符"永远不构成空闲证据，
+ *    必须先用本函数排除忙碌，才能走空闲分支。
+ */
+export function isCliBusy(tailText) {
+  return hasRunningTimer(tailText) || /esc to interrupt/i.test(tailText);
+}
+
+/**
+ * 状态分析的结构化输出 schema（Anthropic tool_use 格式）。
+ *
+ * 用途：把"请你返回纯JSON、以{开头、不要markdown代码块"这种**求着模型守格式**的写法，
+ * 换成 API 层面的强制约束——tool_choice 指定本工具后，模型只能按 schema 填参数，
+ * 不可能再返回 markdown 包裹、前后带解释文字或半截 JSON。
+ *
+ * _parseStatusResponse 仍然保留：非 Claude 供应商（Codex/Gemini/OpenAI）和
+ * 不支持 tools 的中转站走不了这条路，得靠它兜底。
+ */
+/**
+ * 状态判定提示词。
+ *
+ * 为什么重写：原版是一张「看到字符串 X 就输出 Y」的对照表，写死了
+ * "esc to interrupt"、"2m 29s"、"2. Yes, allow for this session" 这类界面原文。
+ * 三个已实测的失效点：
+ *   1. 计时器用的是 U+2026 单字符省略号，且有小时级时长（"(13h 26m 12s)"）；
+ *   2. CLI 会把 spinner 动词本地化（实测 "✶ 构建数学实验课程… (53m 38s)"），
+ *      任何英文字面量都匹配不到；
+ *   3. 选项 2 有三种互不相同的语义（详见下面的确认菜单一节），
+ *      原版一律让选 "2"，撞上「永久免确认」那种就是安全问题。
+ * 所以改成讲清判断目标与取证方式，让模型据此推理，而不是背字面量。
+ *
+ * ⚠️ 结构化输出（tool_use）已在 API 层强制 schema，但这里仍保留 JSON 格式说明：
+ *    非 Claude 供应商走不了 tool_use，得靠 _parseStatusResponse 从自由文本里抠。
+ */
+export function buildStatusPrompt({ cliName, cliCommand, terminalContent, progressContext = '' }) {
+  return `你在监控一个 ${cliName} 终端会话，判断此刻该不该由程序自动替用户发一次输入。
+
+# 代价不对称（这条决定了拿不准时怎么选）
+误判「空闲」→ 发出输入 → **打断正在运行的任务**，用户的工作可能因此丢失。
+误判「忙碌」→ 什么都不做 → 下个检测周期再来看，几乎无损失。
+所以：**只要有任何一点正在运行的迹象，就判忙碌**。宁可多等一轮，不可打断。
+
+# 第一步：CLI 是不是正忙？忙就直接 needsAction:false，不必往下看
+按「证据」判断，不要背界面原文（原文会变，也会被本地化成中文）：
+- 屏幕上有**带括号的累计计时器**，形如 \`… (2m 29s · ↓ 13.5k tokens)\`。
+  注意省略号可能是单字符 \`…\`；时长可能带小时（\`13h 26m 12s\`）；
+  它前面的动词可能是任何语言的任何词（\`Composing…\`、\`构建数学实验课程…\`）——
+  **认括号里的时长，不要认动词**。
+- 屏幕上有「按 esc 中断」一类的提示（esc to interrupt 及其各语言说法）。
+- CLI 正在自己重试网络错误（如 \`504 · Retrying in 31s · attempt 8/10\`）。
+  这种情况没有计时器，但插话会打断它自己的重试。
+- 状态栏显示后台任务未完（\`N shells still running\`、\`· N shell ·\`、\`← N agents\`），
+  或 CLI 最近明确说了「等通知 / 等它跑完 / 不空转」。
+  → needsAction:false，suggestion 说明「后台任务运行中，发继续只会空转」。
+
+⚠️ 运行中屏幕上**输入框（❯ / >）依然存在**，所以「看到提示符」永远不能作为空闲证据。
+   必须先排除上面全部忙碌迹象，才允许判空闲。
+⚠️ \`accept edits on\`、\`shift+tab to cycle\` 是**常驻模式指示器**（底部状态栏一直挂着），
+   不代表有东西在等你接受，不要因此判需要操作。
+例外：若同时弹出了确认菜单，确认菜单优先（见下一节）。
+
+# 第二步：有没有在等你选项？（确认菜单）
+只有明确列出编号选项、且在等输入时才算。actionType:"select"，suggestedAction 填编号。
+**选哪个由选项 2 的语义决定，这三种后果完全不同，别一律选 2：**
+| 选项 2 的内容 | 选 | 理由 |
+|---|---|---|
+| \`Yes, allow for this session\`（仅本次会话允许） | \`2\` | 省掉后续重复确认，范围限于本会话 |
+| \`Yes, and don't ask again ...\`（不再询问 / 永久允许） | \`1\` | 选 2 会给整类命令永久免确认，越权，必须避免 |
+| \`No\` 或其他否定项 | \`1\` | 选 2 等于拒绝执行，会把任务否掉 |
+若选项 2 看不清或不属以上任何一种，选 \`1\`（\`1. Yes\` 是最保守的放行）。
+计划/方案执行确认（选项 1 形如 \`Yes, and auto-accept edits\`）→ 选 \`1\`。
+
+# 第三步：确实空闲时，该不该推一把？
+- 若屏幕呈现「反复发继续 → CLI 只回一句短话（"好的""在""没有其他任务"）」的循环，
+  说明活已经干完了，再发就是空转 → needsAction:false，
+  suggestion 说明「任务已完成，无需继续发送指令」。
+- 处在写代码/改文件/写文档这类**还没收尾的开发工作**中间 →
+  needsAction:true, actionType:"text_input", suggestedAction:"继续"。
+- 处在部署、起服务、跑测试这类**需要人看结果**的阶段（npm run、localhost、测试输出）→
+  needsAction:false，suggestion 提醒用户自己检查。
+- 掉回普通 shell 提示符（\`$\`/\`%\`，不是 ${cliName} 的 \`>\`），说明 CLI 已退出 →
+  needsAction:true, actionType:"shell_command", suggestedAction:"${cliCommand}"。
+- ${cliName} 自身崩溃且卡死不动 → actionType:"text_input", suggestedAction:"/quit"。
+- 看不出在干什么、或信息不足（比如刚启动的欢迎屏、无历史可判）→
+  needsAction:false，**不要猜**。
+
+# 输出
+字段：currentState（状态描述）、workingDir（从终端提取，没有就填"未显示"）、
+recentAction（最近操作）、needsAction（布尔）、
+actionType（select/text_input/shell_command/single_char/suggestion/warning/none）、
+suggestedAction（要发送的内容，无则空）、actionReason（理由）、suggestion（给用户看的提示，无则空）。
+needsAction 为 false 时 actionType 填 "none"。
+
+终端内容：
+---
+${terminalContent || '(空)'}
+---
+${progressContext}
+只输出 JSON（不要 markdown 代码块），以 { 开头：`;
+}
+
+export const STATUS_TOOL = {
+  name: 'report_terminal_status',
+  description: '报告终端当前状态与建议的自动操作',
+  input_schema: {
+    type: 'object',
+    properties: {
+      currentState: { type: 'string', description: '终端当前状态的简短描述' },
+      workingDir: { type: 'string', description: '工作目录路径，未显示则填"未显示"' },
+      recentAction: { type: 'string', description: '最近执行的命令或动作' },
+      needsAction: { type: 'boolean', description: '是否需要自动操作介入' },
+      actionType: {
+        type: 'string',
+        // ⚠️ 这份 enum 必须覆盖下游所有分支实际会判的值，否则模型被 schema 卡住，
+        //    只能挑一个语义不对的凑数。下游现有判定：select/text_input/single_char/
+        //    suggestion/warning，加上提示词里写的 confirm/shell_command/none。
+        enum: ['confirm', 'select', 'text_input', 'shell_command',
+               'single_char', 'suggestion', 'warning', 'key', 'none'],
+        description: '动作类型；needsAction 为 false 时填 none'
+      },
+      // ⚠️ 一律用 type:'string'，不用 ['string','null'] 联合类型：
+      //    联合类型在部分中转站的 schema 校验里会直接 400，而空动作用空串表达足够
+      //    （下游判的是 !action，空串同样为假）。
+      suggestedAction: {
+        type: 'string',
+        description: '具体要发送的内容（如 "2"、"继续"、"/quit"）；无动作时填空字符串'
+      },
+      actionReason: { type: 'string', description: '为什么建议这个动作，无则空字符串' },
+      suggestion: { type: 'string', description: '给用户看的提示，无则空字符串' }
+    },
+    required: ['currentState', 'needsAction', 'actionType']
+  }
+};
+
 export class AIEngine {
   constructor() {
     this.settings = this._loadSettings();
     this.failoverConfig = null;
     this._failoverConfigLoaded = false;
     this._loadFailoverConfig();
+
+    // 已探明不支持 tool_use 的供应商 apiUrl 集合（结构化输出降级用，见 _callClaudeApi）
+    this._noToolsProviders = new Set();
 
     // AI 调用并发控制（防止多 Agent 同时调用触发限流）
     this._aiConcurrency = 0;
@@ -270,7 +442,16 @@ export class AIEngine {
     }
 
     // 4. 回退：使用 ai-settings.json 中的直接配置（旧格式）
+    // ⚠️ v1.2.48：这条回退曾长期掩盖故障。_providerId 指向的供应商在
+    //    ProviderService 和 CC Switch 里都查不到时（用户在 CC Switch 里删了
+    //    再重建，ID 会变），上面两步静默失败，这里就落到 ai-settings.json 里
+    //    内嵌的**陈旧凭证**上——那份 key 早已失效，于是每次分析都 401，
+    //    日志只报"无效的令牌"，看不出根因是引用失效。故这里显式告警。
     if (savedSettings && savedSettings.claude?.apiUrl) {
+      if (savedProviderId) {
+        console.warn(`[AIEngine] ⚠️ 供应商引用 ${savedProviderId} 在 ProviderService/CC Switch 中均未找到，`
+          + `已回退到 ai-settings.json 内嵌凭证——该凭证可能已失效，请在设置中重新选择供应商`);
+      }
       console.log('[AIEngine] 使用 ai-settings.json 直接配置');
       return savedSettings;
     }
@@ -647,13 +828,19 @@ export class AIEngine {
     }
   }
 
-  // 通用 API 调用方法，根据 apiType 选择不同格式
-  async _callApi(prompt) {
+  /**
+   * 通用 API 调用方法，根据 apiType 选择不同格式
+   * @param {string} prompt - 提示词
+   * @param {object} callOpts - 调用选项
+   * @param {boolean} callOpts.structured - 是否用 tool_use 强制结构化输出（仅 Claude 格式支持，
+   *        其他供应商忽略此项，继续靠 _parseStatusResponse 从自由文本里抠 JSON）
+   */
+  async _callApi(prompt, callOpts = {}) {
     const apiType = this.settings.apiType || 'openai';
 
     if (apiType === 'claude') {
       const config = this.settings.claude || this.settings.openai;
-      return this._callClaudeApi(prompt, config);
+      return this._callClaudeApi(prompt, config, callOpts);
     } else if (apiType === 'codex') {
       // Codex 使用 OpenAI Responses API 格式
       const config = this.settings.codex || this.settings.openai;
@@ -667,7 +854,7 @@ export class AIEngine {
       // 默认使用 Claude API 格式（因为 OpenCode 主要支持 Claude/OpenAI）
       const config = this.settings.opencode || this.settings.claude || this.settings.openai;
       if (config.apiUrl && config.apiUrl.includes('anthropic')) {
-        return this._callClaudeApi(prompt, config);
+        return this._callClaudeApi(prompt, config, callOpts);
       } else {
         return this._callOpenAiApi(prompt, config);
       }
@@ -684,17 +871,19 @@ export class AIEngine {
    * @param {object} options - 可选参数
    * @param {string} options.sessionId - 会话 ID（用于 token 统计）
    * @param {string} options.requestType - 请求类型（用于 token 统计）
+   * @param {boolean} options.structured - 透传给 _callApi，Claude 格式下强制 tool_use 输出
    * @returns {string} 返回 AI 响应文本（保持向后兼容）
    */
   async _callApiWithFailover(prompt, options = {}) {
-    const { sessionId, requestType = 'analyze' } = options;
+    const { sessionId, requestType = 'analyze', structured = false } = options;
+    const callOpts = { structured };
 
     // 确保故障转移配置已加载
     await this._ensureFailoverConfigLoaded();
 
     // 如果未启用故障转移，直接调用
     if (!this.failoverConfig || !this.failoverConfig.enabled) {
-      const response = await this._callApi(prompt);
+      const response = await this._callApi(prompt, callOpts);
       // 记录 token 统计（不影响原有逻辑）
       this._recordTokenUsage(response, sessionId, requestType);
       // 返回文本保持兼容
@@ -710,7 +899,7 @@ export class AIEngine {
         // 尝试调用当前供应商
         const currentProvider = this.getCurrentProviderInfo();
         console.log(`[AIEngine] 尝试调用供应商 (${attempt + 1}/${maxRetries}): ${currentProvider?.name || 'unknown'}`);
-        const response = await this._callApi(prompt);
+        const response = await this._callApi(prompt, callOpts);
 
         // 如果成功且不是第一次尝试，说明发生了故障转移
         if (attempt > 0) {
@@ -880,7 +1069,7 @@ export class AIEngine {
   }
 
   // Claude 原生 API 调用（带 Claude Code 伪装）
-  async _callClaudeApi(prompt, config) {
+  async _callClaudeApi(prompt, config, callOpts = {}) {
     if (!config.apiUrl || !config.apiKey) {
       throw new Error('Claude API 未配置，请先在 ccswitch 中添加供应商');
     }
@@ -888,13 +1077,18 @@ export class AIEngine {
     // Claude 列表里的服务器统一使用伪装模式
     console.log('[AIEngine] 使用 Claude Code 伪装模式');
 
+    // 该供应商已探明不支持 tools 就别再试探（每次试探都白付一次 400 的往返）
+    if (callOpts.structured && this._noToolsProviders.has(config.apiUrl)) {
+      callOpts = { ...callOpts, structured: false };
+    }
+
     // 获取要尝试的模型列表
     const modelsToTry = this._getModelsToTry(config.model);
     let lastError = null;
 
     for (const model of modelsToTry) {
       try {
-        const result = await this._callClaudeApiWithModel(prompt, config, model);
+        const result = await this._callClaudeApiWithModel(prompt, config, model, callOpts);
         // 成功后更新当前使用的模型（用于下次优先使用）
         if (model !== modelsToTry[0]) {
           console.log(`[AIEngine] 模型降级成功: ${modelsToTry[0]} -> ${model}`);
@@ -962,7 +1156,7 @@ export class AIEngine {
   }
 
   // 使用指定模型调用 Claude API
-  async _callClaudeApiWithModel(prompt, config, model) {
+  async _callClaudeApiWithModel(prompt, config, model, callOpts = {}) {
     // 构建请求头（伪装 Claude Code）
     const headers = {
       'Content-Type': 'application/json',
@@ -974,13 +1168,22 @@ export class AIEngine {
     };
 
     // 构建请求体（伪装 Claude Code）
+    // ⚠️ max_tokens 兜底抬到 1024：原来是 500，模型一旦多写两句解释，JSON 就被
+    //    截断在半路，_parseStatusResponse 只能整条丢弃 → 表现为"AI 分析无结果"。
     const requestBody = {
       model: model,
-      max_tokens: this.settings.maxTokens || 500,
+      max_tokens: Math.max(this.settings.maxTokens || 0, 1024),
       messages: [{ role: 'user', content: prompt }],
       system: [{ type: 'text', text: CLAUDE_CODE_FAKE.systemPrompt }],
       metadata: { user_id: generateClaudeCodeUserId() }
     };
+
+    // 结构化输出：用 tool_choice 把模型钉死在 schema 上，从"求它别加 markdown"
+    // 变成 API 层面不可能加。不支持 tools 的中转站会报错或忽略，下面按 text 兜底。
+    if (callOpts.structured) {
+      requestBody.tools = [STATUS_TOOL];
+      requestBody.tool_choice = { type: 'tool', name: STATUS_TOOL.name };
+    }
 
     const fetchOptions = {
       method: 'POST',
@@ -991,20 +1194,40 @@ export class AIEngine {
     // 设置 dispatcher：优先使用代理，否则使用忽略 SSL 验证的 Agent
     fetchOptions.dispatcher = proxyAgent || insecureAgent;
 
-    console.log(`[AIEngine] 调用 Claude API，模型: ${model}`);
+    console.log(`[AIEngine] 调用 Claude API，模型: ${model}${callOpts.structured ? '（结构化输出）' : ''}`);
     const response = await fetch(config.apiUrl, fetchOptions);
 
     if (!response.ok) {
       const error = await response.text();
+      // 中转站不支持 tools 时会 400/422，这里去掉 tools 重试一次再放弃——
+      // 否则一个不支持 tools 的供应商会让整个状态分析彻底不可用。
+      if (callOpts.structured && (response.status === 400 || response.status === 422)) {
+        // ⚠️ 按 apiUrl 记，不能记在 engine 上：故障转移会换供应商，
+        //    一个破中转站若把全局开关关掉，好供应商也跟着退化成自由文本。
+        console.warn(`[AIEngine] 供应商不支持 tools（${response.status}），回退为自由文本模式: ${config.apiUrl}`);
+        this._noToolsProviders.add(config.apiUrl);
+        return this._callClaudeApiWithModel(prompt, config, model, { ...callOpts, structured: false });
+      }
       throw new Error(`Claude API 请求失败: ${response.status} ${error}`);
     }
 
     const data = await response.json();
-    // 返回包含 text 和 usage 的对象
+
+    // 优先取 tool_use 的入参（结构化路径），拿不到再退回普通文本块。
+    // 序列化成 JSON 字符串是为了让下游 _parseStatusResponse 完全不用改：
+    // 它本来就是"从字符串里抠 JSON"，给它一个纯净 JSON 是最好情况。
+    const toolBlock = Array.isArray(data.content)
+      ? data.content.find(b => b?.type === 'tool_use' && b?.input)
+      : null;
+    const textBlock = Array.isArray(data.content)
+      ? data.content.find(b => b?.type === 'text' && b?.text)
+      : null;
+
     return {
-      text: data.content?.[0]?.text || null,
+      text: toolBlock ? JSON.stringify(toolBlock.input) : (textBlock?.text || data.content?.[0]?.text || null),
       usage: data.usage || null,
-      model: data.model || model
+      model: data.model || model,
+      structured: !!toolBlock
     };
   }
 
@@ -1482,7 +1705,12 @@ ${historyText || '(空)'}
     const hasOption2YesEarly = /2\.\s*Yes/i.test(earlyLast3000);
     // 检测选项 2 是否是"永久允许某命令模式"（don't ask again for: 具体命令）
     // 这种情况不应自动选 2，因为会永久跳过该命令的确认
-    const isOption2PermanentAllowEarly = /2\.\s*Yes,\s*and\s+don.t\s+ask\s+again\s+for:/i.test(earlyLast3000);
+    // ⚠️ 冒号必须可选：Claude Code 有两种措辞——
+    //   带冒号 "2. Yes, and don't ask again for: npm run build"（针对具体命令）
+    //   无冒号 "2. Yes, and don't ask again for similar commands in /path/to/proj"（针对整类命令，更危险）
+    // 原正则写死了冒号，无冒号那种一律漏判 → 被当成普通"允许本次会话"自动选 2，
+    // 于是给整个项目目录里的同类命令永久免确认。实测 Ghidra 会话就中过这一枪。
+    const isOption2PermanentAllowEarly = /2\.\s*Yes,\s*and\s+don.t\s+ask\s+again\s+for\b/i.test(earlyLast3000);
     // 长说明型选项菜单兜底：标题问号与选项间隔大段说明文字（如 workflow 确认
     // "Run a dynamic workflow?" ... "1. Yes, run it / 2. View raw script / 3. No"），
     // isGenericConfirmEarly 的 100 字符窗口覆盖不到。用"1. Yes 选项 + 2. 选项 + 底部
@@ -1628,7 +1856,7 @@ ${historyText || '(空)'}
       const idleTail = earlyCleanContent.slice(-800);
       const idleLast6 = earlyCleanContent.split('\n').slice(-6).join('\n');
       const hasIdlePromptHere = /^[❯>]\s*$/m.test(idleLast6) || /\n[❯>]\s*$/m.test(idleLast6);
-      const isRunningHere = /\.{2,3}\s*\(\d+[ms]/i.test(idleTail) || /esc to interrupt/i.test(idleLast6);
+      const isRunningHere = RUNNING_TIMER_RE.test(idleTail) || /esc to interrupt/i.test(idleLast6);
       // AI 主动表示"待命/无事可做/需要任务/已完成在等指示"的措辞
       const awaitingTask = /待命中|需要具体任务|需要(您|你)?(提供|给出|明确)(具体)?任务|没有(更多|可执行的)?任务|暂无任务|等待(您|你)?(的)?(指示|指令|下一步|进一步)(说明|要求)?|请(告诉|提供|给).{0,8}(任务|需求|指示)|awaiting (your )?(instructions?|task)|no (further )?task|standing by|let me know what|what would you like (me )?to/i.test(idleTail);
       if (hasIdlePromptHere && !isRunningHere && awaitingTask) {
@@ -1659,7 +1887,7 @@ ${historyText || '(空)'}
       // 必须是空闲状态（有提示符 ❯/> 且不在运行中）
       const directionLast5 = earlyCleanContent.split('\n').slice(-6).join('\n');
       const hasIdlePrompt = /^[❯>]\s*$/m.test(directionLast5) || /\n[❯>]\s*$/m.test(directionLast5);
-      const isRunningNow = /\.{2,3}\s*\(\d+[ms]/i.test(earlyCleanContent.slice(-500)) || /esc to interrupt/i.test(directionLast5);
+      const isRunningNow = RUNNING_TIMER_RE.test(earlyCleanContent.slice(-500)) || /esc to interrupt/i.test(directionLast5);
       // "下一步方向/选项"提示语 + 至少两个编号项 + 征询选择的问句
       const hasDirectionHeader = /(下一步|接下来|后续|可选)(可以|的)?(方向|选项|工作|功能|计划|步骤)|next steps?|下一步可选/i.test(directionLast1500);
       const hasNumberedOptions = (directionLast1500.match(/^\s*\d+\.\s+\S/gm) || []).length >= 2;
@@ -1915,10 +2143,25 @@ ${historyText || '(空)'}
                             /1\.\s*Yes/i.test(cleanContent);
 
     // 检查是否有 accept edits 等待状态（Claude Code 完成任务后等待用户接受编辑）
-    // 重要：只检测最后 5 行，避免匹配到历史滚动缓冲区里的旧提示符
-    const last5Lines = cleanContent.split('\n').slice(-5).join('\n');
+    // 重要：只检测末尾若干行，避免匹配到历史滚动缓冲区里的旧提示符。
+    // ⚠️ 必须先滤掉空行再取末 5 行：tmux capture-pane 会把 pane 补齐到固定高度，
+    //    屏幕不满时尾部是一串空行（实测 38 行的屏幕尾部 8 行全空）。原来直接
+    //    slice(-5) 取到的全是空行，❯ 提示符根本不在窗口里 → hasIdlePromptForAccept
+    //    恒为 false，进而让下面的 isWaitingForAccept 恒为 true。
+    const nonEmptyLines = cleanContent.split('\n').filter(l => l.trim());
+    const last5Lines = nonEmptyLines.slice(-5).join('\n');
     const hasIdlePromptForAccept = /^[❯>]\s*$/m.test(last5Lines) || /\n[❯>]\s*$/m.test(last5Lines);
-    const isWaitingForAccept = !hasIdlePromptForAccept && /accept edits on|shift\+tab to cycle/i.test(cleanContent);
+    // ⚠️ "accept edits on" 是**常驻模式指示器**（底部状态栏一直挂着，shift+tab 切换），
+    //    不代表"有编辑在等你接受"。把它当等待信号会压掉真正的运行证据：
+    //    isWaitingForAccept 为真时下方 hasRunningIndicator/hasRecentRuntime 都被否决，
+    //    于是「accept edits on + esc to interrupt」的运行中屏幕被判成"等待接受编辑"
+    //    并发出"继续"，直接打断正在跑的任务（实测 Composing… 13h 的会话中过枪）。
+    //    真正的等待接受编辑，屏上会有 Claude Code 的编辑确认框，那由上面的确认分支处理。
+    //    所以这里只在**没有任何运行迹象**时才认定为等待接受。
+    const hasAnyRunningHint = /esc to interrupt/i.test(cleanContent)
+      || RUNNING_TIMER_RE.test(fullyCleanContent.slice(-500));
+    const isWaitingForAccept = !hasIdlePromptForAccept && !hasAnyRunningHint
+      && /accept edits on|shift\+tab to cycle/i.test(cleanContent);
     // 检查是否有"<过去式动词> for <时长>"任务完成标志。Claude Code 每轮结束随机用
     // 烹饪动词（Brewed/Baked/Sautéed/Cooked/Simmered...），运行中则是进行时
     // "Sautéing… (10s · esc to interrupt)"。只认 Brewed 曾导致 "Sautéed for 10m 29s"
@@ -1942,8 +2185,8 @@ ${historyText || '(空)'}
       // 进行时 spinner（"✢ Frolicking…"）可能不带计时器后缀也表示运行中——
       // 注意运行中屏幕上输入框 ❯ 依然存在，"有空闲提示符"不构成空闲证据，
       // 进行时(…ing) vs 过去式(Xxxed for Ys) 才是运行/完成的可靠区分
-      const isActivelyRunning = /\.{2,3}\s*\(\d+[ms]/i.test(last500) ||
-        /[✢✻✽✳·+*]\s*[A-Z][a-zé]*ing(…|\.{3})/.test(last500);
+      const isActivelyRunning = RUNNING_TIMER_RE.test(last500) ||
+        RUNNING_SPINNER_RE.test(last500);
       const hasRunningIndicator = !hasIdlePromptForAccept && (
         /esc to interrupt/i.test(cleanContent) ||
         /ctrl\+t to show todos/i.test(cleanContent)
@@ -2054,7 +2297,7 @@ ${historyText || '(空)'}
       // 使用更彻底的 ANSI 清理，避免光标移动等序列破坏运行状态文本
       const fullyClean = fullyCleanContent;
       const last500 = fullyClean.slice(-500);
-      const isActivelyRunning = /\.{2,3}\s*\(\d+[ms]/i.test(last500);
+      const isActivelyRunning = RUNNING_TIMER_RE.test(last500);
       if (isActivelyRunning) {
         console.log(`[AIEngine] 检测到活跃运行状态，跳过 accept edits 处理`);
         return {
@@ -2291,7 +2534,7 @@ ${historyText || '(空)'}
     if (hasPrompt && /accept edits/i.test(cleanContent) && !isEditConfirmMode) {
       // 重要：先检查是否正在运行中（使用 fullyCleanContent 避免 ANSI 序列干扰）
       const last500 = fullyCleanContent.slice(-500);
-      const isActivelyRunning = /\.{2,3}\s*\(\d+[ms]/i.test(last500);
+      const isActivelyRunning = isCliBusy(last500);
       if (isActivelyRunning) {
         console.log(`[AIEngine] 检测到活跃运行状态，跳过空闲处理`);
         return {
@@ -2355,7 +2598,13 @@ ${historyText || '(空)'}
 
     if (hasInputPrompt) {
       // 重要：先检查是否正在运行中（使用 fullyCleanContent 避免 ANSI 序列干扰）
-      const isActivelyRunning = /\.{2,3}\s*\(\d+[ms]/i.test(fullyCleanContent.slice(-800));
+      // ⚠️ 运行中屏幕上 ❯ 输入框**依然存在**，所以"有提示符"不构成空闲证据，
+      //    必须把运行证据查全再决定。除计时器外还要认 esc to interrupt：
+      //    CLI 重试网络错误时（"✻ 504 · Retrying in 31s · attempt 8/10"）没有
+      //    spinner 计时器，只有状态栏那句 esc to interrupt，原来这里只查计时器
+      //    → 判成"空闲"发"继续"，正好打断 CLI 自己的重试。
+      //    这也与 server/index.js 末端保护的口径统一（那边 esc 无条件拦截）。
+      const isActivelyRunning = isCliBusy(fullyCleanContent.slice(-800));
       if (isActivelyRunning) {
         console.log('[AIEngine] 检测到活跃运行状态，跳过空闲处理');
         return {
@@ -2704,45 +2953,20 @@ ${historyText || '(空)'}
     // 需要AI分析
     const cliName = getCliName(aiType);
     const cliCommand = getCliCommand(aiType);
-    const prompt = `分析终端内容，返回纯JSON（不要markdown代码块）。
-
-JSON格式：
-{
-  "currentState": "状态描述",
-  "workingDir": "工作目录（从终端提取，无则填'未显示'）",
-  "recentAction": "最近操作",
-  "needsAction": true/false,
-  "actionType": "confirm/select/text_input/shell_command/none",
-  "suggestedAction": "建议操作",
-  "actionReason": "原因",
-  "suggestion": "其他建议"
-}
-
-判断优先级（按顺序）：
-1. 程序运行中（"esc to interrupt"或运行时间如"2m 29s"）→ needsAction:false
-1.5 后台任务等待中（状态栏有"N shells still running"/"· N shell ·"/"← N agents"，或最近回复明确说"等通知/不空转/后台任务进行中/等它跑完"）→ needsAction:false, suggestion:"后台任务运行中，CLI 在等完成通知，发继续只会空转"。注意：若同时弹出确认菜单则确认优先，不适用本条
-2. 质量调查/评分界面 → needsAction:false
-3. ${cliName}确认界面（"Do you want to make/run"+"1. Yes"+"2. Yes, allow for this session"）→ needsAction:true, actionType:"select", suggestedAction:"2"
-4. 普通确认界面（"Do you want to proceed?"+"1. Yes"）→ needsAction:true, actionType:"select", suggestedAction:"1"
-5. ${cliName}致命错误（"error/fatal/crashed"且卡住）→ needsAction:true, actionType:"text_input", suggestedAction:"/quit"
-6. Shell命令行（普通shell提示符$/%，非${cliName}的">"）→ needsAction:true, actionType:"shell_command", suggestedAction:"${cliCommand}"
-7. ${cliName}空闲（">"提示符，无运行标志）：
-   - 如果终端显示重复的"继续"→短回复（如"在。""好的""没有其他任务"等）循环模式 → needsAction:false, suggestion:"Claude Code 已完成任务，无需继续发送指令"
-   - 开发阶段（代码/文件/翻译/文档/类型定义）→ needsAction:true, actionType:"text_input", suggestedAction:"继续"
-   - 部署/脚本阶段（npm run/启动/测试/localhost）→ needsAction:false, suggestion:"提醒用户检查"
-8. 其他确认提示（[Y/n]、数字选项）→ needsAction:true, actionType:"confirm/select"
-
-终端内容：
----
-${terminalContent || '(空)'}
----
-${this._buildProgressContext(projectContext)}
-直接返回JSON，以{开头：`;
+    const prompt = buildStatusPrompt({
+      cliName,
+      cliCommand,
+      terminalContent,
+      progressContext: this._buildProgressContext(projectContext)
+    });
 
     try {
+      // structured: 走 tool_use 强制 schema（仅 Claude 格式生效，其他供应商自动忽略）。
+      // 具体供应商是否支持由 _callClaudeApi 按 apiUrl 判断并降级，这里无条件请求即可。
       const content = await this._callApiWithFailover(prompt, {
         sessionId,
-        requestType: 'analyzeStatus'
+        requestType: 'analyzeStatus',
+        structured: true
       });
 
       if (!content) {

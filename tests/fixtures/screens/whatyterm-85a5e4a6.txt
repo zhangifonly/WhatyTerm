@@ -1,0 +1,37 @@
+     根路径=000
+     dist/assets/BoundaryLayerExperiment-DMJ0_VtT.js:1
+     dist/assets/index-BeN52urg.js:2
+
+[38;5;231m⏺[39m The bundle contains the route correctly; preview just died. Restarting:
+
+[38;5;114m⏺[39m [1mBash[0m((nohup npx vite preview --port 4199 --strictPort > /tmp/prev338.log 2>&1 < /dev/null &) ; sleep 14; curl -s --noproxy
+      '*' -o /dev/null -w "preview=%{http_code}\…)
+[38;5;246m  ⎿  [39mpreview=200
+       ➜  Local:   [94m]8;id=u54juh;http://localhost:4199/\http://localhost:4199/[39m]8;;\
+       ➜  Network: use --host to expose
+
+[38;5;114m⏺[39m [1mBash[0m(cd /tmp/pptr && (nohup node shot338.mjs profile base /tmp/v338-prof.png > /tmp/log-b1.txt 2>&1 &) ; sleep 4; (nohup node
+      shot338.mjs walllaw base /tmp/v338-wall…)
+[38;5;246m  ⎿  [39mlaunched
+
+[38;5;114m⏺[39m [1mBash[0m(until [ -f /tmp/v338-prof.png ] && [ -f /tmp/v338-wall.png ] && [ -f /tmp/v338-fric.png ]; do sleep 4; done; sleep 2;
+      grep -h "ERRS\|OK" /tmp/log-b1.txt /tmp/lo…)
+[38;5;246m  ⎿  Running in the background (↓ to manage)[39m
+
+[38;5;211m✻[39m [38;5;211m504  (request id: 20260816154213441011918Q9lTUVfM)[38;5;246m · Retrying in 31s · attempt 8/10[39m
+
+[38;5;244m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;5;246m❯ [39m
+[38;5;244m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;147m⏵⏵ accept edits on[38;5;246m · [38;5;44m4 shells[38;5;246m · esc to interrupt · ctrl+t to show tasks · ← 4 agents · ↓ to manage[39m     [38;5;153m◎ /goal active (14h)[39m
+
+
+
+
+
+
+
+
+
+
+

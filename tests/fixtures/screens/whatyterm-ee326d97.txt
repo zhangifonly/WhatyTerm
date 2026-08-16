@@ -1,0 +1,40 @@
+
+
+[38;5;114m⏺[39m [1mUpdate[0m(]8;id=1ixxko7;file:///Users/zhangzhen/Documents/ClaudeCode/AetherEDA/docs/roadmap-agent-native-eda.md\docs/roadmap-agent-native-eda.md]8;;\)
+[38;5;246m  ⎿  [39mAdded [1m4[0m lines, removed [1m1[0m line
+     [2m[38;5;231m 138 [0m[38;5;231m [39m
+     [2m[38;5;231m 139 [0m[38;5;231m ## 四、差距清单：离「全部工具给 Agent 用」还缺什么[39m
+     [2m[38;5;231m 140 [0m[38;5;231m [39m
+     [38;5;167m[48;5;52m 141 -[38;5;231m| 缺口 | 现状 | 目标 |                                                                                       [39m[49m
+     [38;5;77m[48;5;22m 141 +[38;5;231m七项已于 2026-08-14 全部落地。保留「原现状」一列是为了让后来人看见                                           [39m[49m
+     [38;5;77m[48;5;22m 142 +[38;5;231m每项当初卡在哪——删掉它，这张表就只剩一串对勾，读不出为什么要做。                                             [39m[49m
+     [38;5;77m[48;5;22m 143 +[38;5;231m                                                                                                             [39m[49m
+     [38;5;77m[48;5;22m 144 +[38;5;231m| 缺口 | 原现状 | 落地情况 |                                                                                 [39m[49m
+     [2m[38;5;231m 145 [0m[38;5;231m |---|---|---|[39m
+     [2m[38;5;231m 146 [0m[38;5;231m | ~~长跑 checkpoint~~ | ~~中途被砍即全部作废~~ | ✅ 已实现：三阶段 ODB 快照 + `params.resume` 续跑 |[39m
+     [2m[38;5;231m 147 [0m[38;5;231m | ~~成本预估~~ | ~~只有超时上限，无预期时长~~ | ✅ `GET /estimate?netlist=…`：从真实历史样本给同量级区间；样[39m
+     [2m[38;5;231m     [0m[38;5;231m 本不足或跨量级即明说不给数字，不外推 |[39m
+
+  [38;5;246mThought for [1m47s[0m[38;5;246m, searched for [1m3[0m[38;5;246m patterns, ran [1m5[0m[38;5;246m shell commands [39m
+
+[38;5;231m⏺[39m 编排引擎的重试是[1m原样重跑 N 次[0m——完全不看诊断信息。对确定性失败（输入缺失、参数非法）这是纯浪费：重试三次得到三次同样的错。而诊
+  断器已经能分辨错误类型，只是没人用它做决策。
+
+[38;5;246m⏺[39m 查看 diagnose 函数实现
+[38;5;246m  ⎿  $ grep -n "func diagnose\|func findErr" services/openroad-svc/main.go; echo "---"; sed -n "$(grep -n 'func diagnose' [39m
+     [38;5;246mservices/openroad-svc/main.go | cut -d: -f1),+45p" services/openroad-svc/main.go[39m
+
+[38;5;153m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m [1m[38;5;153mBash command[0m
+
+   grep -n "func diagnose\|func findErr" services/openroad-svc/main.go; echo "---"; sed -n "$(grep -n 'func diagnose'
+   services/openroad-svc/main.go | cut -d: -f1),+45p" services/openroad-svc/main.go
+   [38;5;246m查看 diagnose 函数实现[39m
+
+ Parse error
+
+ Do you want to proceed?
+ [38;5;153m❯[39m [38;5;246m1. [38;5;153mYes[39m
+   [38;5;246m2. [39mNo
+
+ [38;5;246mEsc to cancel · Tab to amend · ctrl+e to explain[39m

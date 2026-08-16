@@ -1,0 +1,39 @@
+
+[38;5;114m⏺[39m [1mBash[0m(cd /Users/zhangzhen/Documents/ClaudeCode/Ghidra
+      rm -rf projects __pycache__ /tmp/rg_t /tmp/rg_out…)
+[38;5;246m [39m [38;5;246m⎿[39m [38;5;246m [39m样本:
+     ./bare
+     ./sub/broken.bin
+     [2m…[0m [2m+26[0m [2mlines[0m [2m(ctrl+o[0m [2mto[0m [2mexpand)[0m
+[38;5;246m [39m [38;5;246m⎿[39m [38;5;246m (timeout[39m [38;5;246m10m)[39m
+
+[38;5;231m⏺[39m 五种压缩格式全解开、损坏文件被隔离、其余照常完成。注意 [38;5;153msub/pack/pack[39m 是 [38;5;153m.Z[39m 解出来的（[38;5;153mpack.Z[39m → [38;5;153mpack[39m），说明 [38;5;153m.Z[39m 路径也通。
+
+  清理并确认最终状态：
+
+[38;5;246m⏺[39m [1mBash[0m(cd /Users/zhangzhen/Documents/ClaudeCode/Ghidra
+      rm -rf /tmp/rg_t /tmp/rg_out projects __pycache__…)
+[38;5;246m [39m [38;5;246m⎿[39m [38;5;246m Waiting…[39m
+
+[38;5;153m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m [1m[38;5;153mBash[0m [1m[38;5;153mcommand[0m
+
+   cd /Users/zhangzhen/Documents/ClaudeCode/Ghidra
+   rm -rf /tmp/rg_t /tmp/rg_out projects __pycache__
+   echo "════ 文档与代码一致性（应无输出）════"
+   grep -rn "\-\-force\|默认 5GB\|预算 5GB" README.md 使用说明.md ~/.claude/skills/ghidra/SKILL.md 2>/dev/null || echo "✅
+   无过期描述"
+   echo; echo "════ 语法 ════"
+   ./pyghidra-env/bin/python -c "import ast; [ast.parse(open(f).read()) for f in
+   ['ghidra_cli.py','ghidra_batch.py','ghidra_extract.py']]; print('✅ 三个脚本OK')"
+   [38;5;246m清理并做最终一致性检查[39m
+
+ This command requires approval
+
+ Do you want to proceed?
+ [38;5;153m❯[39m [38;5;246m1.[39m [38;5;153mYes[39m
+   [38;5;246m2.[39m Yes, and don't ask again for similar commands in [1m/Users/zhangzhen/Documents/ClaudeCode/Ghidra[0m
+   [38;5;246m3.[39m No
+
+ [38;5;246mEsc[39m [38;5;246mto[39m [38;5;246mcancel[39m [38;5;246m·[39m [38;5;246mTab[39m [38;5;246mto[39m [38;5;246mamend[39m [38;5;246m·[39m [38;5;246mctrl+e[39m [38;5;246mto[39m [38;5;246mexplain[39m
+

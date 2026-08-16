@@ -1,0 +1,40 @@
+[38;5;114m⏺[39m [1mBash[0m(ssh us-lax02 "cd /root/chemaiforge && npm ci --no-audit --no-fund 2>&1 | tail -2 && npx prisma generate 2>&1 | grep -i
+      'generated' && npm run build 2>&1 | tail…)
+[38;5;246m  ⎿  [39madded 619 packages in 44s
+     ✔ Generated Prisma Client (v5.22.0) to ./node_modules/@prisma/client in 242ms
+     ○  (Static)   prerendered as static content
+     [2m… +6 lines (ctrl+o to expand)[0m
+[38;5;246m  ⎿  (timeout 10m)[39m
+
+[38;5;114m⏺[39m [1mBash[0m(sleep 6
+      echo "=== pm2 ==="; ssh us-lax02 "pm2 jlist | python3 -c \"import
+      sys,json;[print(p['name'],p['pm2_env']['status'],'restarts=',p['pm2_env']['restart_tim…)
+[38;5;246m  ⎿  [39m=== pm2 ===
+     chemaiforge online restarts= 2
+     === 首页 ===
+     [2m… +4 lines (ctrl+o to expand)[0m
+[38;5;246m  ⎿  (timeout 3m)[39m
+
+[38;5;231m⏺[39m 部署完成，服务 online（第 2 次重启），线上 500 条实验、首页文案显示 500。
+
+  一点说明：这轮部署前我做了 rsync
+  试运行对比，本地与服务器代码是零差异的——上一轮部署已经把当前代码送上去了，所以这次实际是同样内容的一次幂等重跑（重新 [38;5;153mnpm [39m
+  [38;5;153mci[39m、构建、[38;5;153mdb:seed[39m upsert、重启）。结果一致，站点正常。
+
+  如果你想让远端 git 仓库也跟上，那还是另一件事——本地 [38;5;153mmain[39m 比远端领先 [38;5;153m69a6b68[39m 一个提交，需要我 push 的话说一声。
+
+[38;5;246m✻[39m [38;5;246mChurned for 3m 50s[39m
+
+[38;5;244m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m❯ 
+[38;5;244m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;147m⏵⏵ accept edits on[38;5;246m (shift+tab to cycle) · ← 4 agents[39m
+
+
+
+
+
+
+
+
+

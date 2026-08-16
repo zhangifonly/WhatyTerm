@@ -1,0 +1,39 @@
+[38;5;114m⏺[39m [1mBash[0m(cat > /tmp/next.md <<'MD'
+      ## 下一步…)
+[38;5;246m  ⎿  [39mF（本次）。Liberty / SPEF / Verilog 仍是自比自，是同一类型的已知缺口。
+
+     ## 下一步
+     [2m… +29 lines (ctrl+o to expand)[0m
+
+[38;5;231m⏺[39m 旧的第 2 条残留了。删掉。
+
+[38;5;246m⏺[39m [1mBash[0m(python3 - <<'PY'
+      from pathlib import Path…)
+[38;5;246m  ⎿  Waiting…[39m
+
+[38;5;153m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m [1m[38;5;153mBash command[0m
+
+   python3 - <<'PY'
+   from pathlib import Path
+   p=Path('README.md'); t=p.read_text()
+   old = """
+   **2. Phase 4 验证签核。** 与开源工具交叉对账。这是继 GDSII 第 4 关之后，
+   下一次「拿我们的结果跟外部事实比」的机会——目前引擎侧的指标基本还是自比自，
+   还差参考实现这一侧。已知待查项：CTS 的时钟偏斜与参考实现仍有缺口，
+   以及缺几何意义上的 sink 聚类。
+   """
+   assert t.count(old)==1
+   p.write_text(t.replace(old,"",1)); print('ok')
+   PY
+   sed -n '/## 下一步/,$p' README.md | tail -20
+   [38;5;246m删除残留的旧第2条[39m
+
+ sed command contains operations that require explicit approval (e.g., write commands, execute commands)
+
+ Do you want to proceed?
+ [38;5;153m❯[39m [38;5;246m1.[39m [38;5;153mYes[39m
+   [38;5;246m2.[39m No
+
+ [38;5;246mEsc[39m [38;5;246mto[39m [38;5;246mcancel[39m [38;5;246m·[39m [38;5;246mTab[39m [38;5;246mto[39m [38;5;246mamend[39m [38;5;246m·[39m [38;5;246mctrl+e[39m [38;5;246mto[39m [38;5;246mexplain[39m
+

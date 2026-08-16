@@ -1,0 +1,40 @@
+
+[38;5;231m⏺[39m 60 条完全同名。但样例暴露一个风险：[1m「新京报」是媒体[0m——那正是我第 136
+  轮识别的噪声类。自动确认前必须挡住它，否则会把媒体做成跨案档案：
+
+[38;5;114m⏺[39m [1mBash[0m(ssh -o ProxyCommand=none -o ConnectTimeout=25 us-lax02 "sqlite3 /root/stellarforge/data/stellarforge.db \"
+      SELECT '--- 60 条同名对的类型构成 ---';…)
+[38;5;246m  ⎿  [39m--- 60 条同名对的类型构成 ---
+     org/org|46
+     person/person|11
+     [2m… +4 lines (ctrl+o to expand)[0m
+
+[38;5;220m⏺[39m [38;5;220mAPI Error: 400 Input is too long. Reduce the size of your messages. (request id: 20260816065218611177430rHzuqxvh) [39m
+  [38;5;220m(request id: 20260816145216126920989ZxsddTeh)[39m
+
+[38;5;246m✻[39m [38;5;246mChurned for 2m 26s[39m
+
+[38;5;239m[48;5;237m❯[39m [38;5;231m/compact[39m
+[38;5;246m[49m  ⎿  [38;5;211mError during compaction: API Error: 400 Input is too long. Reduce the size of your messages. (request id: [39m
+     [38;5;211m2026081607155019401769B4D43q5L) (request id: 20260816151540802797542I0aW8069)[39m
+
+[38;5;244m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m❯ 
+[38;5;244m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;147m⏵⏵ accept edits on[38;5;246m (shift+tab to cycle) · ← 4 agents[39m                                                      [38;5;246m100% context used[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

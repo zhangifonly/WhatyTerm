@@ -1,0 +1,40 @@
+      vps.whaty.org; do printf "%-28s %s\n" "$u" "$(…)
+[38;5;246m [39m [38;5;246m⎿[39m [38;5;246m [39mmirror.whaty.org             200
+     paperflow.whaty.org          200
+     mind.whaty.org               200
+     [2m…[0m [2m+5[0m [2mlines[0m [2m(ctrl+o[0m [2mto[0m [2mexpand)[0m
+[38;5;246m [39m [38;5;246m⎿[39m [38;5;246m Allowed[39m [38;5;246mby[39m [38;5;246mauto[39m [38;5;246mmode[39m [38;5;246mclassifier[39m
+
+[38;5;114m⏺[39m [1mBash[0m(ssh us-lax02 "for s in nginx danzero inkwise easyviz bioviz-tutor gost-relay V2bX XrayR rsyslog; do printf '%-16s %s\n'
+      \$s \$(systemctl is-active \$s); done" 2…)
+[38;5;246m [39m [38;5;246m⎿[39m [38;5;246m [39mnginx            active
+     danzero          active
+     inkwise          active
+     [2m…[0m [2m+6[0m [2mlines[0m [2m(ctrl+o[0m [2mto[0m [2mexpand)[0m
+
+[38;5;231m⏺[39m 清理完成，磁盘从 93%（剩 11G）降到 80%（剩 29G），释放约 18G。所有 36 个容器仍在运行，无一退出或重启，7 个站点和 9 个 systemd
+  服务全部正常。
+
+  释放明细：
+  - Docker 构建缓存 15G —— 全部清空，只影响下次构建速度，不影响运行
+  - systemd journal 3.4G —— 收缩到 473M，保留近期日志
+  - [38;5;153m/var/log[39m 旧归档 —— 从 5.8G 降到 689M
+
+  没动的东西：[38;5;153m/root[39m 那 31G 全是各项目源码和 node_modules（stellarforge 5.8G、easyviz 4.6G、mbtiwriter 2.6G
+  等），一律未碰；所有带 tag 的镜像都归属在跑的服务，也没删。[38;5;153mdocker[39m [38;5;153msystem[39m [38;5;153mdf[39m 里还显示 21.35GB "可回收"，那是 [38;5;153mdocker[39m
+  把未被[1m运行中[0m容器直接引用的镜像都算成可回收，实际上包含各项目重新部署要用的基础镜像，删了会导致下次部署重新拉取，所以我没做
+  [38;5;153mimage[39m [38;5;153mprune[39m [38;5;153m-a[39m。
+
+  一件需要你决定的事：[38;5;153m/var/log/syslog[39m 那 1.4G 是 easyviz 的 MQTT 上位机在往 syslog 刷 DEBUG 级日志——268 万行 "Destination:" 加
+  62 万行 "[上位机]"。我只做了轮转，日志还在持续产生，几天后又会涨回 G 级。根治要么给 easyviz 的 rsyslog 加过滤规则丢弃
+  DEBUG，要么调低它自身的日志级别。这会改动 easyviz 的配置，要我处理吗？
+
+  另外内存仍然紧张：物理内存 7.8G、swap 4G 几近用尽，这是 36 个容器累加的结果，不是清磁盘能解决的问题。
+
+[38;5;246m✻[39m [38;5;246mSautéed[39m [38;5;246mfor[39m [38;5;246m4m[39m [38;5;246m36s[39m
+
+[38;5;37m───────────────────────────────────────────────────────────────────────────────────────────────[38;5;16m[48;5;37m webrtc-realtime-consultation [38;5;37m[49m──
+[39m❯ 
+[38;5;37m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;220m⏵⏵[39m [38;5;220mauto[39m [38;5;220mmode[39m [38;5;220mon[38;5;246m (shift+tab[39m [38;5;246mto[39m [38;5;246mcycle)[39m [38;5;246m·[39m [38;5;246m←[39m [38;5;246m4[39m [38;5;246magents[39m
+

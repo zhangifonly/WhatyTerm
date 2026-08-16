@@ -147,7 +147,7 @@ function parseWorkingDirFromOutput(output) {
 }
 import { SessionManager } from './services/SessionManager.js';
 import { HistoryLogger } from './services/HistoryLogger.js';
-import { AIEngine } from './services/AIEngine.js';
+import { AIEngine, hasRunningTimer } from './services/AIEngine.js';
 import { AuthService } from './services/AuthService.js';
 import { ProviderService } from './services/ProviderService.js';
 import ScheduleManager from './services/ScheduleManager.js';
@@ -4454,7 +4454,10 @@ async function runBackgroundAutoAction() {
               const fullyClean = currentScreen.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
               const screenLast800 = fullyClean.slice(-800);
               // Claude Code 运行中的三种明确证据（任一成立即拦截）
-              const isRunning = /\.{2,3}\s*\(\d+[ms]/i.test(screenLast800);
+              // 复用 AIEngine 里的共享正则：原来这里各写一份 /\.{2,3}\s*\(\d+[ms]/，
+              // 认不出 U+2026 省略号（Claude Code 实际输出的是单字符 `…`）也认不出
+              // 小时级时长，末端保护形同虚设 → 运行中的会话照样被发"继续"打断
+              const isRunning = hasRunningTimer(screenLast800);
               // esc to interrupt 无条件拦截（v1.2.41 撤销 v1.2.40 的按行豁免——那是误判）：
               // 状态栏只在主循环或 agents 确实在跑时才显示这串字，此时发文本会打断工作
               // （paperflow 案例：继续→Interrupted→继续 连环打断）。真空闲时状态栏没有它，
