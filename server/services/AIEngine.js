@@ -2525,6 +2525,54 @@ ${historyText || '(空)'}
       };
     }
 
+    // 2.65 检测 Codex 空闲状态
+    // Codex 的空闲屏与 Claude Code 完全不同，套用 2.7 的规则会永远判不出空闲：
+    //   › Implement {feature}                       ← 提示符是 ›(U+203A)，且带占位提示文字
+    //     gpt-5.6-sol xhigh · ~/path/to/project     ← 底部栏没有 accept edits
+    // 三处都对不上 2.7 的 /^[❯>]\s*$/ + /accept edits/，导致自动模式一直"等待"不发继续。
+    if (aiType === 'codex') {
+      const codexTail = fullyCleanContent.slice(-600);
+      // 空闲证据：占位提示符行 + 底部「模型 · 工作目录」栏
+      const hasCodexIdlePrompt = /^\s*[›❯>]\s+\S/m.test(last5Lines);
+      const hasCodexFooter = /·\s*[~/][^\s]*/.test(codexTail);
+      if (hasCodexIdlePrompt && hasCodexFooter && !isCliBusy(codexTail)) {
+        // 已表示任务完成/无更多工作时停手，不机械发继续
+        const codexDone = /没有(更多|其他)?(任务|工作|需要|要做)|已(全部)?完成(所有|全部)?|all\s*(tasks?\s*)?done|nothing\s*(left\s*)?(to\s*do|more)|no\s*(more\s*)?(tasks?|work)|任务.*已.*完成|工作.*已.*结束|没什么.*要做/i;
+        if (codexDone.test(fullyCleanContent.slice(-800))) {
+          console.log('[AIEngine] Codex 已表示无更多任务，停止自动发送继续');
+          return {
+            currentState: '任务已完成',
+            workingDir: '未显示',
+            recentAction: 'Codex 表示无更多任务',
+            needsAction: false,
+            actionType: 'none',
+            suggestedAction: null,
+            actionReason: 'Codex 已表示没有更多任务，不再发送继续',
+            suggestion: null,
+            updatedAt: new Date().toISOString(),
+            preAnalyzed: true,
+            detectedCLI,
+            ...pluginInfo
+          };
+        }
+        console.log('[AIEngine] 检测到 Codex 空闲（占位提示符 + 模型/目录栏），自动发送继续');
+        return {
+          currentState: 'Codex 空闲',
+          workingDir: '未显示',
+          recentAction: '等待输入',
+          needsAction: true,
+          actionType: 'text_input',
+          suggestedAction: '继续',
+          actionReason: '空闲状态，自动继续开发',
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI,
+          ...pluginInfo
+        };
+      }
+    }
+
     // 2.7 检测 Claude Code 空闲状态（有提示符 + accept edits 状态栏）
     // 底部状态栏的 "accept edits on" 只是提示，不需要按 Tab
     // 空闲状态下应该自动发送"继续"让 Claude Code 继续开发

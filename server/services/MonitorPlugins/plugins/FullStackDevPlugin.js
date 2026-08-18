@@ -260,13 +260,26 @@ class FullStackDevPlugin extends BasePlugin {
       .replace(/\x1b\][^\x07]*\x07/g, '')
       .replace(/\r/g, '');
     const tail800 = fullyClean.slice(-800);
+    // Codex 的屏幕写法与 Claude Code 完全不同，两处判据都要分开走：
+    //   › Implement {feature}                        ← 输入框是 ›(U+203A) 且带占位提示文字
+    //     gpt-5.6-sol xhigh · ~/path/to/project      ← 底部是「模型 · 工作目录」，没有 accept edits
+    const isCodex = (context && context.aiType) === 'codex';
+    const cliLabel = isCodex ? 'Codex' : 'Claude Code';
     // 空闲提示符：最后若干行出现独立的 ❯ / > 行（行内除提示符外只有空白/光标）
     const last6Lines = fullyClean.split('\n').slice(-6).join('\n');
-    const hasIdlePromptEarly = /^\s*[>❯]\s*$/m.test(last6Lines) || /\n\s*[>❯]\s*$/.test(last6Lines);
+    // Codex 的输入框后面跟着占位文字，套 Claude 的「整行只有提示符」永远判不出来
+    const hasCodexComposer = isCodex
+      && /^\s*[›❯>]\s+\S/m.test(last6Lines)
+      && /·\s*[~/]\S*/.test(tail800);
+    const hasIdlePromptEarly = /^\s*[>❯]\s*$/m.test(last6Lines) || /\n\s*[>❯]\s*$/.test(last6Lines)
+      || hasCodexComposer;
     // 活跃运行：有 "...(Ns)" 进度指示器（这是真正运行中的可靠标志）
     const isActivelyRunning = /\.{2,3}\s*\(\d+[ms]/i.test(tail800);
-    // esc to interrupt 仅在「无空闲提示符」时才作为运行依据（空闲时状态栏也常驻该文案）
-    const escInterruptRunning = /esc to interrupt/i.test(tail800) && !hasIdlePromptEarly;
+    // esc to interrupt 能否算运行中，两个 CLI 的口径相反：
+    //   Claude Code：空闲时底部状态栏也常驻该文案 → 只有「无空闲提示符」时才算运行中
+    //   Codex：输入框空闲/忙碌都常驻，所以不能用「有提示符」去否决它；而该文案只在真忙时出现
+    //          （含 "Waiting for background terminal (22m 51s • esc to interrupt)"）→ 直接算运行中
+    const escInterruptRunning = /esc to interrupt/i.test(tail800) && (isCodex || !hasIdlePromptEarly);
     const isRunning = isActivelyRunning || escInterruptRunning;
     const hasQueued = /Press up to edit queued messages/i.test(fullyClean);
     if (isRunning || hasQueued) {
@@ -276,7 +289,7 @@ class FullStackDevPlugin extends BasePlugin {
         suggestedAction: null,
         phase,
         phaseConfig: config,
-        message: isRunning ? 'Claude Code 正在运行中，等待完成' : '存在排队消息，等待处理'
+        message: isRunning ? `${cliLabel} 正在运行中，等待完成` : '存在排队消息，等待处理'
       };
     }
 
@@ -338,7 +351,7 @@ class FullStackDevPlugin extends BasePlugin {
         suggestedAction: null,
         phase,
         phaseConfig: config,
-        message: 'Claude 表示任务已完成，停止自动操作'
+        message: `${cliLabel} 表示任务已完成，停止自动操作`
       };
     }
 

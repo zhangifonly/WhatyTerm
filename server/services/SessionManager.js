@@ -466,6 +466,34 @@ export class Session {
     exec(`${getTmuxPrefix()} resize-window -t "${this.tmuxSessionName}" -x ${cols} -y ${rows}`, { timeout: 3000 }, () => {});
   }
 
+  // attach 前对齐宽度用：等 tmux 真的改完再返回，这样随后的 capturePane
+  // 拿到的是按新宽度重排过的画面，而不是旧宽度的残影。
+  // 宽度没变化时直接返回，避免无谓地打断远端程序重绘。
+  async resizeAndWait(cols, rows) {
+    if (!cols || !rows) return false;
+    if (this.pty) {
+      try { this.pty.resize(cols, rows); } catch {}
+    }
+    if (!useTmux) return true;
+    const prefix = getTmuxPrefix();
+    const name = this.tmuxSessionName;
+    const current = await new Promise((resolve) => {
+      exec(`${prefix} display-message -p -t "${name}" '#{window_width}x#{window_height}'`,
+        { timeout: 3000 }, (err, stdout) => resolve(err ? null : String(stdout).trim()));
+    });
+    if (current === `${cols}x${rows}`) return false;
+    await new Promise((resolve) => {
+      exec(`${prefix} resize-window -t "${name}" -x ${cols} -y ${rows}`, { timeout: 3000 }, () => resolve());
+    });
+    // 给远端程序一点时间响应 SIGWINCH 重绘（Claude Code / Codex 均为异步重绘）
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    // 清掉 capturePane 缓存：旧缓存是按旧宽度渲染的，resize 后必须强制重取，
+    // 否则随后的 capturePane() 命中缓存、把旧宽度画面发给前端，xterm 按新宽度展示就乱码。
+    this._paneCache = null;
+    this._paneCacheTime = 0;
+    return true;
+  }
+
   onOutput(callback) {
     this.outputCallbacks.push(callback);
     return callback;

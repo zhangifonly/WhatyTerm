@@ -224,6 +224,8 @@ export default function App() {
   const terminalRef = useRef(null);
   const terminalInstance = useRef(null);
   const fitAddon = useRef(null);
+  // 最近一次已同步给后端的尺寸（形如 "sessionId:colsxrows"），用于去重
+  const lastSyncedSize = useRef(null);
   const currentSessionRef = useRef(null);
 
   // 保持 currentSession 的 ref 同步
@@ -231,9 +233,34 @@ export default function App() {
     currentSessionRef.current = currentSession;
   }, [currentSession]);
 
+  // 取 xterm 当前网格尺寸（先 fit 一次，保证是容器的最终列/行数）。
+  // attach 时必须把这个尺寸一起发给后端：服务端要「先 resize 再 capture」，
+  // 否则截取到的是旧宽度渲染的画面，贴到更宽的 xterm 网格上，
+  // 远端程序按旧宽度换行、右侧多出的列它从不写入 —— 表现为「边缘的字显示不出来」。
+  const getGridSize = useCallback(() => {
+    const term = terminalInstance.current;
+    if (!term) return null;
+    try {
+      fitAddon.current?.fit();
+    } catch {}
+    if (!term.cols || !term.rows) return null;
+    return { cols: term.cols, rows: term.rows };
+  }, []);
+
+  // 统一的 attach 入口：始终携带当前网格尺寸，让服务端先对齐宽度再截屏。
+  const emitAttach = useCallback((sessionId, extra) => {
+    const size = getGridSize();
+    // 服务端会在截屏前按这个尺寸对齐，等价于已同步，记账避免随后重复 emit
+    lastSyncedSize.current = size ? `${sessionId}:${size.cols}x${size.rows}` : null;
+    socket.emit('session:attach', { sessionId, ...(extra || {}), ...(size || {}) });
+  }, [getGridSize]);
+
   // 统一「fit + 同步后端尺寸」：任何改变 xterm 尺寸的路径都必须走这里。
   // 若只 fit 不同步，xterm 变窄而后端 pty/tmux 仍停在旧的更宽列数，
   // 远端程序（如 Claude Code）会按旧宽度渲染，导致前端右侧字被裁切「遮住」。
+  // 尺寸未变则不重复 emit：多个 effect（折叠动画 350ms / 状态条 400ms / rAF /
+  // ResizeObserver）常常在同一次布局变化后连环触发，每次 emit 都会让远端程序
+  // 收到一次 SIGWINCH 重绘，既浪费又可能在重绘中途被截屏。
   const fitAndSyncSize = useCallback(() => {
     const term = terminalInstance.current;
     if (!fitAddon.current || !term) return;
@@ -241,13 +268,15 @@ export default function App() {
       fitAddon.current.fit();
     } catch {}
     const session = currentSessionRef.current;
-    if (session) {
-      socket.emit('terminal:resize', {
-        sessionId: session.id,
-        cols: term.cols,
-        rows: term.rows
-      });
-    }
+    if (!session || !term.cols || !term.rows) return;
+    const key = `${session.id}:${term.cols}x${term.rows}`;
+    if (lastSyncedSize.current === key) return;
+    lastSyncedSize.current = key;
+    socket.emit('terminal:resize', {
+      sessionId: session.id,
+      cols: term.cols,
+      rows: term.rows
+    });
   }, []);
 
   // AI 面板 / 侧边栏折叠会改变终端可用宽度（CSS width 过渡 0.3s）。
@@ -326,7 +355,7 @@ export default function App() {
         try {
           const lastId = localStorage.getItem('webtmux_last_session_id');
           if (lastId && data.find(s => s.id === lastId)) {
-            socket.emit('session:attach', lastId);
+            emitAttach(lastId);
           }
         } catch { /* 忽略 */ }
       }
@@ -347,7 +376,7 @@ export default function App() {
       const currentSession = currentSessionRef.current;
       if (currentSession) {
         console.log('[Socket] 重连后重新 attach 到会话:', currentSession.id);
-        socket.emit('session:attach', currentSession.id);
+        emitAttach(currentSession.id);
       }
     });
 
@@ -384,7 +413,7 @@ export default function App() {
       console.log('[App] 会话已创建，自动切换:', newId);
       // 不在这里清终端，由 session:attached 的 pendingScreenContent 统一处理
       setSuggestion(null);
-      socket.emit('session:attach', newId);
+      emitAttach(newId);
     });
 
     // 扫码免密登录：手机发起请求时，本机桌面端弹确认框（服务端只推给 local 房间）
@@ -988,8 +1017,10 @@ export default function App() {
       // 然后写入新会话的完整历史，这样用户可以向上滚动查看
       term.clear();
 
-      // 先调用 fit 确保尺寸正确，并同步到后端 pty（避免写入按旧宽度渲染的历史后右侧被裁）
-      fitAndSyncSize();
+      // 只 fit 不 emit：attach 时已把尺寸随请求发给服务端并在截屏前对齐，
+      // 这里再 emit 会在写入后触发第二次 SIGWINCH，让远端程序重复重绘、
+      // 且 xterm 会对刚写入的历史做一次 reflow（曾吞掉换行处的字符）。
+      try { fitAddon.current?.fit(); } catch {}
 
       // 写入当前可见区域内容
       let content = contentToWrite.replace(/\r\n$/, '');
@@ -1050,8 +1081,8 @@ export default function App() {
   const attachSession = useCallback((sessionId) => {
     // 不在这里清空终端，由 pendingScreenContent 处理时统一清空和写入
     setSuggestion(null);
-    socket.emit('session:attach', sessionId);
-  }, []);
+    emitAttach(sessionId);
+  }, [emitAttach]);
 
   // 创建会话
   const createSession = (data) => {

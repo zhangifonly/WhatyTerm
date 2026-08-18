@@ -6691,8 +6691,12 @@ io.on('connection', (socket) => {
   socket.on('session:attach', async (sessionId) => {
     // 参数归一化：移动端传 {sessionId, lite:true}（跳过滚动历史），桌面端传字符串
     let lite = false;
+    let attachCols = 0;
+    let attachRows = 0;
     if (sessionId && typeof sessionId === 'object') {
       lite = !!sessionId.lite;
+      attachCols = Number(sessionId.cols) || 0;
+      attachRows = Number(sessionId.rows) || 0;
       sessionId = sessionId.sessionId;
     }
     console.log(`[session:attach] 收到附加请求: ${sessionId}${lite ? ' (lite)' : ''}`);
@@ -6741,6 +6745,18 @@ io.on('connection', (socket) => {
     session.attach();
     const attachTime = Date.now() - attachStart;
 
+    // 关键顺序：先把 tmux 宽度对齐到浏览器网格，再截屏。
+    // 否则截到的是旧宽度画面，贴到更宽的 xterm 上，远端程序按旧宽度换行，
+    // 右侧多出的列它永远不写 —— 用户看到的就是「边缘的字显示不出来」。
+    let resizedAtAttach = false;
+    if (attachCols > 0 && attachRows > 0 && typeof session.resizeAndWait === 'function') {
+      try {
+        resizedAtAttach = await session.resizeAndWait(attachCols, attachRows);
+      } catch (err) {
+        console.error('[session:attach] 对齐尺寸失败:', err.message);
+      }
+    }
+
     // 获取 tmux 面板当前可见内容和光标位置
     const captureStart = Date.now();
     const paneContent = session.capturePane();
@@ -6762,7 +6778,7 @@ io.on('connection', (socket) => {
     }
 
     const cursorPos = session.getCursorPosition();
-    console.log(`[session:attach] 性能: attach=${attachTime}ms, pane=${paneTime}ms, full=${fullTime}ms, paneLen=${paneContent?.length || 0}, fullLen=${fullContent?.length || 0}`);
+    console.log(`[session:attach] 性能: attach=${attachTime}ms, pane=${paneTime}ms, full=${fullTime}ms, paneLen=${paneContent?.length || 0}, fullLen=${fullContent?.length || 0}${attachCols ? `, size=${attachCols}x${attachRows}${resizedAtAttach ? '(已对齐)' : '(无需改)'}` : ''}`);
 
     // 如果面板有内容且历史为空，记录初始状态
     const existingHistory = historyLogger.getHistory(sessionId, 1);
