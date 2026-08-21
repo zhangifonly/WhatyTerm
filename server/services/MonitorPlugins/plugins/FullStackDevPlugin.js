@@ -1,5 +1,6 @@
 import BasePlugin from '../BasePlugin.js';
 import promptLoader from '../PromptLoader.js';
+import { isTaskDone } from '../../taskDonePattern.js';
 
 /**
  * 全栈开发监控策略插件
@@ -342,9 +343,10 @@ class FullStackDevPlugin extends BasePlugin {
       };
     }
 
-    // 检测 Claude 已表示任务完成/无更多工作 - 不应再发任何指令
-    const taskDonePatterns = /没有(更多|其他)?(任务|工作|需要|要做)|已(全部)?完成(所有|全部)?|all\s*(tasks?\s*)?done|nothing\s*(left\s*)?(to\s*do|more)|no\s*(more\s*)?(tasks?|work)|任务.*已.*完成|工作.*已.*结束|没什么.*要做/i;
-    if (taskDonePatterns.test(tail800)) {
+    // 检测已表示任务完成/无更多工作 - 不应再发任何指令。
+    // 判定收敛到 taskDonePattern：「本批已完成 … 下一批目标是 …」是进度汇报而非收工，
+    // 早先裸的 `已完成` 会把它误判成结束，导致自动模式在还有活干时卡死。
+    if (isTaskDone(tail800)) {
       return {
         needsAction: false,
         actionType: null,
@@ -356,6 +358,13 @@ class FullStackDevPlugin extends BasePlugin {
     }
 
     const lastLines = fullyClean.split('\n').slice(-30).join('\n');
+
+    // 报错扫描专用文本：先抹掉「0 failed / 0 errors / no errors」这类「零失败」汇报。
+    // 否则 "1954 checks: 1954 passed, 0 failed" 里裸的 failed 会被当成构建失败，
+    // 在一切正常时反而发出「请修复上述错误」。
+    const errorScanText = lastLines
+      .replace(/\b(0|zero|no)\s*(failed|failures?|errors?|warnings?|bugs?)\b/gi, '')
+      .replace(/(通过|passed|成功)\s*[:：]?\s*\d+\s*[,，]?\s*(失败|failed)\s*[:：]?\s*0\b/gi, '');
 
     // 检测文档保存成功
     if (phase === 'requirements' || phase === 'design' || phase === 'planning') {
@@ -374,8 +383,8 @@ class FullStackDevPlugin extends BasePlugin {
     // 开发阶段：检测任务完成或错误
     if (phase === 'development') {
       // 检测编译/构建错误 → 自动修复
-      if (/error|Error|ERROR|failed|Failed|FAILED/i.test(lastLines) &&
-          !/error handling|on error|catch/i.test(lastLines)) {
+      if (/error|Error|ERROR|failed|Failed|FAILED/i.test(errorScanText) &&
+          !/error handling|on error|catch/i.test(errorScanText)) {
         return {
           needsAction: true,
           actionType: 'text_input',
@@ -400,8 +409,8 @@ class FullStackDevPlugin extends BasePlugin {
 
     // 测试阶段：检测 bug/错误 → 自动修复
     if (phase === 'testing') {
-      if (/bug|Bug|BUG|error|Error|failed|Failed|测试失败/i.test(lastLines) &&
-          !/no bug|no error|0 failed/i.test(lastLines)) {
+      if (/bug|Bug|BUG|error|Error|failed|Failed|测试失败/i.test(errorScanText) &&
+          !/no bug|no error|0 failed/i.test(errorScanText)) {
         return {
           needsAction: true,
           actionType: 'text_input',
@@ -424,9 +433,9 @@ class FullStackDevPlugin extends BasePlugin {
       }
     }
 
-    // 检查警告模式
+    // 检查警告模式（同样走去零计数的文本，否则「0 failed」会被当成失败告警）
     for (const pattern of config.warningPatterns || []) {
-      if (pattern.test(lastLines)) {
+      if (pattern.test(errorScanText)) {
         return {
           needsAction: true,
           actionType: 'warning',

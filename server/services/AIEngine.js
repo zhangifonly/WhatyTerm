@@ -11,6 +11,8 @@ import configService from './ConfigService.js';
 import processDetector from './ProcessDetector.js';
 import tokenStatsService from './TokenStatsService.js';
 import pluginManager from './MonitorPlugins/index.js';
+import { isTaskDone } from './taskDonePattern.js';
+import { hasPendingQuestion } from './pendingQuestion.js';
 import { DEFAULT_MODEL, CLAUDE_CODE_FAKE, CODEX_FAKE, CLAUDE_MODEL_FALLBACK_LIST, getModelsConfig } from '../config/constants.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -218,6 +220,20 @@ export function buildStatusPrompt({ cliName, cliCommand, terminalContent, progre
 | \`No\` 或其他否定项 | \`1\` | 选 2 等于拒绝执行，会把任务否掉 |
 若选项 2 看不清或不属以上任何一种，选 \`1\`（\`1. Yes\` 是最保守的放行）。
 计划/方案执行确认（选项 1 形如 \`Yes, and auto-accept edits\`）→ 选 \`1\`。
+
+# 第三步之前：CLI 是不是在问你一个需要判断的问题？
+若屏幕结尾是 CLI 把决策权交回来（「你想让我接着做哪个？」「要不要顺便改掉 X？」
+「第 1 项收益明确、第 2 项工作量大，你选哪个？」这类**没有编号选项的开放式提问**），
+那么回「继续」等于没回答——CLI 只会再问一遍，或自行乱选一个。
+此时必须**正面回答问题本身**：
+- 读懂它给的选项及各自代价，按「先低风险、后高价值，都要做就按顺序做完」的原则决断；
+- suggestedAction 写成一句能直接发给 CLI 的**明确指令**，点名做什么、什么顺序，例如
+  \`按顺序完成：先做第 1 项存根补全，完成后再做第 2 项链路修复\`、
+  \`先修 svx/sdrhittesthelper.ts 的断链，那个阻塞其他文件\`；
+- actionType 仍为 "text_input"，actionReason 说明为什么这样选。
+⚠️ 不要输出「继续」「好的」这类没有信息量的话；也不要反问用户——你就是来替他拿主意的。
+⚠️ 但凡问题涉及**删除数据、覆盖文件、推送/发布、改动生产环境、花钱**，
+   不要替用户决定 → needsAction:false，suggestion 说明「需要你本人确认」。
 
 # 第三步：确实空闲时，该不该推一把？
 - 若屏幕呈现「反复发继续 → CLI 只回一句短话（"好的""在""没有其他任务"）」的循环，
@@ -2536,9 +2552,9 @@ ${historyText || '(空)'}
       const hasCodexIdlePrompt = /^\s*[›❯>]\s+\S/m.test(last5Lines);
       const hasCodexFooter = /·\s*[~/][^\s]*/.test(codexTail);
       if (hasCodexIdlePrompt && hasCodexFooter && !isCliBusy(codexTail)) {
-        // 已表示任务完成/无更多工作时停手，不机械发继续
-        const codexDone = /没有(更多|其他)?(任务|工作|需要|要做)|已(全部)?完成(所有|全部)?|all\s*(tasks?\s*)?done|nothing\s*(left\s*)?(to\s*do|more)|no\s*(more\s*)?(tasks?|work)|任务.*已.*完成|工作.*已.*结束|没什么.*要做/i;
-        if (codexDone.test(fullyCleanContent.slice(-800))) {
+        // 已表示任务完成/无更多工作时停手，不机械发继续。
+        // 判定收敛到 taskDonePattern：「本批已完成 … 下一批目标是 …」属于进度汇报，不是收工。
+        if (isTaskDone(fullyCleanContent.slice(-800))) {
           console.log('[AIEngine] Codex 已表示无更多任务，停止自动发送继续');
           return {
             currentState: '任务已完成',
@@ -2603,8 +2619,7 @@ ${historyText || '(空)'}
 
       // 检测 Claude 已表示任务完成/无更多工作
       const taskDone800 = fullyCleanContent.slice(-800);
-      const taskDoneCheck = /没有(更多|其他)?(任务|工作|需要|要做)|已(全部)?完成(所有|全部)?|all\s*(tasks?\s*)?done|nothing\s*(left\s*)?(to\s*do|more)|no\s*(more\s*)?(tasks?|work)|任务.*已.*完成|工作.*已.*结束|没什么.*要做/i;
-      if (taskDoneCheck.test(taskDone800)) {
+      if (isTaskDone(taskDone800)) {
         console.log(`[AIEngine] 检测到 ${cliName} 表示任务已完成，停止自动操作`);
         return {
           currentState: '任务已完成',
@@ -2740,8 +2755,7 @@ ${historyText || '(空)'}
 
       // 检测 Claude 已表示任务完成/无更多工作 - 不应再发"继续"
       // 常见表述：没有任务、已完成所有、没有更多、all done、nothing to do 等
-      const taskDonePatterns = /没有(更多|其他)?(任务|工作|需要|要做)|已(全部)?完成(所有|全部)?|all\s*(tasks?\s*)?done|nothing\s*(left\s*)?(to\s*do|more)|no\s*(more\s*)?(tasks?|work)|任务.*已.*完成|工作.*已.*结束|没什么.*要做/i;
-      if (taskDonePatterns.test(cleanLast800)) {
+      if (isTaskDone(cleanLast800)) {
         console.log('[AIEngine] 检测到 Claude 表示任务已完成/无更多工作，停止自动操作');
         return {
           currentState: '任务已完成',
@@ -2994,8 +3008,23 @@ ${historyText || '(空)'}
     // 先尝试预判断（传递完整参数）
     const preResult = this.preAnalyzeStatus(terminalContent, aiType, tmuxSession, projectContext, forcedPluginId);
     if (preResult) {
-      console.log('[AIEngine] 预判断成功，跳过AI调用:', preResult.currentState);
-      return preResult;
+      // CLI 把球踢回来问「你想让我接着做哪个？」这类问题时，机械回「继续」等于没回答，
+      // CLI 只能再问一遍或自行乱选。这种场景丢弃预判断结果、改走 AI，让它读完屏幕
+      // 给出有内容的答复（如「按顺序完成，先做第 1 项」）。
+      // 只拦「本来就要发继续」的情况：忙碌(needsAction:false)、确认菜单(select)、
+      // 任务已完成等判定完全不受影响，成本也只在真有提问时才付。
+      const mechanicalContinue = preResult.needsAction
+        && preResult.actionType === 'text_input'
+        && /^继续/.test(String(preResult.suggestedAction || ''));
+      const cleanForAsk = String(terminalContent || '')
+        .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+        .replace(/\x1b\][^\x07]*\x07/g, '');
+      if (mechanicalContinue && hasPendingQuestion(cleanForAsk)) {
+        console.log('[AIEngine] 检测到 CLI 正在提问，改由 AI 生成有针对性的回答');
+      } else {
+        console.log('[AIEngine] 预判断成功，跳过AI调用:', preResult.currentState);
+        return preResult;
+      }
     }
 
     // 需要AI分析

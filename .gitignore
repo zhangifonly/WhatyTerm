@@ -22,3 +22,6 @@ CLAUDE.md
 **/.env
 
 .claude/scheduled_tasks.lock
+
+# Spotlight 索引排除标记（本地环境配置，非代码）
+.metadata_never_index

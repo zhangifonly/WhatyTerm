@@ -6772,9 +6772,19 @@ io.on('connection', (socket) => {
     // 限制为 100KB 以保证流畅的切换体验
     const MAX_CONTENT_SIZE = 100 * 1024;
     if (fullContent && fullContent.length > MAX_CONTENT_SIZE) {
+      const originalKB = (fullContent.length / 1024).toFixed(1);
       // 保留最后 MAX_CONTENT_SIZE 字符
       fullContent = fullContent.slice(-MAX_CONTENT_SIZE);
-      console.log(`[session:attach] fullContent 过大 (${(fullContent.length / 1024).toFixed(1)}KB)，已截断为 ${MAX_CONTENT_SIZE / 1024}KB`);
+      // 关键：定长 slice 会切在任意位置，这份内容里有几千个 ESC 序列，
+      // 一旦从 \x1b[38;5;246m 这类序列中间切开，残片（如 "[K"、"53m"）会被
+      // xterm 当普通字符吃掉并让解析器状态错乱，污染其后一大片渲染——
+      // 表现就是「终端文字排版完全乱了」。CSI 序列不跨行，因此丢掉首个换行
+      // 之前的残行即可保证从干净的序列边界开始。
+      const nl = fullContent.indexOf('\n');
+      if (nl >= 0) {
+        fullContent = fullContent.slice(nl + 1);
+      }
+      console.log(`[session:attach] fullContent 过大 (${originalKB}KB)，已截断为 ${(fullContent.length / 1024).toFixed(1)}KB（已对齐到行边界）`);
     }
 
     const cursorPos = session.getCursorPosition();
