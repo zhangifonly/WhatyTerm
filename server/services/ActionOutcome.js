@@ -17,6 +17,9 @@ import crypto from 'crypto';
 
 // 回读延迟：太短 CLI 还没反应，太长就不好归因到这次操作
 const VERIFY_DELAY = 6000;
+// 连续多少次毫无效果就停手。3 次约等于 18 秒~1 分钟内反复按键无反应，
+// 再按下去也只是空转（而且每轮都在花监控成本）。
+const NO_EFFECT_LIMIT = 3;
 const LEDGER_PATH = path.join(os.homedir(), '.webtmux', 'action-outcomes.jsonl');
 const MAX_BYTES = 5 * 1024 * 1024;   // 超过就轮转，保留一个 .1 备份
 
@@ -51,6 +54,9 @@ class ActionOutcome {
     this.pending = new Map();   // id -> timer
     this.recent = [];           // 内存里保留最近若干条，供接口即时查询
     this.enabled = true;
+    // 连续空转计数：sessionId -> { count, state, stuckHash }
+    // 屏幕一动就清零，所以它只会在"真的卡住"时累积
+    this.streak = new Map();
   }
 
   /**
@@ -101,14 +107,27 @@ class ActionOutcome {
     let outcome;
     if (interrupted) {
       outcome = 'interrupted';          // 明确的坏结果：打断了正在跑的活
+    } else if (!changed) {
+      // 屏幕纹丝不动 = 发了等于没发。这一条必须**先于** running 判断：
+      // 屏上本来就挂着的运行指示器是操作之前就在跑的活，不能算这次操作的功劳，
+      // 否则往一个正忙的会话里乱发按键会被记成满分。
+      outcome = 'no_effect';
     } else if (entry.actionType === 'select') {
-      outcome = menuGone ? 'advanced' : 'no_effect';   // 确认菜单该消失
+      outcome = menuGone ? 'advanced' : 'no_effect';   // 菜单没消失说明按键没被 Ink 收到
     } else if (running) {
       outcome = 'advanced';             // CLI 真的动起来了，最强的成功信号
-    } else if (changed) {
-      outcome = 'changed';              // 屏幕变了但看不出在干活，弱成功
     } else {
-      outcome = 'no_effect';            // 发了等于没发
+      outcome = 'changed';              // 屏幕变了但看不出在干活，弱成功
+    }
+
+    if (outcome === 'no_effect') {
+      const st = this.streak.get(entry.sessionId) || { count: 0 };
+      st.count++;
+      st.state = entry.state;
+      st.stuckHash = hash(after);   // 记下卡住的那一屏，屏幕一变就解除
+      this.streak.set(entry.sessionId, st);
+    } else {
+      this.streak.delete(entry.sessionId);
     }
 
     const rec = { ...entry, outcome, changed, interrupted, running };
@@ -118,6 +137,31 @@ class ActionOutcome {
     if (outcome === 'no_effect' || outcome === 'interrupted') {
       console.log(`[效果台账] ${entry.sessionName}: 「${entry.state}」发出 "${entry.action}" → ${outcome}`);
     }
+  }
+
+  /**
+   * 该不该停手。
+   *
+   * 占比最高的那条判定（「等待接受编辑」，历史日志 3271 次）本质是
+   * 「没看到提示符、也没看到运行迹象」时的兜底猜测——屏幕因为任何原因不可解析
+   * 都会落到它，然后发「继续」。猜错时没有任何机制叫停，只会 15 秒一轮地重复。
+   *
+   * 这里用台账的实测结果兜底：同一会话连续 N 次操作都毫无效果，且屏幕始终停在
+   * 卡住的那一屏，就停止自动操作。屏幕一旦真的变了立刻解除——所以它不会把
+   * 正常会话锁死，只在"我们在对着一块石头按键"时生效。
+   *
+   * @param {string} sessionId
+   * @param {string} currentScreen - 当前屏幕，用于判断是否已脱离卡住状态
+   * @returns {string|null} 停手原因；null 表示放行
+   */
+  shouldPause(sessionId, currentScreen) {
+    const st = this.streak.get(sessionId);
+    if (!st || st.count < NO_EFFECT_LIMIT) return null;
+    if (currentScreen && hash(currentScreen) !== st.stuckHash) {
+      this.streak.delete(sessionId);   // 屏幕动了，自愈
+      return null;
+    }
+    return `连续 ${st.count} 次自动操作毫无效果（判定「${st.state}」），屏幕始终未变，已停手等人工介入`;
   }
 
   _append(rec) {
@@ -174,4 +218,4 @@ class ActionOutcome {
 
 const actionOutcome = new ActionOutcome();
 export default actionOutcome;
-export { normalize, hash, VERIFY_DELAY };
+export { normalize, hash, VERIFY_DELAY, NO_EFFECT_LIMIT };

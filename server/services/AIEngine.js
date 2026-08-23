@@ -2683,25 +2683,11 @@ ${historyText || '(空)'}
     const hasInputPromptEarly = /^>\s*$/m.test(cleanLast1000) || />\s*\|/.test(cleanLast1000) || /\n>\s*$/.test(cleanLast1000);
 
     if (hasInputPromptEarly) {
-      // 检测"是否需要..."类询问 - 应该自动回答"继续"或让用户决定
-      const isNeedQuestion = /是否需要.{0,50}[？?]/i.test(cleanLast1000);
-      if (isNeedQuestion) {
-        console.log('[AIEngine] 检测到"是否需要..."询问，建议用户回复');
-        return {
-          currentState: `${cliName}询问下一步`,
-          workingDir: '未显示',
-          recentAction: '显示询问',
-          needsAction: true,
-          actionType: 'text_input',
-          suggestedAction: '继续',
-          actionReason: '检测到询问，建议继续执行',
-          suggestion: null,
-          updatedAt: new Date().toISOString(),
-          preAnalyzed: true,
-          detectedCLI,
-        ...pluginInfo
-        };
-      }
+      // 「是否需要 X？」是**内容问题**（是否需要我把这些也加上测试／同时更新文档），
+      // 回"继续"从来不是答案，CLI 只能再问一遍或自行乱选。原来这里硬答"继续"，
+      // 现在不拦：让它落到下面的通用判定，由 analyzeStatus 的 hasPendingQuestion
+      // 升级给 AI 读屏作答；AI 不可用时会交出"CLI 正在提问"状态请人工回答。
+      // 注意与紧随其后的「是否继续 X？」区分开——那个问题"继续"确实是有效答案。
 
       // 检测"是否继续"类问题 - 应该自动回答"继续"
       const isContinueQuestionEarly = /是否继续.{0,20}[？?]/i.test(cleanLast1000);

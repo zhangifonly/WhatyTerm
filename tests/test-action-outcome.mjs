@@ -136,6 +136,51 @@ test('按判定类型聚合，能指认出空转的策略', () => {
   eq(s.byState[0].state, '等待接受编辑', '应按次数降序，最频繁的排最前');
 });
 
+// ============ 4. 连续空转熔断 ============
+
+test('连续空转不到阈值时不停手', () => {
+  ledger.streak.clear();
+  const idle = '❯ \n  accept edits on';
+  verify(idle, idle, { state: '等待接受编辑' });
+  verify(idle, idle, { state: '等待接受编辑' });
+  eq(ledger.shouldPause('s1', idle), null, '2 次就停手太激进');
+});
+
+test('连续空转达到阈值 → 停手', () => {
+  ledger.streak.clear();
+  const idle = '❯ \n  accept edits on';
+  for (let i = 0; i < 3; i++) verify(idle, idle, { state: '等待接受编辑' });
+  const reason = ledger.shouldPause('s1', idle);
+  assert(reason, '应给出停手原因');
+  assert(/毫无效果/.test(reason) && /等待接受编辑/.test(reason), `原因应说明是哪条判定：${reason}`);
+});
+
+test('屏幕真的变了 → 立刻自愈，不会把会话锁死', () => {
+  ledger.streak.clear();
+  const idle = '❯ \n  accept edits on';
+  for (let i = 0; i < 3; i++) verify(idle, idle, { state: '等待接受编辑' });
+  assert(ledger.shouldPause('s1', idle), '前置条件：应处于停手状态');
+  eq(ledger.shouldPause('s1', '❯ 开始处理新任务'), null, '屏幕变了仍不放行');
+  eq(ledger.shouldPause('s1', idle), null, '自愈后计数应已清零');
+});
+
+test('走秒变化不算屏幕变了（否则熔断会被状态栏跳动绕过）', () => {
+  ledger.streak.clear();
+  const stuck = '❯ 卡住了 (12s · esc to interrupt)';
+  for (let i = 0; i < 3; i++) verify(stuck, stuck, { state: '等待接受编辑' });
+  assert(ledger.shouldPause('s1', '❯ 卡住了 (99s · esc to interrupt)'), '只有走秒变了不该解除熔断');
+});
+
+test('中途出现一次有效操作 → 计数清零', () => {
+  ledger.streak.clear();
+  const idle = '❯ \n  accept edits on';
+  verify(idle, idle, { state: '等待接受编辑' });
+  verify(idle, idle, { state: '等待接受编辑' });
+  verify('❯ ', 'Brewing… (3s · esc to interrupt)', { state: '空闲' });
+  verify(idle, idle, { state: '等待接受编辑' });
+  eq(ledger.shouldPause('s1', idle), null, '有效操作后应重新计数');
+});
+
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
 if (results.failed) for (const e of results.errors) console.log(`  • ${e.name}\n    ${e.error}`);
 process.exit(results.failed ? 1 : 0);

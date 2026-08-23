@@ -13,6 +13,9 @@
  * 运行：node tests/test-confirm-guard.mjs
  */
 
+import fs from 'fs';
+import path from 'path';
+
 const results = { passed: 0, failed: 0, errors: [] };
 
 function test(name, fn) {
@@ -39,6 +42,7 @@ function eq(actual, expected, msg) {
 
 const { AIEngine, isDangerousCommand, extractConfirmCandidates } =
   await import('../server/services/AIEngine.js');
+const { hasPendingQuestion } = await import('../server/services/pendingQuestion.js');
 const engine = new AIEngine();
 
 /** 构造 Claude Code 的命令确认框（真实版式：框线 + 命令头 + 命令 + 说明 + 问句 + 选项） */
@@ -223,6 +227,38 @@ test('没有命令头的裸命令行仍能拦下', () => {
   ].join('\n');
   const r = engine.preAnalyzeStatus(screen, 'claude');
   eq(r.actionType, 'warning', '无命令头时漏拦');
+});
+
+// ============ 5. 内容问题不能用「继续」搪塞 ============
+
+test('「是否需要…？」会被识别为待答问题，从而升级给 AI 作答', () => {
+  const screen = [
+    '我已经把 3 个接口改完了。',
+    '是否需要我把对应的单元测试也补上？',
+    '',
+    '> '
+  ].join('\n');
+  // 规则层仍会给出「继续」——这是设计如此，拦截发生在 analyzeStatus 里：
+  // 只要 (规则层是机械「继续」) 且 (屏上有待答问题)，就丢弃规则结果改问 AI。
+  // 所以真正要锁的是这个复合条件成立，而不是规则层本身的输出。
+  const r = engine.preAnalyzeStatus(screen, 'claude');
+  const mechanicalContinue = r && r.needsAction && r.actionType === 'text_input'
+    && /^继续/.test(String(r.suggestedAction || ''));
+  assert(mechanicalContinue, '前置条件：规则层给出机械「继续」');
+  assert(hasPendingQuestion(screen),
+    '「是否需要 X？」未被识别为待答问题，机械「继续」会直接发出去');
+});
+
+test('原先那条把「是否需要」硬答继续的规则已删除', () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'server/services/AIEngine.js'), 'utf8');
+  assert(!/isNeedQuestion/.test(src),
+    '规则仍在：它会抢在通用判定之前返回「继续」，屏蔽掉 AI 升级');
+});
+
+test('「是否继续？」仍可自动答继续（这个问题「继续」确实是有效答案）', () => {
+  const screen = '当前批次已处理完，是否继续处理下一批？\n\n> ';
+  const r = engine.preAnalyzeStatus(screen, 'claude');
+  eq(r?.suggestedAction, '继续', '这类问题不该被误伤');
 });
 
 summary();

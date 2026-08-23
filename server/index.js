@@ -1208,9 +1208,10 @@ function getSessionProviderId(session, aiType) {
  *
  * @param {object} status - 状态对象
  * @param {string} screenText - 当前屏幕内容（可选，用于现场复核）
+ * @param {string} sessionId - 会话 ID（可选，用于查台账的连续空转熔断）
  * @returns {string|null} 拦截原因；null 表示放行
  */
-function autoActionBlockReason(status, screenText = '') {
+function autoActionBlockReason(status, screenText = '', sessionId = null) {
   if (!status) return null;
   if (status.actionType === 'warning') {
     return status.dangerousCommand
@@ -1218,6 +1219,13 @@ function autoActionBlockReason(status, screenText = '') {
       : '警告类状态(仅展示)';
   }
   if (status.requireConfirmation) return '该阶段配置要求人工确认';
+
+  // 实测熔断：台账连续记到多次「发出去毫无效果」且屏幕没变，说明我们在对着一块石头按键。
+  // 占比最高的那条判定本质是"屏幕看不懂时的兜底猜测"，猜错时原本没有任何机制叫停。
+  if (sessionId) {
+    const paused = actionOutcome.shouldPause(sessionId, screenText);
+    if (paused) return paused;
+  }
 
   if (status.actionType === 'select' && screenText) {
     try {
@@ -4662,7 +4670,7 @@ async function runBackgroundAutoAction() {
         }
 
         // 安全闸：warning / requireConfirmation / 危险确认框 → 只展示不发送
-        const blockReason1 = autoActionBlockReason(status, terminalContent);
+        const blockReason1 = autoActionBlockReason(status, terminalContent, session.id);
         if (blockReason1) {
           console.log(`[后台自动操作] 会话 ${session.name}: 不自动执行「${action}」—— ${blockReason1}`);
           session.isAutoActioning = false;
@@ -4874,7 +4882,7 @@ async function runBackgroundAutoAction() {
           const status = cachedStatus;
           const action = status.suggestedAction;
 
-          const blockReason2 = autoActionBlockReason(status, terminalContent);
+          const blockReason2 = autoActionBlockReason(status, terminalContent, session.id);
           if (blockReason2) {
             console.log(`[后台自动操作] 会话 ${session.name}: 不自动执行「${action}」—— ${blockReason2}`);
             session.isAutoActioning = false;
@@ -5000,7 +5008,7 @@ async function runBackgroundAutoAction() {
         const action = status.suggestedAction;
 
         // 安全闸：AI 路径不经过 preAnalyzeStatus 的确认框检查，这里现场复核
-        const blockReason3 = autoActionBlockReason(status, terminalContent);
+        const blockReason3 = autoActionBlockReason(status, terminalContent, session.id);
         if (blockReason3) {
           console.log(`[后台自动操作] 会话 ${session.name}: 不自动执行「${action}」—— ${blockReason3}`);
           session.isAutoActioning = false;
