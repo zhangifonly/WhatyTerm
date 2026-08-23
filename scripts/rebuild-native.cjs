@@ -126,9 +126,57 @@ async function handleMac(appOutDir, arch) {
       }
     );
     console.log(`[rebuild-native] better-sqlite3 编译成功`);
+    cleanGypIntermediates(sqliteDir);
   } catch (err) {
     console.error(`[rebuild-native] 编译失败: ${err.message}`);
   }
+}
+
+/**
+ * 清理 node-gyp 编译中间产物，只保留 build/Release/*.node。
+ *
+ * 必须做，且必须在这里做：afterPack 跑在 electron-builder 的文件过滤**之后**、
+ * 代码签名**之前**，所以 electron-builder.yml 的 filter 排不掉这些新生成的 .o，
+ * 而签名阶段会挨个去签它们。签 sqlite3.o 这类目标文件会撞上
+ * "The timestamp service is not available"，整个 mac 构建就此失败。
+ * 顺带减掉约 15MB 无用体积。
+ */
+function cleanGypIntermediates(sqliteDir) {
+  const buildDir = path.join(sqliteDir, 'build');
+  if (!fs.existsSync(buildDir)) return;
+
+  const releaseDir = path.join(buildDir, 'Release');
+  let freed = 0;
+  const rm = (p) => {
+    if (!fs.existsSync(p)) return;
+    try {
+      freed += dirSize(p);
+      fs.rmSync(p, { recursive: true, force: true });
+    } catch { /* 清理失败不影响构建 */ }
+  };
+
+  // Release 下除 *.node 外全是中间产物（obj/ obj.target/ .deps/）
+  if (fs.existsSync(releaseDir)) {
+    for (const entry of fs.readdirSync(releaseDir)) {
+      if (!entry.endsWith('.node')) rm(path.join(releaseDir, entry));
+    }
+  }
+  // build 根下的 gyp 脚手架
+  for (const entry of ['deps', 'Makefile', 'binding.Makefile', 'config.gypi', 'gyp-mac-tool']) {
+    rm(path.join(buildDir, entry));
+  }
+  for (const entry of fs.readdirSync(buildDir)) {
+    if (entry.endsWith('.mk')) rm(path.join(buildDir, entry));
+  }
+
+  console.log(`[rebuild-native] 已清理 gyp 中间产物，释放 ${(freed / 1024 / 1024).toFixed(1)}MB`);
+}
+
+function dirSize(p) {
+  const st = fs.statSync(p);
+  if (!st.isDirectory()) return st.size;
+  return fs.readdirSync(p)
+    .reduce((s, e) => s + dirSize(path.join(p, e)), 0);
 }
 
 async function handleWin(appOutDir, arch) {

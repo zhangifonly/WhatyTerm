@@ -84,6 +84,14 @@ extraResources:
       - "!better-sqlite3/build/gyp-mac-tool"
       - "!better-sqlite3/build/binding.Makefile"
       - "!better-sqlite3/build/config.gypi"
+      # 编译中间产物（.o/.d 等），只保留 Release/*.node。
+      # 漏排会让 codesign 去签 sqlite3.o 这类目标文件，触发
+      # "The timestamp service is not available" 导致整个 mac 构建失败。
+      - "!better-sqlite3/build/Release/obj/**"
+      - "!better-sqlite3/build/Release/obj.target/**"
+      - "!better-sqlite3/build/Release/.deps/**"
+      - "!**/*.o"
+      - "!**/*.d"
 
 asar: true
 # 原生模块配置
