@@ -2627,6 +2627,28 @@ body {
   color: hsl(var(--success));
 }
 
+/* 危险命令拦截提示：与绿色的"自动执行中"形成对比，一眼能看出这次不会自动按键 */
+.danger-confirm-hint {
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: rgba(248, 113, 113, 0.18);
+  border-left: 3px solid hsl(var(--destructive, 0 84% 60%));
+  border-radius: 4px;
+  font-size: 12px;
+  color: hsl(var(--destructive, 0 84% 60%));
+  line-height: 1.5;
+}
+
+.danger-confirm-hint code {
+  display: block;
+  margin-top: 4px;
+  padding: 3px 6px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 3px;
+  font-size: 11px;
+  word-break: break-all;
+}
+
 /* 自动模式激活状态 - 紧凑单行条，尽量少占终端可视空间 */
 .auto-mode-strip {
   display: flex;

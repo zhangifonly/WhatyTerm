@@ -1,6 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import './RalphWizard.css';
 
+// Ralph 以 headless 方式跑 CLI，各家都要关掉逐条确认才能无人值守。
+// 这些标志与 server/services/RalphEngine.js 的 headlessCmd() 一一对应，改那边记得改这里。
+const BYPASS_FLAG = {
+  codex: '--dangerously-bypass-approvals-and-sandbox',
+  grok: '--always-approve',
+  gemini: '--yolo',
+  claude: '--dangerously-skip-permissions'
+};
+
 /**
  * 自主开发一键向导：两步
  * Step1 填需求 → 自动建目录/git/拆分 → Step2 确认任务清单 → 开跑
@@ -245,6 +254,15 @@ const RalphWizard = ({ socket, onClose, onStarted }) => {
               </div>
             </label>
           ))}
+        </div>
+        <div className="rw-risk">
+          <strong>⚠️ 无人值守模式</strong>
+          <p>
+            自主开发会以 <code>{BYPASS_FLAG[aiType] || BYPASS_FLAG.claude}</code> 启动
+            {aiType === 'claude' ? ' Claude Code' : ` ${aiType}`}，
+            期间<b>不会再逐条向你确认</b>：改文件、装依赖、执行命令、提交代码都直接进行。
+          </p>
+          <p>请只在你信任该需求、且该目录里的东西丢了也能接受的情况下继续。工作在专属分支上进行，但分支之外的操作（如全局安装、对外请求）不受此限制。</p>
         </div>
         {error && <div className="rw-error">{error}</div>}
         <div className="rw-actions">

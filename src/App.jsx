@@ -2012,6 +2012,10 @@ export default function App() {
                 const isHookConfig = provider?.configSource === 'hook';
                 const isStatusConfig = provider?.configSource === 'status';
                 const isLoginConfig = provider?.configSource === 'login';
+                // 本会话是否有自己的配置（不跟随全局）：local(推断) 与 relay/relay-lost(会话级反代)
+                // 都是会话独立配置——「删除本地配置」按钮和「本地」按钮的显示以此为准，
+                // 否则 relay 模式下会同时藏掉删除按钮、又错误地继续显示「本地」按钮。
+                const hasSessionLocalConfig = isLocalConfig || isRelayConfig || isRelayLost;
                 const globalConfig = provider?.globalConfig;
                 // 反代实测提示：最近一次真实转发的时间/状态
                 const relayTip = (() => {
@@ -2097,8 +2101,8 @@ export default function App() {
                           ⚠️ 旧供应商·重启生效
                         </span>
                       )}
-                      {/* 本地配置时显示红色删除按钮 */}
-                      {isLocalConfig && currentSession?.workingDir && (
+                      {/* 本地配置时显示红色删除按钮（relay/relay-lost 也是会话级本地配置） */}
+                      {hasSessionLocalConfig && currentSession?.workingDir && (
                         <button
                           onClick={async (e) => {
                             e.stopPropagation();
@@ -2214,7 +2218,7 @@ export default function App() {
                       </div>
                     )}
                     {/* 当使用全局配置时，显示同步到本地的按钮 */}
-                    {!isLocalConfig && provider?.exists && currentSession?.workingDir && (
+                    {!hasSessionLocalConfig && provider?.exists && currentSession?.workingDir && (
                       <button
                         onClick={async () => {
                           if (!currentSession?.workingDir) return;
@@ -2222,7 +2226,11 @@ export default function App() {
                             const res = await fetch('/api/claude-code/config', {
                               method: 'POST',
                               headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ projectPath: currentSession.workingDir })
+                              // 带 sessionId：同目录多会话时精确命中当前会话，服务端据此走会话级隔离
+                              body: JSON.stringify({
+                                projectPath: currentSession.workingDir,
+                                sessionId: currentSession.id
+                              })
                             });
                             const data = await res.json();
                             if (!data.success) {
@@ -2401,8 +2409,17 @@ export default function App() {
                     {aiStatusMap[currentSession.id].actionReason && (
                       <p className="action-reason">{aiStatusMap[currentSession.id].actionReason}</p>
                     )}
-                    {/* 自动操作状态提示 */}
-                    {currentSession.autoActionEnabled && (
+                    {/* 危险命令：自动应答已被安全闸拦下，等人工决定 */}
+                    {aiStatusMap[currentSession.id].requireConfirmation && (
+                      <div className="danger-confirm-hint">
+                        {t('aiPanel.dangerBlocked')}
+                        {aiStatusMap[currentSession.id].dangerousCommand && (
+                          <code>{aiStatusMap[currentSession.id].dangerousCommand}</code>
+                        )}
+                      </div>
+                    )}
+                    {/* 自动操作状态提示（被安全闸拦下时不显示，否则文案会误导） */}
+                    {currentSession.autoActionEnabled && !aiStatusMap[currentSession.id].requireConfirmation && (
                       <div className="auto-action-hint">
                         {t('aiPanel.autoActionEnabled')}
                       </div>

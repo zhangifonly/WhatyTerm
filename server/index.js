@@ -147,7 +147,7 @@ function parseWorkingDirFromOutput(output) {
 }
 import { SessionManager } from './services/SessionManager.js';
 import { HistoryLogger } from './services/HistoryLogger.js';
-import { AIEngine, hasRunningTimer } from './services/AIEngine.js';
+import { AIEngine, hasRunningTimer, isDangerousCommand, extractConfirmCandidates } from './services/AIEngine.js';
 import { AuthService } from './services/AuthService.js';
 import { ProviderService } from './services/ProviderService.js';
 import ScheduleManager from './services/ScheduleManager.js';
@@ -908,7 +908,9 @@ app.post('/api/sessions/:sessionId/analyze-now', async (req, res) => {
       projectDesc: session.projectDesc || sessionData.projectDesc,
       workingDir: session.workingDir || sessionData.workingDir,
       goal: session.goal || sessionData.goal,
-      progress: progressManager.loadProgress(session.id)
+      progress: progressManager.loadProgress(session.id),
+      // 监控 AI 跟随本会话正在工作的供应商
+      sessionProviderId: getSessionProviderId(session, sessionData.aiType || 'claude')
     };
 
     // 先尝试规则判断，规则无法判断时调用 AI 分析
@@ -1181,6 +1183,52 @@ function safeGetSession(id) {
   }
 })();
 
+// 取会话正在使用的 CLI 供应商 ID，供监控 AI 复用同一套凭证
+// （原来监控只读全局 ai-settings.json 的单个 _providerId，那个 ID 一失效整条链就哑）
+function getSessionProviderId(session, aiType) {
+  if (!session) return null;
+  const p = aiType === 'codex' ? session.codexProvider
+    : aiType === 'gemini' ? session.geminiProvider
+    : aiType === 'grok' ? session.grokProvider
+    : session.claudeProvider;
+  return p?.id || null;
+}
+
+/**
+ * 自动操作总闸：返回非空字符串表示"只展示、不发送"。
+ *
+ * 三条自动执行路径原来各自为政——只有第一条认 actionType:'warning'，
+ * 另两条（hook unknown 用缓存、AI 分析结果）连 warning 都会照发不误，
+ * 插件阶段配置里的 requireConfirmation 更是从没有人读过。这里收成一处。
+ *
+ * 最后一道是**独立于状态对象**的现场复核：不论状态是规则层给的还是 AI 给的，
+ * 只要要按的是确认菜单选项，就重新解析一次屏幕上待执行的命令；命中危险模式就拦。
+ * AI 路径不经过 preAnalyzeStatus 的安全闸，靠这一层兜住。
+ *
+ * @param {object} status - 状态对象
+ * @param {string} screenText - 当前屏幕内容（可选，用于现场复核）
+ * @returns {string|null} 拦截原因；null 表示放行
+ */
+function autoActionBlockReason(status, screenText = '') {
+  if (!status) return null;
+  if (status.actionType === 'warning') {
+    return status.dangerousCommand
+      ? `危险命令待人工确认: ${status.dangerousCommand}`
+      : '警告类状态(仅展示)';
+  }
+  if (status.requireConfirmation) return '该阶段配置要求人工确认';
+
+  if (status.actionType === 'select' && screenText) {
+    try {
+      const hit = extractConfirmCandidates(screenText).find(c => isDangerousCommand(c));
+      if (hit) return `危险命令待人工确认: ${hit}`;
+    } catch (err) {
+      console.error('[自动操作闸] 确认框复核失败:', err.message);
+    }
+  }
+  return null;
+}
+
 // 获取 AIEngine 当前使用的供应商信息（用于终端状态分析）
 function getAIProviderInfo() {
   const providerInfo = aiEngine.getCurrentProviderInfo();
@@ -1343,6 +1391,127 @@ async function getClaudeProcStartEpoch(tmuxSessionName) {
   return 0;
 }
 
+/**
+ * 读取 CC Switch 当前生效的供应商 id（单一权威口径）。
+ *
+ * ⚠️ 不能用 DB 的 `is_current` 字段：新版 CC Switch 把「当前供应商」记在
+ * ~/.cc-switch/settings.json 的 currentProviderClaude/Codex/Gemini 里，DB 的
+ * is_current 只在我们自己的 switchProviderStateMachine 里被写过，外部 App 切换时
+ * 根本不更新。实测（2026-08-22）settings.json 指向 Whaty，而 DB is_current 仍挂在
+ * Claude Official 上——面板据此显示、「本地」按钮据此复制配置，全都跟着错。
+ *
+ * @param {string} appType 'claude' | 'codex' | 'gemini'
+ * @returns {string} 供应商 id；读不到返回空串（调用方再回落 is_current）
+ */
+function readCcSwitchCurrentId(appType) {
+  const key = appType === 'claude' ? 'currentProviderClaude'
+    : appType === 'codex' ? 'currentProviderCodex'
+    : appType === 'gemini' ? 'currentProviderGemini' : '';
+  if (!key) return '';
+  try {
+    const sp = path.join(os.homedir(), '.cc-switch', 'settings.json');
+    if (!existsSync(sp)) return '';
+    return JSON.parse(readFileSync(sp, 'utf8'))[key] || '';
+  } catch (e) {
+    console.warn('[readCcSwitchCurrentId] 读取失败:', e.message);
+    return '';
+  }
+}
+
+/**
+ * 把「当前供应商」写回 CC Switch 的 settings.json（权威口径）。
+ *
+ * 我们自己切换供应商时只更新 DB 的 is_current 是不够的：既然读取一律以
+ * settings.json 为准，不写回就会出现「我们切了、面板还显示旧的」的反向不一致。
+ * 只改 currentProviderXxx 这一个键，其余键原样保留。
+ *
+ * @returns {boolean} 是否写入成功
+ */
+function writeCcSwitchCurrentId(appType, providerId) {
+  const key = appType === 'claude' ? 'currentProviderClaude'
+    : appType === 'codex' ? 'currentProviderCodex'
+    : appType === 'gemini' ? 'currentProviderGemini' : '';
+  if (!key || !providerId) return false;
+  try {
+    const dir = path.join(os.homedir(), '.cc-switch');
+    const sp = path.join(dir, 'settings.json');
+    if (!existsSync(dir)) return false;  // CC Switch 没装，不主动造目录
+    let cfg = {};
+    if (existsSync(sp)) {
+      try { cfg = JSON.parse(readFileSync(sp, 'utf8')) || {}; } catch { cfg = {}; }
+    }
+    if (cfg[key] === providerId) return true;
+    cfg[key] = providerId;
+    writeFileSync(sp, JSON.stringify(cfg, null, 2), 'utf8');
+    return true;
+  } catch (e) {
+    console.warn('[writeCcSwitchCurrentId] 写入失败:', e.message);
+    return false;
+  }
+}
+
+/**
+ * 取 CC Switch 当前生效供应商的整行（settings.json 优先，is_current 兜底）。
+ * @param {object} db 已打开的 better-sqlite3 实例（调用方负责开关）
+ * @param {string} appType
+ * @param {string} columns 需要的列，默认 '*'
+ */
+function queryCcSwitchCurrentRow(db, appType, columns = '*') {
+  const id = readCcSwitchCurrentId(appType);
+  if (id) {
+    try {
+      const row = db.prepare(`SELECT ${columns} FROM providers WHERE id = ? AND app_type = ?`).get(id, appType);
+      if (row) return row;
+      console.warn(`[queryCcSwitchCurrentRow] settings.json 指向的 id 在 DB 中不存在: ${id}`);
+    } catch (e) {
+      console.warn('[queryCcSwitchCurrentRow] 按 id 查询失败:', e.message);
+    }
+  }
+  // 兜底：老版本 CC Switch 或 settings.json 缺失时仍看 is_current
+  try {
+    return db.prepare(`SELECT ${columns} FROM providers WHERE app_type = ? AND is_current = 1`).get(appType) || null;
+  } catch (e) {
+    console.warn('[queryCcSwitchCurrentRow] is_current 兜底失败:', e.message);
+    return null;
+  }
+}
+
+/**
+ * 判定 <workingDir>/.claude/settings.local.json 是否构成「有效的会话本地供应商配置」。
+ *
+ * 空壳不算：历史上 switchProviderStateMachine 的 OAuth 分支会 `delete ls.env[k]`（甚至
+ * 整个 delete ls.env），面板「本地」按钮在全局是 OAuth 时也只写 `_localProvider:'relay'`
+ * 而不写 env/_localProviderId。结果留下一堆「有标记、无内容」的文件——它既钉不住任何
+ * 供应商，又让 configSource='local' 挡住全局跟随，表现为面板显示与实际不符。
+ * 按「没有本地配置就用全局」处理：这种文件一律视为无配置。
+ *
+ * 有效判据（三者之一）：env 里有真 ANTHROPIC_BASE_URL / 明确标记官方 OAuth /
+ * 钉住了具体供应商 id。
+ * @returns {{url:string,key:string,model:string,isOAuth:boolean,providerId:string}|null}
+ */
+function readLocalProviderConfig(workingDir) {
+  if (!workingDir) return null;
+  const p = path.join(workingDir, '.claude', 'settings.local.json');
+  if (!existsSync(p)) return null;
+  let c;
+  try { c = JSON.parse(readFileSync(p, 'utf8')); }
+  catch (e) {
+    console.error('[readLocalProviderConfig] 解析失败:', p, e.message);
+    return null;
+  }
+  const url = c.env?.ANTHROPIC_BASE_URL || '';
+  const providerId = c._localProviderId || '';
+  const marker = c._localProvider || '';
+  if (!url && marker !== 'oauth' && !providerId) return null;
+  return {
+    url,
+    key: c.env?.ANTHROPIC_AUTH_TOKEN || c.env?.ANTHROPIC_API_KEY || '',
+    model: c.model || '',
+    isOAuth: !url && marker === 'oauth',
+    providerId
+  };
+}
+
 // workingDir: 可选，用于检测项目本地配置
 // tmuxSessionName: 可选，用于读取运行中 claude 进程的真实 env（优先级最高）
 function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) {
@@ -1381,26 +1550,19 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
       }
 
       // 再读取项目本地配置 <workingDir>/.claude/settings.local.json
-      if (workingDir) {
-        const localConfigPath = path.join(workingDir, '.claude', 'settings.local.json');
-        if (existsSync(localConfigPath)) {
-          try {
-            const localSettings = JSON.parse(readFileSync(localConfigPath, 'utf8'));
-            if (localSettings.env?.ANTHROPIC_BASE_URL) {
-              actualApiUrl = localSettings.env.ANTHROPIC_BASE_URL;
-              actualApiKey = localSettings.env?.ANTHROPIC_AUTH_TOKEN || localSettings.env?.ANTHROPIC_API_KEY || '';
-              actualModel = localSettings.model || '';
-              configSource = 'local';
-              if (localSettings._localProviderId) localProviderId = localSettings._localProviderId;
-            } else if (localSettings._localProvider) {
-              // OAuth 供应商同步到本地：env 为空但有 _localProvider 标记
-              configSource = 'local';
-              actualModel = localSettings.model || '';
-              // 本地明确标记为官方 OAuth → 后续不应被全局 is_current(第三方) 覆盖
-              if (localSettings._localProvider === 'oauth') localIsOAuth = true;
-            }
-          } catch (e) {
-            console.error('[getCurrentProvider] 读取项目本地配置失败:', e.message);
+      // 统一走 readLocalProviderConfig：空壳（有标记无内容）视为无本地配置 → 跟随全局
+      {
+        const lp = readLocalProviderConfig(workingDir);
+        if (lp) {
+          configSource = 'local';
+          actualModel = lp.model;
+          if (lp.providerId) localProviderId = lp.providerId;
+          if (lp.url) {
+            actualApiUrl = lp.url;
+            actualApiKey = lp.key;
+          } else if (lp.isOAuth) {
+            // 本地明确标记为官方 OAuth → 后续不应被全局 is_current(第三方) 覆盖
+            localIsOAuth = true;
           }
         }
       }
@@ -1567,7 +1729,7 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         let dbPointsToOAuth = false;
         try {
           const checkDb = new Database(ccSwitchDbPath, { readonly: true });
-          const curRow = checkDb.prepare('SELECT settings_config FROM providers WHERE app_type = ? AND is_current = 1').get(appType);
+          const curRow = queryCcSwitchCurrentRow(checkDb, appType, 'settings_config');
           checkDb.close();
           if (curRow) {
             const curSc = JSON.parse(curRow.settings_config || '{}');
@@ -1870,9 +2032,9 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         }));
       } else {
         // 没有实际配置（settings.json 为空 env）
-        // 优先以 DB is_current 为准（switchProviderStateMachine 切换时已更新 is_current）
+        // 以 CC Switch 的 settings.json(currentProviderXxx) 为准，is_current 仅兜底
         // 注意：保留前面已检测到的 configSource（可能是 'local'）
-        const row = db.prepare('SELECT * FROM providers WHERE app_type = ? AND is_current = 1').get(appType);
+        const row = queryCcSwitchCurrentRow(db, appType);
 
         // 会话本地明确标记为官方 OAuth：忽略全局 is_current(可能是第三方)，直接返回官方
         // （修复：会话设为官方但全局 is_current=第三方时，侧栏误显示第三方、与 /status 不符）
@@ -2525,15 +2687,20 @@ app.post('/api/claude-code/config', async (req, res) => {
     // 从 CC Switch DB 获取当前活跃供应商的配置
     // 全局 settings.json 可能是 OAuth（env 为空），需要从 DB 读取实际供应商
     let dbEnv = {};
+    let dbProviderId = '';   // 钉住具体供应商，避免写出「有标记无内容」的空壳配置
+    let dbIsOAuth = false;   // 当前供应商本身是否官方登录（判 OAuth 的唯一依据）
     try {
       const db = new Database(path.join(os.homedir(), '.cc-switch', 'cc-switch.db'), { readonly: true });
-      const row = db.prepare("SELECT settings_config FROM providers WHERE app_type='claude' AND is_current=1").get();
+      const row = queryCcSwitchCurrentRow(db, 'claude', 'id, name, settings_config');
       db.close();
       if (row) {
+        dbProviderId = row.id || '';
         const sc = JSON.parse(row.settings_config);
         if (sc.env && Object.keys(sc.env).length > 0) {
           dbEnv = sc.env;
         }
+        // 官方 OAuth 供应商的特征：env 里没有 ANTHROPIC_BASE_URL（不走第三方端点）
+        dbIsOAuth = !sc.env?.ANTHROPIC_BASE_URL;
       }
     } catch (e) {
       console.log('[Claude Code Config] 读取 CC Switch DB 失败，使用全局配置');
@@ -2541,7 +2708,50 @@ app.post('/api/claude-code/config', async (req, res) => {
 
     // 合并：DB 供应商配置优先，全局 settings.json 补充
     const mergedEnv = Object.keys(dbEnv).length > 0 ? dbEnv : (globalConfig.env || {});
-    const isOAuth = !mergedEnv.ANTHROPIC_BASE_URL;
+    // ⚠️ isOAuth 只能在「确实是官方登录」时为真。新版 CC Switch 把第三方供应商的
+    // URL/key 落在自己的 DB 里，~/.claude/settings.json 的 env 已经是空的（实测
+    // 2026-08-22：env 0 个键、.current 0 字节），于是 mergedEnv 也可能是空对象。
+    // 此时若仍按 isOAuth 处理，就会写出 `env:{} + _localProvider:'relay'` 的空壳
+    // ——readLocalProviderConfig 判为「无本地配置」→ 跟随全局，用户点「本地」毫无
+    // 效果、再点还是一样（phyviz 实测就是这个文件）。判据必须是「DB 里当前供应商
+    // 本身就是官方 OAuth」，而不是「读不到 URL」。
+    const hasRealUrl = !!mergedEnv.ANTHROPIC_BASE_URL;
+    const isOAuth = !hasRealUrl && dbIsOAuth;
+
+    // 定位该项目对应的会话：有会话才能走真正的会话级隔离（relay + 会话级 tmux env）
+    let targetSession = null;
+    try {
+      const wanted = req.body?.sessionId;
+      for (const sd of sessionManager.listSessions()) {
+        const s = sessionManager.getSession(sd.id);
+        if (!s || s.workingDir !== projectPath) continue;
+        // 传了 sessionId 就精确匹配（同目录多会话时选中用户当前那个），否则取第一个同目录会话
+        if (wanted && s.id !== wanted) continue;
+        targetSession = s;
+        break;
+      }
+    } catch (e) {
+      console.warn('[Claude Code Config] 定位会话失败:', e.message);
+    }
+
+    // 优先走 applySessionProvider：写 relay 地址 + 占位密钥到本地配置、注册服务端映射、
+    // 设置会话级 tmux env（不碰 -g 全局）。这样外部 CC Switch 再切换也影响不到本会话，
+    // 且面板显示的供应商 == 反代实际转发目标（configSource='relay'）。
+    // 拿不到会话或供应商 id 时，回落为原来的「快照复制当前全局」行为。
+    let appliedViaRelay = false;
+    if (targetSession && dbProviderId) {
+      try {
+        const r = applySessionProvider(targetSession, 'claude', dbProviderId);
+        if (r.ok) {
+          appliedViaRelay = true;
+          console.log(`[Claude Code Config] 已按会话级隔离设置供应商: ${targetSession.name} -> ${dbProviderId}`);
+        } else {
+          console.warn('[Claude Code Config] applySessionProvider 失败，回落快照模式:', r.error);
+        }
+      } catch (e) {
+        console.warn('[Claude Code Config] applySessionProvider 异常，回落快照模式:', e.message);
+      }
+    }
 
     // 写入项目级别配置：<projectPath>/.claude/settings.local.json
     const projectClaudeDir = join(projectPath, '.claude');
@@ -2550,6 +2760,8 @@ app.post('/api/claude-code/config', async (req, res) => {
     }
     const configPath = join(projectClaudeDir, 'settings.local.json');
 
+    // 注意：appliedViaRelay 时 applySessionProvider 刚写过该文件，必须重新读取，
+    // 否则下面的 writeFileSync 会用旧内容把 relay env 覆盖掉
     let config = {};
     if (existsSync(configPath)) {
       try {
@@ -2562,13 +2774,36 @@ app.post('/api/claude-code/config', async (req, res) => {
     const localPermissions = config.permissions;
 
     // 同步配置
-    if (isOAuth) {
-      // OAuth 供应商：标记为本地 OAuth 配置，清除残留的 relay env
-      config.env = {};
-      config._localProvider = 'oauth';
-    } else {
-      config.env = { ...mergedEnv };
-      config._localProvider = 'relay';
+    // appliedViaRelay 时 env/_localProvider/_localProviderId 已由 applySessionProvider 写好
+    // （relay 地址 + 占位密钥，或 OAuth 的清空+标记），这里绝不能再动，否则会把真实密钥
+    // 写回本地文件、或用 mergedEnv 覆盖掉 relay 地址。只补下面的 model/permissions 等。
+    if (!appliedViaRelay) {
+      // 走到这里说明没能按会话级隔离落地（拿不到会话或供应商 id），只能退回
+      // 「快照复制当前全局」。此时必须写出「有内容」的本地配置：只写 _localProvider
+      // 标记会变成空壳，readLocalProviderConfig 判为无配置（跟随全局），用户点了
+      // 「本地」却毫无效果、再点还是一样（phyviz 那个 env:{} 文件就是这么来的）。
+      // 既没有真实 URL、当前供应商也不是官方 OAuth → 宁可明确报错，不写空壳。
+      if (!hasRealUrl && !isOAuth) {
+        console.warn('[Claude Code Config] 无真实 ANTHROPIC_BASE_URL 且非官方 OAuth，拒绝写出空壳本地配置');
+        return res.json({
+          success: false,
+          error: 'CC Switch 全局配置的 env 为空，且当前供应商不是官方登录，无法确定接入地址。请在本会话的供应商菜单（▼）里直接选择一个供应商。'
+        });
+      }
+      // OAuth 走 marker='oauth'（本身就是有效判据），第三方必须带上 env 里的真 URL。
+      if (isOAuth) {
+        config.env = {};
+        config._localProvider = 'oauth';
+      } else {
+        config.env = { ...mergedEnv };
+        // 这条路径是「快照复制全局」，并没有走反代，标记成 'relay' 会误导排查
+        // （真正走反代的是 applySessionProvider 写的 'relay-proxy'）。
+        // 判据靠 env 里的真实 URL，这个标记只作说明用。
+        config._localProvider = 'snapshot';
+      }
+      // 钉住供应商 id：同 URL+Key 的多个供应商（如 Whaty 系列共用 zjz-ai）靠它精确命中
+      if (dbProviderId) config._localProviderId = dbProviderId;
+      else delete config._localProviderId;
     }
 
     if (globalConfig.model) config.model = globalConfig.model;
@@ -2590,7 +2825,8 @@ app.post('/api/claude-code/config', async (req, res) => {
     console.log(`[Claude Code Config] 已同步全局配置到项目: ${configPath}`);
 
     // 同步成功后，重新获取供应商信息并通知前端更新
-    const provider = await getCurrentProvider('claude', projectPath);
+    // 带上 tmuxSessionName：relay 模式下才能让 configSource 正确解析为 'relay'（反代实测）
+    const provider = await getCurrentProvider('claude', projectPath, targetSession?.tmuxSessionName || null);
     console.log(`[Claude Code Config] 新的供应商信息: configSource=${provider.configSource}`);
 
     // 找到使用该 workingDir 的会话并更新
@@ -2639,6 +2875,25 @@ app.delete('/api/claude-code/config/local', async (req, res) => {
     // 删除本地配置文件
     unlinkSync(localConfigPath);
     console.log('[Claude Code Config] 已删除本地配置:', localConfigPath);
+
+    // 同步清理会话级隔离残留：relay 映射 + 会话级 tmux env。
+    // 不清的话本地文件没了但 tmux 里仍留着 relay 地址，CLI 重启会连到一个已失效的
+    // /relay/<sid>（映射也在的话则继续走旧供应商），表现为「删了本地配置却没恢复全局」。
+    try {
+      for (const sd of sessionManager.listSessions()) {
+        const s = sessionManager.getSession(sd.id);
+        if (!s || s.workingDir !== projectPath) continue;
+        sessionRelay.clear(s.id);
+        if (s.tmuxSessionName) {
+          for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL']) {
+            try { tmuxSetEnv({ target: s.tmuxSessionName, name: k, value: null }); } catch {}
+          }
+        }
+        console.log(`[Claude Code Config] 已清理会话 ${s.name} 的 relay 映射与会话级 env`);
+      }
+    } catch (e) {
+      console.warn('[Claude Code Config] 清理会话级隔离残留失败:', e.message);
+    }
 
     // 重新获取供应商信息（现在应该是全局配置）
     const provider = await getCurrentProvider('claude', projectPath);
@@ -4235,7 +4490,17 @@ async function runBackgroundAutoAction() {
       // 循环检测：preResult 建议发送"继续"时，检查是否陷入死循环
       if (preResult && preResult.needsAction && preResult.suggestedAction === '继续') {
         const lastAction = lastActionMap.get(session.id);
-        const continueCount = (lastAction?.action === '继续') ? (lastAction.continueCount || 1) + 1 : 1;
+        // ⚠️ v1.2.59：continueCount 原来只增不减——只有中间夹进一个非"继续"动作才归零。
+        // 于是"继续→Claude 干活→回复新内容→继续"这种**完全正常**的开发节奏也会把它推到 4，
+        // 之后每轮都 preResult=null 转 AI 分析，而 AI 路径未必落到执行，会话就永久卡住
+        // （paperflow 实测：10:08 之后 28 分钟零操作，屏幕挂在同一帧不动）。
+        // 死循环的真正特征是"发了继续但屏幕没变"，不是"发过几次继续"。所以先比对内容哈希：
+        // Claude 确实产出了新内容 → 上一轮继续是有效的，计数清零重新开始。
+        const curHash = computeContentHash(terminalContent, 500);
+        const screenAdvanced = lastAction?.contentHash && lastAction.contentHash !== curHash;
+        const continueCount = (lastAction?.action === '继续' && !screenAdvanced)
+          ? (lastAction.continueCount || 1) + 1
+          : 1;
 
         if (continueCount >= 2) {
           const lastReply = getLastClaudeReply(terminalContent);
@@ -4384,9 +4649,10 @@ async function runBackgroundAutoAction() {
           action = status.suggestion;
         }
 
-        // warning 类型仅做状态展示，不发送输入
-        if (status.actionType === 'warning') {
-          console.log(`[后台自动操作] 会话 ${session.name}: 警告(仅展示): ${action}`);
+        // 安全闸：warning / requireConfirmation / 危险确认框 → 只展示不发送
+        const blockReason1 = autoActionBlockReason(status, terminalContent);
+        if (blockReason1) {
+          console.log(`[后台自动操作] 会话 ${session.name}: 不自动执行「${action}」—— ${blockReason1}`);
           session.isAutoActioning = false;
           updateCheckState(sessionData.id, false, status);
           continue;
@@ -4543,7 +4809,12 @@ async function runBackgroundAutoAction() {
           }
 
           const prevAction = lastActionMap.get(session.id);
-          const continueCount = (action === '继续' && prevAction?.action === '继续') ? (prevAction.continueCount || 1) + 1 : (action === '继续' ? 1 : 0);
+          // 与上面的熔断判据保持同一口径：屏幕相比上次操作已推进 → 上轮"继续"有效，计数重开。
+          // 两处口径必须一致，否则熔断这边清零、写回这边继续累加，计数照旧只增不减。
+          const prevAdvanced = prevAction?.contentHash && prevAction.contentHash !== contentHash;
+          const continueCount = (action === '继续' && prevAction?.action === '继续' && !prevAdvanced)
+            ? (prevAction.continueCount || 1) + 1
+            : (action === '继续' ? 1 : 0);
           lastActionMap.set(session.id, { action, time: now, contentHash, continueCount });
           historyLogger.log(session.id, {
             type: 'ai_decision',
@@ -4585,6 +4856,14 @@ async function runBackgroundAutoAction() {
           console.log(`[后台自动操作] 会话 ${session.name}: hook unknown，使用 AI 缓存: ${cachedStatus.currentState}, action=${cachedStatus.suggestedAction}`);
           const status = cachedStatus;
           const action = status.suggestedAction;
+
+          const blockReason2 = autoActionBlockReason(status, terminalContent);
+          if (blockReason2) {
+            console.log(`[后台自动操作] 会话 ${session.name}: 不自动执行「${action}」—— ${blockReason2}`);
+            session.isAutoActioning = false;
+            updateCheckState(sessionData.id, false, status);
+            continue;
+          }
 
           const lastAction = lastActionMap.get(session.id);
           const contentHash = computeContentHash(terminalContent, 500);
@@ -4691,6 +4970,14 @@ async function runBackgroundAutoAction() {
       if (status && status.needsAction && status.suggestedAction && status.actionType !== 'input') {
         const action = status.suggestedAction;
 
+        // 安全闸：AI 路径不经过 preAnalyzeStatus 的确认框检查，这里现场复核
+        const blockReason3 = autoActionBlockReason(status, terminalContent);
+        if (blockReason3) {
+          console.log(`[后台自动操作] 会话 ${session.name}: 不自动执行「${action}」—— ${blockReason3}`);
+          session.isAutoActioning = false;
+          continue;
+        }
+
         // 检查是否在冷却时间内
         // 对于选项选择操作，使用更短的冷却时间（3秒），因为内容未变可能是操作失败
         // 其他操作使用 30 秒冷却
@@ -4778,7 +5065,11 @@ async function runBackgroundAutoAction() {
 
         // 记录本次操作（包含内容哈希，用于检测终端内容变化）
         const prevActionAi = lastActionMap.get(session.id);
-        const continueCountAi = (action === '继续' && prevActionAi?.action === '继续') ? (prevActionAi.continueCount || 1) + 1 : (action === '继续' ? 1 : 0);
+        // 同上：屏幕已推进则计数重开（三处口径必须统一）
+        const prevAdvancedAi = prevActionAi?.contentHash && prevActionAi.contentHash !== contentHash;
+        const continueCountAi = (action === '继续' && prevActionAi?.action === '继续' && !prevAdvancedAi)
+          ? (prevActionAi.continueCount || 1) + 1
+          : (action === '继续' ? 1 : 0);
         lastActionMap.set(session.id, { action, time: now, contentHash, continueCount: continueCountAi });
 
         historyLogger.log(session.id, {
@@ -5143,7 +5434,10 @@ async function runBackgroundStatusAnalysis() {
         projectPath: session.workingDir || sessionData.workingDir,
         projectDesc: session.projectDesc || sessionData.projectDesc,
         workingDir: session.workingDir || sessionData.workingDir,
-        goal: session.goal || sessionData.goal
+        goal: session.goal || sessionData.goal,
+        // 监控 AI 跟随本会话正在工作的供应商
+        sessionProviderId: getSessionProviderId(session, session.aiType || 'claude'),
+        providerEnv: session.providerEnv || {}
       };
 
       console.log(`[后台AI分析] 会话 ${session.name}: 分析状态...`);
@@ -5463,6 +5757,9 @@ function applySessionProvider(session, appType, providerId) {
     } else {
       return { ok: false, error: `不支持的 CLI: ${appType}` };
     }
+    // 留一份在内存 session 上：监控 AI 走 CLI 回退时要用同一套环境变量，
+    // 否则 CLI 会用全局默认供应商，和会话实际在用的不是一个
+    session.providerEnv = providerEnv;
     try { sessionManager.updateSession(session); } catch {}
     console.log(`[applySessionProvider] 会话 ${session.name} 设置 ${appType} 供应商: ${info.provider.name}`);
     return { ok: true, providerEnv };
@@ -5678,6 +5975,12 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
       console.error('[Provider Switch] 更新 DB is_current 失败:', dbErr);
     }
 
+    // 同步写回 settings.json 的 currentProviderXxx——读取一律以它为准，
+    // 只写 DB 会造成「我们切了但面板还显示旧供应商」的反向不一致。
+    if (writeCcSwitchCurrentId(appType, targetProvider.id)) {
+      console.log('[Provider Switch] CC Switch settings.json 已同步为:', targetProvider.name);
+    }
+
     // 清空 ~/.claude/.current，让 CC Switch profile 系统失效
     // profile 优先级高于 settings.local.json，不清空会导致切换无效
     if (appType === 'claude') {
@@ -5850,17 +6153,8 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
         if (!sess) continue;
 
         if (appType === 'claude') {
-          const localPath = sess.workingDir
-            ? path.join(sess.workingDir, '.claude', 'settings.local.json')
-            : null;
-          let hasLocalOverride = false;
-          if (localPath && existsSync(localPath)) {
-            try {
-              const lc = JSON.parse(readFileSync(localPath, 'utf8'));
-              hasLocalOverride = !!lc.env?.ANTHROPIC_BASE_URL;
-            } catch {}
-          }
-          if (!hasLocalOverride) sess.claudeProvider = providerInfo;
+          // 与 getCurrentProvider 用同一判据：空壳算无配置 → 跟随全局
+          if (!readLocalProviderConfig(sess.workingDir)) sess.claudeProvider = providerInfo;
         } else if (appType === 'codex') {
           sess.codexProvider = providerInfo;
         } else if (appType === 'gemini') {
@@ -7739,7 +8033,10 @@ ${terminalContext ? terminalContext : '（无）'}
         projectPath: session.workingDir || sessionData?.workingDir,
         projectDesc: session.projectDesc || sessionData?.projectDesc,
         workingDir: session.workingDir || sessionData?.workingDir,
-        goal: session.goal || sessionData?.goal
+        goal: session.goal || sessionData?.goal,
+        // 监控 AI 跟随本会话正在工作的供应商
+        sessionProviderId: getSessionProviderId(session, session.aiType || 'claude'),
+        providerEnv: session.providerEnv || {}
       };
 
       const status = await aiEngine.analyzeStatus(
@@ -8327,7 +8624,7 @@ async function startServer() {
           const actualUrl = newEnv.ANTHROPIC_BASE_URL || '';
           const actualKey = newEnv.ANTHROPIC_AUTH_TOKEN || newEnv.ANTHROPIC_API_KEY || '';
 
-          const matchedRow = db.prepare("SELECT * FROM providers WHERE app_type='claude' AND is_current=1 LIMIT 1").get();
+          const matchedRow = queryCcSwitchCurrentRow(db, 'claude');
           db.close();
 
           if (matchedRow) {
@@ -8373,11 +8670,14 @@ async function startServer() {
               }
               if (session.currentModel) sessionProvider.model = session.currentModel;
             }
-            if (sessionProvider.exists && (
+            // 有有效本地配置的会话：外部 CC Switch 切换不应改动它，保持自己的供应商
+            const hasLocal = !!readLocalProviderConfig(session.workingDir);
+            if (hasLocal && sessionProvider.exists) {
+              session.claudeProvider = sessionProvider;
+            } else if (sessionProvider.exists && (
                   sessionProvider.configSource === 'process' ||
-                  sessionProvider.configSource === 'local' ||
                   sessionProvider.url || sessionProvider.isOAuth)) {
-              // 检测到该会话真实生效的供应商（进程第三方 / 本地 override / 有 URL / 官方 OAuth）→ 以它为准
+              // 检测到该会话真实生效的供应商（进程第三方 / 有 URL / 官方 OAuth）→ 以它为准
               session.claudeProvider = sessionProvider;
             } else if (currentCcProvider) {
               // 实在检测不到，才回落全局 cc-switch 当前配置

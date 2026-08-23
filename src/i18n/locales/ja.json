@@ -138,6 +138,7 @@
     "actionType": "タイプ",
     "suggestedAction": "推奨操作",
     "autoActionEnabled": "バックグラウンド自動操作が有効、自動実行されます",
+    "dangerBlocked": "⚠️ 確認待ちのコマンドは破壊的です。自動応答を一時停止しました。手動で確認してください",
     "aiMonitoring": "AIがバックグラウンドでターミナルの状態を監視し、操作が必要な場合は自動的に実行します。",
     "noAutoActionLogs": "自動操作ログがまだありません",
     "monitoringProvider": "監視APIプロバイダー",

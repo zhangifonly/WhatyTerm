@@ -313,7 +313,8 @@ test('结构化结果（空串表达"无动作"）能被解析层正确归一', 
 
 test('max_tokens 兜底不低于 1024（原 500 会截断 JSON）', () => {
   const src = fs.readFileSync(path.join(__dirname, '../server/services/AIEngine.js'), 'utf8');
-  assert(/max_tokens:\s*Math\.max\(this\.settings\.maxTokens\s*\|\|\s*0,\s*1024\)/.test(src),
+  // 会话级供应商可以自带 maxTokens（settingsOverride），但 1024 兜底必须仍然生效
+  assert(/max_tokens:\s*Math\.max\([^)]*maxTokens[^)]*,\s*1024\)/.test(src),
     '未找到 max_tokens 的 1024 兜底');
 });
 

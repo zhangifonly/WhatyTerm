@@ -77,3 +77,9 @@
 .rw-actions button { padding: 8px 16px; border-radius: 6px; cursor: pointer; border: 1px solid hsl(var(--border)); background: hsl(var(--secondary)); color: hsl(var(--foreground)); font-size: 13px; }
 .rw-actions button:disabled { opacity: 0.6; cursor: not-allowed; }
 .rw-actions .rw-primary { background: hsl(var(--primary)); border-color: hsl(var(--primary)); color: hsl(var(--primary-foreground, 0 0% 100%)); }
+
+/* 无人值守风险说明：Ralph 会用免确认标志跑 CLI，开跑前必须让用户看见这件事 */
+.rw-risk { margin: 10px 0; padding: 10px 12px; border-radius: 6px; border-left: 3px solid hsl(38 92% 50%); background: hsl(38 92% 50% / 0.12); }
+.rw-risk strong { display: block; margin-bottom: 6px; font-size: 13px; color: hsl(38 92% 60%); }
+.rw-risk p { margin: 4px 0; font-size: 12px; line-height: 1.6; color: hsl(var(--muted-foreground)); }
+.rw-risk code { padding: 1px 5px; border-radius: 3px; background: hsl(var(--muted)); font-size: 11px; word-break: break-all; }
