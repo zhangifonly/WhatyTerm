@@ -133,6 +133,66 @@ function stripBoxBorders(line) {
     .trim();
 }
 
+// 面板底部的按键提示。出现它就说明这是个等按键的模态面板，而不是 AI 打印的编号列表。
+const MENU_HINT = /Esc to (cancel|exit|close|go back)|Enter to |↵|to select\b|to confirm\b|to adjust\b|to use this session|↑\/↓|arrow keys|tab to/i;
+
+/**
+ * 结构化识别「屏上开着一个编号选项面板」——**不依赖面板标题**。
+ *
+ * 为什么不能靠标题：原来的判据是一张白名单（Select Model|Style|Theme、
+ * Settings/Status/Config 标签行……）。Claude Code 每加一个 slash 面板（/agents、
+ * /output-style…）就漏一个，漏掉后屏幕被面板占满，通用判定看到光标就当空闲，
+ * 于是往一个 Ink SelectInput 里发「继续」——既选不中任何项，也推进不了工作。
+ *
+ * 结构特征（三者叠加，才不会把 AI 输出里的编号列表误认成菜单）：
+ *   1. 连续的编号行，从 1 开始递增，至少 2 项
+ *   2. 列表落在屏幕末尾附近（菜单总在最下面，历史输出里的列表不算）
+ *   3. 底部有按键提示，或某一项前面挂着 ›/❯ 选择光标
+ *
+ * @returns {{items:number, hasYes:boolean, hasEscHint:boolean, title:string}|null}
+ */
+function detectOptionMenu(text) {
+  if (!text) return null;
+  const lines = String(text).slice(-3000).split('\n').map(stripBoxBorders);
+  // 只看末尾 30 个非空行——菜单总在屏幕最下面
+  const idx = [];
+  for (let i = lines.length - 1, seen = 0; i >= 0 && seen < 30; i--) {
+    if (lines[i]) { idx.unshift(i); seen++; }
+  }
+  if (!idx.length) return null;
+
+  // 找从 1 开始递增的编号行（允许中间夹空行）
+  let start = -1, expect = 1, last = -1, cursor = false;
+  const nums = [];
+  for (const i of idx) {
+    const m = lines[i].match(/^([›❯>*]\s*)?(\d+)\.\s+(\S.*)$/);
+    if (m && Number(m[2]) === expect) {
+      if (expect === 1) { start = i; nums.length = 0; cursor = false; }
+      nums.push(lines[i]);
+      if (m[1]) cursor = true;
+      expect++; last = i;
+    } else if (expect > 1 && m && Number(m[2]) === 1) {
+      start = i; nums.length = 1; nums[0] = lines[i]; expect = 2; last = i;
+      cursor = !!m[1];
+    }
+  }
+  if (nums.length < 2) return null;
+
+  // 编号行之后不能再有大段正文（否则是历史输出里的列表，不是当前菜单）
+  const after = lines.slice(last + 1).filter(Boolean);
+  const hint = after.slice(0, 8).some(l => MENU_HINT.test(l)) || MENU_HINT.test(nums.join('\n'));
+  if (!hint && !cursor) return null;
+  if (after.filter(l => l.length > 60 && !MENU_HINT.test(l)).length > 2) return null;
+
+  const title = (lines.slice(Math.max(0, start - 3), start).filter(Boolean).pop() || '').slice(0, 60);
+  return {
+    items: nums.length,
+    hasYes: /^\s*([›❯>*]\s*)?1\.\s*(Yes|是|允许)/i.test(nums[0]),
+    hasEscHint: after.slice(0, 8).some(l => /Esc to (cancel|exit|close|go back)/i.test(l)),
+    title
+  };
+}
+
 /**
  * 从确认界面里解析出「正在被确认的命令」候选。
  *
@@ -2056,7 +2116,15 @@ ${historyText || '(空)'}
       // 确认菜单也带 Esc 提示，必须排除——那是要选 1/2 的，另有专门分支处理
       const isConfirmMenu = /Do you want to|Would you like to/i.test(dlgTail)
         && /^\s*[❯>]?\s*1\.\s/m.test(dlgTail);
-      if (hasEscToCancel && looksLikeDialog && !isConfirmMenu) {
+      // 结构化兜底：标题白名单认不出的面板（/agents、/output-style，以及以后新增的），
+      // 只要"编号选项 + 明确写着 Esc to cancel"，就同样按 Esc 关掉。
+      // Esc 提示本身就是 CLI 在声明"这个面板可以无副作用地取消"，比标题可靠得多。
+      const menu = detectOptionMenu(dlgTail);
+      const unknownPanelWithEsc = menu && !menu.hasYes && menu.hasEscHint;
+      if (hasEscToCancel && (looksLikeDialog || unknownPanelWithEsc) && !isConfirmMenu) {
+        if (!looksLikeDialog) {
+          console.log(`[AIEngine] 结构识别到未知选项面板（${menu.items} 项，标题「${menu.title}」）`);
+        }
         console.log('[AIEngine] CLI 内置对话框开着（Esc to cancel），发 Esc 关闭以恢复正常判定');
         return {
           currentState: 'CLI 设置对话框开着（/status 等），屏幕被面板占满无法判断工作状态',
@@ -2066,6 +2134,30 @@ ${historyText || '(空)'}
           actionType: 'key',
           suggestedAction: 'Escape',
           actionReason: '对话框遮挡了真实终端内容，AI 无法判断会话进展。按 Esc 取消对话框（无副作用，不提交任何设置），下一轮即可正常判定',
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI,
+          ...pluginInfo
+        };
+      }
+
+      // 编号面板开着，但既不是 Yes/No 确认、也没写 Esc 可取消 —— 不知道怎么安全脱身。
+      // 绝不能发「继续」：往 Ink 的 SelectInput 里打字既选不中任何项，也推不动工作
+      // （这正是白名单漏掉面板后的老毛病）。标记交给 AI 读屏决定按哪个键；
+      // AI 不可用时 analyzeStatus 会交出"请人工处理"状态，同样不会瞎按。
+      if (menu && !menu.hasYes && !menu.hasEscHint) {
+        console.log(`[AIEngine] 屏上开着选项面板（${menu.items} 项，标题「${menu.title}」）但无已知脱身方式，交给 AI 判断`);
+        return {
+          currentState: `CLI 选项面板开着（${menu.title || '未知面板'}）`,
+          workingDir: '未显示',
+          recentAction: '等待选择',
+          needsAction: true,
+          actionType: 'warning',
+          suggestedAction: null,
+          actionReason: `屏上是一个 ${menu.items} 项的选项面板，没有 Yes/No 语义也没提供 Esc 取消，无法判断该按哪个键`,
+          requireConfirmation: true,
+          _needsAiJudgement: true,
           suggestion: null,
           updatedAt: new Date().toISOString(),
           preAnalyzed: true,
@@ -3289,11 +3381,15 @@ ${historyText || '(空)'}
       const mechanicalContinue = preResult.needsAction
         && preResult.actionType === 'text_input'
         && /^继续/.test(String(preResult.suggestedAction || ''));
+      // 规则层明确说"这个我判不了"（如开着一个不认识的选项面板）时也升级给 AI
+      const needsAi = preResult._needsAiJudgement === true;
       const cleanForAsk = String(terminalContent || '')
         .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
         .replace(/\x1b\][^\x07]*\x07/g, '');
-      if (mechanicalContinue && hasPendingQuestion(cleanForAsk)) {
-        console.log('[AIEngine] 检测到 CLI 正在提问，改由 AI 生成有针对性的回答');
+      if (needsAi || (mechanicalContinue && hasPendingQuestion(cleanForAsk))) {
+        console.log(needsAi
+          ? '[AIEngine] 规则层判不了（选项面板），交给 AI 读屏决定'
+          : '[AIEngine] 检测到 CLI 正在提问，改由 AI 生成有针对性的回答');
         escalatedQuestion = preResult;   // AI 不可用时用它兜底，见下方 _pendingQuestionStatus
       } else {
         console.log('[AIEngine] 预判断成功，跳过AI调用:', preResult.currentState);

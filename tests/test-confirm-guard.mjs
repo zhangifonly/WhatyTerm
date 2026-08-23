@@ -261,4 +261,85 @@ test('「是否继续？」仍可自动答继续（这个问题「继续」确�
   eq(r?.suggestedAction, '继续', '这类问题不该被误伤');
 });
 
+// ============ 6. 选项面板识别（不靠标题白名单）============
+//
+// 起因：截图里 /model 的选择菜单挂在屏上，监控判成「等待输入 → 发继续」。
+// 根因是面板识别原本是一张**标题白名单**（Select Model|Style|Theme、Settings/Status/Config…），
+// Claude Code 每加一个 slash 面板就漏一个；漏掉后屏幕被面板占满，通用判定看到光标当空闲，
+// 于是往 Ink 的 SelectInput 里打「继续」——既选不中任何项，也推不动工作。
+
+/** 造一个编号选项面板；footer 为空表示不提供 Esc 取消 */
+function panel(title, desc, items, footer = 'Enter to confirm · Esc to cancel') {
+  const body = items.map((t, i) => `${i === 1 ? '  › ' : '    '}${i + 1}. ${t}`);
+  return ['  ' + title, '  ' + desc, ''].concat(body, ['', footer ? '  ' + footer : '']).join('\n');
+}
+
+const MODEL_PANEL = panel('Select model',
+  'Switch between Claude models. Your pick becomes the default for new sessions.',
+  ['Default (recommended)   Opus 5 with 1M context',
+   'Opus (1M context) ✓     Opus 5 with 1M context',
+   'Fable                   Fable 5',
+   'Sonnet                  Sonnet 5',
+   'Haiku                   Haiku 4.5'],
+  'Enter to set as default · s to use this session only · Esc to cancel');
+
+test('/model 面板 → 按 Esc 关掉，绝不发「继续」', () => {
+  const r = engine.preAnalyzeStatus(MODEL_PANEL, 'claude');
+  eq(r?.actionType, 'key');
+  eq(r?.suggestedAction, 'Escape');
+});
+
+test('面板套上框线 + tmux 补空行 + 底部状态栏，仍能认出', () => {
+  const boxed = MODEL_PANEL.split('\n').map(l => '│ ' + l.padEnd(72) + '│').join('\n');
+  const screen = '╭' + '─'.repeat(74) + '╮\n' + boxed + '\n╰' + '─'.repeat(74) + '╯'
+    + '\n  ? for shortcuts                      accept edits on' + '\n'.repeat(10);
+  eq(engine.preAnalyzeStatus(screen, 'claude')?.suggestedAction, 'Escape');
+});
+
+test('白名单没有的新面板（/agents 之类）也能认出——这是原来漏掉的那一类', () => {
+  const screen = panel('Select agent', 'Pick an agent to run.',
+    ['general-purpose  通用', 'code-reviewer  审查', 'Explore  检索'])
+    + '\n\n> \n  ? for shortcuts                      accept edits on';
+  const r = engine.preAnalyzeStatus(screen, 'claude');
+  eq(r?.suggestedAction, 'Escape', '未知面板仍被判成空闲并发了「继续」');
+});
+
+test('面板没提供 Esc 取消 → 不猜按键，交给 AI 判断', () => {
+  const screen = panel('Choose a migration path', 'Pick one to continue.',
+    ['原地升级', '新建后迁移', '暂不处理'], '↑/↓ to select') + '\n\n> ';
+  const r = engine.preAnalyzeStatus(screen, 'claude');
+  eq(r?.actionType, 'warning', '不该给出按键');
+  eq(r?._needsAiJudgement, true, '应标记为需要 AI 读屏');
+  assert(!/继续/.test(String(r?.suggestedAction || '')), '仍然发了「继续」');
+});
+
+test('AI 输出里的编号列表不算菜单（不能因为过度识别把正常空闲判死）', () => {
+  const screen = [
+    '剩余 5 处占位都依赖尚未翻译的目录枚举 /stat：',
+    '    1. DirectoryItem.get/getFileStatus 后端未译',
+    '    2. Directory.open/getVolumeInfo 依赖 VolumeDevice.getMountPath',
+    '    3. File 的 copy/move/replace 五个静态方法后端也没译',
+    '    4. 我把它们改成直接返回 E_NOSYS 并注明待补点',
+    '    5. 而不是继续 console.warn 再返回成功',
+    '',
+    '验证：四文件单文件 tsc 零错误；startup 1601 不变。',
+    '',
+    '> ',
+    '  ? for shortcuts                              accept edits on'
+  ].join('\n');
+  const r = engine.preAnalyzeStatus(screen, 'claude');
+  eq(r?.actionType, 'text_input', '普通空闲被误判成面板了');
+  eq(r?.suggestedAction, '继续');
+});
+
+test('权限确认菜单仍走选项分支（有 Yes 语义，我们看得懂）', () => {
+  const r = engine.preAnalyzeStatus(confirmBox('npm run build'), 'claude');
+  eq(r?.actionType, 'select');
+});
+
+test('正在跑的时候即使屏上有编号也不打扰', () => {
+  const screen = 'Sautéing… (2m 13s · esc to interrupt)\n  1. 步骤一\n  2. 步骤二';
+  eq(engine.preAnalyzeStatus(screen, 'claude')?.needsAction, false);
+});
+
 summary();
