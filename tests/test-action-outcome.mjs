@@ -181,6 +181,30 @@ test('中途出现一次有效操作 → 计数清零', () => {
   eq(ledger.shouldPause('s1', idle), null, '有效操作后应重新计数');
 });
 
+// ============ 5. 基线取样时机 ============
+
+test('基线取自「做判断时那一屏」，不是发送后重抓（那时输入框已回显刚打的字）', () => {
+  const judged = '❯ \n  accept edits on';        // 分析时看到的屏
+  const echoed = '❯ 继续\n  accept edits on';    // record() 调用时输入框已回显
+  const session = { id: 's-base', name: 't', getScreenContent: () => echoed };
+  const entry = ledger.record(session, {
+    state: '等待接受编辑', actionType: 'text_input', action: '继续', beforeScreen: judged
+  });
+  for (const t of ledger.pending.values()) clearTimeout(t);
+  ledger.pending.clear();
+  eq(entry.beforeHash, hash(judged), '基线取成了回显后的屏，会把"什么都没发生"记成有变化');
+  assert(entry.beforeHash !== hash(echoed), '基线不该等于回显屏');
+});
+
+test('没传 beforeScreen 时退回实时抓屏（向后兼容）', () => {
+  const now = '❯ 当前屏';
+  const session = { id: 's-fb', name: 't', getScreenContent: () => now };
+  const entry = ledger.record(session, { state: 's', actionType: 'text_input', action: '继续' });
+  for (const t of ledger.pending.values()) clearTimeout(t);
+  ledger.pending.clear();
+  eq(entry.beforeHash, hash(now));
+});
+
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
 if (results.failed) for (const e of results.errors) console.log(`  • ${e.name}\n    ${e.error}`);
 process.exit(results.failed ? 1 : 0);

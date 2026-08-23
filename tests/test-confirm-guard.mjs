@@ -342,4 +342,35 @@ test('正在跑的时候即使屏上有编号也不打扰', () => {
   eq(engine.preAnalyzeStatus(screen, 'claude')?.needsAction, false);
 });
 
+// ============ 7. AI 不可用时的降级状态不能自相矛盾 ============
+
+test('降级为「请人工处理」时必须清掉建议操作', () => {
+  // escalated 里带着规则层那句「继续」。安全闸只拦自动发送，拦不住用户在界面上手点执行——
+  // 若不清掉，界面会在"请人工回答"旁边并排显示「建议操作：继续」，点一下就把
+  // 我们刚判定为答非所问的那句话发出去了。
+  const escalated = {
+    needsAction: true, actionType: 'text_input', suggestedAction: '继续',
+    currentState: 'Claude Code空闲', actionReason: '空闲，发送继续'
+  };
+  const r = engine._pendingQuestionStatus(escalated, 'claude');
+  eq(r.actionType, 'warning');
+  eq(r.suggestedAction, null, '建议操作没清掉，手点执行会发出「继续」');
+  eq(r.requireConfirmation, true);
+});
+
+test('面板类降级保留面板自己的状态描述（不套用"正在提问"文案）', () => {
+  const panelStatus = {
+    needsAction: true, actionType: 'warning', suggestedAction: null,
+    currentState: 'CLI 选项面板开着（Choose a migration path）',
+    actionReason: '屏上是一个 3 项的选项面板', _needsAiJudgement: true
+  };
+  const r = engine._pendingQuestionStatus(panelStatus, 'claude');
+  assert(/选项面板/.test(r.currentState), `面板状态被套成了提问文案：${r.currentState}`);
+  assert(/人工/.test(r.actionReason), '未说明需要人工处理');
+});
+
+test('没有待升级的状态时返回 null（不凭空造状态）', () => {
+  eq(engine._pendingQuestionStatus(null, 'claude'), null);
+});
+
 summary();

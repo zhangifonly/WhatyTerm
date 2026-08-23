@@ -67,7 +67,11 @@ class ActionOutcome {
    */
   record(session, info) {
     if (!this.enabled || !session) return;
-    const before = session.getScreenContent ? session.getScreenContent() : '';
+    // ⚠️ 「操作前」必须用**做判断时那一屏**，而不是现在重新抓一次：
+    //    record() 在发送之后调用，此时输入框里已经回显了刚打进去的文字，
+    //    拿它当基线，比的就成了"回显之后 vs 6 秒后"，而不是"我们判断的那屏 vs 之后"。
+    const before = info.beforeScreen
+      || (session.getScreenContent ? session.getScreenContent() : '');
     const entry = {
       id: `${session.id}-${Date.now()}`,
       at: new Date().toISOString(),
@@ -91,6 +95,7 @@ class ActionOutcome {
     }, VERIFY_DELAY);
     if (timer.unref) timer.unref();
     this.pending.set(entry.id, timer);
+    return entry;   // 返回记录本身，方便调用方与测试核对基线取自哪一屏
   }
 
   /**

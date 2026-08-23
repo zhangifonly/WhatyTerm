@@ -3457,13 +3457,23 @@ ${historyText || '(空)'}
    */
   _pendingQuestionStatus(escalated, aiType) {
     if (!escalated) return null;
-    console.warn('[AIEngine] CLI 在提问但 AI 不可用，交由人工回答（不机械发"继续"）');
+    // 面板类（规则层自己声明判不了）和提问类（机械「继续」被拦下）文案不同
+    const isPanel = escalated._needsAiJudgement === true;
+    console.warn(`[AIEngine] ${isPanel ? '选项面板' : 'CLI 提问'}需要 AI 判断但 AI 不可用，交由人工处理`);
     return {
       ...escalated,
-      currentState: `${getCliName(aiType)}正在提问，等待你回答`,
+      currentState: isPanel
+        ? escalated.currentState
+        : `${getCliName(aiType)}正在提问，等待你回答`,
       actionType: 'warning',
+      // ⚠️ 必须清掉：escalated 里带着规则层那句「继续」，不清的话界面会在
+      //    "请人工回答"旁边并排显示「建议操作：继续」，用户手点执行就会把那句
+      //    我们刚判定为答非所问的话发出去。安全闸只拦自动发送，拦不住手动点击。
+      suggestedAction: null,
       requireConfirmation: true,
-      actionReason: 'CLI 提出了需要判断的问题，而监控 AI 此刻不可用。机械回"继续"等于没回答，请人工读屏答复。',
+      actionReason: isPanel
+        ? `${escalated.actionReason || '屏上开着选项面板'}；监控 AI 此刻不可用，无法代为判断，请人工处理。`
+        : 'CLI 提出了需要判断的问题，而监控 AI 此刻不可用。机械回"继续"等于没回答，请人工读屏答复。',
       _source: 'pending_question_no_ai'
     };
   }

@@ -4838,7 +4838,7 @@ async function runBackgroundAutoAction() {
           lastActionMap.set(session.id, { action, time: now, contentHash, continueCount });
           // 效果台账：延迟回读，按判定类型统计这次操作到底有没有推动事情发生
           actionOutcome.record(session, {
-            state: status.currentState, actionType: status.actionType, action,
+            state: status.currentState, actionType: status.actionType, action, beforeScreen: terminalContent,
             source: status._source || (status.preAnalyzed ? 'rule' : 'ai')
           });
           historyLogger.log(session.id, {
@@ -4933,7 +4933,7 @@ async function runBackgroundAutoAction() {
 
           lastActionMap.set(session.id, { action, contentHash, time: now });
           actionOutcome.record(session, {
-            state: status.currentState, actionType: status.actionType, action, source: 'ai_cache'
+            state: status.currentState, actionType: status.actionType, action, beforeScreen: terminalContent, source: 'ai_cache'
           });
           session.isAutoActioning = false;
           updateCheckState(sessionData.id, false, status);
@@ -5109,7 +5109,7 @@ async function runBackgroundAutoAction() {
           : (action === '继续' ? 1 : 0);
         lastActionMap.set(session.id, { action, time: now, contentHash, continueCount: continueCountAi });
         actionOutcome.record(session, {
-          state: status.currentState, actionType: status.actionType, action,
+          state: status.currentState, actionType: status.actionType, action, beforeScreen: terminalContent,
           source: status._source || (status.preAnalyzed ? 'rule' : 'ai')
         });
 
