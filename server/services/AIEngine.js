@@ -3289,6 +3289,9 @@ ${historyText || '(空)'}
    * @param {string} forcedPluginId - 强制使用的插件 ID（可选）
    */
   async analyzeStatus(terminalContent, aiType = 'claude', sessionId = null, tmuxSession = null, projectContext = null, forcedPluginId = null) {
+    // 因「CLI 正在提问」而被丢弃的预判断结果。AI 不可用时不能就这么什么都不返回：
+    // 屏幕上挂着一个真问题，用户界面却一片空白，等于问题被静默吞掉。
+    let escalatedQuestion = null;
     // 先尝试预判断（传递完整参数）
     const preResult = this.preAnalyzeStatus(terminalContent, aiType, tmuxSession, projectContext, forcedPluginId);
     if (preResult) {
@@ -3305,6 +3308,7 @@ ${historyText || '(空)'}
         .replace(/\x1b\][^\x07]*\x07/g, '');
       if (mechanicalContinue && hasPendingQuestion(cleanForAsk)) {
         console.log('[AIEngine] 检测到 CLI 正在提问，改由 AI 生成有针对性的回答');
+        escalatedQuestion = preResult;   // AI 不可用时用它兜底，见下方 _pendingQuestionStatus
       } else {
         console.log('[AIEngine] 预判断成功，跳过AI调用:', preResult.currentState);
         return preResult;
@@ -3332,7 +3336,7 @@ ${historyText || '(空)'}
       const viaCli = await this._analyzeStatusViaCLI(prompt, sessionId, aiType, projectContext);
       if (viaCli) return viaCli;
       console.warn('[AIEngine] 无可用监控供应商，且 CLI 回退未产出结果');
-      return null;
+      return this._pendingQuestionStatus(escalatedQuestion, aiType);
     }
 
     try {
@@ -3346,18 +3350,40 @@ ${historyText || '(空)'}
       });
 
       if (!content) {
-        return null;
+        return this._pendingQuestionStatus(escalatedQuestion, aiType);
       }
 
-      return this._parseStatusResponse(content);
+      return this._parseStatusResponse(content) || this._pendingQuestionStatus(escalatedQuestion, aiType);
     } catch (err) {
       console.error('AI 状态分析错误:', err);
       // 会话供应商拿不到 HTTP 凭证（官方 OAuth 登录）且全局配置也缺失时，
       // 用 CLI 兜底——它复用 Claude Code 自己的登录态，OAuth 也能用。
       const viaCli = await this._analyzeStatusViaCLI(prompt, sessionId, aiType, projectContext);
       if (viaCli) return viaCli;
+      const pending = this._pendingQuestionStatus(escalatedQuestion, aiType);
+      if (pending) return pending;
       throw err;
     }
+  }
+
+  /**
+   * AI 不可用时，把「CLI 正在提问」这件事本身交给用户。
+   *
+   * 不能退回预判断里那句机械的"继续"——正是因为它答非所问才升级给 AI 的；
+   * 也不能返回 null 让界面一片空白。所以给一个只展示、不自动按键的状态，
+   * 由人来读屏回答。actionType:'warning' 会被 server 的自动操作闸门拦下。
+   */
+  _pendingQuestionStatus(escalated, aiType) {
+    if (!escalated) return null;
+    console.warn('[AIEngine] CLI 在提问但 AI 不可用，交由人工回答（不机械发"继续"）');
+    return {
+      ...escalated,
+      currentState: `${getCliName(aiType)}正在提问，等待你回答`,
+      actionType: 'warning',
+      requireConfirmation: true,
+      actionReason: 'CLI 提出了需要判断的问题，而监控 AI 此刻不可用。机械回"继续"等于没回答，请人工读屏答复。',
+      _source: 'pending_question_no_ai'
+    };
   }
 
   /**

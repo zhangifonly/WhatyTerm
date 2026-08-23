@@ -148,6 +148,7 @@ function parseWorkingDirFromOutput(output) {
 import { SessionManager } from './services/SessionManager.js';
 import { HistoryLogger } from './services/HistoryLogger.js';
 import { AIEngine, hasRunningTimer, isDangerousCommand, extractConfirmCandidates } from './services/AIEngine.js';
+import actionOutcome from './services/ActionOutcome.js';
 import { AuthService } from './services/AuthService.js';
 import { ProviderService } from './services/ProviderService.js';
 import ScheduleManager from './services/ScheduleManager.js';
@@ -2610,6 +2611,17 @@ app.get('/api/auth/scan-login-status', (req, res) => {
 // Tunnel URL API - 直接从 ai-settings.json 读取，不依赖 ProviderService
 const AI_SETTINGS_PATH = join(__dirname, 'db/ai-settings.json');
 
+// 自动操作效果台账：按判定类型看哪些策略在真推进工作、哪些在空转
+// GET /api/monitor/effectiveness?limit=5000
+app.get('/api/monitor/effectiveness', (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 5000, 50000);
+    res.json({ success: true, ...actionOutcome.stats(limit) });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get('/api/tunnel/url', (req, res) => {
   try {
     // 优先返回当前活动的隧道 URL
@@ -4816,6 +4828,11 @@ async function runBackgroundAutoAction() {
             ? (prevAction.continueCount || 1) + 1
             : (action === '继续' ? 1 : 0);
           lastActionMap.set(session.id, { action, time: now, contentHash, continueCount });
+          // 效果台账：延迟回读，按判定类型统计这次操作到底有没有推动事情发生
+          actionOutcome.record(session, {
+            state: status.currentState, actionType: status.actionType, action,
+            source: status._source || (status.preAnalyzed ? 'rule' : 'ai')
+          });
           historyLogger.log(session.id, {
             type: 'ai_decision',
             content: `[预判断自动操作] ${action}`,
@@ -4907,19 +4924,31 @@ async function runBackgroundAutoAction() {
           }
 
           lastActionMap.set(session.id, { action, contentHash, time: now });
+          actionOutcome.record(session, {
+            state: status.currentState, actionType: status.actionType, action, source: 'ai_cache'
+          });
           session.isAutoActioning = false;
           updateCheckState(sessionData.id, false, status);
           continue;
         }
       }
 
+      // Hook 只知道"CLI 有没有在跑工具"，没读过屏幕，不知道屏上是确认框、提问还是真空闲。
+      // 所以这里**不自动操作**——这一点原本靠下方 `actionType !== 'input'` 的排除条件实现，
+      // 但状态里同时写着 needsAction:true / suggestedAction:'继续'，界面于是显示
+      // "需要操作：继续" + "自动操作已开启，将自动执行"，而实际上永远不会执行。
+      // 与其让界面说一句不算数的话，不如把"不操作"和原因如实写出来。
+      const hookIdle = hookState === 'idle' && hookAge > 5000;
       const status = {
         currentState: hookState === 'working' ? '工具执行中（Hook 检测）'
           : hookState === 'idle' ? '等待指令（Hook 检测）'
           : '状态未知',
-        needsAction: hookState === 'idle' && hookAge > 5000,
-        actionType: hookState === 'idle' ? 'input' : null,
-        suggestedAction: hookState === 'idle' ? '继续' : null,
+        needsAction: false,
+        actionType: hookIdle ? 'warning' : null,
+        suggestedAction: null,
+        actionReason: hookIdle
+          ? 'Hook 显示 CLI 已空闲，但监控 AI 不可用、未能读屏确认屏上是什么，故不自动操作'
+          : null,
         recentAction: hookState,
         preAnalyzed: true,
         _source: 'hook_fallback',
@@ -4967,7 +4996,7 @@ async function runBackgroundAutoAction() {
       }
 
       // 情况1：需要交互操作（如确认、选择、文本输入等）
-      if (status && status.needsAction && status.suggestedAction && status.actionType !== 'input') {
+      if (status && status.needsAction && status.suggestedAction) {
         const action = status.suggestedAction;
 
         // 安全闸：AI 路径不经过 preAnalyzeStatus 的确认框检查，这里现场复核
@@ -5071,6 +5100,10 @@ async function runBackgroundAutoAction() {
           ? (prevActionAi.continueCount || 1) + 1
           : (action === '继续' ? 1 : 0);
         lastActionMap.set(session.id, { action, time: now, contentHash, continueCount: continueCountAi });
+        actionOutcome.record(session, {
+          state: status.currentState, actionType: status.actionType, action,
+          source: status._source || (status.preAnalyzed ? 'rule' : 'ai')
+        });
 
         historyLogger.log(session.id, {
           type: 'ai_decision',
