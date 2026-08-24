@@ -100,11 +100,11 @@
   },
   "stats": {
     "title": "AI 操作统计（本会话）",
-    "totalOps": "总操作次数",
-    "success": "成功",
-    "failed": "失败",
+    "totalOps": "状态判定次数",
+    "success": "判定完成",
+    "failed": "判定出错",
     "aiDecision": "AI 判断",
-    "programDecision": "程序判断",
+    "programDecision": "规则判断",
     "sessionDuration": "会话时长",
     "minutes": "分钟",
     "hours": "小时",
@@ -114,7 +114,10 @@
     "outputTokens": "输出",
     "cacheRead": "缓存命中",
     "totalTokens": "总计",
-    "requests": "请求数"
+    "requests": "请求数",
+    "hookFallback": "Hook 兜底",
+    "aiFailedSuffix": "其中失败",
+    "statsNote": "这里数的是判定轮次，不是发出去的操作"
   },
   "aiPanel": {
     "title": "会话状态监控",

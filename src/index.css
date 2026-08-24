@@ -2372,6 +2372,17 @@ body {
   margin: 8px 0;
 }
 
+/* 口径说明：这些数字是判定轮次，不是发出去的操作。没有这一句，
+   自动模式关着时面板照样显示几万次"操作 99% 成功"，很容易被误读 */
+.tooltip-note {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid #444;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #888;
+}
+
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }

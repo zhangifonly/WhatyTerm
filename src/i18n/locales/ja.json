@@ -100,11 +100,11 @@
   },
   "stats": {
     "title": "AI操作統計（現在のセッション）",
-    "totalOps": "総操作回数",
-    "success": "成功",
-    "failed": "失敗",
-    "aiDecision": "AI判断",
-    "programDecision": "プログラム判断",
+    "totalOps": "判定回数",
+    "success": "完了",
+    "failed": "エラー",
+    "aiDecision": "AI 判断",
+    "programDecision": "ルール判断",
     "sessionDuration": "セッション時間",
     "minutes": "分",
     "hours": "時間",
@@ -114,7 +114,10 @@
     "outputTokens": "出力",
     "cacheRead": "キャッシュヒット",
     "totalTokens": "合計",
-    "requests": "リクエスト数"
+    "requests": "リクエスト数",
+    "hookFallback": "Hook フォールバック",
+    "aiFailedSuffix": "うち失敗",
+    "statsNote": "送信した操作ではなく判定回数を数えています"
   },
   "aiPanel": {
     "title": "AIステータス監視",

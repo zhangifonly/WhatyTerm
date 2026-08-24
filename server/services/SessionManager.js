@@ -911,7 +911,7 @@ export class Session {
       geminiProvider: this.geminiProvider || null,
       grokProvider: this.grokProvider || null,
       // 操作统计
-      stats: this.stats || { total: 0, success: 0, failed: 0, aiAnalyzed: 0, preAnalyzed: 0 }
+      stats: this.stats || { total: 0, success: 0, failed: 0, aiAnalyzed: 0, aiFailed: 0, preAnalyzed: 0, hookFallback: 0 }
     };
   }
 }
@@ -1080,6 +1080,15 @@ export class SessionManager {
     } catch {}
     try {
       this.db.exec(`ALTER TABLE sessions ADD COLUMN stats_pre_analyzed INTEGER DEFAULT 0`);
+    } catch {}
+    // AI 判定里失败的那部分。没有它就只能拿"总失败数"当"AI 失败数"看，
+    // 而总失败里还混着监控循环自身的异常 —— 面板上"AI 判断"与"失败"两个数
+    // 恒等，读起来就是"AI 判断全错"。
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN stats_ai_failed INTEGER DEFAULT 0`);
+    } catch {}
+    try {
+      this.db.exec(`ALTER TABLE sessions ADD COLUMN stats_hook_fallback INTEGER DEFAULT 0`);
     } catch {}
     // 添加原始目标字段
     try {
@@ -1299,7 +1308,9 @@ export class SessionManager {
         success: row.stats_success || 0,
         failed: row.stats_failed || 0,
         aiAnalyzed: row.stats_ai_analyzed || 0,
-        preAnalyzed: row.stats_pre_analyzed || 0
+        preAnalyzed: row.stats_pre_analyzed || 0,
+        aiFailed: row.stats_ai_failed || 0,
+        hookFallback: row.stats_hook_fallback || 0
       };
 
       // 恢复工作目录和项目信息
@@ -1411,7 +1422,9 @@ export class SessionManager {
             success: row.stats_success || 0,
             failed: row.stats_failed || 0,
             aiAnalyzed: row.stats_ai_analyzed || 0,
-            preAnalyzed: row.stats_pre_analyzed || 0
+            preAnalyzed: row.stats_pre_analyzed || 0,
+            aiFailed: row.stats_ai_failed || 0,
+            hookFallback: row.stats_hook_fallback || 0
           };
 
           // 恢复工作目录和项目信息
@@ -1599,11 +1612,11 @@ export class SessionManager {
   }
 
   _saveSession(session) {
-    const stats = session.stats || { total: 0, success: 0, failed: 0, aiAnalyzed: 0, preAnalyzed: 0 };
+    const stats = session.stats || { total: 0, success: 0, failed: 0, aiAnalyzed: 0, aiFailed: 0, preAnalyzed: 0, hookFallback: 0 };
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO sessions
-      (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, status, created_at, updated_at, ai_type, claude_provider, codex_provider, gemini_provider, stats_total, stats_success, stats_failed, stats_ai_analyzed, stats_pre_analyzed, working_dir, project_name, project_desc, team_id, team_role)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, status, created_at, updated_at, ai_type, claude_provider, codex_provider, gemini_provider, stats_total, stats_success, stats_failed, stats_ai_analyzed, stats_pre_analyzed, stats_ai_failed, stats_hook_fallback, working_dir, project_name, project_desc, team_id, team_role)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       session.id,
@@ -1627,6 +1640,8 @@ export class SessionManager {
       stats.failed,
       stats.aiAnalyzed,
       stats.preAnalyzed,
+      stats.aiFailed || 0,
+      stats.hookFallback || 0,
       session.workingDir || '',
       session.projectName || '',
       session.projectDesc || '',
@@ -1912,7 +1927,7 @@ export class SessionManager {
 
     // 初始化 stats（如果不存在）
     if (!session.stats) {
-      session.stats = { total: 0, success: 0, failed: 0, aiAnalyzed: 0, preAnalyzed: 0 };
+      session.stats = { total: 0, success: 0, failed: 0, aiAnalyzed: 0, aiFailed: 0, preAnalyzed: 0, hookFallback: 0 };
     }
 
     // 更新统计
@@ -1924,9 +1939,13 @@ export class SessionManager {
     }
     if (statUpdate.aiAnalyzed) {
       session.stats.aiAnalyzed++;
+      if (statUpdate.aiFailed) session.stats.aiFailed = (session.stats.aiFailed || 0) + 1;
     }
     if (statUpdate.preAnalyzed) {
       session.stats.preAnalyzed++;
+    }
+    if (statUpdate.source === 'hook') {
+      session.stats.hookFallback = (session.stats.hookFallback || 0) + 1;
     }
 
     // 保存到数据库

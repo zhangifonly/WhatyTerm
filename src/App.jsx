@@ -1881,6 +1881,13 @@ export default function App() {
                     <span className="tooltip-label">{t('stats.aiDecision')}:</span>
                     <span className="tooltip-value">
                       {currentSession?.stats?.aiAnalyzed || 0} ({(currentSession?.stats?.total || 0) > 0 ? Math.round((currentSession?.stats?.aiAnalyzed || 0) / currentSession.stats.total * 100) : 0}%)
+                      {/* 把 AI 判断里失败的那部分单列出来。原来面板上「AI 判断」和「失败」
+                          两个数恒等（循环异常全被算作 AI 判断），看上去就是"AI 判断全错" */}
+                      {(currentSession?.stats?.aiFailed || 0) > 0 && (
+                        <span className="failed">
+                          {' '}· {t('stats.aiFailedSuffix')} {currentSession.stats.aiFailed}
+                        </span>
+                      )}
                     </span>
                   </div>
                   <div className="tooltip-item">
@@ -1889,6 +1896,13 @@ export default function App() {
                       {currentSession?.stats?.preAnalyzed || 0} ({(currentSession?.stats?.total || 0) > 0 ? Math.round((currentSession?.stats?.preAnalyzed || 0) / currentSession.stats.total * 100) : 0}%)
                     </span>
                   </div>
+                  {(currentSession?.stats?.hookFallback || 0) > 0 && (
+                    <div className="tooltip-item">
+                      <span className="tooltip-label">{t('stats.hookFallback')}:</span>
+                      <span className="tooltip-value">{currentSession.stats.hookFallback}</span>
+                    </div>
+                  )}
+                  <div className="tooltip-note">{t('stats.statsNote')}</div>
                   <div className="tooltip-divider"></div>
                   <div className="tooltip-item">
                     <span className="tooltip-label">{t('stats.sessionDuration')}:</span>

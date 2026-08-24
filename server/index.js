@@ -3475,13 +3475,20 @@ const aiHealthState = {
   networkErrorThreshold: 2, // 连续网络错误阈值，超过则标记为离线
 };
 
-// AI 操作统计
+// 状态判定统计
+// ⚠️ 这里数的是**判定轮次**，不是"发出去的操作"——绝大多数轮次只是看一眼屏幕，
+//    什么都不发（自动模式关着时更是一次都不发）。真正发出去的操作及其效果，
+//    看 ActionOutcome 台账（scripts/monitor-effectiveness.mjs）。
 const aiOperationStats = {
-  total: 0,       // 总操作次数
-  success: 0,     // 成功次数
-  failed: 0,      // 失败次数
-  aiAnalyzed: 0,  // AI分析次数
-  preAnalyzed: 0, // 程序预判断次数
+  total: 0,        // 判定轮次总数
+  success: 0,      // 正常完成的轮次
+  failed: 0,       // 出错的轮次
+  aiAnalyzed: 0,   // 由 AI 判定的轮次
+  aiFailed: 0,     // 其中 AI 调用失败的轮次（原来这类被算进 aiAnalyzed 又算进 failed，
+                   //   于是"AI 判断"和"失败"两个数恒等，看上去像"AI 判断全错"）
+  preAnalyzed: 0,  // 由规则层判定的轮次
+  hookFallback: 0, // 仅靠 Hook 状态兜底的轮次（不读屏、不操作）
+  loopErrors: 0,   // 监控循环自身出错（抓屏/tmux/插件异常），与 AI 无关
   startTime: Date.now()  // 统计开始时间
 };
 
@@ -3504,11 +3511,23 @@ function isNetworkError(error) {
   );
 }
 
-// 更新 AI 健康状态
-function updateAiHealthState(success, error = null, isPreAnalyzed = false, sessionId = null) {
+/**
+ * 更新 AI 健康状态与判定统计。
+ *
+ * @param {boolean} success - 本轮判定是否正常完成
+ * @param {Error|null} error
+ * @param {'rule'|'ai'|'hook'|'error'|boolean} source - 判定来源。
+ *   原来这个参数是布尔 isPreAnalyzed，只有"规则/非规则"两档，于是监控循环里任何异常
+ *   （抓屏失败、tmux 出错、插件 bug）都被归到"AI 判断"名下，且必然 success=false。
+ *   结果「失败」和「AI 判断」两个计数恒等，面板看上去就是"AI 判断全错"。
+ *   仍兼容布尔传参：true=rule，false=ai。
+ * @param {string|null} sessionId
+ */
+function updateAiHealthState(success, error = null, source = 'ai', sessionId = null) {
   const now = Date.now();
+  const src = typeof source === 'boolean' ? (source ? 'rule' : 'ai') : source;
 
-  // 更新全局操作统计
+  // 更新全局判定统计
   aiOperationStats.total++;
   if (success) {
     aiOperationStats.success++;
@@ -3516,19 +3535,25 @@ function updateAiHealthState(success, error = null, isPreAnalyzed = false, sessi
     aiOperationStats.failed++;
   }
 
-  // 区分AI判断和程序预判断
-  if (isPreAnalyzed) {
+  if (src === 'rule') {
     aiOperationStats.preAnalyzed++;
+  } else if (src === 'hook') {
+    aiOperationStats.hookFallback++;
+  } else if (src === 'error') {
+    aiOperationStats.loopErrors++;
   } else {
     aiOperationStats.aiAnalyzed++;
+    if (!success) aiOperationStats.aiFailed++;
   }
 
   // 更新会话统计（如果提供了 sessionId）
   if (sessionId) {
     sessionManager.updateSessionStats(sessionId, {
       success,
-      aiAnalyzed: !isPreAnalyzed,
-      preAnalyzed: isPreAnalyzed
+      source: src,
+      aiAnalyzed: src === 'ai',
+      aiFailed: src === 'ai' && !success,
+      preAnalyzed: src === 'rule'
     });
   }
 
@@ -4537,7 +4562,7 @@ async function runBackgroundAutoAction() {
         console.log(`[后台自动操作] 会话 ${session.name}: 预判断成功 - ${preResult.currentState}`);
         // 使用预判断结果，跳过 AI 调用
         let status = preResult;
-        updateAiHealthState(true, null, true, sessionData.id);
+        updateAiHealthState(true, null, 'rule', sessionData.id);
 
         // 检查是否需要 AI 错误分析（检测到 API 错误但需要判断类型）
         if (status.needsErrorAnalysis && status.errorContent) {
@@ -4962,7 +4987,8 @@ async function runBackgroundAutoAction() {
         _source: 'hook_fallback',
       };
       console.log(`[后台自动操作] 会话 ${session.name}: hook fallback - ${status.currentState}`);
-      updateAiHealthState(true, null, true, sessionData.id);
+      // Hook 兜底既没读屏也不操作，算作单独一档，不该混进"程序判断"充业绩
+      updateAiHealthState(true, null, 'hook', sessionData.id);
 
       // 更新会话信息（工作目录、名称、项目说明）
       // 获取当前工作目录
@@ -5135,8 +5161,8 @@ async function runBackgroundAutoAction() {
       }
     } catch (err) {
       console.error(`[后台自动操作] 会话 ${session.name} 错误:`, err.message);
-      // 更新 AI 健康状态（记录错误）
-      updateAiHealthState(false, err, false, sessionData.id);
+      // 监控循环自身出错（抓屏/tmux/插件），与 AI 判断无关，单独归档
+      updateAiHealthState(false, err, 'error', sessionData.id);
       // 出错也更新状态，避免频繁重试
       updateCheckState(sessionData.id, false, null);
     } finally {
@@ -5491,8 +5517,9 @@ async function runBackgroundStatusAnalysis() {
         sessionData.monitorPluginId
       );
 
-      // AI 分析成功，更新健康状态（区分AI判断和程序预判断）
-      updateAiHealthState(true, null, status?.preAnalyzed || false, sessionData.id);
+      // 判定来源如实记账：规则层给的记 rule，AI 给的记 ai。
+      // status 为 null 表示这一轮没判出任何结果，不能算成功。
+      updateAiHealthState(!!status, null, status?.preAnalyzed ? 'rule' : 'ai', sessionData.id);
 
       if (status) {
         // 如果检测到 CLI 工具运行，动态更新 session 的供应商信息
@@ -5632,8 +5659,9 @@ async function runBackgroundStatusAnalysis() {
       await new Promise(resolve => setTimeout(resolve, 2000));
     } catch (err) {
       console.error(`[后台AI分析] 会话 ${session.name} 错误:`, err.message);
-      // 更新 AI 健康状态（记录错误）
-      updateAiHealthState(false, err, false, sessionData.id);
+      // 这一层的异常可能来自 AI 调用，也可能来自抓屏/插件，无法区分 → 归为循环错误，
+      // 不再一律算到"AI 判断"头上（那正是"AI 判断全错"假象的来源）
+      updateAiHealthState(false, err, 'error', sessionData.id);
       // 出错后也延迟，避免频繁重试
       await new Promise(resolve => setTimeout(resolve, 2000));
     }

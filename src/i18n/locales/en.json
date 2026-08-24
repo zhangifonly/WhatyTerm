@@ -100,11 +100,11 @@
   },
   "stats": {
     "title": "AI Operation Statistics (Current Session)",
-    "totalOps": "Total Operations",
-    "success": "Success",
-    "failed": "Failed",
-    "aiDecision": "AI Decisions",
-    "programDecision": "Program Decisions",
+    "totalOps": "Status checks",
+    "success": "Completed",
+    "failed": "Errored",
+    "aiDecision": "By AI",
+    "programDecision": "By rules",
     "sessionDuration": "Session Duration",
     "minutes": "minutes",
     "hours": "hours",
@@ -114,7 +114,10 @@
     "outputTokens": "Output",
     "cacheRead": "Cache Hit",
     "totalTokens": "Total",
-    "requests": "Requests"
+    "requests": "Requests",
+    "hookFallback": "Hook fallback",
+    "aiFailedSuffix": "failed",
+    "statsNote": "Counts detection rounds, not actions sent"
   },
   "aiPanel": {
     "title": "AI Status Monitor",
