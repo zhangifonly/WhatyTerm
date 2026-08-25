@@ -86,6 +86,27 @@ test('CSS 里有告警条样式（没样式等于没提示）', () => {
   assert(/\.server-stale-banner\s*\{/.test(css), '缺少告警条样式');
 });
 
+test('版本真能读出来 —— 不是只在源码里长得对', async () => {
+  // 血的教训：第一版写成 fs.readFileSync，而这个文件是具名导入
+  //（import { readFileSync } from 'fs'），根本没有 fs 命名空间。
+  // ReferenceError 被 try/catch 吞掉，版本恒为 unknown、stale 恒为 false，
+  // 自检形同虚设，而所有源码文本断言全部通过。所以必须真跑一次。
+  const m = SRC.match(/const PKG_PATH = ([^\n;]+);/);
+  assert(m, '未找到 PKG_PATH');
+  const { readFileSync } = await import('fs');
+  const { join } = await import('path');
+  const serverDir = path.join(process.cwd(), 'server');
+  const pkgPath = join(serverDir, '../package.json');
+  const version = JSON.parse(readFileSync(pkgPath, 'utf-8')).version;
+  assert(version && version !== 'unknown', `按 PKG_PATH 的算法读不到版本：${pkgPath}`);
+
+  // 并且不能用文件里不存在的 fs 命名空间
+  assert(!/BOOT_VERSION = JSON\.parse\(fs\./.test(SRC),
+    'BOOT_VERSION 用了 fs. 命名空间，但本文件是具名导入，会静默失败');
+  assert(!/return JSON\.parse\(fs\.readFileSync\(PKG_PATH/.test(SRC),
+    'readDiskVersion 用了 fs. 命名空间，会静默失败');
+});
+
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
 if (results.failed) for (const e of results.errors) console.log(`  • ${e.name}\n    ${e.error}`);
 process.exit(results.failed ? 1 : 0);

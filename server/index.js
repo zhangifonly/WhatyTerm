@@ -197,13 +197,16 @@ const PKG_PATH = join(__dirname, '../package.json');
 const BOOT_TIME = new Date().toISOString();
 let BOOT_VERSION = 'unknown';
 try {
-  BOOT_VERSION = JSON.parse(fs.readFileSync(PKG_PATH, 'utf-8')).version || 'unknown';
+  // ⚠️ 本文件是具名导入 `import { readFileSync } from 'fs'`，没有 fs 命名空间。
+  //    写成 fs.readFileSync 会抛 ReferenceError 并被下面的 catch 吞掉，
+  //    结果版本恒为 unknown、stale 恒为 false —— 自检形同虚设（已踩过一次）。
+  BOOT_VERSION = JSON.parse(readFileSync(PKG_PATH, 'utf-8')).version || 'unknown';
 } catch { /* 读不到就报 unknown，不影响启动 */ }
 
 /** 读磁盘上当前的版本号（每次都重新读，用于和 BOOT_VERSION 比对） */
 function readDiskVersion() {
   try {
-    return JSON.parse(fs.readFileSync(PKG_PATH, 'utf-8')).version || 'unknown';
+    return JSON.parse(readFileSync(PKG_PATH, 'utf-8')).version || 'unknown';
   } catch {
     return 'unknown';
   }

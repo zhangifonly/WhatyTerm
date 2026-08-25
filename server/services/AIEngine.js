@@ -501,6 +501,8 @@ export class AIEngine {
     this._sessionProviderCache = new Map();
     // 会话级 CLI 回退节流：sessionId -> 上次 CLI 调用时间戳
     this._cliFallbackAt = new Map();
+    // 代理供应商缓存（OAuth 会话借用的那个带凭证供应商）
+    this._proxyProviderSettings = undefined;
 
     // 初始化插件管理器
     this._initPluginManager();
