@@ -1,0 +1,91 @@
+/**
+ * 服务端陈旧代码自检 —— 回归测试
+ *
+ * 背景：改完代码不重启，磁盘上是新版、进程里跑的还是旧版，而界面上完全看不出来。
+ * 状态判定逻辑全在服务端，于是所有修复都"看起来没生效"。
+ * 实测连续发生三次（会话供应商 v1.2.62、面板识别 v1.2.65、以及第三次复现），
+ * 每次都白排查一轮才想起来查进程启动时间。
+ *
+ * 本测试锁住：版本快照在模块加载时固定、磁盘版本每次重读、两者不一致时报 stale。
+ *
+ * 运行：node tests/test-server-stale.mjs
+ */
+
+import fs from 'fs';
+import path from 'path';
+
+const results = { passed: 0, failed: 0, errors: [] };
+
+function test(name, fn) {
+  try {
+    fn();
+    results.passed++;
+    console.log(`✅ ${name}`);
+  } catch (err) {
+    results.failed++;
+    results.errors.push({ name, error: err.message });
+    console.log(`❌ ${name}`);
+  }
+}
+
+function assert(cond, msg) { if (!cond) throw new Error(msg || '断言失败'); }
+
+const SRC = fs.readFileSync(path.join(process.cwd(), 'server/index.js'), 'utf8');
+const APP = fs.readFileSync(path.join(process.cwd(), 'src/App.jsx'), 'utf8');
+
+test('启动版本在模块加载时就固定下来（不是每次调用现读）', () => {
+  assert(/const BOOT_TIME = new Date\(\)\.toISOString\(\);/.test(SRC), '缺少启动时刻快照');
+  assert(/let BOOT_VERSION = 'unknown';/.test(SRC), '缺少启动版本快照');
+  // 必须在顶层读一次，而不是放进函数里懒加载 —— 懒加载会读到改动后的新版本，
+  // 那样 stale 永远为 false，自检形同虚设
+  const bootIdx = SRC.indexOf('BOOT_VERSION = JSON.parse');
+  const routeIdx = SRC.indexOf("app.get('/api/server/state'");
+  assert(bootIdx > 0 && bootIdx < routeIdx, '启动版本不是在模块顶层读取的');
+});
+
+test('磁盘版本每次重新读取', () => {
+  assert(/function readDiskVersion\(\)/.test(SRC), '缺少 readDiskVersion');
+  assert(/const diskVersion = readDiskVersion\(\);/.test(SRC), '接口未实时读磁盘版本');
+});
+
+test('两者不一致才报 stale，读不到版本时不误报', () => {
+  // 注意：文件里另有一处供应商配置的 stale 字段，必须限定在本接口的返回体内取，
+  // 否则会抓错那一处（本测试第一版就踩了这个）
+  const routeIdx = SRC.indexOf("app.get('/api/server/state'");
+  assert(routeIdx > 0, '未找到 /api/server/state 路由');
+  const body = SRC.slice(routeIdx, routeIdx + 800);
+  const m = body.match(/stale: ([^\n]+)/);
+  assert(m, '接口未返回 stale');
+  const expr = m[1];
+  assert(/BOOT_VERSION !== diskVersion/.test(expr), 'stale 判据不是版本比对');
+  assert(/'unknown'/.test(expr), "读不到版本(unknown)时会误报 stale");
+});
+
+test('接口返回足够定位问题的信息（版本 + 启动时刻）', () => {
+  for (const field of ['bootVersion', 'diskVersion', 'startedAt']) {
+    assert(new RegExp(`${field}[,:]`).test(SRC), `接口缺少 ${field}`);
+  }
+});
+
+test('前端会轮询并渲染告警条', () => {
+  assert(/\/api\/server\/state/.test(APP), '前端未拉取服务端状态');
+  assert(/setInterval\(checkServerState/.test(APP), '只拉一次，重启后不会自动消除告警');
+  assert(/server-stale-banner/.test(APP), '未渲染告警条');
+});
+
+test('轮询定时器在 effect 清理里释放', () => {
+  assert(/clearInterval\(staleTimer\)/.test(APP), '定时器未清理');
+  // 原来的 cleanup 写在 if (socket) 里面，socket 为空时整个清理函数都不返回
+  const cleanupIdx = APP.indexOf('clearInterval(staleTimer)');
+  const before = APP.slice(Math.max(0, cleanupIdx - 400), cleanupIdx);
+  assert(!/if \(socket\) \{[^}]*$/.test(before), '清理函数仍嵌在 if (socket) 内，socket 为空时会漏');
+});
+
+test('CSS 里有告警条样式（没样式等于没提示）', () => {
+  const css = fs.readFileSync(path.join(process.cwd(), 'src/index.css'), 'utf8');
+  assert(/\.server-stale-banner\s*\{/.test(css), '缺少告警条样式');
+});
+
+console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
+if (results.failed) for (const e of results.errors) console.log(`  • ${e.name}\n    ${e.error}`);
+process.exit(results.failed ? 1 : 0);

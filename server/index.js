@@ -187,6 +187,28 @@ import SessionRelay from './services/SessionRelay.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// 进程启动时的版本与时刻。
+//
+// 为什么要单独记：改完代码不重启，磁盘上是新版、内存里跑的还是旧版，
+// 而界面上完全看不出来——判定还是老逻辑，用户只会以为"修了但没用"。
+// 实测发生过三次（会话供应商、面板识别、这次），每次都白排查一轮。
+// 这里把"内存里的版本"钉死在启动那一刻，跟磁盘上的实时版本做对比。
+const PKG_PATH = join(__dirname, '../package.json');
+const BOOT_TIME = new Date().toISOString();
+let BOOT_VERSION = 'unknown';
+try {
+  BOOT_VERSION = JSON.parse(fs.readFileSync(PKG_PATH, 'utf-8')).version || 'unknown';
+} catch { /* 读不到就报 unknown，不影响启动 */ }
+
+/** 读磁盘上当前的版本号（每次都重新读，用于和 BOOT_VERSION 比对） */
+function readDiskVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(PKG_PATH, 'utf-8')).version || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
 // 绑定 crashReporter 到全局错误处理
 _crashReporter = crashReporter;
 
@@ -2618,6 +2640,18 @@ app.get('/api/auth/scan-login-status', (req, res) => {
 
 // Tunnel URL API - 直接从 ai-settings.json 读取，不依赖 ProviderService
 const AI_SETTINGS_PATH = join(__dirname, 'db/ai-settings.json');
+
+// 服务端运行状态：内存里跑的版本 vs 磁盘上的版本。
+// stale 为真说明代码改了但进程没重启，界面据此提示——否则用户会一直以为"修了没用"。
+app.get('/api/server/state', (req, res) => {
+  const diskVersion = readDiskVersion();
+  res.json({
+    bootVersion: BOOT_VERSION,
+    diskVersion,
+    startedAt: BOOT_TIME,
+    stale: BOOT_VERSION !== 'unknown' && diskVersion !== 'unknown' && BOOT_VERSION !== diskVersion
+  });
+});
 
 // 自动操作效果台账：按判定类型看哪些策略在真推进工作、哪些在空转
 // GET /api/monitor/effectiveness?limit=5000

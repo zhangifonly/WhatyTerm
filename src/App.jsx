@@ -201,6 +201,9 @@ export default function App() {
   // 接管期间拖拽被转发给应用，tmux 不进 copy-mode，普通拖动完全选不了字，
   // 只能靠 Shift/Option 强制原生选择 —— 提示文案要随之切换。
   const [mouseGrabbed, setMouseGrabbed] = useState(false);
+  // 服务端进程是否跑着旧代码（改完没重启）。修复在磁盘上、进程里还是老逻辑时，
+  // 界面上完全看不出来，只会显得"修了没用" —— 这条提示就是为了避免再白排查一轮。
+  const [serverStale, setServerStale] = useState(null);
   const [aiStatusCountdown, setAiStatusCountdown] = useState(30);
   const [nextAnalysisTime, setNextAnalysisTime] = useState(Date.now() + 30000);
   const [aiHealthStatus, setAiHealthStatus] = useState({
@@ -1977,6 +1980,18 @@ export default function App() {
             </div>
           </div>
           <div className="ai-panel-content">
+            {/* 服务端跑着旧代码时置顶告警：判定逻辑全在服务端，
+                不重启的话所有修复都不生效，而界面上原本毫无迹象 */}
+            {serverStale && (
+              <div className="server-stale-banner">
+                <strong>⚠️ 服务端运行的是旧代码</strong>
+                <p>
+                  进程内 v{serverStale.bootVersion}（启动于 {new Date(serverStale.startedAt).toLocaleString()}），
+                  磁盘上已是 v{serverStale.diskVersion}。
+                </p>
+                <p>状态判定全在服务端，重启前所有修复都不会生效。</p>
+              </div>
+            )}
             {/* 当前 AI 供应商信息 */}
             <div className="ai-status-section" style={{ position: 'relative' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
@@ -4100,6 +4115,16 @@ function AboutPage({ socket, onClose }) {
 
   useEffect(() => {
     // 获取当前版本
+    // 服务端版本自检：内存里跑的版本 vs 磁盘上的版本
+    const checkServerState = () => {
+      fetch('/api/server/state')
+        .then(r => r.json())
+        .then(d => setServerStale(d?.stale ? d : null))
+        .catch(() => {});
+    };
+    checkServerState();
+    const staleTimer = setInterval(checkServerState, 60000);
+
     fetch('/api/update/version')
       .then(res => res.json())
       .then(data => setCurrentVersion(data.version || '1.0.0'))
@@ -4111,11 +4136,14 @@ function AboutPage({ socket, onClose }) {
       socket.on('system:info', (info) => {
         setSystemInfo(info);
       });
-
-      return () => {
-        socket.off('system:info');
-      };
     }
+
+    // 统一清理：原来 cleanup 写在 if (socket) 里面，socket 为空时不返回清理函数，
+    // 定时器就漏掉了
+    return () => {
+      clearInterval(staleTimer);
+      socket?.off('system:info');
+    };
   }, [socket]);
 
   const checkUpdate = async () => {

@@ -373,4 +373,57 @@ test('没有待升级的状态时返回 null（不凭空造状态）', () => {
   eq(engine._pendingQuestionStatus(null, 'claude'), null);
 });
 
+// ============ 8. 真实截图回归 ============
+//
+// 用户第三次报「当前模型判断还是错误的」时的实际屏幕：正文 + background agents 行 +
+// /model 回显 + 完整面板 + tmux 尾部补空行。当时线上跑的是三天前的旧进程，
+// 判成了「等待输入 → 发继续」。这条用例把这一屏钉死。
+
+test('真实 /model 面板屏（含正文与 background agents 行）判为按 Esc', () => {
+  const screen = [
+    '五、 我的建议',
+    '',
+    '这个包不投。 真要打政法/政务信息化这条线， 正确的进入方式是先做有涉密集成资质总包的技术分包。',
+    '',
+    '如果你还是想投， 成本是 5 万保证金占 90 天 + 一周编标人力， 那是另一笔账。',
+    '',
+    '✳ Waiting for 12 background agents to finish',
+    '',
+    '› /model',
+    '  ────────────────────────────────────────────────────────────',
+    '',
+    '  Select model',
+    '  Switch between Claude models. Your pick becomes the default for new sessions.',
+    '  --model.',
+    '',
+    '    1. Default (recommended)   Opus 5 with 1M context · Best for everyday, complex tasks',
+    '  › 2. Opus (1M context) ✓     Opus 5 with 1M context · Best for everyday, complex tasks',
+    '    3. Fable                   Fable 5 · Most capable for your hardest and longest-running tasks',
+    '    4. Sonnet                  Sonnet 5 · Efficient for routine tasks',
+    '    5. Haiku                   Haiku 4.5 · Fastest for quick answers',
+    '',
+    '  ● High effort (default) ←/→ to adjust',
+    '',
+    '  Enter to set as default · s to use this session only · Esc to cancel',
+    '', '', '', '', '', '', '', ''
+  ].join('\n');
+  const r = engine.preAnalyzeStatus(screen, 'claude');
+  eq(r?.actionType, 'key', `应按 Esc 关面板，实际 ${r?.actionType}/${r?.suggestedAction}`);
+  eq(r?.suggestedAction, 'Escape');
+});
+
+test('「Waiting for N background agents」不会把面板判成运行中而放过', () => {
+  const screen = [
+    '✳ Waiting for 12 background agents to finish',
+    '',
+    '  Select model',
+    '    1. Default (recommended)',
+    '  › 2. Opus (1M context) ✓',
+    '    3. Fable',
+    '',
+    '  Enter to set as default · Esc to cancel'
+  ].join('\n');
+  eq(engine.preAnalyzeStatus(screen, 'claude')?.suggestedAction, 'Escape');
+});
+
 summary();

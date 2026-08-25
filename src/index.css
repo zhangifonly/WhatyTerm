@@ -771,6 +771,29 @@ body {
   border: 1px solid hsl(var(--border) / 0.3);
 }
 
+/* 服务端旧代码告警：这个必须显眼，它解释了"为什么修了没用" */
+.server-stale-banner {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border-left: 3px solid hsl(38 92% 50%);
+  background: hsl(38 92% 50% / 0.14);
+}
+
+.server-stale-banner strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: hsl(38 92% 62%);
+}
+
+.server-stale-banner p {
+  margin: 3px 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: hsl(var(--muted-foreground));
+}
+
 /* CLI 接管鼠标时提示要更显眼：此时普通拖动完全选不了字，
    用户不知道原因的话只会以为"选择坏了" */
 .terminal-selection-tip.grabbed {
