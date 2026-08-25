@@ -771,6 +771,14 @@ body {
   border: 1px solid hsl(var(--border) / 0.3);
 }
 
+/* CLI 接管鼠标时提示要更显眼：此时普通拖动完全选不了字，
+   用户不知道原因的话只会以为"选择坏了" */
+.terminal-selection-tip.grabbed {
+  opacity: 1;
+  color: hsl(38 92% 60%);
+  border: 1px solid hsl(38 92% 50% / 0.35);
+}
+
 /* 复制成功的轻提示：复制发生在鼠标松开那一刻，没有反馈的话用户不知道成没成 */
 .terminal-copy-toast {
   position: absolute;

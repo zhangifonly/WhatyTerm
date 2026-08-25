@@ -197,6 +197,10 @@ export default function App() {
   const [terminalReady, setTerminalReady] = useState(false); // 跟踪终端是否已初始化
   const [copyHint, setCopyHint] = useState(false);  // "已复制"轻提示
   const copyHintTimer = useRef(null);
+  // CLI 是否接管了鼠标（Claude Code 弹面板时会开鼠标上报）。
+  // 接管期间拖拽被转发给应用，tmux 不进 copy-mode，普通拖动完全选不了字，
+  // 只能靠 Shift/Option 强制原生选择 —— 提示文案要随之切换。
+  const [mouseGrabbed, setMouseGrabbed] = useState(false);
   const [aiStatusCountdown, setAiStatusCountdown] = useState(30);
   const [nextAnalysisTime, setNextAnalysisTime] = useState(Date.now() + 30000);
   const [aiHealthStatus, setAiHealthStatus] = useState({
@@ -910,6 +914,13 @@ export default function App() {
     // === 复制体验：对齐普通终端 ===
     // tmux mouse on 时，滚轮与拖拽都归 tmux 管，跨屏选择由 tmux copy-mode 完成
     // （拖到边缘会自动滚动历史），复制结果经 OSC 52 送到这里写进系统剪贴板。
+    // 轮询 xterm 暴露的鼠标模式。读的是它自己的解析状态，不发任何请求，
+    // 所以不能用服务端 execSync 去问 tmux 的 mouse_any_flag —— 那会阻塞事件循环。
+    const mouseModeTimer = setInterval(() => {
+      const grabbed = term.modes?.mouseTrackingMode && term.modes.mouseTrackingMode !== 'none';
+      setMouseGrabbed(prev => (prev === !!grabbed ? prev : !!grabbed));
+    }, 1000);
+
     const osc52Disposable = registerOsc52(term, () => {
       setCopyHint(true);
       clearTimeout(copyHintTimer.current);
@@ -1006,6 +1017,11 @@ export default function App() {
     return () => {
       window.removeEventListener('resize', handleResize);
       resizeObserver.disconnect();
+      // 清理鼠标模式轮询与 OSC 52 处理器：effect 依赖 currentSession.id，
+      // 切一次会话就会重跑一次，不清理会叠加定时器和重复的 OSC handler
+      clearInterval(mouseModeTimer);
+      clearTimeout(copyHintTimer.current);
+      osc52Disposable?.dispose?.();
       // 清理 IME 事件监听器
       if (textareaElement) {
         textareaElement.removeEventListener('compositionstart', handleCompositionStart);
@@ -1482,10 +1498,13 @@ export default function App() {
               onDragLeave={handleTerminalDragLeave}
               onDrop={handleTerminalDrop}
             >
-              <span className="terminal-selection-tip">
-                {/* 直接拖动走 tmux copy-mode：能跨屏（拖到边缘自动滚历史），松手即复制。
-                    Shift/Option 拖动是 xterm 原生选择，只覆盖当前可见屏。 */}
-                拖动选择，松开即复制 · Shift/Option 拖动仅选当前屏
+              <span className={`terminal-selection-tip${mouseGrabbed ? ' grabbed' : ''}`}>
+                {/* 平时：直接拖动走 tmux copy-mode，能跨屏（拖到边缘自动滚历史），松手即复制。
+                    CLI 接管鼠标时：拖拽被转发给应用，tmux 不进 copy-mode，普通拖动选不了字，
+                    只能按住 Shift/Option 走 xterm 原生选择（仅当前可见屏）。 */}
+                {mouseGrabbed
+                  ? 'CLI 已接管鼠标 · 按住 Shift/Option 拖动来选择'
+                  : '拖动选择，松开即复制'}
               </span>
               {copyHint && <span className="terminal-copy-toast">已复制到剪贴板</span>}
               {isDragOver && (
