@@ -771,6 +771,27 @@ body {
   border: 1px solid hsl(var(--border) / 0.3);
 }
 
+/* 复制成功的轻提示：复制发生在鼠标松开那一刻，没有反馈的话用户不知道成没成 */
+.terminal-copy-toast {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 6;
+  font-size: 11px;
+  color: hsl(142 70% 45%);
+  background: hsl(var(--background) / 0.92);
+  border: 1px solid hsl(142 70% 45% / 0.4);
+  padding: 4px 8px;
+  border-radius: 4px;
+  pointer-events: none;
+  animation: copy-toast-in 0.15s ease-out;
+}
+
+@keyframes copy-toast-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+
 .terminal-wrapper:hover .terminal-selection-tip {
   opacity: 1;
 }

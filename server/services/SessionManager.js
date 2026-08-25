@@ -301,6 +301,19 @@ export class Session {
       execSync(`${tmuxCmd} set-option -t "${this.tmuxSessionName}" mouse on`, {
         stdio: 'ignore'
       });
+      // 让 copy-mode 里选中的文字直达系统剪贴板。
+      //
+      // 背景：mouse on 时滚轮和拖拽都交给 tmux，xterm 自己的 scrollback 是空的，
+      // 所以「按住 Option 跨屏拖选」在浏览器侧根本选不到滚走的内容——那些内容在
+      // tmux 历史里。正解是让 tmux 自己做跨屏选择（拖到边缘会自动滚动），
+      // 复制时通过 OSC 52 把结果交给前端写进系统剪贴板。
+      execSync(`${tmuxCmd} set-option -t "${this.tmuxSessionName}" set-clipboard on`, {
+        stdio: 'ignore'
+      });
+      // 注：不需要再 append terminal-features —— tmux 3.2+ 的默认值里已含
+      // `xterm*:clipboard`，而 pty 的 TERM 恒为 xterm-256color，正好匹配。
+      // 早先这里追加过 `xterm-256color:clipboard`，但 `-a` 不去重，每建一个会话
+      // 就往全局选项里塞一条重复值，会无限累积。
       // 清除 CLAUDECODE 环境变量，避免 Claude Code 检测到嵌套会话
       execSync(`${tmuxCmd} set-environment -t "${this.tmuxSessionName}" -u CLAUDECODE`, {
         stdio: 'ignore'

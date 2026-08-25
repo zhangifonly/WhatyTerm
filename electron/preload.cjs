@@ -15,6 +15,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('update-status', handler);
   },
 
+  // 终端复制：把 tmux 经 OSC 52 送来的文字写进系统剪贴板（主进程无需用户手势）
+  writeClipboard: (text) => ipcRenderer.invoke('write-clipboard', text),
+
   // 标识：渲染进程能据此判断是否在 Electron 环境
   isElectron: true,
 });

@@ -21,6 +21,7 @@ import ClaudeConfigManager from './components/ClaudeConfigManager';
 import VoiceInput from './components/VoiceInput';
 import SprintProgress from './components/SprintProgress';
 import RalphWizard from './components/RalphWizard';
+import { registerOsc52, writeClipboard } from './terminalClipboard';
 
 const socket = io();
 
@@ -194,6 +195,8 @@ export default function App() {
   const [pendingScreenContent, setPendingScreenContent] = useState(null);
   const [pendingCursorPosition, setPendingCursorPosition] = useState(null);
   const [terminalReady, setTerminalReady] = useState(false); // 跟踪终端是否已初始化
+  const [copyHint, setCopyHint] = useState(false);  // "已复制"轻提示
+  const copyHintTimer = useRef(null);
   const [aiStatusCountdown, setAiStatusCountdown] = useState(30);
   const [nextAnalysisTime, setNextAnalysisTime] = useState(Date.now() + 30000);
   const [aiHealthStatus, setAiHealthStatus] = useState({
@@ -904,6 +907,34 @@ export default function App() {
     term.unicode.activeVersion = '11';
     term.open(terminalRef.current);
 
+    // === 复制体验：对齐普通终端 ===
+    // tmux mouse on 时，滚轮与拖拽都归 tmux 管，跨屏选择由 tmux copy-mode 完成
+    // （拖到边缘会自动滚动历史），复制结果经 OSC 52 送到这里写进系统剪贴板。
+    const osc52Disposable = registerOsc52(term, () => {
+      setCopyHint(true);
+      clearTimeout(copyHintTimer.current);
+      copyHintTimer.current = setTimeout(() => setCopyHint(false), 1200);
+    });
+
+    // 按住 Option/Shift 在当前屏内做原生选择时，xterm 的选中区不是 DOM 选区
+    // （canvas 渲染），浏览器的 Cmd+C 拿不到，必须自己接管。
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== 'keydown') return true;
+      const isCopy = (e.metaKey && e.key === 'c') || (e.ctrlKey && e.shiftKey && (e.key === 'C' || e.key === 'c'));
+      if (isCopy) {
+        const sel = term.getSelection();
+        if (sel) {
+          writeClipboard(sel);
+          setCopyHint(true);
+          clearTimeout(copyHintTimer.current);
+          copyHintTimer.current = setTimeout(() => setCopyHint(false), 1200);
+          return false;   // 吞掉，别把 Ctrl+C 当中断发下去
+        }
+        // 没有选中内容时放行：Ctrl+C 仍然是中断
+      }
+      return true;
+    });
+
     // 延迟调用 fit，确保 DOM 已完全渲染；fit 后立即把尺寸同步到后端 pty
     requestAnimationFrame(() => {
       fitAndSyncSize();
@@ -1452,8 +1483,11 @@ export default function App() {
               onDrop={handleTerminalDrop}
             >
               <span className="terminal-selection-tip">
-                按住 Shift 或 Option 键选择文字
+                {/* 直接拖动走 tmux copy-mode：能跨屏（拖到边缘自动滚历史），松手即复制。
+                    Shift/Option 拖动是 xterm 原生选择，只覆盖当前可见屏。 */}
+                拖动选择，松开即复制 · Shift/Option 拖动仅选当前屏
               </span>
+              {copyHint && <span className="terminal-copy-toast">已复制到剪贴板</span>}
               {isDragOver && (
                 <div className="drop-overlay">
                   <div className="drop-overlay-content">

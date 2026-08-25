@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, dialog, shell, utilityProcess, ipcMain, nativeImage } = require('electron');
+const { app, BrowserWindow, Menu, Tray, dialog, shell, utilityProcess, ipcMain, nativeImage, clipboard } = require('electron');
 const path = require('path');
 const { spawn, execSync } = require('child_process');
 const fs = require('fs');
@@ -130,6 +130,15 @@ function setupIpcHandlers() {
   // 获取当前版本
   ipcMain.handle('get-app-version', () => {
     return app.getVersion();
+  });
+
+  // 终端复制：tmux 经 OSC 52 把选中内容送到渲染进程，这里写进系统剪贴板。
+  // 走主进程是因为它不需要用户手势——浏览器的 navigator.clipboard 在
+  // 「鼠标松开后异步到达的 OSC 序列」这种场景下经常被判定为无手势而拒绝。
+  ipcMain.handle('write-clipboard', (_event, text) => {
+    if (typeof text !== 'string' || !text) return false;
+    clipboard.writeText(text);
+    return true;
   });
 }
 
