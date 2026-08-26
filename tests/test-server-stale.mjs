@@ -107,6 +107,34 @@ test('版本真能读出来 —— 不是只在源码里长得对', async () => 
     'readDiskVersion 用了 fs. 命名空间，会静默失败');
 });
 
+// ============ 重启后清理前端残留判定 ============
+//
+// 症状：修复上线并重启后，面板仍在显示重启前那条「命令有破坏性」告警，
+// 看上去就像"改了没生效"。实际是前端的 aiStatusMap 只合并、从不清空，
+// 服务端内存缓存已随重启清零，前端却留着上个进程的判定，
+// 一直显示到该会话下一次分析为止 —— 而检测间隔会翻倍到 30 分钟。
+
+test('服务端重启（startedAt 变化）时清空前端 AI 判定', () => {
+  assert(/serverStartedAtRef/.test(APP), '未记录服务端启动时刻');
+  assert(/setAiStatusMap\(\{\}\)/.test(APP), '重启后未清空 aiStatusMap');
+});
+
+test('只在启动时刻真的变了时清空，网络抖动重连不误清', () => {
+  const idx = APP.indexOf('setAiStatusMap({})');
+  assert(idx > 0, '未找到清空逻辑');
+  const before = APP.slice(Math.max(0, idx - 300), idx);
+  assert(/prev && prev !== d\.startedAt/.test(before),
+    '无条件清空会在每次重连（含网络抖动）都把面板清白');
+});
+
+test('socket 重连时立即核对，不只靠 60 秒轮询', () => {
+  const connectIdx = APP.indexOf("socket.on('connect'");
+  assert(connectIdx > 0, '未找到 connect 处理');
+  const body = APP.slice(connectIdx, connectIdx + 900);
+  assert(/\/api\/server\/state/.test(body),
+    '重连时不核对的话，重启后最长有一分钟仍在显示旧判定');
+});
+
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
 if (results.failed) for (const e of results.errors) console.log(`  • ${e.name}\n    ${e.error}`);
 process.exit(results.failed ? 1 : 0);

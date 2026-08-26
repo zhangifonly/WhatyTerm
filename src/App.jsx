@@ -204,6 +204,10 @@ export default function App() {
   // 服务端进程是否跑着旧代码（改完没重启）。修复在磁盘上、进程里还是老逻辑时，
   // 界面上完全看不出来，只会显得"修了没用" —— 这条提示就是为了避免再白排查一轮。
   const [serverStale, setServerStale] = useState(null);
+  // 上次见到的服务端启动时刻。变了说明进程重启过，此时前端手里的 AI 判定
+  // 全是上个进程留下的（服务端内存缓存已清空），必须丢弃 —— 否则面板会拿
+  // 重启前的旧判定继续显示，看上去就像"修复没生效"。
+  const serverStartedAtRef = useRef(null);
   const [aiStatusCountdown, setAiStatusCountdown] = useState(30);
   const [nextAnalysisTime, setNextAnalysisTime] = useState(Date.now() + 30000);
   const [aiHealthStatus, setAiHealthStatus] = useState({
@@ -380,6 +384,21 @@ export default function App() {
     // 处理 socket 重连：重新 attach 到当前会话
     socket.on('connect', () => {
       console.log('[Socket] 已连接');
+      // 立刻核对服务端启动时刻：重启过就丢弃重启前的 AI 判定。
+      // 不能只靠 60 秒的轮询 —— 那样重启后最长有一分钟在显示旧判定，
+      // 而这一分钟正是用户盯着面板等修复生效的时候。
+      fetch('/api/server/state')
+        .then(r => r.json())
+        .then(d => {
+          if (!d?.startedAt) return;
+          const prev = serverStartedAtRef.current;
+          serverStartedAtRef.current = d.startedAt;
+          if (prev && prev !== d.startedAt) {
+            console.log('[Socket] 服务端已重启，丢弃重启前的 AI 判定');
+            setAiStatusMap({});
+          }
+        })
+        .catch(() => {});
       // 重连后重新获取会话列表
       socket.emit('sessions:list');
       // 如果有当前会话，重新 attach
@@ -4119,7 +4138,17 @@ function AboutPage({ socket, onClose }) {
     const checkServerState = () => {
       fetch('/api/server/state')
         .then(r => r.json())
-        .then(d => setServerStale(d?.stale ? d : null))
+        .then(d => {
+          setServerStale(d?.stale ? d : null);
+          if (!d?.startedAt) return;
+          const prev = serverStartedAtRef.current;
+          serverStartedAtRef.current = d.startedAt;
+          // 只在启动时刻真的变了时清空；网络抖动重连时刻不变，不该误清
+          if (prev && prev !== d.startedAt) {
+            console.log('[Socket] 服务端已重启，丢弃重启前的 AI 判定');
+            setAiStatusMap({});
+          }
+        })
         .catch(() => {});
     };
     checkServerState();
