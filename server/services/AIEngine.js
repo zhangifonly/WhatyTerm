@@ -20,6 +20,12 @@ const __dirname = dirname(__filename);
 const SETTINGS_PATH = join(__dirname, '../db/ai-settings.json');
 // CLI 回退最小间隔（同一会话）。CLI 单次约 4.3 万 input tokens，不能每轮都走
 const CLI_FALLBACK_INTERVAL = 5 * 60 * 1000;
+// 代理供应商拉黑时长。实测 32 个带凭证的 claude 供应商只有 2 个真能用（其余
+// 401/404/502/503），按名字盲挑必然挑到死的。挂了就拉黑一段时间换下一个，
+// 别再撞同一面墙，也别因为一次失败就永久放弃（网关 502 常是临时的）。
+const PROXY_BLACKLIST_TTL = 10 * 60 * 1000;
+// 代理供应商最多换几次。3 次已能覆盖"前几个恰好都挂了"，再多就不如直接走 CLI
+const PROXY_MAX_ATTEMPTS = 3;
 const CC_SWITCH_DB_PATH = join(os.homedir(), '.cc-switch', 'cc-switch.db');
 
 // 创建 ProviderService 实例（不传 io，AIEngine 不需要推送事件）
@@ -83,7 +89,12 @@ function getCliName(aiType) {
 //    所以 `cd /tmp && rm -rf x` 的第二段也能命中；同时整串也会再匹配一次，
 //    以覆盖 `curl ... | sh` 这类靠管道本身构成危险的形态。
 const DANGEROUS_PATTERNS = [
-  /^rm\s+(-[a-zA-Z]*[rf]|--recursive|--force)/,
+  // rm 只在「递归」或「目标是根/家目录」时才算危险。
+  // 曾经把 -f 也算进来，但 `rm -f 某个文件` 与 `rm 某个文件` 破坏力完全相同
+  // （-f 只是跳过确认提示，不改变删除范围），而后者一直放行 —— 单纯因为 -f
+  // 长得吓人就拦，逻辑上站不住，实测把 AI 清理临时脚本这类常规操作全拦了。
+  /^rm\s+(-\S*[rR]|--recursive)/,
+  /^rm\s+(-\S+\s+)*(\/|\/\*|~|~\/\*|\$HOME)(\s|$)/,   // 直指根目录/家目录，不带 -r 也拦
   /^sudo\s+/,
   /^chmod\s+(-R\s+)?777/,
   /^chown\s+-R\s+/,
@@ -503,6 +514,12 @@ export class AIEngine {
     this._cliFallbackAt = new Map();
     // 代理供应商缓存（OAuth 会话借用的那个带凭证供应商）
     this._proxyProviderSettings = undefined;
+    // 代理供应商黑名单：providerKey -> 拉黑到期时间戳
+    this._proxyBlacklist = new Map();
+    // 最近成功过的代理供应商 providerKey。优先级名单是给"用户切换供应商"用的，
+    // 里面排前面的未必活着（实测 88codepaid/crs/FoxCode 全挂），所以监控这边
+    // 自己记一个"真的调通过"的，下次优先用它，别把重试预算浪费在必挂的选项上。
+    this._proxyLastGood = null;
 
     // 初始化插件管理器
     this._initPluginManager();
@@ -1096,6 +1113,97 @@ export class AIEngine {
 
     this._sessionProviderCache.set(key, result);
     return result;
+  }
+
+  /**
+   * 为「无 HTTP 凭证」的会话挑一个带凭证的供应商做监控分析。
+   *
+   * 为什么这样做：实测 26 个会话里 25 个用 Claude Official（OAuth 登录，settings_config.env
+   * 为空，结构上取不到 URL/key）。若这些会话一律回退 CLI，按 5 分钟节流也是
+   * 25 × 4.3 万 ≈ 107 万 tokens / 5 分钟，不可接受。
+   *
+   * 而监控分析只是「读一屏文本判断状态」——用哪个 key 判断结果都一样，它不需要
+   * 跟被监控会话用同一个供应商。所以这里借一个便宜的第三方 key，CLI 只留给
+   * 「连一个带凭证的供应商都没有」的极端情况。
+   *
+   * @param {string[]} priority - 供应商名称优先级（外部传入，见 index.js 的 CLAUDE_PROVIDER_PRIORITY）
+   */
+  getProxyMonitorSettings(priority = []) {
+    if (this._proxyProviderSettings !== undefined) return this._proxyProviderSettings;
+
+    let picked = null;
+    try {
+      if (fs.existsSync(CC_SWITCH_DB_PATH)) {
+        const db = new Database(CC_SWITCH_DB_PATH, { readonly: true });
+        const rows = db.prepare(
+          "SELECT id, name, app_type, settings_config, website_url FROM providers WHERE app_type='claude'"
+        ).all();
+        db.close();
+
+        // 只保留能解析出 URL+key、且不在黑名单里的
+        const now = Date.now();
+        const usable = [];
+        for (const row of rows) {
+          const cfg = this._parseProviderConfig(row);
+          if (!cfg?.claude?.apiUrl || !cfg.claude.apiKey) continue;
+          const until = this._proxyBlacklist.get(`claude:${row.id}`) || 0;
+          if (until > now) continue;   // 最近刚失败过，跳过
+          usable.push({ row, cfg });
+        }
+        // 1) 上次真的调通过的那个 —— 比任何静态名单都可靠
+        if (this._proxyLastGood) {
+          picked = usable.find(u => `claude:${u.row.id}` === this._proxyLastGood) || null;
+        }
+        // 2) 按优先级名称匹配（子串匹配，和 tryAutoSwitchProvider 的口径一致）
+        if (!picked) {
+          for (const p of priority) {
+            const hit = usable.find(u => u.row.name.includes(p));
+            if (hit) { picked = hit; break; }
+          }
+        }
+        // 3) 兜底取第一个可用的
+        if (!picked && usable.length) picked = usable[0];
+      }
+    } catch (err) {
+      console.error('[AIEngine] 挑选代理监控供应商失败:', err.message);
+    }
+
+    if (picked) {
+      const r = picked.cfg;
+      r._providerId = `claude:${picked.row.id}`;
+      r._providerName = `${picked.row.name} (代理监控)`;
+      r._isProxy = true;   // 标记"借来的"：失败时可以拉黑换下一个，会话自己的供应商不行
+      const modelsConf = getModelsConfig();
+      if (r.claude) r.claude.model = modelsConf?.claude?.default || DEFAULT_MODEL;
+      r.maxTokens = this.settings.maxTokens || r.maxTokens || 500;
+      console.log(`[AIEngine] OAuth 会话借用代理监控供应商: ${picked.row.name}`);
+      this._proxyProviderSettings = r;
+    } else {
+      console.warn('[AIEngine] 无可用的代理监控供应商，OAuth 会话将回退 CLI');
+      this._proxyProviderSettings = null;
+    }
+    return this._proxyProviderSettings;
+  }
+
+  /**
+   * 把当前借用的代理供应商拉黑一段时间，并清掉缓存，让下次挑到别的。
+   *
+   * 只对**借来的**代理供应商这么做。会话自己指定的供应商不能换——那是用户的选择，
+   * 换了就等于偷偷用别人的账号。而代理供应商本来就是我们随便挑的，挑错了换一个
+   * 完全合理，比直接烧 4.3 万 tokens 走 CLI 划算得多。
+   *
+   * @param {string} providerKey - 形如 'claude:<id>'
+   * @param {string} reason - 失败原因（记日志）
+   */
+  blacklistProxyProvider(providerKey, reason = '') {
+    if (!providerKey) return;
+    this._proxyBlacklist.set(providerKey, Date.now() + PROXY_BLACKLIST_TTL);
+    if (this._proxyProviderSettings?._providerId === providerKey) {
+      this._proxyProviderSettings = undefined;   // undefined 而非 null：下次重新挑
+    }
+    // 曾经能用现在挂了，"上次成功"这条记录也失效，否则会一直挑这个死的
+    if (this._proxyLastGood === providerKey) this._proxyLastGood = null;
+    console.warn(`[AIEngine] 代理监控供应商 ${providerKey.slice(0, 20)}… 拉黑 ${PROXY_BLACKLIST_TTL / 60000} 分钟：${reason.slice(0, 80)}`);
   }
 
   /**
@@ -3409,10 +3517,17 @@ ${historyText || '(空)'}
       progressContext: this._buildProgressContext(projectContext)
     });
 
-    // 会话级供应商优先：跟随该会话正在工作的供应商，而不是全局那一个 _providerId
-    const sessionSettings = projectContext?.sessionProviderId
+    // 供应商三级选择：
+    //   1. 会话自己的供应商有 HTTP 凭证 → 用它（凭证归属最清晰）
+    //   2. 会话是 OAuth 登录（取不到 key）→ 借一个带凭证的第三方做监控
+    //      （监控只是读屏判状态，用谁的 key 结果一样，比每次烧 4.3 万 tokens 走 CLI 划算）
+    //   3. 两者都没有 → CLI 兜底
+    let sessionSettings = projectContext?.sessionProviderId
       ? this.resolveSessionSettings(aiType, projectContext.sessionProviderId)
       : null;
+    if (!sessionSettings) {
+      sessionSettings = this.getProxyMonitorSettings(projectContext?.providerPriority || []);
+    }
 
     // 会话供应商和全局配置都没有可用的 HTTP 凭证时，不必先发一次注定 401 的请求，
     // 直接走 CLI（_noProvider 是 _loadSettings 第 5 级兜底打的标记）
@@ -3423,31 +3538,47 @@ ${historyText || '(空)'}
       return this._pendingQuestionStatus(escalatedQuestion, aiType);
     }
 
-    try {
-      // structured: 走 tool_use 强制 schema（仅 Claude 格式生效，其他供应商自动忽略）。
-      // 具体供应商是否支持由 _callClaudeApi 按 apiUrl 判断并降级，这里无条件请求即可。
-      const content = await this._callApiWithFailover(prompt, {
-        sessionId,
-        requestType: 'analyzeStatus',
-        structured: true,
-        settingsOverride: sessionSettings
-      });
+    // 借来的代理供应商挂了就换下一个再试（实测 32 个带凭证供应商只有 2 个真能用，
+    // 一次失败就回退 CLI 等于白扔一个便宜路径）。会话自己指定的供应商不参与轮换。
+    const isProxy = !!sessionSettings?._isProxy;
+    const maxAttempts = isProxy ? PROXY_MAX_ATTEMPTS : 1;
+    let lastErr = null;
 
-      if (!content) {
-        return this._pendingQuestionStatus(escalatedQuestion, aiType);
+    for (let attempt = 0; attempt < maxAttempts && sessionSettings; attempt++) {
+      try {
+        // structured: 走 tool_use 强制 schema（仅 Claude 格式生效，其他供应商自动忽略）。
+        // 具体供应商是否支持由 _callClaudeApi 按 apiUrl 判断并降级，这里无条件请求即可。
+        const content = await this._callApiWithFailover(prompt, {
+          sessionId,
+          requestType: 'analyzeStatus',
+          structured: true,
+          settingsOverride: sessionSettings
+        });
+
+        if (!content) break;
+        const parsed = this._parseStatusResponse(content);
+        if (parsed) {
+          // 记住这个真的调通过的代理，下次直接用它，省掉前面几个必挂的
+          if (isProxy) this._proxyLastGood = sessionSettings._providerId;
+          return parsed;
+        }
+        break;   // 拿到响应但解析不出结构 → 换供应商也没用
+      } catch (err) {
+        lastErr = err;
+        console.error(`AI 状态分析错误（第 ${attempt + 1}/${maxAttempts} 次）:`, err.message);
+        if (!isProxy) break;
+        this.blacklistProxyProvider(sessionSettings._providerId, err.message);
+        sessionSettings = this.getProxyMonitorSettings(projectContext?.providerPriority || []);
       }
-
-      return this._parseStatusResponse(content) || this._pendingQuestionStatus(escalatedQuestion, aiType);
-    } catch (err) {
-      console.error('AI 状态分析错误:', err);
-      // 会话供应商拿不到 HTTP 凭证（官方 OAuth 登录）且全局配置也缺失时，
-      // 用 CLI 兜底——它复用 Claude Code 自己的登录态，OAuth 也能用。
-      const viaCli = await this._analyzeStatusViaCLI(prompt, sessionId, aiType, projectContext);
-      if (viaCli) return viaCli;
-      const pending = this._pendingQuestionStatus(escalatedQuestion, aiType);
-      if (pending) return pending;
-      throw err;
     }
+
+    // HTTP 路径彻底走不通：用 CLI 兜底——它复用 CLI 自己的登录态，OAuth 也能用。
+    const viaCli = await this._analyzeStatusViaCLI(prompt, sessionId, aiType, projectContext);
+    if (viaCli) return viaCli;
+    const pending = this._pendingQuestionStatus(escalatedQuestion, aiType);
+    if (pending) return pending;
+    if (lastErr) throw lastErr;
+    return null;
   }
 
   /**

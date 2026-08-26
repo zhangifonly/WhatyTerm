@@ -123,6 +123,29 @@ test('开发场景的不可逆操作也命中', () => {
 
 // 尺度取舍：无人值守场景下，误报会让用户干脆关掉自动模式，比漏报更糟。
 // 判据是"丢了拿不回来"——能靠 reflog / 重新构建 / 重新拉镜像找回的，一律放行。
+// rm 的尺度：递归才危险。`rm -f 某个文件` 与 `rm 某个文件` 破坏力相同，
+// 而后者一直放行 —— 只因 -f 长得吓人就拦，逻辑上站不住。
+// 实测误伤过 AI 清理临时脚本的常规操作（见下方真实命令）。
+test('rm 只在递归或直指根/家目录时才拦', () => {
+  for (const c of ['rm -rf build', 'rm -fr /tmp/x', 'rm -Rf dist', 'rm --recursive foo',
+                   'rm -f /', 'rm -f /*', 'rm ~']) {
+    assert(isDangerousCommand(c), `应判为危险: ${c}`);
+  }
+  for (const c of ['rm -f scripts/_tmp.mts', 'rm build.log', 'rm -f /tmp/x.png',
+                   'rm *.log', 'rm -f node_modules/.cache/x']) {
+    assert(!isDangerousCommand(c), `不该判为危险: ${c}`);
+  }
+});
+
+test('真实误伤命令：AI 跑完脚本顺手删掉自己的临时文件', () => {
+  // 截图里被拦下的原命令。三段都无破坏性：跑脚本、删自己刚建的临时脚本、拷两张图。
+  const cmd = 'npx tsx scripts/_bcalib.mts && rm -f scripts/_bcalib.mts'
+    + ' && cp /tmp/b-calib.png /tmp/a-white.png /private/tmp/claude-50';
+  assert(!isDangerousCommand(cmd), 'AI 清理临时脚本被当成危险操作拦下');
+  const r = engine.preAnalyzeStatus(confirmBox(cmd), 'claude');
+  eq(r?.actionType, 'select', `应正常自动应答，实际 ${r?.actionType}`);
+});
+
 test('可恢复的操作不拦（否则自动模式会被频繁打断）', () => {
   for (const c of [
     'git reset --hard',            // 丢的是工作区改动，且 Ralph 在专属分支上跑

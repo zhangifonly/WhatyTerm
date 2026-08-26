@@ -136,12 +136,99 @@ test('CLI 回退节流常量存在且不小于 1 分钟（CLI 单次约 4.3 万 
   assert(eval(m[1]) >= 60000, `节流间隔过短: ${m[1]}`);
 });
 
+// ============ OAuth 会话借用代理供应商（实测 26 个会话里 25 个是 OAuth） ============
+test('OAuth 会话能借到带凭证的代理监控供应商', () => {
+  if (!withKey) return console.log('   （跳过：无带凭证样本）');
+  const r = engine.getProxyMonitorSettings(['88codepaid', 'crs.whaty.org', 'FoxCode']);
+  assert(r, '未挑到代理供应商——OAuth 会话会全部退到 CLI，成本不可接受');
+  assert(r.claude.apiKey.length > 0, '代理供应商无 key');
+  assert(/\/v1\/messages$/.test(r.claude.apiUrl), `apiUrl 未规范化: ${r.claude.apiUrl}`);
+  assert(/代理监控/.test(r._providerName), '_providerName 应标注代理监控，便于排障时区分');
+});
+
+test('代理供应商按优先级挑选并缓存', () => {
+  if (!withKey) return console.log('   （跳过：无带凭证样本）');
+  const a = engine.getProxyMonitorSettings(['88codepaid']);
+  const b = engine.getProxyMonitorSettings([]);
+  assert(a === b, '应缓存，避免每轮监控重扫 CC Switch 全表');
+});
+
+test('三处 analyzeStatus 调用点都传了会话供应商与优先级', () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'server/index.js'), 'utf8');
+  const sp = (src.match(/sessionProviderId:\s*getSessionProviderId/g) || []).length;
+  const pp = (src.match(/providerPriority:\s*CLAUDE_PROVIDER_PRIORITY/g) || []).length;
+  assert(sp === 3, `sessionProviderId 应出现 3 次（三个调用点），实际 ${sp}`);
+  assert(pp === 3, `providerPriority 应出现 3 次，实际 ${pp}`);
+});
+
+test('getSessionProviderId 按 aiType 取对应字段（codex 会话不能误读 claudeProvider）', () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'server/index.js'), 'utf8');
+  const m = src.match(/function getSessionProviderId[\s\S]{0,400}?\n\}/);
+  assert(m, '未找到 getSessionProviderId');
+  for (const f of ['codexProvider', 'geminiProvider', 'grokProvider', 'claudeProvider']) {
+    assert(m[0].includes(f), `未覆盖 ${f}`);
+  }
+});
+
 test('_loadSettings 跳过 env 为空的 ProviderService 空壳', () => {
   const src = fs.readFileSync(path.join(process.cwd(), 'server/services/AIEngine.js'), 'utf8');
   assert(/currentProvider\s*&&\s*this\._parseProviderConfigFromService\(currentProvider\)/.test(src),
     '第 2 级未校验空壳供应商，会导致后续步骤全走空并误报"未找到供应商"');
   assert(/currentProviderClaude/.test(src),
     '缺少 2b 级：未跟随 CC Switch 当前供应商');
+});
+
+test('代理供应商失败可拉黑并换下一个（借来的才换，会话自己的不换）', () => {
+  const proxy = engine.getProxyMonitorSettings([]);
+  if (!proxy) return console.log('   （跳过：无带凭证供应商）');
+
+  assert(proxy._isProxy === true, '代理供应商必须打 _isProxy 标记，否则轮换逻辑认不出来');
+  const firstId = proxy._providerId;
+
+  engine.blacklistProxyProvider(firstId, '模拟 502');
+  const second = engine.getProxyMonitorSettings([]);
+  if (second) {
+    assert(second._providerId !== firstId, '拉黑后仍挑到同一个供应商，轮换无效');
+    assert(second._isProxy === true, '换出来的也必须带 _isProxy');
+  } else {
+    assert(true, '只有一个可用供应商，拉黑后为空属正常');
+  }
+});
+
+test('会话自己的供应商不带 _isProxy（不可被拉黑替换）', () => {
+  if (!withKey) return console.log('   （跳过：无第三方供应商样本）');
+  const cfg = engine.resolveSessionSettings('claude', withKey.id);
+  if (!cfg) return console.log('   （跳过：样本无法解析）');
+  assert(!cfg._isProxy, '会话指定的供应商被标成代理，会导致偷偷换用别人的账号');
+});
+
+test('analyzeStatus 对代理供应商做有限次轮换后才回退 CLI', () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'server/services/AIEngine.js'), 'utf8');
+  assert(/PROXY_MAX_ATTEMPTS\s*=\s*[1-9]/.test(src), '缺少代理重试次数上限');
+  assert(/PROXY_BLACKLIST_TTL\s*=\s*\d+\s*\*\s*60\s*\*\s*1000/.test(src), '缺少代理拉黑时长');
+  assert(/isProxy\s*\?\s*PROXY_MAX_ATTEMPTS\s*:\s*1/.test(src),
+    '未区分代理与会话供应商的重试次数：会话自己的供应商不该被轮换');
+  assert(/blacklistProxyProvider\([^)]*_providerId/.test(src), '失败后未拉黑当前代理供应商');
+});
+
+test('代理选择优先用"上次真的调通过"的那个（静态优先级名单里的可能全挂）', () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'server/services/AIEngine.js'), 'utf8');
+  assert(/_proxyLastGood/.test(src), '缺少"上次成功的代理"记录');
+  // 顺序必须是 lastGood → 优先级名单 → 第一个
+  const pick = src.match(/getProxyMonitorSettings[\s\S]{0,2000}?picked = usable\[0\]/);
+  assert(pick, '未找到代理挑选逻辑');
+  const iLast = pick[0].indexOf('_proxyLastGood');
+  const iPrio = pick[0].indexOf('of priority');
+  assert(iLast > -1 && iPrio > -1 && iLast < iPrio,
+    '"上次成功的代理"必须排在静态优先级名单之前，否则重试预算全浪费在必挂的选项上');
+  assert(/_proxyLastGood\s*===\s*providerKey/.test(src),
+    '拉黑时未清除 _proxyLastGood，会一直挑已死的供应商');
+
+  // 运行时验证：拉黑后 lastGood 被清掉
+  const e = new AIEngine();
+  e._proxyLastGood = 'claude:fake-good';
+  e.blacklistProxyProvider('claude:fake-good', '模拟失效');
+  assert(e._proxyLastGood === null, '拉黑后 _proxyLastGood 未清空');
 });
 
 summary();

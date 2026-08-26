@@ -936,7 +936,8 @@ app.post('/api/sessions/:sessionId/analyze-now', async (req, res) => {
       goal: session.goal || sessionData.goal,
       progress: progressManager.loadProgress(session.id),
       // 监控 AI 跟随本会话正在工作的供应商
-      sessionProviderId: getSessionProviderId(session, sessionData.aiType || 'claude')
+      sessionProviderId: getSessionProviderId(session, sessionData.aiType || 'claude'),
+      providerPriority: CLAUDE_PROVIDER_PRIORITY
     };
 
     // 先尝试规则判断，规则无法判断时调用 AI 分析
@@ -5541,7 +5542,8 @@ async function runBackgroundStatusAnalysis() {
         goal: session.goal || sessionData.goal,
         // 监控 AI 跟随本会话正在工作的供应商
         sessionProviderId: getSessionProviderId(session, session.aiType || 'claude'),
-        providerEnv: session.providerEnv || {}
+        providerEnv: session.providerEnv || {},
+        providerPriority: CLAUDE_PROVIDER_PRIORITY
       };
 
       console.log(`[后台AI分析] 会话 ${session.name}: 分析状态...`);
@@ -8142,7 +8144,8 @@ ${terminalContext ? terminalContext : '（无）'}
         goal: session.goal || sessionData?.goal,
         // 监控 AI 跟随本会话正在工作的供应商
         sessionProviderId: getSessionProviderId(session, session.aiType || 'claude'),
-        providerEnv: session.providerEnv || {}
+        providerEnv: session.providerEnv || {},
+        providerPriority: CLAUDE_PROVIDER_PRIORITY
       };
 
       const status = await aiEngine.analyzeStatus(
