@@ -141,7 +141,6 @@
     "actionType": "类型",
     "suggestedAction": "建议操作",
     "autoActionEnabled": "后台自动操作已开启，将自动执行",
-    "dangerBlocked": "⚠️ 待确认的命令有破坏性，已暂停自动应答，请人工确认",
     "aiMonitoring": "AI 正在后台监控终端状态，检测到需要操作时会自动执行。",
     "noAutoActionLogs": "暂无自动操作记录",
     "monitoringProvider": "智能监控 API 供应商",
@@ -156,7 +155,8 @@
     "times": "次",
     "serviceFailedMsg": "AI 服务故障",
     "serviceRecovered": "AI 服务已恢复正常",
-    "requestingAnalysis": "开始请求 AI 状态分析..."
+    "requestingAnalysis": "开始请求 AI 状态分析...",
+    "needsManual": "⚠️ 此状态需要人工处理，已暂停自动应答"
   },
   "session": {
     "title": "会话历史",

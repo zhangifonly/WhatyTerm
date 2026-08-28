@@ -84,57 +84,6 @@ function getCliName(aiType) {
   return names[aiType] || names['claude'];
 }
 
-// 危险命令模式。命中后**不自动放行确认框**，交人工决断。
-// ⚠️ 这些正则按「拆分后的单条命令」匹配（见 splitCommandSegments），
-//    所以 `cd /tmp && rm -rf x` 的第二段也能命中；同时整串也会再匹配一次，
-//    以覆盖 `curl ... | sh` 这类靠管道本身构成危险的形态。
-const DANGEROUS_PATTERNS = [
-  // rm 只在「递归」或「目标是根/家目录」时才算危险。
-  // 曾经把 -f 也算进来，但 `rm -f 某个文件` 与 `rm 某个文件` 破坏力完全相同
-  // （-f 只是跳过确认提示，不改变删除范围），而后者一直放行 —— 单纯因为 -f
-  // 长得吓人就拦，逻辑上站不住，实测把 AI 清理临时脚本这类常规操作全拦了。
-  /^rm\s+(-\S*[rR]|--recursive)/,
-  /^rm\s+(-\S+\s+)*(\/|\/\*|~|~\/\*|\$HOME)(\s|$)/,   // 直指根目录/家目录，不带 -r 也拦
-  /^sudo\s+/,
-  /^chmod\s+(-R\s+)?777/,
-  /^chown\s+-R\s+/,
-  /^dd\s+/,
-  />\s*\/dev\/(sd|nvme|disk)/,                   // 只认块设备；`> /dev/null` 是最常见的 shell 惯用法，绝不能拦
-  /^(reboot|shutdown|halt|poweroff)\b/,
-  /^killall\s+-9/,                              // 只拦 killall：kill -9 <pid> 收拾卡住的 dev server 是日常操作
-  /^mkfs/,
-  /^(shred|srm)\b/,
-  /:\s*\(\)\s*\{.*\|.*&.*\}\s*;\s*:/,          // fork bomb（原写法未转义括号，实际是错误的分支正则）
-  /^mv\s+.+\s+\/dev\/null/,
-  // —— 开发场景里同样不可逆的操作 ——
-  /^git\s+push\b.*(\s--force|\s-f\b)/,
-  /^git\s+clean\s+-[a-zA-Z]*x/,                  // 只拦带 x 的：-fd 清构建产物是常规操作，
-                                                //   -fdx 才会连 .env 这类被 gitignore 的真实内容一起删
-  /^npm\s+publish\b/,
-  /^kubectl\b.*\b(delete|destroy)\b/,           // 删线上资源，不设门槛
-  /^docker\b.*\b(rm|rmi|prune|destroy)\b.*(--all|\s-a\b)|^docker\b.*\bprune\b/,
-                                                //   docker rm -f <某个容器> 放行（镜像能重建），
-                                                //   批量删和 prune 才拦
-  /\b(DROP|TRUNCATE)\s+(DATABASE|TABLE|SCHEMA)\b/i,
-  /^(curl|wget)\b[^|]*\|\s*(sudo\s+)?\S*sh\b/,
-];
-
-// 把复合命令拆成单条，让 ^ 锚定的模式对 `a && rm -rf b` 的后半段也生效
-function splitCommandSegments(command) {
-  return String(command)
-    .split(/&&|\|\||;|\n|\|/)
-    .map(s => s.replace(/^[\s(){}$]+|[\s(){}]+$/g, ''))
-    .filter(Boolean);
-}
-
-// 模块级危险判定（原为 AIEngine 实例方法，确认框安全闸也要用，故上提）
-export function isDangerousCommand(command) {
-  if (!command) return false;
-  const whole = String(command).trim();
-  if (DANGEROUS_PATTERNS.some(p => p.test(whole))) return true;
-  return splitCommandSegments(whole).some(seg => DANGEROUS_PATTERNS.some(p => p.test(seg)));
-}
-
 // 剥掉 TUI 框线，保留命令本身（不能全局删 `|`，那会打断管道命令）
 function stripBoxBorders(line) {
   return line
@@ -202,86 +151,6 @@ function detectOptionMenu(text) {
     hasEscHint: after.slice(0, 8).some(l => /Esc to (cancel|exit|close|go back)/i.test(l)),
     title
   };
-}
-
-/**
- * 从确认界面里解析出「正在被确认的命令」候选。
- *
- * 为什么需要：原来三处确认分支只看**菜单形状**（有没有 `1. Yes` / `2. Yes`）就决定按键，
- * 于是「要执行 rm -rf build 吗」和「要执行 npm test 吗」得到完全相同的自动应答。
- * 危险与否取决于框里那条命令，不取决于菜单长什么样。
- *
- * 典型版式（Claude Code）：
- *   ╭──────────────────────────────╮
- *   │ Bash command                 │   ← 头
- *   │   rm -rf node_modules        │   ← 命令（头之后第一条非空行）
- *   │   Remove dependencies        │   ← 说明
- *   │ Do you want to proceed?      │   ← 问句
- *   │ ❯ 1. Yes                     │
- *
- * @returns {string[]} 候选命令；找到明确的命令头时只返回那一条（高置信），
- *   否则返回问句上方的若干行让调用方逐条筛（模式都带 ^ 锚，散文行不会误命中）。
- */
-export function extractConfirmCandidates(text) {
-  if (!text) return [];
-  const clean = String(text)
-    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
-    .replace(/\x1b\][^\x07]*\x07/g, '')
-    .replace(/\r/g, '');
-  const tail = clean.slice(-6000);
-
-  // 定位最后一个确认问句
-  let qIdx = -1;
-  const qRe = /(Do you want to|Would you like to)[^\n]*/gi;
-  let m;
-  while ((m = qRe.exec(tail)) !== null) qIdx = m.index;
-  if (qIdx === -1) return [];
-
-  const questionLine = tail.slice(qIdx).split('\n')[0];
-  // 编辑类确认（改文件）不是命令执行，交给原有逻辑
-  if (/make this edit|create this file/i.test(questionLine)) return [];
-  // 问句内联命令：Do you want to run `rm -rf x`?
-  const inline = questionLine.match(/[`"']([^`"']{2,200})[`"']/);
-
-  const above = tail.slice(0, qIdx).split('\n').map(stripBoxBorders);
-  const collected = [];
-  let header = null;
-  for (let i = above.length - 1; i >= 0 && above.length - i <= 40; i--) {
-    const line = above[i];
-    if (!line) continue;
-    // 工具头两种写法：`Bash command` 独占一行，或 `Bash(rm -rf build)`
-    // 允许行首的工具调用标记（Claude Code 会打 `● Bash(cmd)`）
-    const paren = line.match(/^[●○◦*•\-\s]*(?:Bash|Shell|Run)\((.+)\)\s*$/i);
-    if (paren) { header = paren[1].trim(); break; }
-    if (/^(bash|shell|run|执行)?\s*(command|命令)\s*$/i.test(line)) { header = ''; break; }
-    collected.push(line);
-    if (collected.length >= 12) break;
-  }
-
-  if (header) return [header];                       // Bash(cmd) 形式
-  if (header === '' && collected.length) {
-    return [collected[collected.length - 1]];        // 命令头之后的第一条非空行
-  }
-  // 没找到命令头时只能拿问句上方的行兜底。这里过滤掉明显是散文的行：
-  // 计划/说明文字里常出现 `npm publish`、`rm -rf` 等字样，若不过滤会把
-  // "Exit plan mode?" 这类确认整个卡住，自动化就废了。
-  const fallback = collected.reverse().filter(looksLikeCommandLine);
-  if (inline) fallback.unshift(inline[1].trim());
-  return fallback;
-}
-
-// 粗判一行是不是"独立的命令行"而非说明文字
-function looksLikeCommandLine(line) {
-  if (!line || line.length > 300) return false;
-  if (/[\u4e00-\u9fff\u3040-\u30ff]/.test(line)) return false;   // 含中日文 → 说明文字
-  if (/^\d+\.\s/.test(line)) return false;                        // 菜单项/编号列表
-  if (/^[-*+]\s/.test(line)) return false;                        // Markdown 列表
-  if (/^(#|\/\/|\*)/.test(line)) return false;                    // 标题/注释
-  // 英文散文特征：出现句末标点，或词数多且不含 shell 记号
-  const wordCount = line.split(/\s+/).length;
-  if (/[.!?]\s+[A-Z]/.test(line)) return false;
-  if (wordCount > 12 && !/[|&;><$]|--|\//.test(line)) return false;
-  return true;
 }
 
 const DEFAULT_SYSTEM_PROMPT = `你是一个终端助手，帮助用户在命令行中完成任务。
@@ -1944,12 +1813,12 @@ ${historyText || '(空)'}
           question: parsed.question
         };
       } else if (parsed.action === 'command') {
-        const isDangerous = this._isDangerous(parsed.command);
         return {
           type: 'command',
           command: parsed.command,
           reasoning: parsed.reasoning,
-          isDangerous
+          // 破坏性检测已按要求整体移除；字段保留为 false，避免下游读取时行为突变
+          isDangerous: false
         };
       }
 
@@ -1958,49 +1827,6 @@ ${historyText || '(空)'}
       console.error('解析 AI 响应失败:', err, content);
       return null;
     }
-  }
-
-  // 保留实例方法做兼容入口；判定逻辑已上提到模块级 isDangerousCommand
-  _isDangerous(command) {
-    return isDangerousCommand(command);
-  }
-
-  /**
-   * 确认框安全闸：解析出待确认的命令，命中危险模式时拒绝自动应答。
-   * @returns {string|null} 命中的危险命令；null 表示可安全自动放行
-   */
-  _dangerousConfirmCommand(screenText) {
-    try {
-      return extractConfirmCandidates(screenText).find(c => isDangerousCommand(c)) || null;
-    } catch (err) {
-      console.error('[AIEngine] 解析确认框命令失败:', err.message);
-      return null;  // 解析失败不阻塞正常流程，回落到原有形状判定
-    }
-  }
-
-  /**
-   * 危险确认框的返回状态：只展示、不按键，等人工决断。
-   * actionType 用 'warning'（server 的自动操作闸门认这个值），
-   * 同时带 requireConfirmation 供前端与其它执行路径识别。
-   */
-  _dangerousConfirmStatus(cliName, command, option, detectedCLI, pluginInfo) {
-    console.warn(`[AIEngine] ⚠️ 确认框待执行命令有破坏性，暂停自动应答: ${command}`);
-    return {
-      currentState: `${cliName}确认界面（危险命令）`,
-      workingDir: '未显示',
-      recentAction: '等待人工确认',
-      needsAction: true,
-      actionType: 'warning',
-      suggestedAction: option,
-      actionReason: `⚠️ 待确认的命令有破坏性：${command} —— 已暂停自动应答，请人工决定`,
-      requireConfirmation: true,
-      dangerousCommand: command,
-      suggestion: null,
-      updatedAt: new Date().toISOString(),
-      preAnalyzed: true,
-      detectedCLI,
-      ...(pluginInfo || {})
-    };
   }
 
   /**
@@ -2183,12 +2009,6 @@ ${historyText || '(空)'}
         selectOption = '2';
       } else {
         selectOption = '1';
-      }
-      // P0 安全闸：菜单形状之外，还要看框里到底要执行什么命令。
-      // 没有这一步时，「要执行 rm -rf build 吗」和「要执行 npm test 吗」拿到的是同一个按键。
-      const dangerEarly = this._dangerousConfirmCommand(earlyLast3000);
-      if (dangerEarly) {
-        return this._dangerousConfirmStatus(cliNameEarly, dangerEarly, selectOption, detectedCLI, pluginInfo);
       }
       console.log(`[AIEngine] [高优先级] 检测到确认界面（插件分析前），选择选项 ${selectOption}${isPlanExecuteEarly ? '（Plan执行）' : isOption2PermanentAllowEarly ? '（跳过永久允许）' : ''}`);
       return {
@@ -2832,11 +2652,6 @@ ${historyText || '(空)'}
       const isOption2PermanentAllow = /2\.\s*Yes,\s*and\s+don.t\s+ask\s+again\s+for:/i.test(cleanContent);
       // 有选项2且不是永久允许时选2（允许本次会话），否则选1
       const selectOption = (hasOption2Yes && !isOption2PermanentAllow) ? '2' : '1';
-      // P0 安全闸：同上，先看命令再决定按键
-      const dangerCmd = this._dangerousConfirmCommand(cleanContent);
-      if (dangerCmd) {
-        return this._dangerousConfirmStatus(cliName, dangerCmd, selectOption, detectedCLI, pluginInfo);
-      }
       console.log(`[AIEngine] 检测到 ${cliName} 确认界面，选择选项 ${selectOption}${isOption2PermanentAllow ? '（跳过永久允许）' : ''}`);
       return {
         currentState: `${cliName}确认界面`,
@@ -2963,11 +2778,6 @@ ${historyText || '(空)'}
       const hasOption2 = /2\.\s*Yes/i.test(cleanContent);
       const isOption2Permanent = /2\.\s*Yes,\s*and\s+don't\s+ask\s+again\s+for:/i.test(cleanContent);
       const selectOpt = (hasOption2 && !isOption2Permanent) ? '2' : '1';
-      // P0 安全闸：同上，先看命令再决定按键
-      const dangerProceed = this._dangerousConfirmCommand(cleanContent);
-      if (dangerProceed) {
-        return this._dangerousConfirmStatus(cliName, dangerProceed, selectOpt, detectedCLI, pluginInfo);
-      }
       console.log(`[AIEngine] 检测到普通确认界面，选择选项 ${selectOpt}${isOption2Permanent ? '（跳过永久允许）' : ''}`);
       return {
         currentState: '确认界面',

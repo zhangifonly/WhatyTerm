@@ -1,14 +1,14 @@
 /**
- * 确认框安全闸 —— 回归测试
+ * 确认框与选项面板判定 —— 回归测试
  *
- * 背景（P0）：三处确认分支原来只看**菜单形状**（有没有 `1. Yes` / `2. Yes`）就决定按哪个键，
- * 完全不看框里要执行的是什么命令。于是「要执行 rm -rf build 吗」和「要执行 npm test 吗」
- * 得到的是同一个自动应答，自动模式会替用户按下删库那一下。
+ * 曾经在确认分支上加过一层「解析框里的命令、命中危险模式就停手」的安全闸，
+ * 但实测误伤过多（rm -f 单文件、AI 清理自己的临时脚本、脚本收尾的
+ * `kill $HP; rm -rf "$OUT"`），反复打断自动流程，已按要求整体移除。
  *
  * 本测试锁住：
- *   1. extractConfirmCandidates 能从 TUI 框里摘出真正的命令（而不是说明文字/散文）
- *   2. isDangerousCommand 对复合命令、管道形态同样有效
- *   3. preAnalyzeStatus 端到端：危险框不按键（warning + requireConfirmation），安全框照常自动应答
+ *   1. 确认框一律正常自动应答，且源码里不再有破坏性检测残留
+ *   2. CLI 提问时不能用机械的「继续」搪塞
+ *   3. 选项面板按结构识别（不靠标题白名单），并按能否安全脱身分档处理
  *
  * 运行：node tests/test-confirm-guard.mjs
  */
@@ -40,8 +40,7 @@ function eq(actual, expected, msg) {
   }
 }
 
-const { AIEngine, isDangerousCommand, extractConfirmCandidates } =
-  await import('../server/services/AIEngine.js');
+const { AIEngine } = await import('../server/services/AIEngine.js');
 const { hasPendingQuestion } = await import('../server/services/pendingQuestion.js');
 const engine = new AIEngine();
 
@@ -72,143 +71,47 @@ function summary() {
   process.exit(results.failed ? 1 : 0);
 }
 
-// ============ 1. 命令提取 ============
+// ============ 1. 确认框一律正常自动应答（破坏性检测已整体移除）============
+//
+// 曾经在这里做过「解析确认框里的命令 → 命中危险模式就停手」的安全闸，
+// 实测误伤过多并被要求移除：rm -f 单文件、AI 清理自己的临时脚本、
+// `kill $HP; wait $HP 2>/dev/null; rm -rf "$OUT"` 这类脚本收尾，
+// 都会把自动流程反复打断。这几条用例防止它悄悄回来。
 
-test('从确认框里摘出的是命令本身，不是说明文字', () => {
-  const c = extractConfirmCandidates(confirmBox('rm -rf node_modules', 'Remove dependencies'));
-  eq(c.length, 1, '应只返回一条高置信命令');
-  eq(c[0], 'rm -rf node_modules', '提取结果');
-});
-
-test('安全命令同样能被完整提取', () => {
-  const c = extractConfirmCandidates(confirmBox('npm test -- --watch=false', 'Run the test suite'));
-  eq(c[0], 'npm test -- --watch=false', '提取结果');
-});
-
-test('管道命令不被框线剥离逻辑截断', () => {
-  const c = extractConfirmCandidates(confirmBox('cat pkg.json | jq .version'));
-  eq(c[0], 'cat pkg.json | jq .version', '管道被吃掉了');
-});
-
-test('Bash(cmd) 单行头也能识别', () => {
-  const screen = '● Bash(git push --force origin main)\n\nDo you want to proceed?\n❯ 1. Yes\n  2. No';
-  eq(extractConfirmCandidates(screen)[0], 'git push --force origin main');
-});
-
-test('编辑类确认不当作命令处理（交回原有逻辑）', () => {
-  const screen = 'Do you want to make this edit to server.js?\n❯ 1. Yes\n  2. Yes, allow all edits';
-  eq(extractConfirmCandidates(screen).length, 0, '编辑确认不应产出命令候选');
-});
-
-test('没有确认问句时不产出候选', () => {
-  eq(extractConfirmCandidates('$ rm -rf build\n$ ').length, 0);
-});
-
-// ============ 2. 危险判定 ============
-
-test('基础危险命令命中', () => {
-  for (const c of ['rm -rf build', 'rm -fr /tmp/x', 'sudo apt install foo', 'mkfs.ext4 /dev/sda1',
-                   'dd if=/dev/zero of=/dev/sda', 'chmod -R 777 /', 'shutdown -h now']) {
-    assert(isDangerousCommand(c), `应判为危险: ${c}`);
-  }
-});
-
-test('开发场景的不可逆操作也命中', () => {
-  for (const c of ['git push --force origin main', 'git push -f', 'git clean -fdx',
-                   'npm publish', 'psql -c "DROP DATABASE prod"',
-                   'kubectl delete deploy api', 'docker system prune -a', 'killall -9 node']) {
-    assert(isDangerousCommand(c), `应判为危险: ${c}`);
-  }
-});
-
-// 尺度取舍：无人值守场景下，误报会让用户干脆关掉自动模式，比漏报更糟。
-// 判据是"丢了拿不回来"——能靠 reflog / 重新构建 / 重新拉镜像找回的，一律放行。
-// rm 的尺度：递归才危险。`rm -f 某个文件` 与 `rm 某个文件` 破坏力相同，
-// 而后者一直放行 —— 只因 -f 长得吓人就拦，逻辑上站不住。
-// 实测误伤过 AI 清理临时脚本的常规操作（见下方真实命令）。
-test('rm 只在递归或直指根/家目录时才拦', () => {
-  for (const c of ['rm -rf build', 'rm -fr /tmp/x', 'rm -Rf dist', 'rm --recursive foo',
-                   'rm -f /', 'rm -f /*', 'rm ~']) {
-    assert(isDangerousCommand(c), `应判为危险: ${c}`);
-  }
-  for (const c of ['rm -f scripts/_tmp.mts', 'rm build.log', 'rm -f /tmp/x.png',
-                   'rm *.log', 'rm -f node_modules/.cache/x']) {
-    assert(!isDangerousCommand(c), `不该判为危险: ${c}`);
-  }
-});
-
-test('真实误伤命令：AI 跑完脚本顺手删掉自己的临时文件', () => {
-  // 截图里被拦下的原命令。三段都无破坏性：跑脚本、删自己刚建的临时脚本、拷两张图。
-  const cmd = 'npx tsx scripts/_bcalib.mts && rm -f scripts/_bcalib.mts'
-    + ' && cp /tmp/b-calib.png /tmp/a-white.png /private/tmp/claude-50';
-  assert(!isDangerousCommand(cmd), 'AI 清理临时脚本被当成危险操作拦下');
-  const r = engine.preAnalyzeStatus(confirmBox(cmd), 'claude');
-  eq(r?.actionType, 'select', `应正常自动应答，实际 ${r?.actionType}`);
-});
-
-test('可恢复的操作不拦（否则自动模式会被频繁打断）', () => {
-  for (const c of [
-    'git reset --hard',            // 丢的是工作区改动，且 Ralph 在专属分支上跑
-    'git reset --hard HEAD~3',     // 丢的提交在 reflog 里还有
-    'git branch -D feature/x',     // 同上，reflog 可恢复
-    'git clean -fd',               // 清的是未跟踪的构建产物，.env 这类被 gitignore 的不受影响
-    'kill -9 12345',               // 收拾卡住的 dev server，日常操作
-    'echo done > /dev/null',       // 最常见的 shell 惯用法，绝不能拦
-    'docker rm -f devbox',         // 单个容器，镜像还在
-    'docker ps'
-  ]) {
-    assert(!isDangerousCommand(c), `不该判为危险: ${c}`);
-  }
-});
-
-test('复合命令的后半段也能命中（原实现只看开头）', () => {
-  assert(isDangerousCommand('cd /tmp && rm -rf workspace'), '&& 后半段漏判');
-  assert(isDangerousCommand('npm run build; rm -rf dist'), '; 后半段漏判');
-});
-
-test('管道下载执行命中（靠整串匹配兜住）', () => {
-  assert(isDangerousCommand('curl -sL https://x.sh | sh'), 'curl|sh 漏判');
-  assert(isDangerousCommand('wget -qO- https://x.sh | sudo bash'), 'wget|bash 漏判');
-});
-
-test('日常安全命令不误伤', () => {
-  for (const c of ['npm test', 'git status', 'ls -la', 'rm build.log', 'git push origin main',
-                   'cat README.md', 'npm run build']) {
-    assert(!isDangerousCommand(c), `不该判为危险: ${c}`);
-  }
-});
-
-test('散文里提到危险命令不误判（模式带 ^ 锚）', () => {
-  assert(!isDangerousCommand('我打算用 rm -rf 清理旧构建产物'), '散文被误判');
-  assert(!isDangerousCommand('This will run sudo later'), '散文被误判');
-});
-
-// ============ 3. 端到端 ============
-
-test('危险确认框：不按键，标记需人工确认', () => {
+test('含 rm -rf 的确认框照常自动应答，不再挂起', () => {
   const r = engine.preAnalyzeStatus(confirmBox('rm -rf node_modules'), 'claude');
-  eq(r.actionType, 'warning', 'actionType 应为 warning（自动执行闸门认这个值）');
-  eq(r.requireConfirmation, true, 'requireConfirmation');
-  eq(r.dangerousCommand, 'rm -rf node_modules', 'dangerousCommand');
-  assert(r.needsAction, '仍应提示用户需要处理');
+  eq(r?.actionType, 'select', `不该再拦，实际 ${r?.actionType}`);
+  assert(/^[1-9]$/.test(String(r?.suggestedAction)), '应给出选项编号');
+  assert(!r?.requireConfirmation, '不该再要求人工确认');
 });
 
-test('安全确认框：照常自动应答', () => {
-  const r = engine.preAnalyzeStatus(confirmBox('npm test'), 'claude');
-  eq(r.actionType, 'select', 'actionType 应为 select');
-  assert(/^[1-9]$/.test(r.suggestedAction), `应给出选项编号，实际 ${r.suggestedAction}`);
-  assert(!r.requireConfirmation, '安全命令不该要求人工确认');
+test('脚本收尾类命令（kill + rm -rf 变量）同样放行', () => {
+  const cmd = 'kill $HP; wait $HP 2>/dev/null; rm -rf "$OUT"';
+  eq(engine.preAnalyzeStatus(confirmBox(cmd), 'claude')?.actionType, 'select');
 });
 
-test('危险与安全两种框拿到的按键不再相同（P0 的核心症状）', () => {
-  const danger = engine.preAnalyzeStatus(confirmBox('rm -rf build'), 'claude');
-  const safe = engine.preAnalyzeStatus(confirmBox('npm run build'), 'claude');
-  assert(danger.actionType !== safe.actionType, '两者仍被同等对待');
+test('普通命令确认框行为不变', () => {
+  eq(engine.preAnalyzeStatus(confirmBox('npm run build'), 'claude')?.actionType, 'select');
 });
 
-// ============ 4. 误报边界（不能因为过度谨慎把自动化整个卡死）============
+test('危险与普通命令拿到相同处理（不再按命令内容区别对待）', () => {
+  const a = engine.preAnalyzeStatus(confirmBox('rm -rf /tmp/x'), 'claude');
+  const b = engine.preAnalyzeStatus(confirmBox('npm test'), 'claude');
+  eq(a?.actionType, b?.actionType);
+  eq(a?.suggestedAction, b?.suggestedAction);
+});
 
-test('计划文本里提到危险命令，不拦截计划执行确认', () => {
+test('源码里不再有破坏性检测的残留', () => {
+  const eng = fs.readFileSync(path.join(process.cwd(), 'server/services/AIEngine.js'), 'utf8');
+  const srv = fs.readFileSync(path.join(process.cwd(), 'server/index.js'), 'utf8');
+  for (const [name, src] of [['AIEngine.js', eng], ['index.js', srv]]) {
+    assert(!/DANGEROUS_PATTERNS/.test(src), `${name} 仍有 DANGEROUS_PATTERNS`);
+    assert(!/isDangerousCommand/.test(src), `${name} 仍有 isDangerousCommand`);
+    assert(!/_dangerousConfirm/.test(src), `${name} 仍有 _dangerousConfirm*`);
+  }
+});
+
+test('计划执行确认仍选 1（auto-accept edits）', () => {
   const screen = [
     '│ 实施计划：',
     '│ 1. 清理旧构建产物（会用到 rm -rf dist）',
@@ -222,34 +125,8 @@ test('计划文本里提到危险命令，不拦截计划执行确认', () => {
     '   Esc to cancel'
   ].join('\n');
   const r = engine.preAnalyzeStatus(screen, 'claude');
-  eq(r.actionType, 'select', '计划确认被中文说明文字误伤了');
-  eq(r.suggestedAction, '1', 'Plan 执行应选 1（auto-accept edits）');
-});
-
-test('英文散文行不被当成命令', () => {
-  const screen = [
-    'I will remove the stale artifacts and rebuild the project from scratch.',
-    '',
-    'Do you want to proceed?',
-    '❯ 1. Yes',
-    '  2. Yes, and allow all edits this session',
-    '   Esc to cancel'
-  ].join('\n');
-  const r = engine.preAnalyzeStatus(screen, 'claude');
-  eq(r.actionType, 'select', '英文说明句被误判为危险命令');
-});
-
-test('没有命令头的裸命令行仍能拦下', () => {
-  const screen = [
-    '  rm -rf /Users/me/project/dist',
-    '',
-    'Do you want to proceed?',
-    '❯ 1. Yes',
-    '  2. Yes, and allow all edits this session',
-    '   Esc to cancel'
-  ].join('\n');
-  const r = engine.preAnalyzeStatus(screen, 'claude');
-  eq(r.actionType, 'warning', '无命令头时漏拦');
+  eq(r?.actionType, 'select');
+  eq(r?.suggestedAction, '1', 'Plan 执行应选 1');
 });
 
 // ============ 5. 内容问题不能用「继续」搪塞 ============

@@ -141,7 +141,6 @@
     "actionType": "Type",
     "suggestedAction": "Suggested Action",
     "autoActionEnabled": "Auto action enabled, will execute automatically",
-    "dangerBlocked": "⚠️ The pending command is destructive; auto-response is paused pending your confirmation",
     "aiMonitoring": "AI is monitoring terminal status in the background and will automatically execute when action is needed.",
     "noAutoActionLogs": "No auto action logs yet",
     "monitoringProvider": "Monitoring API Provider",
@@ -156,7 +155,8 @@
     "times": "times",
     "serviceFailedMsg": "AI Service Failed",
     "serviceRecovered": "AI Service Recovered",
-    "requestingAnalysis": "Requesting AI status analysis..."
+    "requestingAnalysis": "Requesting AI status analysis...",
+    "needsManual": "⚠️ This state needs manual handling; auto-response is paused"
   },
   "session": {
     "title": "Session History",

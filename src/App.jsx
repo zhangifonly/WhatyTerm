@@ -2510,13 +2510,11 @@ export default function App() {
                     {aiStatusMap[currentSession.id].actionReason && (
                       <p className="action-reason">{aiStatusMap[currentSession.id].actionReason}</p>
                     )}
-                    {/* 危险命令：自动应答已被安全闸拦下，等人工决定 */}
+                    {/* 需人工确认的状态（插件阶段配置要求、或 AI 不可用时 CLI 正在提问）。
+                        破坏性命令检测已整体移除，这里不再展示"危险命令"。 */}
                     {aiStatusMap[currentSession.id].requireConfirmation && (
                       <div className="danger-confirm-hint">
-                        {t('aiPanel.dangerBlocked')}
-                        {aiStatusMap[currentSession.id].dangerousCommand && (
-                          <code>{aiStatusMap[currentSession.id].dangerousCommand}</code>
-                        )}
+                        {t('aiPanel.needsManual')}
                       </div>
                     )}
                     {/* 自动操作状态提示（被安全闸拦下时不显示，否则文案会误导） */}

@@ -147,7 +147,7 @@ function parseWorkingDirFromOutput(output) {
 }
 import { SessionManager } from './services/SessionManager.js';
 import { HistoryLogger } from './services/HistoryLogger.js';
-import { AIEngine, hasRunningTimer, isDangerousCommand, extractConfirmCandidates } from './services/AIEngine.js';
+import { AIEngine, hasRunningTimer } from './services/AIEngine.js';
 import actionOutcome from './services/ActionOutcome.js';
 import { AuthService } from './services/AuthService.js';
 import { ProviderService } from './services/ProviderService.js';
@@ -1239,11 +1239,7 @@ function getSessionProviderId(session, aiType) {
  */
 function autoActionBlockReason(status, screenText = '', sessionId = null) {
   if (!status) return null;
-  if (status.actionType === 'warning') {
-    return status.dangerousCommand
-      ? `危险命令待人工确认: ${status.dangerousCommand}`
-      : '警告类状态(仅展示)';
-  }
+  if (status.actionType === 'warning') return '警告类状态(仅展示)';
   if (status.requireConfirmation) return '该阶段配置要求人工确认';
 
   // 实测熔断：台账连续记到多次「发出去毫无效果」且屏幕没变，说明我们在对着一块石头按键。
@@ -1253,14 +1249,10 @@ function autoActionBlockReason(status, screenText = '', sessionId = null) {
     if (paused) return paused;
   }
 
-  if (status.actionType === 'select' && screenText) {
-    try {
-      const hit = extractConfirmCandidates(screenText).find(c => isDangerousCommand(c));
-      if (hit) return `危险命令待人工确认: ${hit}`;
-    } catch (err) {
-      console.error('[自动操作闸] 确认框复核失败:', err.message);
-    }
-  }
+  // 注：这里原本还有一层「解析确认框里的命令、命中危险模式就停手」的复核，
+  // 已按用户要求整体移除 —— 实测误伤过多（rm -f 单文件、清理临时脚本、
+  // kill $HP; rm -rf "$OUT" 这类脚本收尾），反复打断自动流程。
+  // 现在确认框一律按菜单语义正常自动应答。
   return null;
 }
 
