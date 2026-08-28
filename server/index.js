@@ -937,6 +937,8 @@ app.post('/api/sessions/:sessionId/analyze-now', async (req, res) => {
       progress: progressManager.loadProgress(session.id),
       // 监控 AI 跟随本会话正在工作的供应商
       sessionProviderId: getSessionProviderId(session, sessionData.aiType || 'claude'),
+      // 上次我们发给该会话的文本 —— 用于判断输入框里没提交的内容是不是自己打的
+      lastSentText: lastActionMap.get(session.id)?.action,
       providerPriority: CLAUDE_PROVIDER_PRIORITY
     };
 
@@ -5534,6 +5536,7 @@ async function runBackgroundStatusAnalysis() {
         goal: session.goal || sessionData.goal,
         // 监控 AI 跟随本会话正在工作的供应商
         sessionProviderId: getSessionProviderId(session, session.aiType || 'claude'),
+        lastSentText: lastActionMap.get(session.id)?.action,
         providerEnv: session.providerEnv || {},
         providerPriority: CLAUDE_PROVIDER_PRIORITY
       };
@@ -8136,6 +8139,7 @@ ${terminalContext ? terminalContext : '（无）'}
         goal: session.goal || sessionData?.goal,
         // 监控 AI 跟随本会话正在工作的供应商
         sessionProviderId: getSessionProviderId(session, session.aiType || 'claude'),
+        lastSentText: lastActionMap.get(session.id)?.action,
         providerEnv: session.providerEnv || {},
         providerPriority: CLAUDE_PROVIDER_PRIORITY
       };

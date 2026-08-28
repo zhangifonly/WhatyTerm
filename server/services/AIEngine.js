@@ -13,6 +13,7 @@ import tokenStatsService from './TokenStatsService.js';
 import pluginManager from './MonitorPlugins/index.js';
 import { isTaskDone } from './taskDonePattern.js';
 import { hasPendingQuestion } from './pendingQuestion.js';
+import { promptPendingText, isOwnPendingInput } from './promptState.js';
 import { DEFAULT_MODEL, CLAUDE_CODE_FAKE, CODEX_FAKE, CLAUDE_MODEL_FALLBACK_LIST, getModelsConfig } from '../config/constants.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -2625,6 +2626,31 @@ ${historyText || '(空)'}
         };
       }
 
+      // 这条分支的成立条件里包含「没看到空提示符」，而输入框里留着未提交文本时
+      // 恰好也满足 —— 于是会在已有内容后面再打一个「继续」，拼成没法用的指令。
+      // 先把这种情况分出去：自己的指令回车提交，用户的内容不碰。
+      const acceptPending = promptPendingText(fullyCleanContent);
+      if (acceptPending) {
+        const own = isOwnPendingInput(acceptPending, ['继续'], projectContext?.lastSentText);
+        console.log(`[AIEngine] 输入框有未提交内容「${acceptPending.slice(0, 30)}」，${own ? '发送回车提交' : '疑似用户输入，暂不操作'}`);
+        return {
+          currentState: own ? `${cliName}有未提交的自动指令` : `${cliName}输入框有你未提交的内容`,
+          workingDir: '未显示',
+          recentAction: own ? '等待提交' : '等待用户',
+          needsAction: own,
+          actionType: own ? 'key' : 'none',
+          suggestedAction: own ? 'Enter' : null,
+          actionReason: own
+            ? `输入框里留着自动指令「${acceptPending.slice(0, 30)}」尚未提交，发送回车`
+            : `输入框里有你未提交的内容「${acceptPending.slice(0, 30)}」，已暂停自动操作`,
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI,
+          ...pluginInfo
+        };
+      }
+
       console.log(`[AIEngine] 检测到 ${cliName} 等待接受编辑，发送"继续"`);
       return {
         currentState: `${cliName}等待接受编辑`,
@@ -3044,6 +3070,32 @@ ${historyText || '(空)'}
           actionType: 'none',
           suggestedAction: null,
           actionReason: 'Claude 已表示没有更多任务，不再发送继续',
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          detectedCLI,
+          ...pluginInfo
+        };
+      }
+
+      // 输入框里若留着没提交的文本，只需要回车 —— 再发「继续」会把它拼成
+      // 「原文本+继续」，既不是原意也不是能用的指令。
+      const pendingInput = promptPendingText(fullyCleanContent);
+      if (pendingInput) {
+        // 只提交我们自己打进去的（以「继续」开头）。用户可能正打到一半在思考，
+        // 替他按回车会把半截话发出去 —— 那比不操作更糟，而用户输入暂停只挡 5 秒。
+        const own = isOwnPendingInput(pendingInput, ['继续'], projectContext?.lastSentText);
+        console.log(`[AIEngine] 输入框有未提交内容「${pendingInput.slice(0, 30)}」，${own ? '发送回车提交' : '疑似用户输入，暂不操作'}`);
+        return {
+          currentState: own ? `${cliName}有未提交的自动指令` : `${cliName}输入框有你未提交的内容`,
+          workingDir: '未显示',
+          recentAction: own ? '等待提交' : '等待用户',
+          needsAction: own,
+          actionType: own ? 'key' : 'none',
+          suggestedAction: own ? 'Enter' : null,
+          actionReason: own
+            ? `输入框里留着自动指令「${pendingInput.slice(0, 30)}」尚未提交，发送回车`
+            : `输入框里有你未提交的内容「${pendingInput.slice(0, 30)}」，已暂停自动操作`,
           suggestion: null,
           updatedAt: new Date().toISOString(),
           preAnalyzed: true,

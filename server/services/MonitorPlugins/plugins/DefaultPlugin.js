@@ -1,5 +1,6 @@
 import BasePlugin from '../BasePlugin.js';
 import promptLoader from '../PromptLoader.js';
+import { promptPendingText, isOwnPendingInput } from '../../promptState.js';
 
 /**
  * 默认监控策略插件
@@ -210,9 +211,10 @@ class DefaultPlugin extends BasePlugin {
       if (hasQueuedMessages || isRunning) {
         return 'running';
       }
-      // 有 idle prompt → 是 waiting 状态（Claude 等待用户输入）
-      const hasIdlePrompt = /^[>❯]\s*$/m.test(cleanLastLines) || /\n[>❯]\s*$/.test(cleanLastLines);
-      if (hasIdlePrompt) {
+      // 提示符存在即视为 waiting —— 不再要求它必须是空的。
+      // 输入框里留着没提交的文本（回车没落地）时，CLI 同样是闲着的，
+      // 只是需要一个回车而不是再打一段字；具体发什么由 analyzeStatus 决定。
+      if (promptPendingText(cleanLastLines) !== null) {
         return 'waiting';
       }
     }
@@ -368,8 +370,36 @@ class DefaultPlugin extends BasePlugin {
       };
     }
 
-    // 等待输入：发送继续指令
+    // 等待输入
     if (phase === 'waiting') {
+      // 输入框里已经有没提交的文本时，只需要一个回车。
+      // 这时再发「继续」会把输入框拼成「继续 format 组继续」—— 既不是原意，
+      // 也不是一条能用的指令。最常见的成因是上一次自动操作的回车没落地。
+      const pending = promptPendingText(
+        terminalContent.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1B\][^\x07]*\x07/g, '')
+      );
+      if (pending) {
+        // 只提交我们自己打进去的（以自动指令开头）。用户可能正打到一半在思考，
+        // 替他按回车会把半截话发出去 —— 那比不操作更糟。
+        if (!isOwnPendingInput(pending, config.autoActions, context?.lastSentText)) {
+          return {
+            needsAction: false,
+            actionType: 'none',
+            suggestedAction: null,
+            phase,
+            phaseConfig: config,
+            message: `输入框里有你未提交的内容「${pending.slice(0, 30)}」，已暂停自动操作`
+          };
+        }
+        return {
+          needsAction: true,
+          actionType: 'key',
+          suggestedAction: 'Enter',
+          phase,
+          phaseConfig: config,
+          message: `输入框有未提交的自动指令「${pending.slice(0, 30)}」，发送回车提交`
+        };
+      }
       return {
         needsAction: true,
         actionType: 'text_input',

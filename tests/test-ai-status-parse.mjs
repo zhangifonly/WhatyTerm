@@ -107,13 +107,25 @@ const IDLE_FIXTURES = {
   'whatyterm-4234334b.txt': '✻ Worked for 8m 3s',
   'whatyterm-5f2353ad.txt': '✻ Sautéed for 4m 36s（含重音字符）',
   'whatyterm-9e66c2f8.txt': '✻ Churned for 3m 50s',
-  'whatyterm-b7d80d07.txt': '✻ Churned for 2m 31s',
   'whatyterm-d660315f.txt': '✻ Cogitated for 1m 12s',
   'whatyterm-fca2bfbb.txt': '✻ Cooked for 2m 8s',
   'whatyterm-e0e95cf7.txt': 'Settings dialog dismissed 后空闲',
 };
 for (const [f, note] of Object.entries(IDLE_FIXTURES)) {
   EXPECTATIONS[f] = { needsAction: true, actionType: 'text_input', action: '继续', note };
+}
+
+// ---- 输入框里留着没提交的内容：不能再发文本，否则会拼接 ----
+// 这几个样本的提示符行不是空的。原先这里期望发「继续」，那其实固化了一个 bug：
+// 屏上是 `❯ 检查 Clash 里 whaty.org 的分流规则`，再发「继续」会拼成
+// 「…分流规则继续」。现在改为：认得出是自己打的就回车提交，认不出就不动。
+// 单测环境拿不到 lastSentText（那是运行时 lastActionMap 里的事实），
+// 所以这里落到保守分支 —— 不操作，等人工。
+const PENDING_INPUT_FIXTURES = {
+  'whatyterm-b7d80d07.txt': '✻ Churned for 2m 31s，但输入框里留着一句未提交的指令',
+};
+for (const [f, note] of Object.entries(PENDING_INPUT_FIXTURES)) {
+  EXPECTATIONS[f] = { needsAction: false, note };
 }
 
 // ---- 边界样本：preAnalyze 不该硬判，交给 AI ----
