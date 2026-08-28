@@ -4586,6 +4586,33 @@ async function runBackgroundAutoAction() {
           if (lastReply.length < 20 || replyIsWaiting || continueCount >= 4) {
             console.log(`[循环检测] 会话 ${session.name}: 连续${continueCount}次"继续"（回复${replyIsWaiting ? '为等待型' : `"${lastReply.slice(0, 30)}"`}），停止机械继续，交给AI判断`);
             preResult = null; // 清除 preResult，走 AI 分析路径（提示词含后台等待判则）
+
+            // ⚠️ 必须作废内容哈希，否则这次"交给 AI"根本交不出去：
+            //    后台 AI 分析循环有一条「内容无变化 + 有缓存 → 跳过分析」的短路，
+            //    而这里恰恰是"屏幕一直没变"才触发的熔断 —— 两个条件同时成立，
+            //    AI 永远不会真正分析，机械继续停了、AI 也没接手，会话就此挂死。
+            aiContentHashCache.delete(sessionData.id);
+            // 同时把缓存状态改成实情：熔断已生效，不会再自动发「继续」。
+            // 不改的话，AI 循环跳过时会把旧状态原样重播，面板一直显示
+            //「建议操作：继续 / 将自动执行」，而实际上一个字也不会发出去。
+            const stalledStatus = {
+              currentState: `连续${continueCount}次"继续"无效，已停止机械继续`,
+              workingDir: '未显示',
+              recentAction: '等待 AI 重新判断',
+              needsAction: false,
+              actionType: 'none',
+              suggestedAction: null,
+              actionReason: '重复发送"继续"没有推动进展，已交给 AI 重新判断当前状态',
+              suggestion: null,
+              updatedAt: new Date().toISOString(),
+              _source: 'continue_loop_break'
+            };
+            aiStatusCache.set(sessionData.id, stalledStatus);
+            io.to(`session:${sessionData.id}`).emit('ai:status', {
+              sessionId: sessionData.id,
+              ...stalledStatus,
+              ...getAIProviderInfo()
+            });
           }
         }
       }
