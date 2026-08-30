@@ -22,6 +22,7 @@ import VoiceInput from './components/VoiceInput';
 import SprintProgress from './components/SprintProgress';
 import RalphWizard from './components/RalphWizard';
 import { registerOsc52, writeClipboard } from './terminalClipboard';
+import { fitTerminal, measureScrollbarWidth } from './terminalFit';
 
 const socket = io();
 
@@ -238,6 +239,9 @@ export default function App() {
   const terminalRef = useRef(null);
   const terminalInstance = useRef(null);
   const fitAddon = useRef(null);
+  // 平台滚动条占位宽度：探测一次即可（同一平台不会变），供 fitTerminal 扣减用。
+  // macOS 悬浮滚动条为 0；FitAddon 无条件扣 15px 会白丢 2~4 列，行尾宽字符因此不渲染。
+  const scrollbarWidth = useRef(null);
   // 最近一次已同步给后端的尺寸（形如 "sessionId:colsxrows"），用于去重
   const lastSyncedSize = useRef(null);
   const currentSessionRef = useRef(null);
@@ -251,15 +255,29 @@ export default function App() {
   // attach 时必须把这个尺寸一起发给后端：服务端要「先 resize 再 capture」，
   // 否则截取到的是旧宽度渲染的画面，贴到更宽的 xterm 网格上，
   // 远端程序按旧宽度换行、右侧多出的列它从不写入 —— 表现为「边缘的字显示不出来」。
+  // 统一的 fit 入口：走自算列数的 fitTerminal（按平台实测滚动条宽度扣减），
+  // 取不到 xterm 内部尺寸时自动退回 FitAddon。所有需要 fit 的路径都必须调这里。
+  const doFit = useCallback(() => {
+    const term = terminalInstance.current;
+    if (!term) return null;
+    if (scrollbarWidth.current === null) {
+      scrollbarWidth.current = measureScrollbarWidth();
+    }
+    try {
+      return fitTerminal(term, scrollbarWidth.current, () => fitAddon.current?.fit());
+    } catch {
+      try { fitAddon.current?.fit(); } catch {}
+      return term.cols && term.rows ? { cols: term.cols, rows: term.rows } : null;
+    }
+  }, []);
+
   const getGridSize = useCallback(() => {
     const term = terminalInstance.current;
     if (!term) return null;
-    try {
-      fitAddon.current?.fit();
-    } catch {}
+    doFit();
     if (!term.cols || !term.rows) return null;
     return { cols: term.cols, rows: term.rows };
-  }, []);
+  }, [doFit]);
 
   // 统一的 attach 入口：始终携带当前网格尺寸，让服务端先对齐宽度再截屏。
   const emitAttach = useCallback((sessionId, extra) => {
@@ -278,9 +296,7 @@ export default function App() {
   const fitAndSyncSize = useCallback(() => {
     const term = terminalInstance.current;
     if (!fitAddon.current || !term) return;
-    try {
-      fitAddon.current.fit();
-    } catch {}
+    doFit();
     const session = currentSessionRef.current;
     if (!session || !term.cols || !term.rows) return;
     const key = `${session.id}:${term.cols}x${term.rows}`;
@@ -291,7 +307,7 @@ export default function App() {
       cols: term.cols,
       rows: term.rows
     });
-  }, []);
+  }, [doFit]);
 
   // AI 面板 / 侧边栏折叠会改变终端可用宽度（CSS width 过渡 0.3s）。
   // ResizeObserver 在过渡中可能收敛到中间值，这里在过渡结束后再显式 fit + 同步一次，
@@ -1089,7 +1105,7 @@ export default function App() {
       // 只 fit 不 emit：attach 时已把尺寸随请求发给服务端并在截屏前对齐，
       // 这里再 emit 会在写入后触发第二次 SIGWINCH，让远端程序重复重绘、
       // 且 xterm 会对刚写入的历史做一次 reflow（曾吞掉换行处的字符）。
-      try { fitAddon.current?.fit(); } catch {}
+      doFit();
 
       // 写入当前可见区域内容
       let content = contentToWrite.replace(/\r\n$/, '');
@@ -1144,7 +1160,7 @@ export default function App() {
 
     // 切换会话后自动获取焦点
     term.focus();
-  }, [pendingScreenContent, pendingCursorPosition, terminalReady]);
+  }, [pendingScreenContent, pendingCursorPosition, terminalReady, doFit]);
 
   // 附加到会话
   const attachSession = useCallback((sessionId) => {
