@@ -7525,9 +7525,14 @@ io.on('connection', (socket) => {
   // 调整终端大小
   socket.on('terminal:resize', (data) => {
     const session = sessionManager.getSession(data.sessionId);
-    if (session) {
-      session.resize(data.cols, data.rows);
+    if (!session) {
+      console.log(`[Resize] 会话不存在 ${data.sessionId} 请求=${data.cols}x${data.rows}`);
+      return;
     }
+    // 记录前端请求值与 tmux 实际值：排查「右侧文字被裁」时需要判断
+    // 究竟是前端算错列数，还是 tmux 窗口没跟上前端网格。
+    console.log(`[Resize] ${data.sessionId} 前端请求=${data.cols}x${data.rows}`);
+    session.resize(data.cols, data.rows);
   });
 
   // 更新会话设置
