@@ -1181,27 +1181,36 @@ export default function App() {
     const normalizePath = (p) => p ? p.replace(/\/+$/, '') : '';
     const projectPath = normalizePath(project.path);
 
-    // 检查是否有现有会话在该项目目录下工作
-    const existingSession = sessions.find(s => normalizePath(s.workingDir) === projectPath);
+    // 检查是否有现有会话在该项目目录下工作。
+    // 必须同时匹配 aiType：同一个目录常常既跑过 Claude 又跑过 Codex，
+    // 只按目录匹配会让「点 Codex 历史项目却切到该目录下的 Claude 会话」，
+    // 表现为「点 codex 项目启动的却是 claude」。
+    const wantType = project.aiType || 'claude';
+    const existingSession = sessions.find(s =>
+      normalizePath(s.workingDir) === projectPath &&
+      (s.aiType || 'claude') === wantType
+    );
 
     if (existingSession) {
-      // 已有会话，直接切换
-      console.log(`[App] 项目 ${project.name} 已有会话 ${existingSession.id}，切换过去`);
+      // 已有同类型会话，直接切换
+      console.log(`[App] 项目 ${project.name}(${wantType}) 已有会话 ${existingSession.id}，切换过去`);
       attachSession(existingSession.id);
     } else {
-      // 检查是否正在创建该项目的会话（防止重复点击）
-      if (creatingProjectPaths.has(projectPath)) {
-        console.log(`[App] 项目 ${project.name} 正在创建会话中，忽略重复点击`);
+      // 检查是否正在创建该项目的会话（防止重复点击）。
+      // 键含 aiType：否则同目录下先点 Codex 再点 Claude 会被当成重复点击而被吞掉。
+      const creatingKey = `${wantType}:${projectPath}`;
+      if (creatingProjectPaths.has(creatingKey)) {
+        console.log(`[App] 项目 ${project.name}(${wantType}) 正在创建会话中，忽略重复点击`);
         return;
       }
 
       // 标记为正在创建
-      setCreatingProjectPaths(prev => new Set(prev).add(projectPath));
+      setCreatingProjectPaths(prev => new Set(prev).add(creatingKey));
 
       // 没有现有会话，创建新会话
       const sessionData = {
         name: project.name,
-        aiType: project.aiType,
+        aiType: wantType,
         workingDir: project.path,
         projectName: project.name,
         projectDesc: '',  // 由服务器端从项目文件提取
