@@ -228,6 +228,15 @@ try {
     try { settings = JSON.parse(readFileSync(hooksPath, 'utf8')); } catch {}
     if (!settings.hooks) settings.hooks = {};
 
+    // 清掉我们早期版本写下的顶层事件键（pre_tool_call / post_tool_call / session_end 等）。
+    // Codex 只接受顶层 description 与 hooks 两个字段，多一个就整份文件解析失败：
+    //   warning: failed to parse hooks config ...: unknown field `pre_tool_call`,
+    //   expected `description` or `hooks`
+    // 解析失败等于 hooks 全不生效——监控会静默失灵，所以必须主动清理，不能只做增量写入。
+    for (const key of Object.keys(settings)) {
+      if (key !== 'hooks' && key !== 'description') delete settings[key];
+    }
+
     const ext = this._scriptExt();
     const eventConfigs = [
       { event: 'PreToolUse',  script: 'pre-tool' + ext,  matcher: '.*' },
@@ -251,18 +260,38 @@ try {
     mkdirSync(join(homedir(), '.codex'), { recursive: true });
     writeFileSync(hooksPath, JSON.stringify(settings, null, 2));
 
-    // config.toml - 启用 codex_hooks 实验特性
+    // config.toml - 启用 hooks 特性。
+    // 键名从 codex_hooks 改为 hooks：codex-cli 0.151 起 codex_hooks 只是 legacy 别名
+    // （二进制 features/src/legacy.rs 里的兼容映射），启动时会红字告警
+    // "`[features].codex_hooks` is deprecated. Use `[features].hooks` instead."
+    // 这里既写新键，也把用户配置里遗留的旧键迁移掉，否则告警一直在。
     const configPath = join(homedir(), '.codex', 'config.toml');
     let config = '';
     try { config = readFileSync(configPath, 'utf8'); } catch {}
+    const before = config;
     // 清理旧的错误配置
-    config = config.replace(/^enable_hooks\s*=.*$/gm, '').replace(/\n{3,}/g, '\n\n');
-    if (!/\[features\][\s\S]*?codex_hooks\s*=\s*true/.test(config)) {
-      if (/\[features\]/.test(config)) {
-        config = config.replace(/\[features\]/, '[features]\ncodex_hooks = true');
-      } else {
-        config += '\n[features]\ncodex_hooks = true\n';
+    config = config.replace(/^enable_hooks\s*=.*$/gm, '');
+    // 迁移 legacy 键：codex_hooks = X -> hooks = X（保留其值，通常为 true）
+    config = config.replace(/^[ \t]*codex_hooks[ \t]*=[ \t]*(\S+)[ \t]*$/gm, 'hooks = $1');
+    // 迁移后可能与已有的 hooks 行重复，去掉多余的（只保留首个）
+    let seenHooks = false;
+    config = config.split('\n').filter(line => {
+      if (/^[ \t]*hooks[ \t]*=/.test(line)) {
+        if (seenHooks) return false;
+        seenHooks = true;
       }
+      return true;
+    }).join('\n');
+    config = config.replace(/\n{3,}/g, '\n\n');
+
+    if (!/^[ \t]*hooks[ \t]*=[ \t]*true/m.test(config)) {
+      if (/\[features\]/.test(config)) {
+        config = config.replace(/\[features\]/, '[features]\nhooks = true');
+      } else {
+        config += '\n[features]\nhooks = true\n';
+      }
+    }
+    if (config !== before) {
       writeFileSync(configPath, config);
     }
   }
