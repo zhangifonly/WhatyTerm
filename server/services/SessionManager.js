@@ -3,7 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import Database from 'better-sqlite3';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { execSync, exec } from 'child_process';
+import { execSync, execFileSync, exec } from 'child_process';
 import { promisify } from 'util';
 import path from 'path';
 
@@ -462,6 +462,57 @@ export class Session {
     }
     if (this.pty) {
       this.pty.write(data);
+    }
+  }
+
+  /** v1.2.87 自动化输入：直达 tmux server（send-keys），不依赖 attach 客户端。
+   * 背景：write() 走长驻 `tmux attach` 的 node-pty，客户端半死时写入**静默丢失**
+   * ——实测 session-1788… 输入框里的「继续，开工 P6」用 write('\r') 连发 4 次
+   * 全部石沉大海（台账 no_effect），改 `tmux send-keys Enter` 一发即中。
+   * 用户交互输入仍走 write（前端在看 = 客户端活着）；监控/Ralph 的程序化
+   * 输入一律走这里。Windows 原生模式（无 tmux）自动退回 write。
+   * @param {string} text 字面文本（UTF-8，可含中文）
+   * @param {object} opts { submit: 50ms 后补发回车（Ink 文本与回车须分两次） }
+   */
+  sendInput(text, opts = {}) {
+    if (!useTmux) {
+      this.write(text);
+      if (opts.submit) setTimeout(() => this.write('\r'), 50);
+      return true;
+    }
+    try {
+      const bin = useWSL ? 'wsl' : (getLocalTmuxPath() || 'tmux');
+      const pre = useWSL ? ['tmux'] : [];
+      execFileSync(bin, [...pre, 'send-keys', '-t', this.tmuxSessionName, '-l', '--', String(text)],
+        { stdio: 'ignore', timeout: 5000 });
+      if (opts.submit) setTimeout(() => this.sendNamedKey('Enter'), 50);
+      return true;
+    } catch (e) {
+      console.error(`[Session] sendInput 失败(${this.tmuxSessionName}): ${e.message}，回退 pty.write`);
+      this.write(text);
+      if (opts.submit) setTimeout(() => this.write('\r'), 50);
+      return false;
+    }
+  }
+
+  /** v1.2.87 发送命名按键（Enter/Tab/Escape/C-c…），同 sendInput 走 send-keys */
+  sendNamedKey(key) {
+    if (!useTmux) {
+      const map = { Enter: '\r', Tab: '\t', Escape: '\x1b', 'C-c': '\x03' };
+      if (map[key]) this.write(map[key]);
+      return true;
+    }
+    try {
+      const bin = useWSL ? 'wsl' : (getLocalTmuxPath() || 'tmux');
+      const pre = useWSL ? ['tmux'] : [];
+      execFileSync(bin, [...pre, 'send-keys', '-t', this.tmuxSessionName, key],
+        { stdio: 'ignore', timeout: 5000 });
+      return true;
+    } catch (e) {
+      console.error(`[Session] sendNamedKey ${key} 失败(${this.tmuxSessionName}): ${e.message}`);
+      const map = { Enter: '\r', Tab: '\t', Escape: '\x1b', 'C-c': '\x03' };
+      if (map[key]) this.write(map[key]);
+      return false;
     }
   }
 

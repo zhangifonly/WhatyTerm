@@ -449,7 +449,9 @@ class RalphEngine {
 
     // 通过会话写入命令（用户可在 tmux 里观看）
     try {
-      session.write(shellCmd + '\r');
+      // v1.2.87 sendInput 直达 tmux server（attach 客户端半死时 write 静默丢键）
+      if (typeof session.sendInput === 'function') session.sendInput(shellCmd, { submit: true });
+      else session.write(shellCmd + '\r');
     } catch (e) {
       this._log(sessionId, `${label}: 写入命令失败 ${e.message}`);
       return null;
@@ -534,7 +536,10 @@ class RalphEngine {
 
   /** 中断会话内正在跑的 headless 进程（发 Ctrl+C） */
   _killInSession(session) {
-    try { session.write('\x03'); } catch {}
+    try {
+      if (typeof session.sendNamedKey === 'function') session.sendNamedKey('C-c');
+      else session.write('\x03');
+    } catch {}
   }
 
   /** shell 路径转义（路径在 tmpDir，无空格也兜底加引号） */
@@ -546,7 +551,9 @@ class RalphEngine {
     const outFile = path.join(this.tmpDir, `sh-${tag}.txt`);
     const doneMarker = `__RALPH_DONE_${tag}__`;
     const shellCmd = `{ ${cmd} ; } > ${this._sh(outFile)} 2>&1; echo "${doneMarker} rc=$?" >> ${this._sh(outFile)}`;
-    try { session.write(shellCmd + '\r'); } catch (e) {
+    try { // v1.2.87 sendInput 直达 tmux server（attach 客户端半死时 write 静默丢键）
+      if (typeof session.sendInput === 'function') session.sendInput(shellCmd, { submit: true });
+      else session.write(shellCmd + '\r'); } catch (e) {
       this._log(sessionId, `${label}: 写入命令失败 ${e.message}`);
       return { ok: false, rc: -1, out: `(写入命令失败: ${e.message})` };
     }

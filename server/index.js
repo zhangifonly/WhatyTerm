@@ -4814,7 +4814,7 @@ async function runBackgroundAutoAction() {
           const keyMap = { 'Enter': '\r', 'Tab': '\t', 'Escape': '\x1b' };
           if (keyMap[action]) {
             console.log(`[后台自动操作] 会话 ${session.name}: 发送特殊按键 "${action}"`);
-            session.write(keyMap[action]);
+            session.sendNamedKey(action);  // v1.2.87 直达 tmux server，attach 客户端半死时 write 会静默丢键
           } else if (status.actionType === 'select' && /^[1-9]$/.test(action)) {
             const tmuxSession = session.tmuxSessionName;
             const optionNum = parseInt(action);
@@ -4879,11 +4879,8 @@ async function runBackgroundAutoAction() {
 
             // Claude Code 文本输入模式：分两次发送，延迟50ms发送回车
             console.log(`[后台自动操作] 会话 ${session.name}: 发送文本 "${action}" + CR (延迟50ms)`);
-            session.write(action);
-            // 延迟 50ms 后发送回车（缩短延迟确保及时发送）
-            setTimeout(() => {
-              session.write('\r');
-            }, 50);
+            // v1.2.87 sendInput 直达 tmux server：write 依赖的 attach 客户端半死时静默丢键
+            session.sendInput(action, { submit: true });
 
             // 记录操作到历史（用于智能监控）
             if (!session.actionHistory) session.actionHistory = [];
@@ -5014,7 +5011,7 @@ async function runBackgroundAutoAction() {
 
           const keyMap = { 'Enter': '\r', 'Tab': '\t', 'Escape': '\x1b' };
           if (keyMap[action]) {
-            session.write(keyMap[action]);
+            session.sendNamedKey(action);  // v1.2.87 直达 tmux server，attach 客户端半死时 write 会静默丢键
           } else if (status.actionType === 'select' && /^[1-9]$/.test(action)) {
             const tmuxSession = session.tmuxSessionName;
             const optionNum = parseInt(action);
@@ -5032,8 +5029,7 @@ async function runBackgroundAutoAction() {
               console.error(`[后台自动操作] 会话 ${session.name}: 选项选择失败:`, e.message);
             }
           } else {
-            session.write(action);
-            setTimeout(() => session.write('\r'), 50);
+            session.sendInput(action, { submit: true });  // v1.2.87 直达 tmux server
           }
 
           lastActionMap.set(session.id, { action, contentHash, time: now });
@@ -5159,7 +5155,7 @@ async function runBackgroundAutoAction() {
         if (keyMap[action]) {
           // 如果是特殊按键名称，转换为实际按键，直接发送
           console.log(`[后台自动操作] 会话 ${session.name}: 发送特殊按键 "${action}"`);
-          session.write(keyMap[action]);
+          session.sendNamedKey(action);  // v1.2.87 直达 tmux server，attach 客户端半死时 write 会静默丢键
         } else if (status.actionType === 'select' && /^[1-9]$/.test(action)) {
           // Claude Code 选项菜单（如 "Do you want to proceed?"）：
           // 使用 tmux send-keys 直接发送数字，更可靠
