@@ -131,8 +131,14 @@ class RalphEngine {
     await this._execShell(sessionId, session, cmd, '建分支', 30 * 1000);
   }
 
-  /** 主循环：逐个任务 Developer → Validator */
+  /** 主循环：逐个任务 Developer → Validator。
+   * v1.2.83：① 开发阶段超时/失败也计入 retryCount（原来只 continue 不计数，
+   * CLI 挂掉时同一任务静默死循环直到 maxIterations 烧完）；② 连续 5 轮失败
+   * 触发全局熔断（多半是 CLI/凭证/环境的系统性问题，换任务也一样挂）；
+   * ③ 每轮写 ralph-rounds.jsonl 台账；④ PASS 后记录 HEAD commit 作为证据。 */
   async _loop(sessionId, session, state, maxIterations) {
+    let consecutiveFails = 0;
+    const MAX_CONSECUTIVE_FAILS = 5;
     for (let i = 1; i <= maxIterations; i++) {
       if (state.stop) { this._log(sessionId, '收到停止指令，退出循环'); return; }
       state.iteration = i;
@@ -143,16 +149,29 @@ class RalphEngine {
         this._emit(sessionId, 'ralph:state', { running: false, phase: 'done' });
         return;
       }
+      const roundStart = Date.now();
 
       // ── Developer 阶段 ──
       this._setPhase(sessionId, state, 'developing', task);
       progressManager.updateFeatureStatus(sessionId, task.id, { status: 'in_progress' });
       this._log(sessionId, `迭代 ${i}/${maxIterations} - 开发任务: ${task.name}`);
-      const devOk = await this._runDeveloper(sessionId, session, task);
+      const devOk = await this._runDeveloper(sessionId, session, task, i);
       if (state.stop) return;
       if (!devOk) {
-        this._log(sessionId, `任务 ${task.id} 开发阶段超时/失败，稍后重试`);
-        progressManager.updateFeatureStatus(sessionId, task.id, { status: 'pending' });
+        // notes 带迭代号：开发失败多为超时/网络类瞬态问题，不应触发
+        // 「连续相同失败」的早熔断，让它享受完整的 MAX_RETRY 重试预算
+        const r = progressManager.recordValidationFailure(sessionId, task.id,
+          `开发阶段超时/失败（进程无输出或 rc≠0，迭代 ${i}）`, MAX_RETRY);
+        consecutiveFails++;
+        this._ledger(sessionId, { iteration: i, taskId: task.id, taskName: task.name,
+          outcome: 'dev_failed', retryCount: r?.retryCount, blocked: !!r?.blocked,
+          durationMs: Date.now() - roundStart });
+        this._log(sessionId, `任务 ${task.id} 开发阶段超时/失败（第${r?.retryCount}次）${r?.blocked ? '，已 blocked' : '，稍后重试'}`);
+        if (consecutiveFails >= MAX_CONSECUTIVE_FAILS) {
+          this._log(sessionId, `连续 ${consecutiveFails} 轮失败，疑似系统性问题（CLI/凭证/环境），熔断停机`);
+          this._emit(sessionId, 'ralph:state', { running: false, phase: 'circuit_broken' });
+          return;
+        }
         await this._sleep(2000);
         continue;
       }
@@ -160,21 +179,38 @@ class RalphEngine {
       // ── Validator 阶段 ──
       this._setPhase(sessionId, state, 'validating', task);
       this._log(sessionId, `迭代 ${i} - 验证任务: ${task.name}`);
-      const verdict = await this._runValidator(sessionId, session, task);
+      const verdict = await this._runValidator(sessionId, session, task, i);
       if (state.stop) return;
 
       if (verdict.passed) {
+        consecutiveFails = 0;
+        // 证据：记录验收通过时的 HEAD commit（Developer prompt 要求每任务提交）
+        const head = await this._execShell(sessionId, session, 'git log --oneline -1', '取HEAD', 15000);
+        const commit = head?.ok ? head.out.trim().split('\n')[0].slice(0, 120) : '';
         progressManager.updateFeatureStatus(sessionId, task.id, {
-          status: 'completed',
+          status: 'completed', commit,
           passes: { implemented: true, compiles: true, tested: true }
         });
-        this._log(sessionId, `✓ 任务 ${task.id} 验证通过`);
+        this._ledger(sessionId, { iteration: i, taskId: task.id, taskName: task.name,
+          outcome: 'passed', commit, durationMs: Date.now() - roundStart });
+        this._log(sessionId, `✓ 任务 ${task.id} 验证通过${commit ? ` @ ${commit}` : ''}`);
       } else {
         const r = progressManager.recordValidationFailure(sessionId, task.id, verdict.notes, MAX_RETRY);
+        consecutiveFails++;
+        this._ledger(sessionId, { iteration: i, taskId: task.id, taskName: task.name,
+          outcome: verdict.hard ? 'hard_validation_failed' : 'validation_failed',
+          notes: (verdict.notes || '').slice(0, 500), retryCount: r?.retryCount,
+          blocked: !!r?.blocked, repeatedFailure: !!r?.repeatedFailure,
+          durationMs: Date.now() - roundStart });
         if (r?.blocked) {
-          this._log(sessionId, `✗ 任务 ${task.id} 已达最大重试(${MAX_RETRY})，标记 blocked 跳过`);
+          this._log(sessionId, `✗ 任务 ${task.id} ${r?.repeatedFailure ? '连续相同失败（无信息增益）' : `已达最大重试(${MAX_RETRY})`}，标记 blocked 跳过`);
         } else {
-          this._log(sessionId, `✗ 任务 ${task.id} 验证失败 (第${r?.retryCount}次)，退回重试: ${verdict.notes}`);
+          this._log(sessionId, `✗ 任务 ${task.id} 验证失败 (第${r?.retryCount}次)，退回重试: ${(verdict.notes || '').slice(0, 120)}`);
+        }
+        if (consecutiveFails >= MAX_CONSECUTIVE_FAILS) {
+          this._log(sessionId, `连续 ${consecutiveFails} 轮失败，疑似系统性问题（CLI/凭证/环境），熔断停机`);
+          this._emit(sessionId, 'ralph:state', { running: false, phase: 'circuit_broken' });
+          return;
         }
       }
 
@@ -209,7 +245,9 @@ class RalphEngine {
     });
   }
 
-  /** 构建任务上下文（项目 CLAUDE.md + patterns + 任务详情） */
+  /** 构建任务上下文（CLAUDE.md + 进度摘要 + patterns + 任务详情 + 失败回灌）
+   * v1.2.83：新增进度摘要（每轮 agent 知道全局走到哪）与失败历史回灌
+   * （重试不再是无信息增益的原样重做）；patterns 截最近 30 条防线性膨胀。 */
   _buildTaskContext(sessionId, session, task) {
     const parts = [];
     const claudeMd = path.join(session.workingDir || '', 'CLAUDE.md');
@@ -219,23 +257,39 @@ class RalphEngine {
       }
     } catch {}
     const progress = progressManager.loadProgress(sessionId);
+    if (progress?.features?.length) {
+      const done = progress.features.filter(f => f.status === 'completed');
+      const blocked = progress.features.filter(f => f.blocked);
+      const lines = [`已完成 ${done.length}/${progress.features.length}${blocked.length ? `，阻塞 ${blocked.length}` : ''}`];
+      if (done.length) lines.push(`最近完成: ${done.slice(-3).map(f => `[${f.id}] ${f.name}`).join('、')}`);
+      parts.push(`# 进度摘要\n${lines.join('\n')}`);
+    }
     if (progress?.patterns?.length) {
-      parts.push(`# Codebase Patterns（复用经验）\n- ${progress.patterns.join('\n- ')}`);
+      parts.push(`# Codebase Patterns（复用经验）\n- ${progress.patterns.slice(-30).join('\n- ')}`);
     }
     const ac = (task.acceptanceCriteria || []).map(c => `- ${c}`).join('\n') || '- （未指定，按需求合理判断）';
+    const vc = (task.validationCommands || []).length
+      ? `\n\n## 验证命令（引擎会逐条真实执行，全部 rc=0 才算过，不要试图绕过）\n${(task.validationCommands || []).map(c => `- ${c}`).join('\n')}`
+      : '';
     parts.push(
       `# 当前任务 [${task.id}] ${task.name}\n` +
       `优先级: ${task.priority}  分支: ${task.branch || '(当前分支)'}\n\n` +
-      `## 需求与技术设计\n${task.description}\n\n## 验收标准\n${ac}`
+      `## 需求与技术设计\n${task.description}\n\n## 验收标准\n${ac}${vc}`
     );
+    const hist = (task.validationHistory || []).slice(-3);
+    if (hist.length) {
+      parts.push(`# 上次失败原因（第 ${task.retryCount || hist.length} 次重试，优先修这些，不要原样重做）\n` +
+        hist.map((h, idx) => `${idx + 1}. ${h.notes}`).join('\n'));
+    }
     return parts.join('\n\n---\n\n');
   }
 
   /** Developer 阶段：执行实现 */
-  async _runDeveloper(sessionId, session, task) {
+  async _runDeveloper(sessionId, session, task, iteration) {
     const ctx = this._buildTaskContext(sessionId, session, task);
     const prompt = `${ctx}\n\n---\n\n${DEVELOPER_PROMPT}\n\n立即开始执行当前任务，不要询问确认。`;
-    const out = await this._execHeadless(sessionId, session, prompt, '开发', TOTAL_TIMEOUT);
+    const out = await this._execHeadless(sessionId, session, prompt, '开发', TOTAL_TIMEOUT,
+      { saveAs: `${iteration}-${task.id}-dev` });
     if (out === null) return false;
     // 抓取 PATTERN: 学习并记录
     const m = out.match(/PATTERN:\s*(.+)/i);
@@ -243,14 +297,31 @@ class RalphEngine {
     return true;
   }
 
-  /** Validator 阶段：逐条验收，解析 VALIDATION: PASS/FAIL */
-  async _runValidator(sessionId, session, task) {
+  /** Validator 阶段（v1.2.83 双条件 PASS）：
+   * ① 硬验证：task.validationCommands 由引擎逐条真实执行（不经 agent 之手，
+   *    agent 无法删测试/改命令蒙混），任一 rc≠0 直接 FAIL 并把输出尾部回灌，
+   *    还省掉一次 LLM 调用；
+   * ② 软验证：LLM 逐条核验语义验收标准。两者都过才算 PASS。
+   * 结论只认输出**结尾几行**——此前全文 /VALIDATION: PASS/ 正则，模型在正文里
+   * 复述格式说明就会误判通过。 */
+  async _runValidator(sessionId, session, task, iteration) {
+    for (const cmd of (task.validationCommands || [])) {
+      const r = await this._execShell(sessionId, session, cmd, `硬验证`, 10 * 60 * 1000);
+      if (!r?.ok) {
+        const tail = (r?.out || '').split('\n').filter(Boolean).slice(-15).join('\n').slice(-800);
+        this._log(sessionId, `✗ 硬验证失败 (rc=${r?.rc}): ${cmd}`);
+        return { passed: false, hard: true, notes: `验证命令失败 (rc=${r?.rc}): ${cmd}\n输出尾部:\n${tail}` };
+      }
+      this._log(sessionId, `✓ 硬验证通过: ${cmd}`);
+    }
     const ctx = this._buildTaskContext(sessionId, session, task);
     const prompt = `${ctx}\n\n---\n\n${VALIDATOR_PROMPT}\n\n立即开始验证，不要询问确认。`;
-    const out = await this._execHeadless(sessionId, session, prompt, '验证', TOTAL_TIMEOUT * 2);
+    const out = await this._execHeadless(sessionId, session, prompt, '验证', TOTAL_TIMEOUT * 2,
+      { saveAs: `${iteration}-${task.id}-val` });
     if (out === null) return { passed: false, notes: '验证阶段超时或无输出' };
-    if (/VALIDATION:\s*PASS/i.test(out)) return { passed: true, notes: '' };
-    const fail = out.match(/VALIDATION:\s*FAIL\s*-?\s*(.+)/i);
+    const tailLines = out.split('\n').map(l => l.trim()).filter(Boolean).slice(-5).join('\n');
+    if (/VALIDATION:\s*PASS/i.test(tailLines)) return { passed: true, notes: '' };
+    const fail = tailLines.match(/VALIDATION:\s*FAIL\s*-?\s*(.+)/i);
     if (fail) return { passed: false, notes: fail[1].trim().slice(0, 300) };
     // 没有明确标记：保守判失败，记录原因
     return { passed: false, notes: '未输出明确验证结论（缺少 VALIDATION 标记）' };
@@ -258,13 +329,34 @@ class RalphEngine {
 
   _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+  /** 轮次台账：每轮一条 JSONL，回答"哪个任务、结果如何、为何失败、花了多久"。
+   * v1.2.83 之前一轮 Developer→Validator 只在 progress.json 留最终态，
+   * 无耗时、无重试历史、无输出留存——失败不可回溯。 */
+  _ledger(sessionId, entry) {
+    try {
+      const dir = path.join(os.homedir(), '.webtmux', 'sessions', sessionId);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(path.join(dir, 'ralph-rounds.jsonl'),
+        JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n');
+    } catch {}
+  }
+
+  /** Developer/Validator 的完整输出留档（原来直接 unlink，失败原因死无对证） */
+  _saveLog(sessionId, name, content) {
+    try {
+      const dir = path.join(os.homedir(), '.webtmux', 'sessions', sessionId, 'ralph-logs');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `${name}.txt`), content || '', 'utf-8');
+    } catch {}
+  }
+
   /**
    * 在会话 tmux 内执行一次 headless CLI 调用。
    * 机制：prompt 写临时文件，stdout/err 重定向到输出文件，命令尾部 echo DONE 标记。
    * 引擎轮询输出文件大小（检测活跃）+ DONE 标记（检测完成），三层超时兜底。
    * 返回输出文本，超时/失败返回 null。
    */
-  async _execHeadless(sessionId, session, prompt, label, totalTimeout) {
+  async _execHeadless(sessionId, session, prompt, label, totalTimeout, opts = {}) {
     const aiType = session.aiType || 'claude';
     const tag = `${task_uid()}`;
     const promptFile = path.join(this.tmpDir, `prompt-${tag}.txt`);
@@ -312,6 +404,8 @@ class RalphEngine {
         const result = rawOut.replace(new RegExp('\\n?' + doneMarker + '\\s+rc=\\d+\\s*$'), '');
         this._cleanup(promptFile, outFile);
         this._log(sessionId, `${label}: 完成 (rc=${rc}, ${Math.round((Date.now() - start) / 1000)}s)`);
+        // v1.2.83：输出留档（原来直接 unlink，事后无法回答"那轮到底输出了什么"）
+        if (opts.saveAs) this._saveLog(sessionId, rc === '0' ? opts.saveAs : `${opts.saveAs}-rc${rc}`, result);
         if (rc !== '0') {
           this._log(sessionId, `${label}: 进程返回非零退出码 rc=${rc}`);
           return null;
@@ -341,14 +435,17 @@ class RalphEngine {
       const idle = now - lastChangeAt;
       if (now - start > totalTimeout) {
         this._log(sessionId, `${label}: 总时长超时 (${Math.round((now - start) / 1000)}s)`);
+        if (opts.saveAs) this._saveLog(sessionId, `${opts.saveAs}-timeout`, rawOut);
         this._killInSession(session); this._cleanup(promptFile, outFile); return null;
       }
       if (!gotFirst && idle > FIRST_TOKEN_TIMEOUT) {
         this._log(sessionId, `${label}: 首字响应超时`);
+        if (opts.saveAs) this._saveLog(sessionId, `${opts.saveAs}-timeout`, rawOut);
         this._killInSession(session); this._cleanup(promptFile, outFile); return null;
       }
       if (gotFirst && idle > IDLE_TIMEOUT) {
         this._log(sessionId, `${label}: 持续无输出超时`);
+        if (opts.saveAs) this._saveLog(sessionId, `${opts.saveAs}-timeout`, rawOut);
         this._killInSession(session); this._cleanup(promptFile, outFile); return null;
       }
       await this._sleep(1000);
@@ -380,23 +477,25 @@ class RalphEngine {
     const shellCmd = `{ ${cmd} ; } > ${this._sh(outFile)} 2>&1; echo "${doneMarker} rc=$?" >> ${this._sh(outFile)}`;
     try { session.write(shellCmd + '\r'); } catch (e) {
       this._log(sessionId, `${label}: 写入命令失败 ${e.message}`);
-      return null;
+      return { ok: false, rc: -1, out: `(写入命令失败: ${e.message})` };
     }
     const start = Date.now();
     while (true) {
       const st = this.running.get(sessionId);
-      if (st?.stop) return null;
+      if (st?.stop) return { ok: false, rc: -1, out: '(收到停止指令)' };
       const raw = this._readOut(outFile);
       const m = raw.match(new RegExp(doneMarker + '\\s+rc=(\\d+)'));
       if (m) {
         this._cleanup(outFile);
         this._log(sessionId, `${label}: 完成 (rc=${m[1]})`);
-        return m[1] === '0' ? raw.replace(new RegExp('\\n?' + doneMarker + '\\s+rc=\\d+\\s*$'), '') : null;
+        const out = raw.replace(new RegExp('\\n?' + doneMarker + '\\s+rc=\\d+\\s*$'), '');
+        // v1.2.83：返回结构化结果——失败时输出不能丢（硬验证要把它回灌给下一次重试）
+        return { ok: m[1] === '0', rc: Number(m[1]), out };
       }
       if (Date.now() - start > timeout) {
         this._log(sessionId, `${label}: 超时`);
         this._cleanup(outFile);
-        return null;
+        return { ok: false, rc: -1, out: '(命令超时)' };
       }
       await this._sleep(500);
     }

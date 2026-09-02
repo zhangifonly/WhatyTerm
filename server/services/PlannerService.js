@@ -288,6 +288,7 @@ ${designSection}
 1. **每个任务必须足够小**：能在一次 AI 迭代（单个 Claude/CLI 实例）中稳定完成。单实体的 schema→service→API→UI 全链路算正常；跨多个独立实体/不相邻模块则必须拆开。
 2. **按真实开发顺序拆**：基础准备→数据层→接口服务层→页面组件层→集成层→验证收尾。不要按"前端部分/后端部分/优化代码/联调"这种模糊方式拆。
 3. **每个任务必须有可验证的验收标准**（acceptanceCriteria）：写成 Agent 能实际检查的事实/命令，例如 "users 表新增 last_login_at 列"、"npm run typecheck 通过"、"/api/x 支持 status 参数并返回过滤结果"。禁止 "功能正常""代码整洁" 这种无法验证的标准。
+3b. **每个任务必须给出 validationCommands**：一组可直接在项目根目录执行、以退出码判成败的 shell 命令（如 "npm run typecheck"、"npm test -- --run xxx"、"node -e \"require('./x')\""）。这些命令由引擎真实执行、全部 rc=0 才算通过——这是硬验收，比文字标准更重要。命令必须真实存在于项目（先看 package.json scripts），没有合适命令的任务至少给一条语法/加载检查。
 4. **编号即执行顺序**，三位数：001、002...；较早任务不能依赖较晚任务。
 5. **dependsOn 只写直接前置任务**的 id。
 6. **所有任务共用同一个 branch**：从功能名派生，kebab-case，前缀 ralph/。禁止按阶段拆多个分支。
@@ -308,7 +309,8 @@ ${designSection}
       "status": "pending",
       "dependsOn": [],
       "branch": "ralph/feature-name",
-      "acceptanceCriteria": ["可验证标准1", "可验证标准2", "typecheck/test 通过"]
+      "acceptanceCriteria": ["可验证标准1", "可验证标准2", "typecheck/test 通过"],
+      "validationCommands": ["npm run typecheck", "npm test -- --run relevant.test"]
     }
   ],
   "sprintContract": "整体完成标准描述"

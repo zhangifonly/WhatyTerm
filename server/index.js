@@ -3511,7 +3511,14 @@ const aiHealthState = {
 // ⚠️ 这里数的是**判定轮次**，不是"发出去的操作"——绝大多数轮次只是看一眼屏幕，
 //    什么都不发（自动模式关着时更是一次都不发）。真正发出去的操作及其效果，
 //    看 ActionOutcome 台账（scripts/monitor-effectiveness.mjs）。
-const aiOperationStats = {
+// v1.2.83：跨重启持久化（原来纯内存，重启清零，做不了趋势）。
+// 启动时回读上次快照，之后每 60s 落盘一次（丢最多 1 分钟可接受，避免每轮写盘）。
+const AI_STATS_PATH = path.join(os.homedir(), '.webtmux', 'ai-operation-stats.json');
+function loadAiStats() {
+  try { return JSON.parse(readFileSync(AI_STATS_PATH, 'utf-8')); } catch { return null; }
+}
+const _savedAiStats = loadAiStats();
+const aiOperationStats = _savedAiStats || {
   total: 0,        // 判定轮次总数
   success: 0,      // 正常完成的轮次
   failed: 0,       // 出错的轮次
@@ -3523,6 +3530,10 @@ const aiOperationStats = {
   loopErrors: 0,   // 监控循环自身出错（抓屏/tmux/插件异常），与 AI 无关
   startTime: Date.now()  // 统计开始时间
 };
+if (_savedAiStats) console.log(`[统计] 已恢复上次快照 (total=${aiOperationStats.total})`);
+setInterval(() => {
+  try { writeFileSync(AI_STATS_PATH, JSON.stringify(aiOperationStats)); } catch {}
+}, 60 * 1000);
 
 // 判断是否是网络错误
 function isNetworkError(error) {

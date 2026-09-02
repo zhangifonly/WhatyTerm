@@ -92,6 +92,9 @@ class ProgressManager {
         retryCount: 0,
         blocked: false,
         validationNotes: '',
+        // v1.2.83：可执行验证命令（引擎自己跑，不经 agent 之手）与失败历史（只追加）
+        validationCommands: Array.isArray(f.validationCommands) ? f.validationCommands : [],
+        validationHistory: [],
         passes: {
           implemented: isCompleted,
           compiles: isCompleted,
@@ -227,7 +230,12 @@ class ProgressManager {
     return candidates[0] || null;
   }
 
-  /** 验证失败：retryCount+1，记录原因，满 maxRetry 标记 blocked。返回 { blocked, retryCount } */
+  /** 验证失败：retryCount+1，追加失败历史，满 maxRetry 或连续两次相同失败标记 blocked。
+   * 返回 { blocked, retryCount, repeatedFailure }。
+   * v1.2.83：validationNotes 原来是单值覆盖——重试时上一次的失败原因就丢了，
+   * 5 次重试等于 5 次无信息增益的原样重做。改为 validationHistory 只追加；
+   * 连续两次**完全相同**的失败原因说明重试没有产生任何新信息（VRR-Stop 思想：
+   * 修复的边际收益为零就该停），直接 blocked，省掉后面注定一样的重试。 */
   recordValidationFailure(sessionId, featureId, notes, maxRetry = 5) {
     const progress = this.loadProgress(sessionId);
     if (!progress) return null;
@@ -235,12 +243,21 @@ class ProgressManager {
     if (!feature) return null;
     feature.retryCount = (feature.retryCount || 0) + 1;
     feature.validationNotes = notes || '';
+    if (!Array.isArray(feature.validationHistory)) feature.validationHistory = [];
+    feature.validationHistory.push({ at: new Date().toISOString(), notes: notes || '' });
     feature.status = 'pending';
+    const h = feature.validationHistory;
+    const repeatedFailure = h.length >= 2 && !!notes &&
+      h[h.length - 1].notes === h[h.length - 2].notes;
     if (feature.retryCount >= maxRetry) {
       feature.blocked = true;
+      feature.blockedReason = `已达最大重试 ${maxRetry} 次`;
+    } else if (repeatedFailure) {
+      feature.blocked = true;
+      feature.blockedReason = '连续两次相同失败，重试无信息增益';
     }
     this.saveProgress(sessionId, progress);
-    return { blocked: feature.blocked, retryCount: feature.retryCount };
+    return { blocked: feature.blocked, retryCount: feature.retryCount, repeatedFailure };
   }
 
   /** 追加一条 Codebase Pattern（去重） */
