@@ -14,6 +14,7 @@ import pluginManager from './MonitorPlugins/index.js';
 import { isTaskDone } from './taskDonePattern.js';
 import { hasPendingQuestion } from './pendingQuestion.js';
 import { promptPendingText, isOwnPendingInput } from './promptState.js';
+import { isLiveConfirmMenu } from './liveMenu.js';
 import { DEFAULT_MODEL, CLAUDE_CODE_FAKE, CODEX_FAKE, CLAUDE_MODEL_FALLBACK_LIST, getModelsConfig } from '../config/constants.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1999,7 +2000,17 @@ ${historyText || '(空)'}
       && /^\s*[❯>]?\s*2\.\s+\S/im.test(earlyLast3000)
       && /Esc to (cancel|amend)\b/i.test(earlyLast3000);
 
-    if ((isEditConfirmEarly || isProceedConfirmEarly || isPlanExecuteEarly || isGenericConfirmEarly || hasOptionMenuEarly) && hasOption1YesEarly) {
+    // v1.2.81 验活闸：Claude 侧「关键词命中」不等于「有菜单」——对话正文里的
+    // 问句+编号列表照样命中这些正则。台账实测 1142 次自动选择里 1138 次落账时
+    // 屏上根本没有菜单（空转率 99.5%~100%），按键全落在空输入框/运行中的 CLI 上。
+    // 活菜单必有 ❯ 指针行 + 底部快捷键提示（见 liveMenu.js，fixture 实测）。
+    // Codex 走同一路径实测 84.3% 有效，不收紧非 Claude 的判定。
+    const confirmKeywordHitEarly = (isEditConfirmEarly || isProceedConfirmEarly || isPlanExecuteEarly || isGenericConfirmEarly || hasOptionMenuEarly) && hasOption1YesEarly;
+    const confirmMenuLiveEarly = (aiType || 'claude') !== 'claude' || isLiveConfirmMenu(earlyCleanContent);
+    if (confirmKeywordHitEarly && !confirmMenuLiveEarly) {
+      console.log('[AIEngine] 确认字样命中但无活菜单（缺 ❯ 指针/底部快捷键提示），判为正文误报，不发键');
+    }
+    if (confirmKeywordHitEarly && confirmMenuLiveEarly) {
       // Plan 执行确认（auto-accept edits）：选 1
       // 文件操作确认（allow all edits this session）：选 2
       // 永久允许某命令模式：选 1（避免永久跳过确认）
@@ -2673,7 +2684,8 @@ ${historyText || '(空)'}
     const hasOption1Yes = /1\.\s*Yes/i.test(cleanContent);
     const hasOption2Yes = /2\.\s*Yes/i.test(cleanContent);
 
-    if (isEditConfirm && hasOption1Yes) {
+    // v1.2.81 验活闸（同早期分支）：Claude 侧必须屏上有活菜单才发键
+    if (isEditConfirm && hasOption1Yes && confirmMenuLiveEarly) {
       // 检测选项 2 是否是"永久允许某命令模式"
       const isOption2PermanentAllow = /2\.\s*Yes,\s*and\s+don.t\s+ask\s+again\s+for:/i.test(cleanContent);
       // 有选项2且不是永久允许时选2（允许本次会话），否则选1
@@ -2800,7 +2812,8 @@ ${historyText || '(空)'}
     // 5. 检测普通确认界面（Do you want to proceed?）
     // 如果有选项 2 且不是永久允许某命令模式，选择 2；否则选择 1
     if (/Do you want to proceed\?/i.test(cleanContent) &&
-        /1\.\s*Yes/i.test(cleanContent)) {
+        /1\.\s*Yes/i.test(cleanContent) &&
+        confirmMenuLiveEarly) {  // v1.2.81 验活闸（同早期分支）
       const hasOption2 = /2\.\s*Yes/i.test(cleanContent);
       const isOption2Permanent = /2\.\s*Yes,\s*and\s+don't\s+ask\s+again\s+for:/i.test(cleanContent);
       const selectOpt = (hasOption2 && !isOption2Permanent) ? '2' : '1';

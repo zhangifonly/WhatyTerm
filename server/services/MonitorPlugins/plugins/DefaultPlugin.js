@@ -1,6 +1,7 @@
 import BasePlugin from '../BasePlugin.js';
 import promptLoader from '../PromptLoader.js';
 import { promptPendingText, isOwnPendingInput } from '../../promptState.js';
+import { isLiveConfirmMenu } from '../../liveMenu.js';
 
 /**
  * 默认监控策略插件
@@ -290,6 +291,20 @@ class DefaultPlugin extends BasePlugin {
           phase,
           phaseConfig: config,
           message: '检测到 y/n 确认，自动选择 y'
+        };
+      }
+
+      // v1.2.81：以下 select 类分支统一先验活。phase 判定里 /选择.*[123]/ 这类
+      // 松模式会把中文正文推进 confirmation，最后兜底盲选 1 —— 台账实测
+      // 「检测到确认界面，自动选择选项 1」221 次全部空转。活的 Ink 选项菜单
+      // 必有 ❯ 指针行 + 底部快捷键提示（见 liveMenu.js）。
+      // y/n 是 shell 风格提示、屏上无 ❯，所以放在此闸之前处理，不受影响。
+      if (!isLiveConfirmMenu(cleanLastLines)) {
+        return {
+          needsAction: false,
+          phase,
+          phaseConfig: config,
+          message: '疑似确认字样但屏上无活菜单（缺 ❯ 指针/快捷键提示），不自动操作'
         };
       }
 
