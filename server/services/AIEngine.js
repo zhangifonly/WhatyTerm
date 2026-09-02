@@ -15,6 +15,7 @@ import { isTaskDone } from './taskDonePattern.js';
 import { hasPendingQuestion } from './pendingQuestion.js';
 import { promptPendingText, isOwnPendingInput } from './promptState.js';
 import { isLiveConfirmMenu } from './liveMenu.js';
+import { evalEarlyRules } from './aiRules/earlyRules.js';
 import { DEFAULT_MODEL, CLAUDE_CODE_FAKE, CODEX_FAKE, CLAUDE_MODEL_FALLBACK_LIST, getModelsConfig } from '../config/constants.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -2049,64 +2050,37 @@ ${historyText || '(空)'}
     // 正确动作是按 Esc 关掉对话框，让真实终端内容重新露出来，下一轮再正常判定。
     // Esc 在此处无副作用（对话框取消，不提交任何设置变更）。
     {
-      const dlgTail = earlyCleanContent.slice(-1200);
-      const hasEscToCancel = /Esc to cancel/i.test(dlgTail);
-      // 面板特征：settings/status/config 面板的 Tab 行，或 /model 的选择列表标题
-      const looksLikeDialog = /Settings\s+Status\s+Config/i.test(dlgTail)
-        || /^\s*(Version|Session ID|Setting sources|Login method|Auth token):/m.test(dlgTail)
-        || /Select (Model|Style|Theme)/i.test(dlgTail);
-      // 确认菜单也带 Esc 提示，必须排除——那是要选 1/2 的，另有专门分支处理
-      const isConfirmMenu = /Do you want to|Would you like to/i.test(dlgTail)
-        && /^\s*[❯>]?\s*1\.\s/m.test(dlgTail);
-      // 结构化兜底：标题白名单认不出的面板（/agents、/output-style，以及以后新增的），
-      // 只要"编号选项 + 明确写着 Esc to cancel"，就同样按 Esc 关掉。
-      // Esc 提示本身就是 CLI 在声明"这个面板可以无副作用地取消"，比标题可靠得多。
-      const menu = detectOptionMenu(dlgTail);
-      const unknownPanelWithEsc = menu && !menu.hasYes && menu.hasEscHint;
-      if (hasEscToCancel && (looksLikeDialog || unknownPanelWithEsc) && !isConfirmMenu) {
-        if (!looksLikeDialog) {
-          console.log(`[AIEngine] 结构识别到未知选项面板（${menu.items} 项，标题「${menu.title}」）`);
-        }
-        console.log('[AIEngine] CLI 内置对话框开着（Esc to cancel），发 Esc 关闭以恢复正常判定');
+      // v1.2.88 P3-13 第一阶段：本分支已迁入声明式规则表 aiRules/earlyRules.js
+      // （首批为 CLI 内置对话框族）。规则 id 随 _rule 写进台账，空转率可按规则归因。
+      const hit = evalEarlyRules({
+        tail: earlyCleanContent.slice(-1200),
+        clean: earlyCleanContent,
+        aiType,
+        helpers: { detectOptionMenu }
+      });
+      if (hit) {
+        const { rule, extras } = hit;
+        if (extras.log) console.log(`[AIEngine] ${extras.log}`);
+        console.log(`[AIEngine] 声明式规则 ${rule.id} 命中`);
         return {
-          currentState: 'CLI 设置对话框开着（/status 等），屏幕被面板占满无法判断工作状态',
+          currentState: rule.state,
           workingDir: '未显示',
-          recentAction: '打开了 CLI 内置对话框',
+          recentAction: rule.recentAction || '',
           needsAction: true,
-          actionType: 'key',
-          suggestedAction: 'Escape',
-          actionReason: '对话框遮挡了真实终端内容，AI 无法判断会话进展。按 Esc 取消对话框（无副作用，不提交任何设置），下一轮即可正常判定',
+          actionType: rule.action?.type || 'none',
+          suggestedAction: rule.action ? (rule.action.key || rule.action.text || null) : null,
+          actionReason: rule.reason || '',
           suggestion: null,
           updatedAt: new Date().toISOString(),
           preAnalyzed: true,
+          _rule: rule.id,
           detectedCLI,
-          ...pluginInfo
+          ...pluginInfo,
+          ...(rule.fields ? rule.fields(extras) : {})
         };
       }
 
-      // 编号面板开着，但既不是 Yes/No 确认、也没写 Esc 可取消 —— 不知道怎么安全脱身。
-      // 绝不能发「继续」：往 Ink 的 SelectInput 里打字既选不中任何项，也推不动工作
-      // （这正是白名单漏掉面板后的老毛病）。标记交给 AI 读屏决定按哪个键；
-      // AI 不可用时 analyzeStatus 会交出"请人工处理"状态，同样不会瞎按。
-      if (menu && !menu.hasYes && !menu.hasEscHint) {
-        console.log(`[AIEngine] 屏上开着选项面板（${menu.items} 项，标题「${menu.title}」）但无已知脱身方式，交给 AI 判断`);
-        return {
-          currentState: `CLI 选项面板开着（${menu.title || '未知面板'}）`,
-          workingDir: '未显示',
-          recentAction: '等待选择',
-          needsAction: true,
-          actionType: 'warning',
-          suggestedAction: null,
-          actionReason: `屏上是一个 ${menu.items} 项的选项面板，没有 Yes/No 语义也没提供 Esc 取消，无法判断该按哪个键`,
-          requireConfirmation: true,
-          _needsAiJudgement: true,
-          suggestion: null,
-          updatedAt: new Date().toISOString(),
-          preAnalyzed: true,
-          detectedCLI,
-          ...pluginInfo
-        };
-      }
+      // （原「无脱身方式的选项面板」分支已迁入 aiRules/earlyRules.js 的 panel-no-escape）
     }
 
     // === 高优先级：连环打断熔断器 ===

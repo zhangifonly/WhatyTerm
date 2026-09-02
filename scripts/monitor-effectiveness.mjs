@@ -30,8 +30,9 @@ console.log(pad('判定类型', 34), pad('次数', 8), pad('有效率', 10), pad
 console.log('─'.repeat(80));
 for (const g of byState) {
   const flag = g.noEffectRate >= 50 ? '  ← 空转' : g.interruptRate >= 10 ? '  ← 在打断工作' : '';
+  const label = g.rule ? `[${g.rule}] ${g.state}` : g.state;
   console.log(
-    pad(g.state, 34), pad(g.total, 8),
+    pad(label, 34), pad(g.total, 8),
     pad(g.effectiveRate + '%', 10), pad(g.noEffectRate + '%', 10),
     g.interruptRate + '%' + flag
   );

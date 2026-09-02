@@ -82,7 +82,9 @@ class ActionOutcome {
       action: typeof info.action === 'string' ? info.action.slice(0, 40) : String(info.action || ''),
       source: info.source || 'rule',
       beforeHash: hash(before),
-      hadConfirmMenu: CONFIRM_MENU.test(before)
+      hadConfirmMenu: CONFIRM_MENU.test(before),
+      // v1.2.88：声明式规则 id（aiRules/earlyRules.js），空转率可精确归因到单条规则
+      rule: info.rule || null
     };
 
     const timer = setTimeout(() => {
@@ -188,12 +190,22 @@ class ActionOutcome {
    * 某个判定如果 no_effect 占比很高，说明那条规则在空转，该改或该删。
    * @param {number} limit - 只统计最近多少条（默认全部已落盘记录）
    */
+  /** 状态串归一化：同一条规则产出的状态可能带任务名/数字等易变内容
+   * （如「继续做 rtl_str」「继续做 test-unit_conversion」），按原串分组会把
+   * 一条规则的统计打碎成一行一条，空转率完全看不出规律。归一化后按规则族聚合。 */
+  normalizeStateKey(state) {
+    return String(state || '未知')
+      .replace(/「[^」]*」/g, '「…」')
+      .replace(/\d+/g, 'N');
+  }
+
   stats(limit = 5000) {
     const rows = this._load(limit);
     const by = new Map();
     for (const r of rows) {
-      const k = r.state || '未知';
-      const g = by.get(k) || { state: k, total: 0, advanced: 0, changed: 0, no_effect: 0, interrupted: 0, actions: {} };
+      const k = this.normalizeStateKey(r.state);
+      const g = by.get(k) || { state: k, sample: r.state, rule: r.rule || null, total: 0, advanced: 0, changed: 0, no_effect: 0, interrupted: 0, actions: {} };
+      if (r.rule && !g.rule) g.rule = r.rule;
       g.total++;
       g[r.outcome] = (g[r.outcome] || 0) + 1;
       g.actions[r.action] = (g.actions[r.action] || 0) + 1;

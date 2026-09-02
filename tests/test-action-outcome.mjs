@@ -205,6 +205,15 @@ test('没传 beforeScreen 时退回实时抓屏（向后兼容）', () => {
   eq(entry.beforeHash, hash(now));
 });
 
+test('normalizeStateKey：任务名/数字归一，规则族聚合不碎行', () => {
+  eq(ledger.normalizeStateKey('输入框有未提交的自动指令「继续做 rtl_str」，发送回车提交'),
+     '输入框有未提交的自动指令「…」，发送回车提交');
+  eq(ledger.normalizeStateKey('检测到确认界面，自动选择选项 1'),
+     ledger.normalizeStateKey('检测到确认界面，自动选择选项 2'));
+  eq(ledger.normalizeStateKey('Claude Code确认界面'), 'Claude Code确认界面');
+  eq(ledger.normalizeStateKey(''), '未知');
+});
+
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
 if (results.failed) for (const e of results.errors) console.log(`  • ${e.name}\n    ${e.error}`);
 process.exit(results.failed ? 1 : 0);
