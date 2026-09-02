@@ -17,6 +17,7 @@ import os from 'os';
 import path from 'path';
 import progressManager from './ProgressManager.js';
 import { DEVELOPER_PROMPT, VALIDATOR_PROMPT, REPLANNER_PROMPT } from './ralph/prompts.js';
+import { buildRepoMap } from './ralph/repoMap.js';
 
 // 超时配置（毫秒）
 const FIRST_TOKEN_TIMEOUT = 300 * 1000; // 大 prompt 经中转首字可能较慢，给 5 分钟
@@ -271,6 +272,18 @@ class RalphEngine {
       if (session.workingDir && fs.existsSync(claudeMd)) {
         parts.push(`# 项目上下文（CLAUDE.md）\n${fs.readFileSync(claudeMd, 'utf-8').substring(0, 4000)}`);
       }
+    } catch {}
+    // v1.2.86 轻量仓库地图（目录树 + package.json scripts）：agent 不再每轮
+    // 重新摸目录；scripts 是 validationCommands 的事实来源。5 分钟缓存防重扫。
+    try {
+      const now = Date.now();
+      if (!this._repoMapCache) this._repoMapCache = new Map();
+      let rm = this._repoMapCache.get(session.workingDir);
+      if (!rm || now - rm.at > 5 * 60 * 1000) {
+        rm = { at: now, text: buildRepoMap(session.workingDir) };
+        this._repoMapCache.set(session.workingDir, rm);
+      }
+      if (rm.text) parts.push(rm.text);
     } catch {}
     const progress = progressManager.loadProgress(sessionId);
     if (progress?.features?.length) {

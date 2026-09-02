@@ -254,6 +254,28 @@ await t('归档接通：再次规划前上一轮入 archive，patterns 跨轮保
   eq(p.features.length, 0, '新一轮从空 features 开始');
 });
 
+console.log('\n仓库地图（v1.2.86 P3-15）');
+
+await t('buildRepoMap：scripts 单列、目录树限量、坏路径安全返回空', async () => {
+  const { buildRepoMap } = await import('../server/services/ralph/repoMap.js');
+  const map = buildRepoMap(process.cwd());
+  ok(/npm run dev/.test(map), 'scripts 要列出（validationCommands 事实来源）');
+  ok(/server\//.test(map), '目录树要包含 server/');
+  ok(map.split('\n').length < 100, '输出必须限量，不能把上下文塞爆');
+  eq(buildRepoMap('/nonexistent-xyz'), '', '坏路径返回空串不抛异常');
+  eq(buildRepoMap(''), '');
+});
+
+await t('_buildTaskContext 注入仓库地图且走缓存', async () => {
+  freshProgress([{ id: 'f1', name: 'A', description: 'x' }]);
+  const { engine } = makeEngine();
+  const session = { aiType: 'claude', workingDir: process.cwd(), write() {} };
+  const task = progressManager.loadProgress(SID).features[0];
+  const ctx1 = engine._buildTaskContext(SID, session, task);
+  ok(/仓库地图/.test(ctx1) && /npm run dev/.test(ctx1), '仓库地图应进上下文');
+  ok(engine._repoMapCache.has(process.cwd()), '应写入缓存');
+});
+
 cleanup();
 console.log(`\n通过 ${pass}，失败 ${fail}`);
 process.exit(fail ? 1 : 0);

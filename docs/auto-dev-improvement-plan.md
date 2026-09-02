@@ -12,8 +12,12 @@
 > - ✅ P2 条目 8/9/11（v1.2.84）：DISCOVERED 入图（谱系/去重/队尾）/ 失败≥2 拆小重规划
 >   （parent-child 链式依赖，子任务不再拆）/ expandGoal 接通归档（patterns 跨轮保留）；
 >   条目 10 由"仅失败时升级拓扑"隐式满足；条目 12（worktree 并行）仍未做
-> - ⬜ P3 全部未动
-> - 测试：tests/test-ralph-loop.mjs 15 条（引擎从零覆盖到有）、test-live-confirm-menu.mjs 10 条
+> - ✅ P3 条目 14/15/16（v1.2.85/86）：hook 载荷（tool/file）注入 AI 判定 prompt +
+>   hook 日志 512KB 轮转 / Ralph 上下文加轻量仓库地图（目录树+scripts，5min 缓存）/
+>   npm test 统一入口（tests/run-all.mjs）
+> - ⬜ 未做：P2-12 worktree 并行（可选）、P3-13 preAnalyzeStatus 数据化
+>   （回归风险最高，等 v1.2.81 后的新台账数据验证确认菜单修复后再动）
+> - 测试：tests/test-ralph-loop.mjs 17 条（引擎从零覆盖到有）、test-live-confirm-menu.mjs 10 条
 
 ## 0. 一页结论
 
