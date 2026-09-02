@@ -3,6 +3,18 @@
 > 2026-09-02 调研产出。三路输入：本仓库自动化机制摸底（AIEngine 监控 + Ralph 自主模式 + HookServer）、
 > Loop Engineering 外部调研、Graph Engineering 外部调研。本文档是改进路线图，按 P0→P3 排期。
 
+> **落地进度（2026-09-02）**：
+> - ✅ P0-1 确认菜单验活闸（v1.2.81，liveMenu.js，验收=台账空转率归零，观察中）
+> - ✅ P0-2 清理 85 个死 prompt md + 测试退出码修真（v1.2.82）
+> - ✅ P1 全部（v1.2.83）：硬验证 validationCommands / 失败历史回灌 / 相同失败早熔断 /
+>   开发失败计 retry / 连续5轮全局熔断 / ralph-rounds.jsonl 台账 + 输出留档 / commit 证据 /
+>   开场定位仪式 / 禁删测试强措辞 / aiOperationStats 持久化
+> - ✅ P2 条目 8/9/11（v1.2.84）：DISCOVERED 入图（谱系/去重/队尾）/ 失败≥2 拆小重规划
+>   （parent-child 链式依赖，子任务不再拆）/ expandGoal 接通归档（patterns 跨轮保留）；
+>   条目 10 由"仅失败时升级拓扑"隐式满足；条目 12（worktree 并行）仍未做
+> - ⬜ P3 全部未动
+> - 测试：tests/test-ralph-loop.mjs 15 条（引擎从零覆盖到有）、test-live-confirm-menu.mjs 10 条
+
 ## 0. 一页结论
 
 - **Loop Engineering**（Huntley 2025-07 Ralph 循环 → Addy Osmani 2026-06 命名）公认支柱：

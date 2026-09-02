@@ -175,6 +175,85 @@ await t('验证通过：记录 commit、台账 outcome=passed、连续失败清�
   eq(ledger[ledger.length - 1].outcome, 'passed');
 });
 
+console.log('\n任务图（v1.2.84 P2）');
+
+await t('DISCOVERED 入图：谱系/队尾/去重，且不顺手做', async () => {
+  freshProgress([{ id: 'f1', name: 'A', description: 'x', priority: 1 }]);
+  const { engine, session } = makeEngine();
+  engine._execHeadless = async () => '实现完成。\nDISCOVERED: 补充登录模块的错误处理\nDISCOVERED: 补充登录模块的错误处理\nPATTERN: 用 zod 校验';
+  await engine._runDeveloper(SID, session, progressManager.loadProgress(SID).features[0], 1);
+  const fs2 = progressManager.loadProgress(SID).features;
+  const disc = fs2.filter(f => f.id.startsWith('disc-'));
+  eq(disc.length, 1, '同名发现任务必须去重');
+  eq(disc[0].discoveredFrom, 'f1', '要记录谱系');
+  ok(disc[0].priority > 1, '发现任务排队尾，不插队');
+});
+
+await t('decomposeTask：父转 decomposed，子任务链式依赖', () => {
+  freshProgress([
+    { id: 'f0', name: '前置', description: 'p', priority: 1, status: 'completed' },
+    { id: 'f1', name: 'A', description: 'x', priority: 2, dependsOn: ['f0'], branch: 'ralph/x' }
+  ]);
+  progressManager.decomposeTask(SID, 'f1', [
+    { name: '甲', description: 'a' }, { name: '乙', description: 'b' }
+  ]);
+  const fs2 = progressManager.loadProgress(SID).features;
+  const parent = fs2.find(f => f.id === 'f1');
+  eq(parent.status, 'decomposed');
+  eq(parent.blocked, false, 'decomposed 不算 blocked');
+  const c1 = fs2.find(f => f.id === 'f1.1'), c2 = fs2.find(f => f.id === 'f1.2');
+  eq(JSON.stringify(c1.dependsOn), '["f0"]', '首子继承父依赖');
+  eq(JSON.stringify(c2.dependsOn), '["f1.1"]', '其余链式依赖前一个');
+  eq(c1.branch, 'ralph/x', '继承父分支');
+});
+
+await t('getNextTask 图语义：decomposed 父不执行；下游等全部子任务完成', () => {
+  freshProgress([
+    { id: 'f1', name: 'A', description: 'x', priority: 1 },
+    { id: 'f2', name: 'B', description: 'y', priority: 2, dependsOn: ['f1'] }
+  ]);
+  progressManager.decomposeTask(SID, 'f1', [{ name: '甲' }, { name: '乙' }]);
+  eq(progressManager.getNextTask(SID).id, 'f1.1', '先做首子任务');
+  progressManager.updateFeatureStatus(SID, 'f1.1', { status: 'completed' });
+  eq(progressManager.getNextTask(SID).id, 'f1.2', '这一条锁住图语义：f2 不能在子任务完成前放行');
+  progressManager.updateFeatureStatus(SID, 'f1.2', { status: 'completed' });
+  eq(progressManager.getNextTask(SID).id, 'f2', '全部子任务完成后 f1 视为满足，f2 放行');
+});
+
+await t('_loop 失败 2 次触发重规划；子任务失败不再拆', async () => {
+  freshProgress([{ id: 'f1', name: 'A', description: 'x' }]);
+  const { engine, session } = makeEngine();
+  let replanCalls = 0;
+  engine._runDeveloper = async () => true;
+  engine._runValidator = async (sid, sess, task) =>
+    ({ passed: false, notes: `失败于 ${task.id} 第${(task.retryCount || 0) + 1}次` });
+  engine._execHeadless = async (sid, sess, prompt, label) => {
+    if (label === '重规划') { replanCalls++; return '```json\n{"subtasks":[{"name":"甲"},{"name":"乙"}]}\n```'; }
+    return '';
+  };
+  const state = { stop: false, paused: false, phase: 'idle', iteration: 0 };
+  engine.running.set(SID, state);
+  await engine._loop(SID, session, state, 30);
+  eq(replanCalls, 1, '顶层任务失败2次拆一次；子任务(parentId)不得再拆');
+  const fs2 = progressManager.loadProgress(SID).features;
+  eq(fs2.find(f => f.id === 'f1').status, 'decomposed');
+  ok(fs2.find(f => f.id === 'f1.1'), '子任务已入图');
+  // f1.1 连续失败会先触发全局熔断（连续5轮）停机，f1.2 轮不到——这正是预期：
+  // 子任务只走常规重试路径（本例 notes 每次不同，不触发相同失败早熔断）
+  ok(fs2.find(f => f.id === 'f1.1').retryCount > 0, '子任务走常规重试路径，不再拆');
+});
+
+await t('归档接通：再次规划前上一轮入 archive，patterns 跨轮保留', () => {
+  freshProgress([{ id: 'f1', name: 'A', description: 'x', status: 'completed' }]);
+  progressManager.addPattern(SID, '经验一');
+  progressManager.archiveRound(SID);
+  const p = progressManager.loadProgress(SID);
+  eq(p.archive.length, 1, '这一条锁住故障：archiveRound 原是零调用死代码');
+  eq(p.archive[0].features.length, 1);
+  eq(JSON.stringify(p.patterns), '["经验一"]', 'patterns 是 codebase 级经验，跨轮保留');
+  eq(p.features.length, 0, '新一轮从空 features 开始');
+});
+
 cleanup();
 console.log(`\n通过 ${pass}，失败 ${fail}`);
 process.exit(fail ? 1 : 0);

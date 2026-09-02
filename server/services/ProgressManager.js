@@ -218,13 +218,20 @@ class ProgressManager {
     return this.saveProgress(sessionId, progress);
   }
 
-  /** 取下一个可执行任务：非 blocked、非 completed、依赖已满足，按 priority 排序 */
+  /** 取下一个可执行任务：非 blocked、非 completed/decomposed、依赖已满足，按 priority 排序。
+   * v1.2.84 图语义：status='decomposed' 的父任务本身不再执行；依赖它的任务
+   * 要等它的全部子任务（parentId 指向它）完成才视为依赖满足。 */
   getNextTask(sessionId) {
     const progress = this.loadProgress(sessionId);
     if (!progress?.features?.length) return null;
     const doneIds = new Set(progress.features.filter(f => f.status === 'completed').map(f => f.id));
+    for (const f of progress.features) {
+      if (f.status !== 'decomposed') continue;
+      const children = progress.features.filter(c => c.parentId === f.id);
+      if (children.length && children.every(c => c.status === 'completed')) doneIds.add(f.id);
+    }
     const candidates = progress.features
-      .filter(f => f.status !== 'completed' && !f.blocked)
+      .filter(f => f.status !== 'completed' && f.status !== 'decomposed' && !f.blocked)
       .filter(f => (f.dependsOn || []).every(d => doneIds.has(d)))
       .sort((a, b) => (a.priority || 999) - (b.priority || 999));
     return candidates[0] || null;
@@ -277,6 +284,81 @@ class ProgressManager {
     return this.getNextTask(sessionId) !== null;
   }
 
+  /** v1.2.84 Beads 式发现任务入图：Developer 干活时发现的超范围必要工作，
+   * 不顺手做（守住"每轮一小事"），入队成新任务，记录 discoveredFrom 谱系。
+   * 排到队尾（max priority + 1），同名去重。 */
+  addDiscoveredTask(sessionId, { name, description = '', discoveredFrom = '' }) {
+    if (!name) return null;
+    const progress = this.loadProgress(sessionId);
+    if (!progress) return null;
+    const short = name.trim().slice(0, 120);
+    if (progress.features.some(f => f.name === short)) return null;
+    const maxP = Math.max(0, ...progress.features.map(f => f.priority || 0));
+    const n = progress.features.filter(f => f.id.startsWith('disc-')).length + 1;
+    const feature = {
+      id: `disc-${String(n).padStart(3, '0')}`,
+      name: short,
+      description: description || short,
+      priority: maxP + 1,
+      status: 'pending',
+      acceptanceCriteria: [],
+      dependsOn: [],
+      discoveredFrom,
+      branch: '',
+      retryCount: 0,
+      blocked: false,
+      validationNotes: '',
+      validationCommands: [],
+      validationHistory: [],
+      passes: { implemented: false, compiles: false, tested: false },
+      startedAt: null,
+      completedAt: null,
+      evaluations: []
+    };
+    progress.features.push(feature);
+    this.saveProgress(sessionId, progress);
+    return feature;
+  }
+
+  /** v1.2.84 重规划节点：屡次失败的任务拆成串行子任务（parent-child）。
+   * 父任务转 status='decomposed'（不再执行、不算 blocked）；子任务 id 为
+   * <parentId>.N，首个继承父的 dependsOn，其余链式依赖前一个；继承 branch，
+   * priority 紧贴父任务保持执行顺序。子任务不允许再拆（引擎侧守卫）。 */
+  decomposeTask(sessionId, parentId, subtasks) {
+    if (!Array.isArray(subtasks) || !subtasks.length) return false;
+    const progress = this.loadProgress(sessionId);
+    if (!progress) return false;
+    const parent = progress.features.find(f => f.id === parentId);
+    if (!parent || parent.parentId) return false;
+    const children = subtasks.slice(0, 4).map((st, idx) => ({
+      id: `${parentId}.${idx + 1}`,
+      name: String(st.name || `子任务${idx + 1}`).slice(0, 120),
+      description: st.description || '',
+      priority: (parent.priority || 0) + (idx + 1) / 100,
+      status: 'pending',
+      acceptanceCriteria: Array.isArray(st.acceptanceCriteria) ? st.acceptanceCriteria : [],
+      validationCommands: Array.isArray(st.validationCommands) ? st.validationCommands : [],
+      dependsOn: idx === 0 ? [...(parent.dependsOn || [])] : [`${parentId}.${idx}`],
+      parentId,
+      branch: parent.branch || '',
+      retryCount: 0,
+      blocked: false,
+      validationNotes: '',
+      validationHistory: [],
+      passes: { implemented: false, compiles: false, tested: false },
+      startedAt: null,
+      completedAt: null,
+      evaluations: []
+    }));
+    parent.status = 'decomposed';
+    parent.blocked = false;
+    parent.decomposedAt = new Date().toISOString();
+    const at = progress.features.indexOf(parent);
+    progress.features.splice(at + 1, 0, ...children);
+    this.saveProgress(sessionId, progress);
+    return true;
+  }
+
   /** 归档当前轮次（features + patterns），重置 features 供新一轮拆分 */
   archiveRound(sessionId) {
     const progress = this.loadProgress(sessionId);
@@ -291,7 +373,8 @@ class ProgressManager {
       });
     }
     progress.features = [];
-    progress.patterns = [];
+    // v1.2.84：patterns 不清空——它是 codebase 级经验，跨轮仍然有效
+    // （归档条目里已存了本轮快照；注入侧已截最近 30 条防膨胀）
     progress.status = 'planning';
     progress.currentFeatureIndex = 0;
     return this.saveProgress(sessionId, progress);

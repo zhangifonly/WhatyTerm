@@ -70,8 +70,19 @@ class PlannerService {
 
     const autonomous = projectContext.autonomous === true;
 
-    // 创建初始 progress
-    progressManager.createProgress(sessionId, goal);
+    // v1.2.84 接通归档闭环：同一会话再次规划时，把上一轮 features（含快照 patterns）
+    // 归档进 progress.archive 再开新轮——原来这里 createProgress 整文件重建，
+    // 上一轮记录连同 archive 一起被冲掉，archiveRound 一直是零调用的死代码。
+    const existing = progressManager.loadProgress(sessionId);
+    if (existing?.features?.length) {
+      progressManager.archiveRound(sessionId);
+      const p = progressManager.loadProgress(sessionId);
+      p.goal = goal;
+      progressManager.saveProgress(sessionId, p);
+      console.log(`[Planner] 上一轮 ${existing.features.length} 个 feature 已归档（累计 ${p.archive?.length || 0} 轮）`);
+    } else {
+      progressManager.createProgress(sessionId, goal);
+    }
     if (autonomous) progressManager.setMode(sessionId, 'autonomous');
 
     const projectScan = this._scanProject(projectContext.workingDir, projectContext.terminalOutput);

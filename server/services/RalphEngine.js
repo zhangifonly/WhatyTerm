@@ -16,7 +16,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import progressManager from './ProgressManager.js';
-import { DEVELOPER_PROMPT, VALIDATOR_PROMPT } from './ralph/prompts.js';
+import { DEVELOPER_PROMPT, VALIDATOR_PROMPT, REPLANNER_PROMPT } from './ralph/prompts.js';
 
 // 超时配置（毫秒）
 const FIRST_TOKEN_TIMEOUT = 300 * 1000; // 大 prompt 经中转首字可能较慢，给 5 分钟
@@ -202,7 +202,23 @@ class RalphEngine {
           notes: (verdict.notes || '').slice(0, 500), retryCount: r?.retryCount,
           blocked: !!r?.blocked, repeatedFailure: !!r?.repeatedFailure,
           durationMs: Date.now() - roundStart });
-        if (r?.blocked) {
+        // v1.2.84 重规划节点：失败 ≥2 次（或已 blocked）的顶层任务，不再原样重试
+        // 或一弃了之——先尝试拆成 2-4 个子任务入图（parent-child），拆分成功后
+        // 父任务转 decomposed，循环自然转去执行子任务。子任务失败不再拆，走原路。
+        let decomposed = false;
+        if (r && (r.retryCount >= 2 || r.blocked) && !task.parentId) {
+          this._setPhase(sessionId, state, 'replanning', task);
+          decomposed = await this._runReplanner(sessionId, session, task, i);
+          if (state.stop) return;
+          if (decomposed) {
+            consecutiveFails = 0; // 拆小是有效进展，不计入连续失败
+            this._ledger(sessionId, { iteration: i, taskId: task.id, taskName: task.name,
+              outcome: 'decomposed', durationMs: Date.now() - roundStart });
+          }
+        }
+        if (decomposed) {
+          // 已拆小，无需 blocked/重试日志
+        } else if (r?.blocked) {
           this._log(sessionId, `✗ 任务 ${task.id} ${r?.repeatedFailure ? '连续相同失败（无信息增益）' : `已达最大重试(${MAX_RETRY})`}，标记 blocked 跳过`);
         } else {
           this._log(sessionId, `✗ 任务 ${task.id} 验证失败 (第${r?.retryCount}次)，退回重试: ${(verdict.notes || '').slice(0, 120)}`);
@@ -294,6 +310,15 @@ class RalphEngine {
     // 抓取 PATTERN: 学习并记录
     const m = out.match(/PATTERN:\s*(.+)/i);
     if (m) progressManager.addPattern(sessionId, m[1].trim().slice(0, 200));
+    // v1.2.84 Beads 式发现任务入图：Developer 上报的超范围必要工作（DISCOVERED:）
+    // 不顺手做、不丢弃，排进队尾，记录谱系。每轮最多收 3 条防图爆炸。
+    const discovered = [...out.matchAll(/^DISCOVERED:\s*(.+)$/gim)].slice(0, 3);
+    for (const d of discovered) {
+      const added = progressManager.addDiscoveredTask(sessionId, {
+        name: d[1].trim(), discoveredFrom: task.id
+      });
+      if (added) this._log(sessionId, `＋发现任务入队 [${added.id}] ${added.name}（来自 ${task.id}）`);
+    }
     return true;
   }
 
@@ -325,6 +350,39 @@ class RalphEngine {
     if (fail) return { passed: false, notes: fail[1].trim().slice(0, 300) };
     // 没有明确标记：保守判失败，记录原因
     return { passed: false, notes: '未输出明确验证结论（缺少 VALIDATION 标记）' };
+  }
+
+  /** v1.2.84 重规划节点：屡次失败的任务拆成 2-4 个子任务（parent-child 入图）。
+   * 学术搜索（AFlow/ADAS）收敛出的固定拓扑：生成→验证→失败不原样重试而是拆小。
+   * 守卫：子任务（有 parentId）不再拆，一个任务只拆一次。成功返回 true。 */
+  async _runReplanner(sessionId, session, task, iteration) {
+    if (task.parentId) return false;
+    const ctx = this._buildTaskContext(sessionId, session, task);
+    const prompt = `${ctx}\n\n---\n\n${REPLANNER_PROMPT}\n\n立即输出拆分 JSON，不要询问确认。`;
+    const out = await this._execHeadless(sessionId, session, prompt, '重规划', TOTAL_TIMEOUT,
+      { saveAs: `${iteration}-${task.id}-replan` });
+    if (out === null) return false;
+    try {
+      let json = out;
+      const m = out.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (m) json = m[1];
+      const braceAt = json.indexOf('{');
+      if (braceAt > 0) json = json.slice(braceAt);
+      const parsed = JSON.parse(json.trim());
+      const subtasks = parsed?.subtasks;
+      if (!Array.isArray(subtasks) || subtasks.length < 2) {
+        this._log(sessionId, `重规划输出无有效子任务（${Array.isArray(subtasks) ? subtasks.length : 0} 个），放弃拆分`);
+        return false;
+      }
+      const okDecomp = progressManager.decomposeTask(sessionId, task.id, subtasks);
+      if (okDecomp) {
+        this._log(sessionId, `⊕ 任务 ${task.id} 已拆成 ${Math.min(subtasks.length, 4)} 个子任务: ${subtasks.slice(0, 4).map(t => t.name).join(' → ')}`);
+      }
+      return okDecomp;
+    } catch (e) {
+      this._log(sessionId, `重规划 JSON 解析失败: ${e.message}`);
+      return false;
+    }
   }
 
   _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
