@@ -275,3 +275,6 @@ if (results.errors.length > 0) {
 }
 
 export { results };
+
+// 失败必须反映到退出码（跑批时红的不能被当成绿的）
+process.exitCode = results.failed ? 1 : 0;

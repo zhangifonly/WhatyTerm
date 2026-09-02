@@ -108,15 +108,25 @@ Failed: Cannot connect to server`;
 });
 
 test('T3.1.5 analyzeStatus() 返回正确的操作建议', () => {
-  // 测试确认状态的操作建议
-  const confirmContent = `Do you want to proceed?
+  // v1.2.81 起确认菜单必须「验活」：❯ 指针行 + 底部快捷键提示（liveMenu.js）。
+  // 活菜单：应给出 select 建议
+  const liveConfirm = `Do you want to proceed?
+❯ 1. Yes
+  2. No
+
+ Esc to cancel · Tab to amend`;
+  const result = defaultPlugin.analyzeStatus(liveConfirm, 'confirmation', {});
+  assertNotNull(result, 'analyzeStatus 返回 null');
+  assertEqual(result.needsAction, true, '活确认菜单应需要操作');
+  assertNotNull(result.suggestedAction, '应有建议操作');
+
+  // 无 ❯/快捷键提示的裸文本（正文误报形状）：不得动作。
+  // 台账实测这类误报 1100+ 次全空转，v1.2.81 修复。
+  const proseConfirm = `Do you want to proceed?
 1. Yes
 2. No`;
-
-  const result = defaultPlugin.analyzeStatus(confirmContent, 'confirmation', {});
-  assertNotNull(result, 'analyzeStatus 返回 null');
-  assertEqual(result.needsAction, true, '确认状态应需要操作');
-  assertNotNull(result.suggestedAction, '应有建议操作');
+  const suppressed = defaultPlugin.analyzeStatus(proseConfirm, 'confirmation', {});
+  assertEqual(suppressed.needsAction, false, '无活菜单的确认字样不得自动操作');
 });
 
 test('T3.1.6 isIdle() 能识别各 CLI 的空闲提示符', () => {
@@ -179,5 +189,8 @@ if (results.errors.length > 0) {
     console.log(`  - ${e.name}: ${e.error}`);
   });
 }
+
+// 失败必须反映到退出码：此前失败静默 exit 0，跑批时红的会被当成绿的
+process.exitCode = results.failed ? 1 : 0;
 
 export { results };
