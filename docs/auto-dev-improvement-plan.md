@@ -15,9 +15,15 @@
 > - ✅ P3 条目 14/15/16（v1.2.85/86）：hook 载荷（tool/file）注入 AI 判定 prompt +
 >   hook 日志 512KB 轮转 / Ralph 上下文加轻量仓库地图（目录树+scripts，5min 缓存）/
 >   npm test 统一入口（tests/run-all.mjs）
-> - ⬜ 未做：P2-12 worktree 并行（可选）、P3-13 preAnalyzeStatus 数据化
->   （回归风险最高，等 v1.2.81 后的新台账数据验证确认菜单修复后再动）
-> - 测试：tests/test-ralph-loop.mjs 17 条（引擎从零覆盖到有）、test-live-confirm-menu.mjs 10 条
+> - ✅ 计划外重大修复（v1.2.87）：自动化输入静默丢失——session.write 依赖的
+>   tmux attach 客户端半死时 pty.write 丢键（实测某会话回车 4 连丢、卡 10 小时）。
+>   监控/Ralph 程序化输入全部改走 sendInput/sendNamedKey（send-keys 直达 server）
+> - ⬜ 有意缓做（数据触发）：
+>   * P2-12 worktree 并行：等 ralph-rounds.jsonl 显示「同时可跑任务 ≥2」高频出现再做
+>     （典型计划是依赖链，第二车道多数时间空转；Co-Coder：盲并行会亏）
+>   * P3-13 preAnalyzeStatus 数据化：回归风险最高，等 v1.2.81/87 后的新台账
+>     积累几天、确认两类空转归零后单独立项
+> - 测试：test-ralph-loop.mjs 17 条、test-live-confirm-menu.mjs 10 条、test-send-input.mjs 4 条
 
 ## 0. 一页结论
 
