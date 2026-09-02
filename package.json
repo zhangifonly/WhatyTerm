@@ -1,6 +1,6 @@
 {
   "name": "whatyterm",
-  "version": "1.2.84",
+  "version": "1.2.85",
   "description": "网梯终端 - AI 智能终端管理工具",
   "license": "SEE LICENSE IN LICENSE",
   "author": {
@@ -30,7 +30,8 @@
     "electron:build:win": "npm run build:release && electron-builder --win",
     "electron:build:all": "npm run build:release && electron-builder --mac --win",
     "generate-update-files": "node scripts/generate-update-files.js",
-    "postinstall": "node -e \"const fs=require('fs'),p=require('path'),d='node_modules/node-pty/prebuilds';if(fs.existsSync(d))for(const dir of fs.readdirSync(d)){const f=p.join(d,dir,'spawn-helper');if(fs.existsSync(f))fs.chmodSync(f,0o755)}\""
+    "postinstall": "node -e \"const fs=require('fs'),p=require('path'),d='node_modules/node-pty/prebuilds';if(fs.existsSync(d))for(const dir of fs.readdirSync(d)){const f=p.join(d,dir,'spawn-helper');if(fs.existsSync(f))fs.chmodSync(f,0o755)}\"",
+    "test": "node tests/run-all.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",

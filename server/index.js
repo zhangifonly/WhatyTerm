@@ -1070,6 +1070,16 @@ function _wireHookServer() {
       : (ev === 'PostToolUse' || ev === 'Stop') ? 'idle'
       : session.hookState;
 
+    // v1.2.85：保留最近 10 条工具活动（事件/工具名/文件）。这是来自 CLI 进程
+    // 自身的信号，可信度高于截图正则——AI 升级判定时会注入（_buildHookContext）。
+    // 此前这些载荷只做面板展示，高质量证据被白白丢掉。
+    if (!Array.isArray(session.hookRecent)) session.hookRecent = [];
+    session.hookRecent.push({
+      at: Date.now(), event: ev,
+      tool: event.tool_name || '', file: event.tool_input?.file_path || ''
+    });
+    if (session.hookRecent.length > 10) session.hookRecent.shift();
+
     // 实测有效环境：hook 是 CLI 子进程，其 env = CLI 实际生效配置（settings env 块
     // 会被 Claude Code 注入自身 process.env）。baseUrl 空 = 官方 OAuth。
     // 这是面板供应商显示的最高优先级证据（getCurrentProvider 消费）。
@@ -5576,7 +5586,8 @@ async function runBackgroundStatusAnalysis() {
         sessionProviderId: getSessionProviderId(session, session.aiType || 'claude'),
         lastSentText: lastActionMap.get(session.id)?.action,
         providerEnv: session.providerEnv || {},
-        providerPriority: CLAUDE_PROVIDER_PRIORITY
+        providerPriority: CLAUDE_PROVIDER_PRIORITY,
+        hookRecent: session.hookRecent || []
       };
 
       console.log(`[后台AI分析] 会话 ${session.name}: 分析状态...`);

@@ -9,14 +9,13 @@
  * 5. 将收到的事件写入 ~/.webtmux/hook-events.log（最近 200 条）
  */
 
-import { readFileSync, writeFileSync, mkdirSync, chmodSync, appendFileSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, appendFileSync, statSync, renameSync } from 'fs';
 import { homedir, platform } from 'os';
 import { join } from 'path';
 import { randomBytes } from 'crypto';
 
 const isWindows = platform() === 'win32';
 
-const MAX_LOG_LINES = 200;
 
 class HookServer {
   constructor(serverPort = 3928) {
@@ -358,11 +357,11 @@ try {
     console.log(`[HookServer] ${line}`);
     try {
       appendFileSync(this.logPath, line + '\n');
-      // 滚动：超过阈值时截断前半部分
-      const content = readFileSync(this.logPath, 'utf8');
-      const lines = content.split('\n').filter(Boolean);
-      if (lines.length > MAX_LOG_LINES) {
-        writeFileSync(this.logPath, lines.slice(-MAX_LOG_LINES).join('\n') + '\n');
+      // v1.2.85：512KB 大小轮转到 .1（此前每写一行全文回读数行数、且只留 200 行——
+      // 多会话下历史必然被冲刷，还把 O(n) 读放在高频路径上）。行格式不变，
+      // /api/sessions/:id/hook-activity 的解析继续兼容。
+      if (statSync(this.logPath).size > 512 * 1024) {
+        try { renameSync(this.logPath, this.logPath + '.1'); } catch {}
       }
     } catch {}
   }

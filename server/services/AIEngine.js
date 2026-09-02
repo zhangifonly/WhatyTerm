@@ -3389,7 +3389,7 @@ ${historyText || '(空)'}
       cliName,
       cliCommand,
       terminalContent,
-      progressContext: this._buildProgressContext(projectContext)
+      progressContext: this._buildProgressContext(projectContext) + this._buildHookContext(projectContext)
     });
 
     // 供应商三级选择：
@@ -3554,6 +3554,20 @@ ${historyText || '(空)'}
   }
 
   /** 构建进度上下文（注入到 AI 分析 prompt） */
+  /** v1.2.85：hooks 实测的最近工具活动，注入 AI 判定 prompt。
+   * 信号来自 CLI 进程自身（PreToolUse/PostToolUse hook），可信度高于截图正则；
+   * 给「忙/闲」判定多一路独立证据。 */
+  _buildHookContext(projectContext) {
+    const recent = projectContext?.hookRecent;
+    if (!Array.isArray(recent) || !recent.length) return '';
+    const lines = recent.slice(-6).map(e => {
+      const ago = Math.round((Date.now() - e.at) / 1000);
+      const file = e.file ? ` ${String(e.file).split('/').slice(-2).join('/')}` : '';
+      return `- ${ago}s前 ${e.event}${e.tool ? ` ${e.tool}` : ''}${file}`;
+    });
+    return `\n# CLI 最近工具活动（hooks 实测，可信度高于屏幕文本）\n${lines.join('\n')}\n（最近 ~30s 内有 PreToolUse 且其后无 Stop → 多半仍在干活，判忙碌。）\n`;
+  }
+
   _buildProgressContext(projectContext) {
     if (!projectContext?.progress?.features?.length) return '';
     const p = projectContext.progress;
