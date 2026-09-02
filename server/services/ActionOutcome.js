@@ -47,7 +47,8 @@ function hash(screen) {
 // CLI 确实动起来了的证据（比「屏幕变了」更强的成功信号）
 const RUNNING = /esc to interrupt|正在|Running \d+ Task|\bthinking\b/i;
 const INTERRUPTED = /Interrupted\s*[·•]\s*What should Claude do instead/i;
-const CONFIRM_MENU = /(Do you want to|Would you like to)[\s\S]{0,400}?[❯>]?\s*1\.\s+\S/i;
+// v1.2.89 起与 AIEngine 的 Codex 验活闸共用一份定义（liveMenu.js），防止两处漂移
+import { CONFIRM_MENU_NEAR as CONFIRM_MENU } from './liveMenu.js';
 
 class ActionOutcome {
   constructor() {

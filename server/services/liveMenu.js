@@ -28,3 +28,15 @@ export function isLiveConfirmMenu(cleanContent, tailLen = 1200) {
   const hasFooterHint = /Esc to \w+|Enter to confirm|Tab to amend/i.test(tail);
   return hasPointer && hasFooterHint;
 }
+
+/**
+ * 近距确认菜单判别器（v1.2.89）：问句与首个编号选项相距 ≤400 字符。
+ * 台账实测（Codex确认界面族）：2780 条有效样本全命中，470/473 空转样本不命中
+ * ——scrollback 里答完的旧菜单，问句与残留文本拉开距离后即不再命中。
+ * 与 ActionOutcome 落账的 hadConfirmMenu 用同一正则（它就是数据来源），
+ * 修改必须两处同步——所以只在这里定义一份。
+ */
+export const CONFIRM_MENU_NEAR = /(Do you want to|Would you like to)[\s\S]{0,400}?[❯>]?\s*1\.\s+\S/i;
+export function hasNearbyConfirmMenu(content) {
+  return CONFIRM_MENU_NEAR.test(content || '');
+}

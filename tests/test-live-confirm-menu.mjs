@@ -102,5 +102,34 @@ t('codex 不受验活闸影响（同关键词无 ❯ 仍按原逻辑处理）', 
   ok(r && r.actionType === 'select', `Codex 路径实测 84.3% 有效，不得被收紧，实际 ${JSON.stringify(r && { state: r.currentState, actionType: r.actionType })}`);
 });
 
+console.log('\nv1.2.89 Codex 验活闸与排队消息守卫');
+
+t('codex：scrollback 旧菜单（问句与选项相距>400字符）不发键', () => {
+  const stale = ' Do you want to proceed?\n' + '中间隔着大段执行输出……\n'.repeat(40) + ' 正在编译 module_x …\n';
+  const r = engine.preAnalyzeStatus(stale, 'codex');
+  ok(!(r && r.actionType === 'select'),
+    `这一条锁住故障：Codex 族 470 次空转全是这种旧菜单，实际 ${JSON.stringify(r && { state: r.currentState, actionType: r.actionType })}`);
+});
+
+t('codex：活菜单（问句紧邻选项）照常 select（84% 有效路径不受损）', () => {
+  const r = engine.preAnalyzeStatus(' Do you want to proceed?\n 1. Yes\n 2. No\n', 'codex');
+  ok(r && r.actionType === 'select');
+});
+
+t('排队消息 + 正常运行：不发 Escape（排队合法，Esc 会打断并丢指令）', () => {
+  const screen = '✳ Cooking… (2m 10s · esc to interrupt)\nPress up to edit queued messages\n❯ ';
+  const r = engine.preAnalyzeStatus(screen, 'claude');
+  ok(r && r.needsAction === false && r.suggestedAction === null,
+    `台账实测 3 次有 2 次 Interrupted，实际 ${JSON.stringify(r && { state: r.currentState, action: r.suggestedAction })}`);
+  ok(r._rule === 'queued-msgs-wait', '规则 id 要进台账归因');
+});
+
+t('排队消息 + Compacting：仍发 Escape 清无效队（原设计意图保留）', () => {
+  const screen = '✻ Compacting conversation…\nPress up to edit queued messages\n';
+  const r = engine.preAnalyzeStatus(screen, 'claude');
+  ok(r && r.suggestedAction === 'Escape' && r._rule === 'queued-msgs-clear',
+    `实际 ${JSON.stringify(r && { state: r.currentState, action: r.suggestedAction })}`);
+});
+
 console.log(`\n通过 ${pass}，失败 ${fail}`);
 process.exit(fail ? 1 : 0);

@@ -14,7 +14,7 @@ import pluginManager from './MonitorPlugins/index.js';
 import { isTaskDone } from './taskDonePattern.js';
 import { hasPendingQuestion } from './pendingQuestion.js';
 import { promptPendingText, isOwnPendingInput } from './promptState.js';
-import { isLiveConfirmMenu } from './liveMenu.js';
+import { isLiveConfirmMenu, hasNearbyConfirmMenu } from './liveMenu.js';
 import { evalEarlyRules } from './aiRules/earlyRules.js';
 import { DEFAULT_MODEL, CLAUDE_CODE_FAKE, CODEX_FAKE, CLAUDE_MODEL_FALLBACK_LIST, getModelsConfig } from '../config/constants.js';
 
@@ -2007,9 +2007,14 @@ ${historyText || '(空)'}
     // 活菜单必有 ❯ 指针行 + 底部快捷键提示（见 liveMenu.js，fixture 实测）。
     // Codex 走同一路径实测 84.3% 有效，不收紧非 Claude 的判定。
     const confirmKeywordHitEarly = (isEditConfirmEarly || isProceedConfirmEarly || isPlanExecuteEarly || isGenericConfirmEarly || hasOptionMenuEarly) && hasOption1YesEarly;
-    const confirmMenuLiveEarly = (aiType || 'claude') !== 'claude' || isLiveConfirmMenu(earlyCleanContent);
+    // v1.2.89：Codex 等非 Claude 也设闸——用台账实测判别器（问句与选项相距≤400字符）：
+    // Codex 族 2780 条有效样本全命中、470/473 空转样本不命中（scrollback 旧菜单）。
+    // Claude 仍用更严的 ❯ 指针+底部提示探针。
+    const confirmMenuLiveEarly = (aiType || 'claude') === 'claude'
+      ? isLiveConfirmMenu(earlyCleanContent)
+      : hasNearbyConfirmMenu(earlyCleanContent);
     if (confirmKeywordHitEarly && !confirmMenuLiveEarly) {
-      console.log('[AIEngine] 确认字样命中但无活菜单（缺 ❯ 指针/底部快捷键提示），判为正文误报，不发键');
+      console.log('[AIEngine] 确认字样命中但无活菜单（Claude 缺 ❯ 指针/底部提示；Codex 问句与选项距离超限），判为旧菜单/正文误报，不发键');
     }
     if (confirmKeywordHitEarly && confirmMenuLiveEarly) {
       // Plan 执行确认（auto-accept edits）：选 1
@@ -2409,9 +2414,30 @@ ${historyText || '(空)'}
     // 0. 最高优先级：检测排队消息状态（上下文压缩期间排队的无效输入）
     // 必须在所有其他检测之前，因为此时任何操作都会被打断
     if (/Press up to edit queued messages/i.test(cleanContent)) {
-      console.log(`[AIEngine] 检测到排队消息状态，发送 Escape 清除`);
+      // v1.2.89：台账实测该分支 3 次有 2 次 Interrupted——正常运行中的排队消息是
+      // **合法**的（运行结束会自动发出），此时发 Escape 既打断任务又丢掉排队指令。
+      // 本分支的本意只是清「上下文压缩期间排的无效队」，所以只在 Compacting 时动手。
+      if (!/Compacting/i.test(cleanContent)) {
+        return {
+          currentState: '有排队消息（运行中，属正常排队）',
+          workingDir: '未显示',
+          recentAction: '消息排队等待运行结束',
+          needsAction: false,
+          actionType: 'none',
+          suggestedAction: null,
+          actionReason: '排队消息会在当前运行结束后自动发出；此时按 Esc 会打断任务并丢掉排队指令',
+          suggestion: null,
+          updatedAt: new Date().toISOString(),
+          preAnalyzed: true,
+          _rule: 'queued-msgs-wait',
+          detectedCLI,
+          ...pluginInfo
+        };
+      }
+      console.log(`[AIEngine] 检测到排队消息状态（Compacting 中），发送 Escape 清除`);
       return {
         currentState: '有排队消息待清除',
+        _rule: 'queued-msgs-clear',
         workingDir: '未显示',
         recentAction: '排队消息',
         needsAction: true,
