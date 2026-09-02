@@ -40,3 +40,21 @@ export const CONFIRM_MENU_NEAR = /(Do you want to|Would you like to)[\s\S]{0,400
 export function hasNearbyConfirmMenu(content) {
   return CONFIRM_MENU_NEAR.test(content || '');
 }
+
+/**
+ * Codex 活确认菜单判据（v1.2.90）：结构铁证，不靠脆弱的问句-选项距离。
+ * 背景：v1.2.89 用「问句与选项相距 ≤400 字符」给 Codex 设闸，但 Codex 确认界面
+ * 结构是「问句 + Environment + Reason + $ 完整命令回显 + 选项」，命令一长（超长
+ * 路径 + 一串函数名）距离就破 400——实测某 decompile 命令 430 字符，真菜单被误杀。
+ * 活菜单铁证：尾部同时有底部确认提示行（Press enter to confirm / esc to cancel）
+ * 与编号选项行（› / ❯ / > 指针，Codex 用 ›=U+203A）。答完后提示行被新输出推走、
+ * 不再在尾部，故能区分 scrollback 里的旧菜单。
+ */
+export function isCodexLiveConfirm(content) {
+  const trimmed = (content || '').replace(/\s+$/, '');
+  // footer 必须紧贴屏幕底部：活菜单时它是最后一行；答完后新输出把它推离底部。
+  // 仅「在尾部 700 字符内」不够——旧菜单后若新输出少，footer 仍在窗口里会误判活。
+  const hasFooter = /Press enter to confirm|Esc to cancel/i.test(trimmed.slice(-150));
+  const hasOption = /^[\s│>›❯]*1\.\s+\S/m.test(trimmed.slice(-700));
+  return hasFooter && hasOption;
+}

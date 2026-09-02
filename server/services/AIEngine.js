@@ -14,7 +14,7 @@ import pluginManager from './MonitorPlugins/index.js';
 import { isTaskDone } from './taskDonePattern.js';
 import { hasPendingQuestion } from './pendingQuestion.js';
 import { promptPendingText, isOwnPendingInput } from './promptState.js';
-import { isLiveConfirmMenu, hasNearbyConfirmMenu } from './liveMenu.js';
+import { isLiveConfirmMenu, hasNearbyConfirmMenu, isCodexLiveConfirm } from './liveMenu.js';
 import { evalEarlyRules } from './aiRules/earlyRules.js';
 import { DEFAULT_MODEL, CLAUDE_CODE_FAKE, CODEX_FAKE, CLAUDE_MODEL_FALLBACK_LIST, getModelsConfig } from '../config/constants.js';
 
@@ -2010,9 +2010,12 @@ ${historyText || '(空)'}
     // v1.2.89：Codex 等非 Claude 也设闸——用台账实测判别器（问句与选项相距≤400字符）：
     // Codex 族 2780 条有效样本全命中、470/473 空转样本不命中（scrollback 旧菜单）。
     // Claude 仍用更严的 ❯ 指针+底部提示探针。
+    // Claude 用 ❯ 指针+底部提示探针；Codex 用两条 OR 覆盖：结构铁证（底部确认
+    // 提示行+编号选项，v1.2.90，覆盖长命令撑爆距离的活菜单）或近距离命中
+    // （v1.2.89，覆盖问句紧邻选项）。旧 scrollback 菜单两条都不命中，仍被拦。
     const confirmMenuLiveEarly = (aiType || 'claude') === 'claude'
       ? isLiveConfirmMenu(earlyCleanContent)
-      : hasNearbyConfirmMenu(earlyCleanContent);
+      : (isCodexLiveConfirm(earlyCleanContent) || hasNearbyConfirmMenu(earlyCleanContent));
     if (confirmKeywordHitEarly && !confirmMenuLiveEarly) {
       console.log('[AIEngine] 确认字样命中但无活菜单（Claude 缺 ❯ 指针/底部提示；Codex 问句与选项距离超限），判为旧菜单/正文误报，不发键');
     }

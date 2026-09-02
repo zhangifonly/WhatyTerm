@@ -1,0 +1,39 @@
+• Ran 24 commands · ctrl + t to view transcript
+• Ran for f in "/Users/zhangzhen/Documents/新点资料/江苏新点资料/新点_2024清单造价_江苏版_V11.3.3.1/V10FileConverterTool/bin/x86/
+  │ unreEncrypt.dll" "/Users/zhangzhen/Documents/新点资料/江苏新点资料/新点_2024清单造价_江苏版_V11.3.3.1/V10FileConverterTool/
+  │ bin/x86/unreEncrypt_NET.dll" "/Users/zhangzhen/Documents/新点资料/江苏新点资料/新点_2024清单造价_江苏版_V11.3.3.1/
+  │ … +1 lines
+  └ shasum: /Users/zhangzhen/Documents/新点资料/江苏新点资料/新点_2024清单造价_江苏版_V11.3.3.1/V10FileConverterTool/bin/x86/
+    unreEncrypt.dll: No such file or directory
+    … +2 lines (ctrl + t to view transcript)
+    shasum: /Users/zhangzhen/Documents/新点资料/江苏新点资料/新点_2024清单造价_江苏版_V11.3.3.1/V10FileConverterTool/bin/x86/
+    unreEncrypt_NET2.dll: No such file or directory
+
+✔ You approved codex to run /Users/zhangzhen/Documents/ClaudeCode/Ghidra/ghidra-auto run "/Users/zhangzhe... this time
+
+✔ You approved codex to run /Users/zhangzhen/Documents/ClaudeCode/Ghidra/ghidra-cli decompile "/Users/zha... this time
+
+✔ You approved codex to run /Users/zhangzhen/Documents/ClaudeCode/Ghidra/ghidra-cli functions "/Users/zha... this time
+
+• Ran 8 commands · ctrl + t to view transcript
+• Running /Users/zhangzhen/Documents/ClaudeCode/Ghidra/ghidra-cli decompile "/Users/zhangzhen/Documents/新点资料/江苏新点资料/新
+  │ 点_2024清单造价_江苏版_V11.3.3.1/V10FileConverterTool/bin/x64/unreEncrypt.dll" FUN_18001f6e0 FUN_18001f860
+  │ FUN_18001fbd0 FUN_18001fc50 FUN_18001fce0 FUN_18001fdc0 FUN_18001feb0 FUN_18001ff00 FUN_18001eee0
+
+
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: 是否允许读取导出序号 1-8、15 对应函数的 Ghidra 伪代码？
+
+  $ /Users/zhangzhen/Documents/ClaudeCode/Ghidra/ghidra-cli decompile
+  "/Users/zhangzhen/Documents/新点资料/江苏新点资料/新点_2024清单造价_江苏版_V11.3.3.1/V10FileConverterTool/bin/x64/unreEncrypt
+  .dll" FUN_18001f6e0 FUN_18001f860 FUN_18001fbd0 FUN_18001fc50 FUN_18001fce0 FUN_18001fdc0 FUN_18001feb0 FUN_18001ff00
+  FUN_18001eee0
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `/Users/zhangzhen/Documents/ClaudeCode/Ghidra/ghidra-cli` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel

@@ -15,7 +15,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { isLiveConfirmMenu } from '../server/services/liveMenu.js';
+import { isLiveConfirmMenu, isCodexLiveConfirm } from '../server/services/liveMenu.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const { AIEngine } = await import('../server/services/AIEngine.js');
@@ -100,6 +100,24 @@ t('codex 不受验活闸影响（同关键词无 ❯ 仍按原逻辑处理）', 
   const codexScreen = ' Do you want to proceed?\n 1. Yes\n 2. No\n';
   const r = engine.preAnalyzeStatus(codexScreen, 'codex');
   ok(r && r.actionType === 'select', `Codex 路径实测 84.3% 有效，不得被收紧，实际 ${JSON.stringify(r && { state: r.currentState, actionType: r.actionType })}`);
+});
+
+console.log('\nv1.2.90 Codex 长命令活菜单（结构判据）');
+
+t('真实抓屏：长命令确认菜单（问句-选项距离 430>400）仍判活并 select', () => {
+  const screen = fs.readFileSync(path.join(__dirname, 'fixtures/screens/codex-confirm-long-cmd.txt'), 'utf8');
+  const r = engine.preAnalyzeStatus(screen, 'codex');
+  ok(r && r.actionType === 'select',
+    `这一条锁住 v1.2.89 回归：长命令把距离撑破 400，真菜单被误杀。实际 ${JSON.stringify(r && { state: r.currentState, actionType: r.actionType })}`);
+});
+
+t('isCodexLiveConfirm：有底部提示行+编号选项判活', () => {
+  ok(isCodexLiveConfirm(' Reason: x\n › 1. Yes, proceed (y)\n   2. No (esc)\n\n Press enter to confirm or esc to cancel'));
+});
+
+t('isCodexLiveConfirm：旧菜单（尾部无提示行）不判活', () => {
+  const stale = ' › 1. Yes, proceed\n Press enter to confirm or esc to cancel\n' + '后续执行输出\n'.repeat(30);
+  ok(!isCodexLiveConfirm(stale), '答完后提示行被推离尾部，不得再判活');
 });
 
 console.log('\nv1.2.89 Codex 验活闸与排队消息守卫');
