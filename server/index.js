@@ -3564,6 +3564,18 @@ function isNetworkError(error) {
   );
 }
 
+// v1.2.92：上游限流/暂时不可用（429/502/503/rate-limit）——不是判定能力问题，
+// 是判状态用的 API 通道被挡回。当作"本轮跳过"，不计入判定出错、不触发健康降级，
+// 否则会像某 Codex 会话那样把 272 次限流累成"判定出错 1%"，还误触连续错误降级。
+function isUpstreamThrottle(error) {
+  const m = (error?.message || String(error || '')).toLowerCase();
+  return /\b(429|502|503)\b/.test(m)
+    || m.includes('rate-limited') || m.includes('rate limit')
+    || m.includes('upstream request failed')
+    || m.includes('temporarily unavailable')
+    || m.includes('all available accounts');
+}
+
 /**
  * 更新 AI 健康状态与判定统计。
  *
@@ -5554,6 +5566,28 @@ async function runBackgroundStatusAnalysis() {
         continue;
       }
 
+      // v1.2.92：hook 明确"在跑"且屏上无确认菜单时，直接用 hook 结论，不花 API 判状态。
+      // 运行中的会话每 30s 调一次 API 判状态是纯浪费——hook 已从 CLI 进程拿到确切信号。
+      // 这也修掉 OAuth 会话掉 CLI 兜底、烧 API 还撞上游限流的问题：某 Codex 会话
+      // 272 次"判定出错"全是判状态请求撞 crs.whaty.org 账号池限流(429/502/503)，
+      // 而它大部分时间在"程序运行中"，这段本就不该花 API。对所有 hook 活跃会话生效。
+      const hookAge = Date.now() - (session.lastHookEventAt || 0);
+      if (session.hookState === 'working' && hookAge < 8000 && !hasConfirmMenuOnScreen(terminalContent)) {
+        const st = {
+          currentState: '工具执行中（Hook 检测）',
+          workingDir: session.workingDir || sessionData.workingDir || '未显示',
+          recentAction: '工具执行中',
+          needsAction: false, actionType: 'none', suggestedAction: null,
+          actionReason: 'Hook 已确认 CLI 正在执行工具，无需操作也无需花 API 判状态',
+          suggestion: null, preAnalyzed: true, _source: 'hooks',
+          updatedAt: new Date().toISOString()
+        };
+        aiStatusCache.set(sessionData.id, st);
+        io.emit('ai:status', { sessionId: sessionData.id, ...st, ...getAIProviderInfo() });
+        updateAiHealthState(true, null, 'hook', sessionData.id);
+        continue;
+      }
+
       // 计算内容哈希，检测是否有变化
       const contentHash = computeContentHash(terminalContent);
       const lastHash = aiContentHashCache.get(sessionData.id);
@@ -5740,6 +5774,13 @@ async function runBackgroundStatusAnalysis() {
       // 会话之间延迟 2 秒，避免并发请求
       await new Promise(resolve => setTimeout(resolve, 2000));
     } catch (err) {
+      // 上游限流/暂不可用：判状态的 API 通道被挡回，不是判定失败。当作本轮跳过，
+      // 不记"判定出错"、不触发降级（详见 isUpstreamThrottle）。
+      if (isUpstreamThrottle(err)) {
+        console.log(`[后台AI分析] 会话 ${session.name}: 上游限流跳过本轮判定 (${(err.message||'').slice(0,60)})`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
       console.error(`[后台AI分析] 会话 ${session.name} 错误:`, err.message);
       // 这一层的异常可能来自 AI 调用，也可能来自抓屏/插件，无法区分 → 归为循环错误，
       // 不再一律算到"AI 判断"头上（那正是"AI 判断全错"假象的来源）

@@ -120,6 +120,23 @@ test('三种语言的新文案齐全（缺键会渲染成裸 key）', () => {
   }
 });
 
+test('v1.2.92 上游限流不算判定出错（当本轮跳过）', () => {
+  assert(/function isUpstreamThrottle/.test(SRC), '缺少 isUpstreamThrottle 分类器');
+  assert(/all available accounts/.test(SRC), '应识别 crs 网关的账号池限流文案');
+  assert(/429|502|503/.test(SRC), '应识别 429/502/503');
+  // 限流分支必须在 updateAiHealthState('error') 之前 continue 掉
+  const gate = SRC.indexOf('isUpstreamThrottle(err)');
+  const errAcct = SRC.lastIndexOf("updateAiHealthState(false, err, 'error'");
+  assert(gate > 0 && errAcct > 0 && gate < errAcct, '限流拦截必须早于本循环的 error 记账');
+  assert(SRC.slice(gate, errAcct).includes('continue'), '限流分支必须 continue 掉，不落到 error 记账');
+});
+
+test('v1.2.92 hook 在跑时跳过 API 判状态（省 API、避开限流）', () => {
+  assert(/hookState === 'working' && hookAge < 8000 && !hasConfirmMenuOnScreen/.test(SRC),
+    'AI 分析循环应在 hook 明确在跑且无确认菜单时短路');
+  assert(/updateAiHealthState\(true, null, 'hook'/.test(SRC), 'hook 短路应记为 hook 来源');
+});
+
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
 if (results.failed) for (const e of results.errors) console.log(`  • ${e.name}\n    ${e.error}`);
 process.exit(results.failed ? 1 : 0);
