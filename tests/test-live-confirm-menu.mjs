@@ -120,6 +120,13 @@ t('isCodexLiveConfirm：旧菜单（尾部无提示行）不判活', () => {
   ok(!isCodexLiveConfirm(stale), '答完后提示行被推离尾部，不得再判活');
 });
 
+t('真实抓屏：选项2回显整条命令（1.Yes 距底 727>700）仍判活并 select', () => {
+  const screen = fs.readFileSync(path.join(__dirname, 'fixtures/screens/codex-confirm-long-option.txt'), 'utf8');
+  const r = engine.preAnalyzeStatus(screen, 'codex');
+  ok(r && r.actionType === 'select',
+    `锁住第二次回归：超长选项块把选项行挤出 700 窗口，靠 footer 紧贴底部兜住。实际 ${JSON.stringify(r && { state: r.currentState, actionType: r.actionType })}`);
+});
+
 console.log('\nv1.2.89 Codex 验活闸与排队消息守卫');
 
 t('codex：scrollback 旧菜单（问句与选项相距>400字符）不发键', () => {

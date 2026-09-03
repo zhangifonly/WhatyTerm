@@ -52,9 +52,12 @@ export function hasNearbyConfirmMenu(content) {
  */
 export function isCodexLiveConfirm(content) {
   const trimmed = (content || '').replace(/\s+$/, '');
-  // footer 必须紧贴屏幕底部：活菜单时它是最后一行；答完后新输出把它推离底部。
-  // 仅「在尾部 700 字符内」不够——旧菜单后若新输出少，footer 仍在窗口里会误判活。
+  // 主锚：footer 紧贴屏幕底部（最后 150 字符）。这是唯一与命令长度无关的活性标志——
+  // 活菜单时它是最后一行，答完后新输出把它推离底部。Codex 确认界面尺寸完全由命令
+  // 长度决定，任何固定字符窗口都可能被够长的命令/选项撑破（v1.2.89 距离闸、v1.2.90
+  // 的 700 选项窗口先后被超长命令、超长「选项2重复整条命令」各破一次），故不能靠窗口。
   const hasFooter = /Press enter to confirm|Esc to cancel/i.test(trimmed.slice(-150));
-  const hasOption = /^[\s│>›❯]*1\.\s+\S/m.test(trimmed.slice(-700));
+  // 辅证：有编号选项行。窗口放大到 4000 覆盖超长选项块（选项2会回显整条命令）。
+  const hasOption = /^[\s│>›❯]*1\.\s+\S/m.test(trimmed.slice(-4000));
   return hasFooter && hasOption;
 }
