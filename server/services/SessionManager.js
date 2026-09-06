@@ -186,6 +186,7 @@ export class Session {
     this.aiEnabled = options.aiEnabled ?? true;
     this.autoMode = options.autoMode ?? false;
     this.autoActionEnabled = options.autoActionEnabled ?? false;  // 后台自动操作开关
+    this.waterlineMode = options.waterlineMode || 'auto';  // 上下文水位交接：off/warn/auto
     this.monitorPluginId = options.monitorPluginId || 'auto';  // 监控策略插件 ID，默认自动选择
     this.teamId = options.teamId || null;       // 所属团队 ID
     this.teamRole = options.teamRole || null;   // 团队角色: 'lead' | 'member' | null
@@ -693,6 +694,16 @@ export class Session {
         console.log(`[Session ${this.name}] autoActionEnabled 变化: ${oldValue} -> ${settings.autoActionEnabled}`);
       }
     }
+    if (settings.waterlineMode !== undefined) {
+      const allowed = ['off', 'warn', 'auto'];
+      const v = allowed.includes(settings.waterlineMode) ? settings.waterlineMode : 'auto';
+      if (this.waterlineMode !== v) {
+        console.log(`[Session ${this.name}] 水位交接模式: ${this.waterlineMode} -> ${v}`);
+      }
+      this.waterlineMode = v;
+      // 切模式后作废一次性标记，让新模式立刻按新规则判定
+      this._waterlineHandedOff = false;
+    }
     if (settings.monitorPluginId !== undefined) {
       this.monitorPluginId = settings.monitorPluginId;
       console.log(`[Session ${this.name}] 监控插件变更: ${settings.monitorPluginId}`);
@@ -958,6 +969,7 @@ export class Session {
       aiEnabled: this.aiEnabled,
       autoMode: this.autoMode,
       autoActionEnabled: this.autoActionEnabled,
+      waterlineMode: this.waterlineMode,
       monitorPluginId: this.monitorPluginId || 'auto',  // 监控策略插件 ID
       teamId: this.teamId || null,
       teamRole: this.teamRole || null,
@@ -1188,6 +1200,9 @@ export class SessionManager {
     try { this.db.exec(`ALTER TABLE closed_sessions ADD COLUMN gemini_provider TEXT`); } catch {}
     try { this.db.exec(`ALTER TABLE closed_sessions ADD COLUMN stats_total INTEGER DEFAULT 0`); } catch {}
     try { this.db.exec(`ALTER TABLE closed_sessions ADD COLUMN stats_success INTEGER DEFAULT 0`); } catch {}
+    // 上下文水位交接开关：off/warn/auto（见 contextWaterline.js）
+    try { this.db.exec(`ALTER TABLE sessions ADD COLUMN waterline_mode TEXT DEFAULT 'auto'`); } catch {}
+    try { this.db.exec(`ALTER TABLE closed_sessions ADD COLUMN waterline_mode TEXT DEFAULT 'auto'`); } catch {}
   }
 
   /**
@@ -1343,6 +1358,7 @@ export class SessionManager {
         aiEnabled: !!row.ai_enabled,
         autoMode: !!row.auto_mode,
         autoActionEnabled: !!row.auto_action_enabled,
+        waterlineMode: row.waterline_mode || 'auto',
         createdAt: new Date(row.created_at),
         skipPty: false,
         isNew: false  // 恢复已有会话
@@ -1454,6 +1470,7 @@ export class SessionManager {
             aiEnabled: !!row.ai_enabled,
             autoMode: !!row.auto_mode,
             autoActionEnabled: !!row.auto_action_enabled,
+            waterlineMode: row.waterline_mode || 'auto',
             createdAt: new Date(row.created_at),
             skipPty: true,
             isNew: false
@@ -1679,8 +1696,8 @@ export class SessionManager {
     const stats = session.stats || { total: 0, success: 0, failed: 0, aiAnalyzed: 0, aiFailed: 0, preAnalyzed: 0, hookFallback: 0 };
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO sessions
-      (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, status, created_at, updated_at, ai_type, claude_provider, codex_provider, gemini_provider, stats_total, stats_success, stats_failed, stats_ai_analyzed, stats_pre_analyzed, stats_ai_failed, stats_hook_fallback, working_dir, project_name, project_desc, team_id, team_role)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, status, created_at, updated_at, ai_type, claude_provider, codex_provider, gemini_provider, stats_total, stats_success, stats_failed, stats_ai_analyzed, stats_pre_analyzed, stats_ai_failed, stats_hook_fallback, working_dir, project_name, project_desc, team_id, team_role, waterline_mode)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       session.id,
@@ -1710,7 +1727,8 @@ export class SessionManager {
       session.projectName || '',
       session.projectDesc || '',
       session.teamId || null,
-      session.teamRole || null
+      session.teamRole || null,
+      session.waterlineMode || 'auto'
     );
   }
 
@@ -2304,6 +2322,7 @@ export class SessionManager {
       aiEnabled: Boolean(row.ai_enabled),
       autoMode: Boolean(row.auto_mode),
       autoActionEnabled: Boolean(row.auto_action_enabled),
+      waterlineMode: row.waterline_mode || 'auto',
       aiType: row.ai_type,
       projectName: row.project_name,
       projectDesc: row.project_desc,

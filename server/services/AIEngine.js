@@ -29,6 +29,10 @@ const CLI_FALLBACK_INTERVAL = 5 * 60 * 1000;
 const PROXY_BLACKLIST_TTL = 10 * 60 * 1000;
 // 代理供应商最多换几次。3 次已能覆盖"前几个恰好都挂了"，再多就不如直接走 CLI
 const PROXY_MAX_ATTEMPTS = 3;
+// 非对称降级阈值：AI 对「发继续/重启CLI//quit」这类会打断会话的主动动作，
+// 自报把握低于此值时降级为仅建议、不自动按键。取 0.6——低于此基本是模型在
+// 「说不好但先试试」，正是最容易误打断的区间；≥0.6 视为有依据，放行照旧。
+const CONFIDENCE_DOWNGRADE_THRESHOLD = 0.6;
 const CC_SWITCH_DB_PATH = join(os.homedir(), '.cc-switch', 'cc-switch.db');
 
 // 创建 ProviderService 实例（不传 io，AIEngine 不需要推送事件）
@@ -358,7 +362,13 @@ export const STATUS_TOOL = {
         description: '具体要发送的内容（如 "2"、"继续"、"/quit"）；无动作时填空字符串'
       },
       actionReason: { type: 'string', description: '为什么建议这个动作，无则空字符串' },
-      suggestion: { type: 'string', description: '给用户看的提示，无则空字符串' }
+      suggestion: { type: 'string', description: '给用户看的提示，无则空字符串' },
+      // 非对称降级用：仅当主动动作（发继续/重启CLI//quit）把握不足时，
+      // 代码会据此降级为"只建议、不自动按键"。选项菜单与不动作不受影响。
+      confidence: {
+        type: 'number',
+        description: '对本次判定的把握，0~1。发「继续」/重启CLI//quit 这类会打断会话的动作若把握不足（<0.6）请如实给低分；确认菜单、判空闲不动作可留空或给高分'
+      }
     },
     required: ['currentState', 'needsAction', 'actionType']
   }
@@ -3631,7 +3641,7 @@ ${historyText || '(空)'}
         }
       }
 
-      return {
+      const result = {
         currentState: parsed.currentState || '未知状态',
         workingDir: parsed.workingDir || '未知',
         recentAction: parsed.recentAction || '无',
@@ -3640,8 +3650,10 @@ ${historyText || '(空)'}
         suggestedAction: parsed.suggestedAction || null,
         actionReason: parsed.actionReason || null,
         suggestion: parsed.suggestion || null,
+        confidence: typeof parsed.confidence === 'number' ? parsed.confidence : null,
         updatedAt: new Date().toISOString()
       };
+      return this._applyConfidenceDowngrade(result);
     } catch (err) {
       console.error('解析状态响应失败:', err, content);
       return {
@@ -3653,9 +3665,54 @@ ${historyText || '(空)'}
         suggestedAction: null,
         actionReason: null,
         suggestion: null,
+        confidence: null,
         updatedAt: new Date().toISOString()
       };
     }
+  }
+
+  /**
+   * 非对称降级（借鉴长程编排器 supervisor 的"拿不准就偏保守"）。
+   *
+   * 编排器执行器是一次性子进程，多跑无害，故它"拿不准完成没→继续"；
+   * WebTmux 监控的是交互会话，"多发一次继续/重启"会打断或空转（记忆
+   * monitor-no-blind-continue 反复记的坏行为），所以这里方向相反：
+   * 对**会改变会话状态的主动动作**，AI 自报把握不足时降级为纯建议、不自动按键，交给人。
+   *
+   * 只降这三类主动动作：
+   *   - text_input 发「继续」（机械推进，最容易误打断运行中的任务）
+   *   - shell_command 重启 CLI（claude -c 等，误判会在别处乱起进程）
+   *   - text_input 发「/quit」（误判会白白杀掉正常会话）
+   * 不碰：确认菜单 select（用户明确在等选，不选反而卡死流水线）、
+   *       针对性开放问答（已是慎重回答）、needsAction:false（本就安全）。
+   *
+   * 与熔断正交：熔断管「连续多轮空转」，这里管「单次低置信」，两者独立生效。
+   */
+  _applyConfidenceDowngrade(result) {
+    if (!result || !result.needsAction) return result;
+    const conf = result.confidence;
+    // 没给置信度（旧供应商不支持该字段、或判的是菜单/不动作）→ 不干预，保持原行为
+    if (typeof conf !== 'number') return result;
+    if (conf >= CONFIDENCE_DOWNGRADE_THRESHOLD) return result;
+
+    const action = String(result.suggestedAction || '');
+    const isContinue = result.actionType === 'text_input' && /^继续/.test(action);
+    const isQuit = result.actionType === 'text_input' && action.trim() === '/quit';
+    const isRestart = result.actionType === 'shell_command';
+    if (!isContinue && !isQuit && !isRestart) return result;
+
+    const what = isContinue ? '发「继续」' : (isQuit ? '发 /quit 退出' : '重启 CLI');
+    console.log(`[AIEngine] 置信度不足（${conf} < ${CONFIDENCE_DOWNGRADE_THRESHOLD}），`
+      + `${what} 降级为仅建议、不自动执行`);
+    return {
+      ...result,
+      needsAction: false,
+      actionType: 'warning',   // server 的自动操作闸门会拦下 warning，只展示不按键
+      _downgradedFrom: result.actionType,
+      _downgradeConfidence: conf,
+      suggestion: `AI 对"${what}"把握不足（置信度 ${conf}），已暂不自动操作，`
+        + `请你确认后手动处理。原判断：${result.currentState || ''}`,
+    };
   }
 
   /**

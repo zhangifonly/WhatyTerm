@@ -169,6 +169,7 @@ import { getProjectRecordingService } from './services/ProjectRecordingService.j
 import cliRegistry from './services/CliRegistry.js';
 import HookServer from './services/HookServer.js';
 import cliLearner from './services/CliLearner.js';
+import { readContextWaterline, decideWaterlineAction, HANDOFF_PROMPT } from './services/contextWaterline.js';
 import tokenStatsService from './services/TokenStatsService.js';
 import builtinProviderDB from './services/BuiltinProviderDB.js';
 import ccSwitchAudit from './services/CCSwitchAudit.js';
@@ -4597,6 +4598,54 @@ async function runBackgroundAutoAction() {
         sessionData.monitorPluginId  // 强制使用的插件 ID
       );
 
+      // 上下文水位交接（借鉴长程编排器 05 节）：赶在自动压缩前，让会话先把进度/决定/
+      // 下一步写进记忆再继续，压缩后新上下文靠 MEMORY.md 接上。水位取自 Claude 底栏
+      // "Context left until auto-compact: N%"（拿不到的 CLI 返回 null，不臆造、不触发）。
+      // 判定：这轮 preResult 认为该发「继续」==会话空闲、本该推进——正是插收尾的时机。
+      {
+        const usedPercent = readContextWaterline(terminalContent);
+        const isIdleNow = !!(preResult && preResult.needsAction && preResult.suggestedAction === '继续');
+        const wl = decideWaterlineAction({
+          usedPercent,
+          isIdle: isIdleNow,
+          alreadyHandedOff: !!session._waterlineHandedOff,
+          mode: session.waterlineMode || 'auto',  // 用户开关：off/warn/auto
+        });
+        // 单独推一个轻量事件给前端右栏显示：ai:status 有多处 emit，逐个塞易漏，
+        // 用独立通道最省心。拿不到读数（非 Claude CLI 或底栏无该行）时推 null，前端不渲染。
+        session._waterline = (usedPercent !== null)
+          ? { usedPercent, level: wl.level, mode: session.waterlineMode || 'auto' }
+          : null;
+        io.to(`session:${sessionData.id}`).emit('ai:waterline', {
+          sessionId: sessionData.id,
+          waterline: session._waterline,
+        });
+        if (wl.level === 'handoff') {
+          // 把这轮的「继续」升级为「收尾指令」：改写 preResult，复用下游全部门控
+          //（autoActionEnabled 开关、分两次发送、循环检测因动作内容变化而自动归零）。
+          console.log(`[水位交接] 会话 ${session.name}: ${wl.reason}，将「继续」改为收尾指令`);
+          session._waterlineHandedOff = true;  // 会话级只发一次，避免每轮复读
+          preResult = {
+            ...preResult,
+            suggestedAction: HANDOFF_PROMPT,
+            actionType: 'text_input',
+            currentState: `上下文水位 ${usedPercent}%，接近自动压缩`,
+            actionReason: '接近自动压缩，先写记忆再继续（上下文交接）',
+            _source: 'context_waterline_handoff',
+          };
+        } else if (wl.level === 'warn') {
+          // 只在右栏提示、不改动作。水位回落到安全区后允许再次交接。
+          if (usedPercent < 80) session._waterlineHandedOff = false;
+          if (!session._waterlineWarnedAt || Date.now() - session._waterlineWarnedAt > 120000) {
+            session._waterlineWarnedAt = Date.now();
+            console.log(`[水位交接] 会话 ${session.name}: ${wl.reason}`);
+          }
+        } else if (usedPercent !== null && usedPercent < 80) {
+          // 水位已回落（多半是发生过压缩），重置一次性标记，下个周期可再交接。
+          session._waterlineHandedOff = false;
+        }
+      }
+
       // 循环检测：preResult 建议发送"继续"时，检查是否陷入死循环
       if (preResult && preResult.needsAction && preResult.suggestedAction === '继续') {
         const lastAction = lastActionMap.get(session.id);
@@ -7795,6 +7844,32 @@ ${terminalContext ? terminalContext : '（无）'}
     }, 300);
 
     autoActionToggleState.set(data.sessionId, { timer, targetEnabled });
+  });
+
+  // 上下文水位交接开关（三态：off/warn/auto）
+  socket.on('ai:toggleWaterline', (data) => {
+    const session = sessionManager.getSession(data.sessionId);
+    if (!session) return;
+
+    const allowed = ['off', 'warn', 'auto'];
+    const mode = allowed.includes(data.mode) ? data.mode : 'auto';
+    if (session.waterlineMode === mode) {
+      socket.emit('session:updated', session.toJSON());
+      return;
+    }
+
+    session.updateSettings({ waterlineMode: mode });
+    sessionManager.updateSession(session);
+
+    io.to(`session:${data.sessionId}`).emit('session:updated', session.toJSON());
+    io.emit('sessions:updated', sessionManager.listSessions());
+
+    const label = { off: '关闭', warn: '仅告警', auto: '自动收尾' }[mode];
+    historyLogger.log(data.sessionId, {
+      type: 'system',
+      content: `上下文水位交接：${label}`
+    });
+    console.log(`[水位交接] 会话 ${session.name}: 模式 -> ${mode}`);
   });
 
   // ========== 预约管理事件 ==========

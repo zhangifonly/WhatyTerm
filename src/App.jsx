@@ -184,6 +184,7 @@ export default function App() {
     return saved === 'true';
   });
   const [aiStatusMap, setAiStatusMap] = useState({});
+  const [waterlineMap, setWaterlineMap] = useState({}); // sessionId -> { usedPercent, level, mode }
   // 扫码免密登录：手机发起的待确认请求 { id, code, ip, ua }（仅本机桌面端收到）
   const [scanLoginReq, setScanLoginReq] = useState(null);
   const [hookStateMap, setHookStateMap] = useState({}); // sessionId -> { state, event, ts }
@@ -681,6 +682,14 @@ export default function App() {
     addDebugLog('toggleAutoAction', { sessionId, enabled, message: enabled ? '开启后台自动操作' : '关闭后台自动操作' });
   }, [addDebugLog]);
 
+  // 上下文水位交接：三态循环 off → warn → auto → off
+  const cycleWaterlineMode = useCallback((sessionId, current) => {
+    const order = ['off', 'warn', 'auto'];
+    const next = order[(order.indexOf(current || 'auto') + 1) % order.length];
+    socket.emit('ai:toggleWaterline', { sessionId, mode: next });
+    addDebugLog('toggleWaterline', { sessionId, mode: next, message: `上下文水位交接 -> ${next}` });
+  }, [addDebugLog]);
+
   // 打开供应商下拉菜单
   const openProviderDropdown = useCallback(async () => {
     console.log('[Provider] 点击下拉箭头, currentSession:', currentSession);
@@ -774,6 +783,11 @@ export default function App() {
       if (data.needsAction === false && data.sessionId === currentSessionRef.current?.id) {
         setSuggestion(null);
       }
+    });
+
+    // 上下文水位（每监测周期推一次；waterline 为 null 表示拿不到读数）
+    socket.on('ai:waterline', (data) => {
+      setWaterlineMap(prev => ({ ...prev, [data.sessionId]: data.waterline }));
     });
 
     // 监听会话内存更新
@@ -2512,6 +2526,32 @@ export default function App() {
                     )}
                   </div>
                 )}
+                {/* 上下文水位：接近自动压缩时高亮提示 */}
+                {(() => {
+                  const wl = waterlineMap[currentSession.id];
+                  if (!wl || typeof wl.usedPercent !== 'number') return null;
+                  const danger = wl.level === 'handoff';
+                  const warn = wl.level === 'warn';
+                  const color = danger ? '#ef4444' : (warn ? '#f59e0b' : '#22c55e');
+                  const barBg = 'rgba(255,255,255,0.08)';
+                  const note = danger
+                    ? '接近压缩，已让 AI 先写记忆再继续'
+                    : (warn ? '接近自动压缩阈值' : '充足');
+                  return (
+                    <div className="ai-status-section">
+                      <h4>上下文水位</h4>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <div style={{ flex: 1, height: 6, background: barBg, borderRadius: 3, overflow: 'hidden' }}>
+                          <div style={{ width: `${wl.usedPercent}%`, height: '100%', background: color, transition: 'width .3s' }} />
+                        </div>
+                        <span style={{ color, fontWeight: 'bold', fontSize: 12, minWidth: 66, textAlign: 'right' }}>
+                          已用 {wl.usedPercent}%
+                        </span>
+                      </div>
+                      <p style={{ color: warn || danger ? color : '#888', fontSize: 11, margin: '4px 0 0' }}>{note}</p>
+                    </div>
+                  );
+                })()}
                 <div className="ai-status-section">
                   <h4>{t('aiPanel.currentState')}</h4>
                   <p>{aiStatusMap[currentSession.id].currentState || t('aiPanel.waitingAnalysis')}</p>
@@ -2596,6 +2636,23 @@ export default function App() {
             >
               {currentSession.autoActionEnabled ? t('controls.autoOn') : t('controls.autoOff')}
             </button>
+            {(() => {
+              const wm = currentSession.waterlineMode || 'auto';
+              const meta = {
+                off:  { label: '📄 上下文:关',   cls: 'btn-secondary', title: '上下文水位交接：关闭（不干预自动压缩）' },
+                warn: { label: '📄 上下文:告警', cls: 'btn-secondary', title: '上下文水位交接：仅告警（接近压缩时提示，不自动操作）' },
+                auto: { label: '📄 上下文:自动', cls: 'btn-primary',   title: '上下文水位交接：自动收尾（接近压缩且空闲时，先让 AI 写记忆再继续）' },
+              }[wm];
+              return (
+                <button
+                  className={`btn btn-small ${meta.cls}`}
+                  onClick={() => cycleWaterlineMode(currentSession.id, wm)}
+                  title={meta.title}
+                >
+                  {meta.label}
+                </button>
+              );
+            })()}
             <button
               className="btn btn-secondary btn-small"
               onClick={() => setShowScheduleManager(true)}

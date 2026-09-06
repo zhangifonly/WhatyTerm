@@ -1,7 +1,7 @@
 import BasePlugin from '../BasePlugin.js';
 import promptLoader from '../PromptLoader.js';
 import { promptPendingText, isOwnPendingInput } from '../../promptState.js';
-import { isLiveConfirmMenu } from '../../liveMenu.js';
+import { isLiveConfirmMenu, isCodexLiveConfirm } from '../../liveMenu.js';
 
 /**
  * 默认监控策略插件
@@ -163,6 +163,13 @@ class DefaultPlugin extends BasePlugin {
     // 使用清理后的文本进行匹配，避免 ANSI 转义序列干扰
     const hasDoYouWantToProceed = /Do you want to proceed\?/i.test(cleanLastLines);
     const hasDoYouWantToMakeEdit = /Do you want to make this edit/i.test(cleanLastLines);
+    // Codex 的确认框措辞不止 "Do you want to proceed?"：跑命令时会问
+    // "Would you like to run the following command?"，底部固定是
+    // "Press enter to confirm or esc to cancel"。任一出现 + 有编号选项即确认界面。
+    // 不补的话会掉过 confirmation 分支，被后面 /running/i 命中残留的 "Running ..."
+    // 误判成运行中，卡死在"程序运行中，等待完成"永不确认。
+    const hasWouldYouLikeTo = /Would you like to/i.test(cleanLastLines);
+    const hasPressEnterConfirm = /Press enter to confirm/i.test(cleanLastLines);
     const hasOption1Yes = /1\.\s*Yes/i.test(cleanLastLines);
     const hasOption2No = /2\.\s*No/i.test(cleanLastLines);
     const hasOption2AllowEdits = /2\.\s*Yes,\s*allow/i.test(cleanLastLines);
@@ -180,8 +187,12 @@ class DefaultPlugin extends BasePlugin {
       });
     }
 
-    // 检测任何 "Do you want to proceed/make" 确认界面
-    if ((hasDoYouWantToProceed || hasDoYouWantToMakeEdit) && hasOption1Yes) {
+    // 检测任何 "Do you want to proceed/make" / "Would you like to" 确认界面
+    if ((hasDoYouWantToProceed || hasDoYouWantToMakeEdit || hasWouldYouLikeTo) && hasOption1Yes) {
+      return 'confirmation';
+    }
+    // Codex 底部 "Press enter to confirm" + 编号选项：即便问句措辞再变也兜得住
+    if (hasPressEnterConfirm && hasOption1Yes) {
       return 'confirmation';
     }
 
@@ -291,6 +302,27 @@ class DefaultPlugin extends BasePlugin {
           phase,
           phaseConfig: config,
           message: '检测到 y/n 确认，自动选择 y'
+        };
+      }
+
+      // Codex 确认界面：指针是 ›(U+203A) 不是 Claude 的 ❯(U+2771)，底部提示是
+      // "Press enter to confirm / Esc to cancel"。isLiveConfirmMenu 只认 ❯ + Claude
+      // 措辞（其注释亦声明「Codex 判定路径不要套用本探针」），若不先分流，Codex 真
+      // 菜单会在下面那道 ❯ 闸被判成「屏上无活菜单」而不操作——正是本次卡住的第二道坎。
+      // isCodexLiveConfirm 用 footer 贴底 + 编号选项，与命令长度无关（见 liveMenu.js）。
+      // ⚠️ 其 footer 正则含 "Esc to cancel"，Claude 老菜单也命中——故必须再排除 Claude：
+      // Claude 菜单用 ❯ 指针，命中 isLiveConfirmMenu；Codex 用 ›，不命中。加 !isLiveConfirmMenu
+      // 保证 Claude 的「2. Yes, allow」仍走下面选 2 的原逻辑，不被这里抢去盲选 1。
+      if (isCodexLiveConfirm(cleanLastLines) && !isLiveConfirmMenu(cleanLastLines)) {
+        // Codex 确认菜单绝大多数是「运行命令」确认，默认选 1（Yes / 执行本次）。
+        // 若出现「2. Yes, 且不再询问」这类永久授权项，仍选 1（只放行本次更稳妥）。
+        return {
+          needsAction: true,
+          actionType: 'select',
+          suggestedAction: '1',
+          phase,
+          phaseConfig: config,
+          message: '检测到 Codex 确认菜单，自动选择选项 1（执行本次）'
         };
       }
 
