@@ -36,7 +36,8 @@ services:
       - WECHAT_APP_ID=${WECHAT_APP_ID}
       - WECHAT_NOTIFY_URL=${WECHAT_NOTIFY_URL:-https://term.whaty.org/api/payment/wechat/notify}
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3100/api/plans"]
+      # node:20-slim 不含 wget/curl，用 node 自带 http 探测（原 wget 探针会一直失败卡在 starting）
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3100/api/plans',r=>process.exit(r.statusCode<400?0:1)).on('error',()=>process.exit(1))"]
       interval: 30s
       timeout: 10s
       retries: 3
