@@ -35,11 +35,18 @@ export const HANDOFF_PROMPT =
  */
 export function readContextWaterline(terminalContent) {
   if (!terminalContent) return null;
-  // Claude Code 底栏："Context left until auto-compact: 23%"
-  // 允许大小写/空白差异；只取最后一次出现（底栏是最新帧）。
-  const re = /Context left until auto-compact:\s*(\d{1,3})\s*%/gi;
-  let m, last = null;
-  while ((m = re.exec(terminalContent)) !== null) last = m[1];
+  // Claude Code 底栏两种历史文案都要兼容（读到的都是「剩余」百分比）：
+  //   旧版："Context left until auto-compact: 23%"
+  //   新版："23% until auto-compact"（百分比在前，无 "Context left" 前缀/冒号）
+  // 只取最后一次出现（底栏是最新帧）。
+  let last = null;
+  const reOld = /Context left until auto-compact:\s*(\d{1,3})\s*%/gi;
+  let m;
+  while ((m = reOld.exec(terminalContent)) !== null) last = m[1];
+  if (last === null) {
+    const reNew = /(\d{1,3})\s*%\s*until\s+auto-compact/gi;
+    while ((m = reNew.exec(terminalContent)) !== null) last = m[1];
+  }
   if (last === null) return null;
   const left = Math.max(0, Math.min(100, parseInt(last, 10)));
   return 100 - left; // 转成已用

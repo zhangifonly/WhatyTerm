@@ -531,6 +531,11 @@ class DefaultPlugin extends BasePlugin {
                          /\[plan\]\s*$/m.test(lastLines) ||
                          /OpenCode\s*>\s*$/m.test(lastLines);
 
+    // Codex 空闲提示符：输入框占位符 "Ask Codex to do anything"（> 后跟占位文字，
+    // 不是空行，故 claudeCodeIdle 匹配不到），或完成标志 "Worked for Nm"。
+    const codexIdle = /Ask Codex to do anything/i.test(lastLines) ||
+                      /Worked for \d+m/i.test(lastLines);
+
     // Shell 空闲提示符（更宽松）
     const shellIdle = /[\$#%]\s*[\x00-\x1f]*$/.test(lastLines) ||
                      /\n.*[\$#%]\s*$/.test(lastLines);
@@ -538,7 +543,7 @@ class DefaultPlugin extends BasePlugin {
     // 通用空闲检测
     const genericIdle = />>>\s*$|In \[\d+\]:\s*$/m.test(lastLines);
 
-    return claudeCodeIdle || openCodeIdle || shellIdle || genericIdle;
+    return claudeCodeIdle || openCodeIdle || codexIdle || shellIdle || genericIdle;
   }
 
   /**
