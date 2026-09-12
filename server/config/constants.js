@@ -60,15 +60,16 @@ const CODEX_VERSION = getLocalVersion('codex --version', '0.77.0');
 const GEMINI_VERSION = getLocalVersion('gemini --version', '0.21.3');
 
 // 默认模型（从配置文件读取，回退到硬编码值）
-export const DEFAULT_MODEL = modelsConfig?.claude?.default || 'claude-sonnet-4-6';
+export const DEFAULT_MODEL = modelsConfig?.claude?.default || 'claude-sonnet-5';
 
 // Claude 模型降级列表（从配置文件读取）
 export const CLAUDE_MODEL_FALLBACK_LIST = modelsConfig?.claude?.fallback || [
-  'claude-haiku-4-5-20251001',
+  'claude-sonnet-5',
   'claude-sonnet-4-6',
+  'claude-haiku-4-5-20251001',
   'claude-sonnet-4-5-20250929',
+  'claude-opus-5',
   'claude-opus-4-6',
-  'claude-opus-4-5-20251101',
 ];
 
 // 获取最新的模型配置（支持热更新）

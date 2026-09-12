@@ -1,19 +1,21 @@
 {
   "claude": {
-    "default": "claude-sonnet-4-6",
+    "default": "claude-sonnet-5",
     "fallback": [
-      "claude-haiku-4-5-20251001",
+      "claude-sonnet-5",
       "claude-sonnet-4-6",
+      "claude-haiku-4-5-20251001",
       "claude-sonnet-4-5-20250929",
-      "claude-opus-4-6",
-      "claude-opus-4-5-20251101"
+      "claude-opus-5",
+      "claude-opus-4-6"
     ],
     "display": {
-      "claude-sonnet-4-6": "Sonnet 4.6 (默认)",
-      "claude-opus-4-6": "Opus 4.6 (旗舰)",
+      "claude-sonnet-5": "Sonnet 5 (默认)",
+      "claude-opus-5": "Opus 5 (旗舰)",
+      "claude-sonnet-4-6": "Sonnet 4.6",
       "claude-haiku-4-5-20251001": "Haiku 4.5 (最快)",
       "claude-sonnet-4-5-20250929": "Sonnet 4.5",
-      "claude-opus-4-5-20251101": "Opus 4.5"
+      "claude-opus-4-6": "Opus 4.6"
     }
   },
   "openai": {
@@ -42,5 +44,5 @@
       "gemini-2.5-pro": "Gemini 2.5 Pro"
     }
   },
-  "lastUpdated": "2026-03-02"
+  "lastUpdated": "2026-09-12"
 }

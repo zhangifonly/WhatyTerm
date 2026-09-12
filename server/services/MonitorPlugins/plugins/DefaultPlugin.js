@@ -196,11 +196,18 @@ class DefaultPlugin extends BasePlugin {
       return 'confirmation';
     }
 
-    if (/Allow once|Allow for this session|Deny/i.test(lastLines) ||
+    // 弱信号块（纯文案匹配，无结构化问句）：正文里的"选择/确认/Deny"极易命中叙述性
+    // 文字（如 Codex 完成后写 "选择 180401a10 作为下一目标"里"选择"后跟数字1）。
+    // 必须屏上真有活菜单（Claude ❯ 指针+提示 / Codex › footer+编号）才认，否则会把
+    // 完成后的空闲屏误判成 confirmation、卡在下游"无活菜单"闸永不推进。
+    // 见记忆 monitor-no-blind-continue。强信号块（上方 Do you want to + 1.Yes）不受此限。
+    const hasLiveMenuForWeak = isLiveConfirmMenu(cleanLastLines) || isCodexLiveConfirm(cleanLastLines);
+    if (hasLiveMenuForWeak && (
+        /Allow once|Allow for this session|Deny/i.test(lastLines) ||
         /allow all edits during this session/i.test(lastLines) ||
         /\[1\].*\[2\].*\[3\]/i.test(lastLines) ||
         /选择.*[123]|choose.*[123]/i.test(lastLines) ||
-        /\(y\/n\)|\[Y\/n\]|\[yes\/no\]/i.test(lastLines)) {
+        /\(y\/n\)|\[Y\/n\]|\[yes\/no\]/i.test(lastLines))) {
       return 'confirmation';
     }
 
