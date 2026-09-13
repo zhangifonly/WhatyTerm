@@ -5137,6 +5137,13 @@ async function runBackgroundAutoAction() {
             ? (prevAction.continueCount || 1) + 1
             : (action === '继续' ? 1 : 0);
           lastActionMap.set(session.id, { action, time: now, contentHash, advanceSig: curAdvanceSig, continueCount });
+          // ⚠️ 按键发出后必须立即作废状态缓存：缓存 30 秒才刷一轮
+          //（AI_ANALYSIS_INTERVAL），而确认框一旦被自动选掉、屏幕就往下走了。
+          // 不清的话「N 个等确认」会挂着一条已经处理完的陈旧状态最长 30 秒，
+          // 用户点进去什么都没有 —— 摘要谎报的主要来源。
+          // 顺带清内容哈希，让下一轮 AI 分析不被「内容无变化」短路挡掉。
+          aiStatusCache.delete(session.id);
+          aiContentHashCache.delete(session.id);
           // 水位阶段在这里才落地——「确认发出」的收口点（与 lastActionMap/台账同一处）。
           // 上面 5 处 continue 天然到不了这里，阶段留在原地 → 下轮重试同一步（不缺步）；
           // 到了这里就只推进一次（不重复）。
@@ -5251,6 +5258,10 @@ async function runBackgroundAutoAction() {
               ? (prevActionCache.continueCount || 1) + 1
               : (action === '继续' ? 1 : 0);
             lastActionMap.set(session.id, { action, contentHash, advanceSig: curAdvanceSig, continueCount: continueCountCache, time: now });
+            // 同 preAnalyze 路径：按键后立即作废状态缓存，否则陈旧的「确认界面」
+            // 会在摘要里挂最长 30 秒（AI_ANALYSIS_INTERVAL），点进去已无事可做。
+            aiStatusCache.delete(session.id);
+            aiContentHashCache.delete(session.id);
           }
           actionOutcome.record(session, {
             state: status.currentState, actionType: status.actionType, action, beforeScreen: terminalContent,
@@ -5431,6 +5442,10 @@ async function runBackgroundAutoAction() {
           ? (prevActionAi.continueCount || 1) + 1
           : (action === '继续' ? 1 : 0);
         lastActionMap.set(session.id, { action, time: now, contentHash, advanceSig: curAdvanceSigAi, continueCount: continueCountAi });
+        // 同 preAnalyze 路径：按键后立即作废状态缓存，否则陈旧的「确认界面」
+        // 会在摘要里挂最长 30 秒（AI_ANALYSIS_INTERVAL），点进去已无事可做。
+        aiStatusCache.delete(session.id);
+        aiContentHashCache.delete(session.id);
         actionOutcome.record(session, {
           state: status.currentState, actionType: status.actionType, action, beforeScreen: terminalContent,
           source: status._source || (status.preAnalyzed ? 'rule' : 'ai'),

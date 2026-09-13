@@ -22,6 +22,7 @@ function assert(cond, msg) { if (!cond) throw new Error(msg || '断言失败'); 
 
 const APP = fs.readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8');
 const SM = fs.readFileSync(new URL('../server/services/SessionManager.js', import.meta.url), 'utf8');
+const SRV = fs.readFileSync(new URL('../server/index.js', import.meta.url), 'utf8');
 
 // ---------- ① 门牌号必须稳定：不随显示排序变 ----------
 // 复刻 App.jsx 的两段逻辑（序号按 createdAt 编号；显示顺序另算）
@@ -316,6 +317,35 @@ test('实现里等确认判据不含裸 needsAction', () => {
   const block = APP.slice(i, i + 600);
   assert(/actionType === 'select'/.test(block), '未按选项面板判定');
   assert(!/st\.needsAction/.test(block), '等确认判据仍在看 needsAction —— 会谎报');
+});
+
+
+// ---------- ⑧ 按键后必须立即作废状态缓存 ----------
+// 缓存 30 秒才刷一轮（AI_ANALYSIS_INTERVAL），而确认框一被自动选掉屏幕就往下走。
+// 不清的话「N 个等确认」会挂着一条已处理完的陈旧状态最长 30 秒，
+// 用户点进去什么都没有 —— 摘要谎报的主要来源。
+test('三条发送路径都在按键后清 aiStatusCache', () => {
+  const n = (SRV.match(/aiStatusCache\.delete\(session\.id\)/g) || []).length;
+  assert(n >= 3, `应在 preAnalyze / ai_cache / ai 三条发送路径都清缓存，实际 ${n} 处`);
+});
+test('清缓存紧跟落账点（确认发出后才清，不是提前清）', () => {
+  const idxs = [];
+  for (let i = SRV.indexOf('lastActionMap.set(session.id'); i !== -1;
+       i = SRV.indexOf('lastActionMap.set(session.id', i + 1)) idxs.push(i);
+  assert(idxs.length >= 3, `应有 3 处落账点，实际 ${idxs.length}`);
+  for (const at of idxs) {
+    const near = SRV.slice(at, at + 700);
+    assert(/aiStatusCache\.delete/.test(near), '某条落账点后没有清状态缓存');
+  }
+});
+test('同时清内容哈希（否则下一轮 AI 分析被「内容无变化」短路挡掉）', () => {
+  const at = SRV.indexOf('lastActionMap.set(session.id');
+  const near = SRV.slice(at, at + 700);
+  assert(/aiContentHashCache\.delete/.test(near), '未清内容哈希，AI 分析会被短路');
+});
+test('「待推进」摘要条已移除（常驻十几个、点进去无事可做）', () => {
+  assert(!/个待推进/.test(APP), '待推进摘要条仍在渲染');
+  assert(/idleWaitingIds/.test(APP), 'idleWaitingIds 应保留给列表红点与排序使用');
 });
 
 await Promise.all(pending);

@@ -1744,16 +1744,10 @@ export default function App() {
             {erroredIds.size} 个出错待处理
           </button>
         )}
-        {idleWaitingIds.size > 0 && (
-          <button
-            className="session-pending-bar idle"
-            onClick={() => jumpToNext(idleWaitingIds)}
-            title={'空闲等推进，且该会话的自动操作是关的 —— 没人替它按「继续」。\n开了自动操作的会话不计入。'}
-          >
-            <span className="spb-dot" />
-            {idleWaitingIds.size} 个待推进
-          </button>
-        )}
+        {/* 「待推进」摘要条已去掉：它常驻显示十几个，而那些会话只是自动操作关着的
+            空闲状态 —— 多半是你故意不管的，点进去也无事可做，摘要条反而占掉列表空间。
+            这类会话在列表里仍有红点标记，⌘↓ 在没有更紧迫项时也仍会跳到它们。
+            idleWaitingIds 保留给列表红点与「待处理优先」排序使用。 */}
 
         <div className="session-list">
           {orderedSessions.map((session) => (
