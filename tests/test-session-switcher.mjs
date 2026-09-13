@@ -252,6 +252,72 @@ test('依赖已锁确切版本（pinyin-match，非 pinyin-pro）', () => {
   assert(!pkg.dependencies['pinyin-pro'], '不应同时引入 pinyin-pro（实测误命中更多、体积翻倍）');
 });
 
+
+// ---------- ⑦ 待办分类：needsAction ≠ 等确认 ----------
+// 实测踩过的坑：拿 needsAction 当「N 个等确认」，实测 35 会话里 17 个 needsAction=true
+// 而其中 **0 个**是确认界面（8×Claude空闲 / 6×发继续 / 2×Grok空闲 / 1×编译错误）。
+// 用户点进去只是个空闲会话，什么都不用确认 —— 文案谎报，功能反而误导。
+const classify = (sessions, statusMap) => {
+  const conf = new Set(), err = new Set(), idle = new Set();
+  for (const ses of sessions) {
+    const st = statusMap[ses.id]; if (!st) continue;
+    if (st.actionType === 'select' || st.actionType === 'confirm') conf.add(ses.id);
+  }
+  for (const ses of sessions) {
+    const st = statusMap[ses.id]; if (!st || conf.has(ses.id)) continue;
+    if (st.actionType === 'error' || (st.requireConfirmation && st.actionType !== 'text_input')) err.add(ses.id);
+  }
+  for (const ses of sessions) {
+    const st = statusMap[ses.id];
+    if (!st?.needsAction || ses.autoActionEnabled) continue;
+    if (conf.has(ses.id) || err.has(ses.id)) continue;
+    idle.add(ses.id);
+  }
+  return { conf, err, idle };
+};
+
+test('待办分类：空闲发「继续」不算等确认（这是原缺陷）', () => {
+  const ses = [{ id: 'a', autoActionEnabled: false }];
+  const sm = { a: { needsAction: true, actionType: 'text_input', suggestedAction: '继续', currentState: 'Claude Code空闲' } };
+  const { conf, idle } = classify(ses, sm);
+  assert(conf.size === 0, '空闲发继续被误判成等确认 —— 点进去无事可做');
+  assert(idle.has('a'), '应归入待推进');
+});
+test('待办分类：选项面板才算等确认', () => {
+  const ses = [{ id: 'a', autoActionEnabled: false }];
+  const sm = { a: { needsAction: true, actionType: 'select', suggestedAction: '2' } };
+  const { conf, idle } = classify(ses, sm);
+  assert(conf.has('a'), '选项面板应算等确认');
+  assert(!idle.has('a'), '不该重复计入待推进');
+});
+test('待办分类：报错单独一档，不并进等确认', () => {
+  const ses = [{ id: 'a', autoActionEnabled: false }];
+  const sm = { a: { needsAction: false, actionType: 'error', requireConfirmation: true } };
+  const { conf, err } = classify(ses, sm);
+  assert(!conf.has('a'), '报错不是「屏上有面板等按键」，不该混进等确认');
+  assert(err.has('a'), '应归入出错待处理');
+});
+test('待办分类：自动操作开着的空闲会话不计入（它自己会处理）', () => {
+  const ses = [{ id: 'a', autoActionEnabled: true }];
+  const sm = { a: { needsAction: true, actionType: 'text_input', suggestedAction: '继续' } };
+  const { conf, err, idle } = classify(ses, sm);
+  assert(conf.size === 0 && err.size === 0 && idle.size === 0, '自动操作开着不该报待办');
+});
+test('待办分类：三档互斥，同一会话只进一档', () => {
+  const ses = [{ id: 'a', autoActionEnabled: false }];
+  const sm = { a: { needsAction: true, actionType: 'select', requireConfirmation: true } };
+  const { conf, err, idle } = classify(ses, sm);
+  const n = (conf.has('a') ? 1 : 0) + (err.has('a') ? 1 : 0) + (idle.has('a') ? 1 : 0);
+  assert(n === 1, `同一会话进了 ${n} 档，计数会重复`);
+});
+test('实现里等确认判据不含裸 needsAction', () => {
+  const i = APP.indexOf('const awaitingConfirmIds');
+  assert(i > 0, '找不到等确认判据');
+  const block = APP.slice(i, i + 600);
+  assert(/actionType === 'select'/.test(block), '未按选项面板判定');
+  assert(!/st\.needsAction/.test(block), '等确认判据仍在看 needsAction —— 会谎报');
+});
+
 await Promise.all(pending);
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
 if (results.failed) for (const e of results.errors) console.log(`  • ${e.name}\n    ${e.error}`);

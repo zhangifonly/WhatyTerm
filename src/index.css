@@ -4492,3 +4492,27 @@ body {
   cursor: help;
   white-space: nowrap;
 }
+
+/* 「待推进」用中性色，与「等确认」的橙色警示区分开：
+   前者只是没人按继续，后者是屏上真开着面板在等你选，紧迫度不同。 */
+.session-pending-bar.idle {
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted) / 0.35);
+  border-color: hsl(var(--border) / 0.6);
+}
+.session-pending-bar.idle:hover { background: hsl(var(--muted) / 0.5); }
+.session-pending-bar.idle .spb-dot {
+  background: hsl(var(--muted-foreground) / 0.7);
+  animation: none;               /* 不闪，避免和真警示抢注意力 */
+}
+.switcher-flag.idle { color: hsl(var(--muted-foreground) / 0.8); font-weight: 700; }
+
+/* 「出错待处理」用红色：任务失败要你判断，比橙色的等按键更该先看 */
+.session-pending-bar.error {
+  color: hsl(0 84% 68%);
+  background: hsl(0 84% 60% / 0.12);
+  border-color: hsl(0 84% 60% / 0.3);
+}
+.session-pending-bar.error:hover { background: hsl(0 84% 60% / 0.2); }
+.session-pending-bar.error .spb-dot { background: hsl(0 84% 65%); }
+.switcher-flag.err { color: hsl(0 84% 68%); font-weight: 700; }

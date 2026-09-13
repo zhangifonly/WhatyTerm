@@ -1242,14 +1242,57 @@ export default function App() {
     });
   }, []);
 
-  // 需要人工介入的会话（自动操作开着时它自己会处理，不算待办）
-  const needsActionIds = useMemo(() => {
+  // 「真的在等你确认」和「只是空闲、可以推进」是两回事，必须分开。
+  //
+  // ⚠️ 不能用 needsAction 当「等确认」：它的语义是「监控认为该做点什么」，而该做的
+  //    动作**绝大多数是发「继续」**。实测 35 个会话里 needsAction=true 有 17 个，
+  //    其中 0 个是确认界面：
+  //      8 × Claude Code空闲   6 × 检测到等待输入状态，发送"继续"指令
+  //      2 × Grok 空闲         1 × 检测到编译/构建错误
+  //    拿它当「N 个等确认」→ 点进去只是个空闲会话，什么都不用你确认。
+  //
+  // 真正「等你按键」的：屏上开着选项面板 / 确认框。这一类是阻塞性的，
+  // 会话停在那里直到有人选，所以文案必须准 —— 说了等确认就得真有东西要确认。
+  const awaitingConfirmIds = useMemo(() => {
     const s = new Set();
     for (const ses of sessions) {
-      if (aiStatusMap[ses.id]?.needsAction && !ses.autoActionEnabled) s.add(ses.id);
+      const st = aiStatusMap[ses.id];
+      if (!st) continue;
+      if (st.actionType === 'select' || st.actionType === 'confirm') s.add(ses.id);
     }
     return s;
   }, [sessions, aiStatusMap]);
+
+  // 出错待处理：actionType='error'（规则带 requireConfirmation，要你看一眼再决定）。
+  // 不并进「等确认」——那是屏上有面板等按键，这是任务失败要你判断，两种事。
+  const erroredIds = useMemo(() => {
+    const s = new Set();
+    for (const ses of sessions) {
+      const st = aiStatusMap[ses.id];
+      if (!st || awaitingConfirmIds.has(ses.id)) continue;
+      if (st.actionType === 'error' || (st.requireConfirmation && st.actionType !== 'text_input')) s.add(ses.id);
+    }
+    return s;
+  }, [sessions, aiStatusMap, awaitingConfirmIds]);
+
+  // 可推进：空闲等「继续」，但自动操作关着 → 没人替它按，需要你来推一把。
+  // 自动操作开着的不算——它自己会处理。
+  const idleWaitingIds = useMemo(() => {
+    const s = new Set();
+    for (const ses of sessions) {
+      const st = aiStatusMap[ses.id];
+      if (!st?.needsAction || ses.autoActionEnabled) continue;
+      if (awaitingConfirmIds.has(ses.id) || erroredIds.has(ses.id)) continue;  // 已归入其他档
+      s.add(ses.id);
+    }
+    return s;
+  }, [sessions, aiStatusMap, awaitingConfirmIds, erroredIds]);
+
+  // 列表红点/排序沿用三类合一的口径（都属于需要你看一眼）
+  const needsActionIds = useMemo(
+    () => new Set([...awaitingConfirmIds, ...erroredIds, ...idleWaitingIds]),
+    [awaitingConfirmIds, erroredIds, idleWaitingIds]
+  );
 
   // 快捷键位：与门牌号**分开的第二套编号**，只发给置顶会话。
   //
@@ -1376,14 +1419,23 @@ export default function App() {
     setTimeout(() => switcherInputRef.current?.focus(), 0);
   }, []);
 
-  // ⌘↓ / Ctrl↓：依次跳到需要人工介入的会话（35 个会话里真正等你的通常只有两三个）
-  const jumpToNextPending = useCallback(() => {
-    const list = orderedSessions.filter(s => needsActionIds.has(s.id));
+  // 在给定集合内依次循环跳转
+  const jumpToNext = useCallback((idSet) => {
+    const list = orderedSessions.filter(s => idSet.has(s.id));
     if (!list.length) return;
     const curIdx = list.findIndex(s => s.id === currentSession?.id);
     const next = list[(curIdx + 1) % list.length];
     if (next) attachSession(next.id);
-  }, [orderedSessions, needsActionIds, currentSession, attachSession]);
+  }, [orderedSessions, currentSession, attachSession]);
+
+  // ⌘↓ / Ctrl↓ 按紧迫度依次：等按键的面板 > 出错待判断 > 空闲待推进。
+  // 前两类是会话真的停住了，最后一类只是没人替它按「继续」。
+  const jumpToNextPending = useCallback(() => {
+    const target = awaitingConfirmIds.size > 0 ? awaitingConfirmIds
+      : erroredIds.size > 0 ? erroredIds
+      : idleWaitingIds;
+    jumpToNext(target);
+  }, [jumpToNext, awaitingConfirmIds, erroredIds, idleWaitingIds]);
 
   // 全局快捷键。⚠️ 终端聚焦时按键先经过 xterm 的 attachCustomKeyEventHandler，
   //    那边必须放行这些组合键（见终端初始化处），否则会被当成输入发给 CLI。
@@ -1669,15 +1721,37 @@ export default function App() {
             {sortMode === 'fixed' ? '固定顺序' : sortMode === 'active' ? '最近活跃' : '待处理优先'}
           </button>
         </div>
-        {needsActionIds.size > 0 && (
+        {/* 两类分开显示，文案如实：「等确认」是屏上真开着选项面板，
+            「待推进」只是空闲且自动操作关着 —— 混成一条会让你点进去发现无事可做。 */}
+        {awaitingConfirmIds.size > 0 && (
           <button
             className="session-pending-bar"
-            onClick={jumpToNextPending}
-            title="跳到下一个需要你确认的会话（⌘↓ / Ctrl+↓）"
+            onClick={() => jumpToNext(awaitingConfirmIds)}
+            title="屏上开着选项面板、真的在等你选（⌘↓ / Ctrl+↓）"
           >
             <span className="spb-dot" />
-            {needsActionIds.size} 个等确认
+            {awaitingConfirmIds.size} 个等确认
             <kbd>⌘↓</kbd>
+          </button>
+        )}
+        {erroredIds.size > 0 && (
+          <button
+            className="session-pending-bar error"
+            onClick={() => jumpToNext(erroredIds)}
+            title="任务报错、需要你看一眼再决定怎么办（不是屏上有面板等按键）"
+          >
+            <span className="spb-dot" />
+            {erroredIds.size} 个出错待处理
+          </button>
+        )}
+        {idleWaitingIds.size > 0 && (
+          <button
+            className="session-pending-bar idle"
+            onClick={() => jumpToNext(idleWaitingIds)}
+            title={'空闲等推进，且该会话的自动操作是关的 —— 没人替它按「继续」。\n开了自动操作的会话不计入。'}
+          >
+            <span className="spb-dot" />
+            {idleWaitingIds.size} 个待推进
           </button>
         )}
 
@@ -3088,7 +3162,13 @@ export default function App() {
                   <div className="switcher-main">
                     <div className="switcher-line1">
                       <span className="switcher-name">{s.projectName || s.name}</span>
-                      {needsActionIds.has(s.id) && <span className="switcher-flag" title="等你确认">⚠</span>}
+                      {awaitingConfirmIds.has(s.id)
+                        ? <span className="switcher-flag" title="屏上开着选项面板，等你选">⚠</span>
+                        : erroredIds.has(s.id)
+                          ? <span className="switcher-flag err" title="任务报错，等你判断">✕</span>
+                          : idleWaitingIds.has(s.id)
+                            ? <span className="switcher-flag idle" title="空闲待推进（自动操作关着）">·</span>
+                            : null}
                       {/* 目录区分重名会话（实测 RustCandance 有 codex/claude 两个） */}
                       <span className="switcher-dir">{(s.workingDir || '').split('/').slice(-2).join('/')}</span>
                       <span className="switcher-type">{s.aiType || 'claude'}</span>
