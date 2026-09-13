@@ -187,6 +187,12 @@ export class Session {
     this.autoMode = options.autoMode ?? false;
     this.autoActionEnabled = options.autoActionEnabled ?? false;  // 后台自动操作开关
     this.waterlineMode = options.waterlineMode || 'auto';  // 上下文水位交接：off/warn/auto
+    // 三步闭环阶段必须落库：老实现只放内存，发版/崩溃/Electron 重启都会丢。
+    // 丢在 handoff_sent 上 → 新进程从 idle 重判 → 同一条收尾指令二次发出，
+    // CLI 在水位最紧时重写一遍记忆；丢在 compact_sent 上 → 最后一步 resume 永不发出，
+    // 压缩后的新上下文没有「先读 MEMORY.md」，闭环白做。
+    this._waterlinePhase = options.waterlinePhase || 'idle';
+    this._waterlineHandoffRounds = options.waterlineHandoffRounds || 0;
     this.monitorPluginId = options.monitorPluginId || 'auto';  // 监控策略插件 ID，默认自动选择
     this.teamId = options.teamId || null;       // 所属团队 ID
     this.teamRole = options.teamRole || null;   // 团队角色: 'lead' | 'member' | null
@@ -701,8 +707,16 @@ export class Session {
         console.log(`[Session ${this.name}] 水位交接模式: ${this.waterlineMode} -> ${v}`);
       }
       this.waterlineMode = v;
-      // 切模式后作废一次性标记，让新模式立刻按新规则判定
-      this._waterlineHandedOff = false;
+      // 只在切到 off 时复位阶段。老实现无条件清零，与状态机的口径打三套：
+      //   contextWaterline.js 里 warn 模式是**原样带回 phase**（不冻结、不清零），
+      //   off 才返回硬编码 idle。前端 cycleWaterlineMode 是 off→warn→auto 单向循环，
+      //   用户想从 auto 临时看一眼 warn 必须绕一圈 off，无条件清零会把
+      //   正在进行的闭环腰斩：停在 compact_sent 上就等于最后一步 resume 永远不发。
+      // 现在与状态机对齐：off = 放弃闭环（清零），warn/auto 互切保留阶段。
+      if (v === 'off') {
+        this._waterlinePhase = 'idle';
+        this._waterlineHandoffRounds = 0;
+      }
     }
     if (settings.monitorPluginId !== undefined) {
       this.monitorPluginId = settings.monitorPluginId;
@@ -970,6 +984,8 @@ export class Session {
       autoMode: this.autoMode,
       autoActionEnabled: this.autoActionEnabled,
       waterlineMode: this.waterlineMode,
+      waterlinePhase: this._waterlinePhase || 'idle',
+      waterlineHandoffRounds: this._waterlineHandoffRounds || 0,
       monitorPluginId: this.monitorPluginId || 'auto',  // 监控策略插件 ID
       teamId: this.teamId || null,
       teamRole: this.teamRole || null,
@@ -1203,6 +1219,10 @@ export class SessionManager {
     // 上下文水位交接开关：off/warn/auto（见 contextWaterline.js）
     try { this.db.exec(`ALTER TABLE sessions ADD COLUMN waterline_mode TEXT DEFAULT 'auto'`); } catch {}
     try { this.db.exec(`ALTER TABLE closed_sessions ADD COLUMN waterline_mode TEXT DEFAULT 'auto'`); } catch {}
+    // 三步闭环阶段（idle/handoff_sent/compact_sent/resumed）+ 兜底轮数：必须跨进程存活，
+    // 否则重启后重发收尾指令或永远丢掉最后一步 resume。
+    try { this.db.exec(`ALTER TABLE sessions ADD COLUMN waterline_phase TEXT DEFAULT 'idle'`); } catch {}
+    try { this.db.exec(`ALTER TABLE sessions ADD COLUMN waterline_rounds INTEGER DEFAULT 0`); } catch {}
   }
 
   /**
@@ -1249,7 +1269,11 @@ export class SessionManager {
   }
 
   _loadSessions() {
-    const rows = this.db.prepare('SELECT * FROM sessions WHERE status = ?').all('running');
+    // ⚠️ 必须 ORDER BY created_at：listSessions() 返回的是 Map 插入顺序，而插入顺序
+    //    就是这里的查询顺序。不排序的话列表顺序取决于 SQLite 返回顺序，重启后可能变，
+    //    侧栏的会话序号（门牌号）就不稳定了 —— ⌘1~⌘9 的肌肉记忆会失效。
+    //    created_at 实测 35 个会话全部唯一且无空值，是可靠的稳定排序键。
+    const rows = this.db.prepare('SELECT * FROM sessions WHERE status = ? ORDER BY created_at ASC').all('running');
     // 本轮被重建的会话，稍后统一拉起 CLI（见 _resumeCliForRecreated）
     this._pendingCliResume = [];
 
@@ -1359,6 +1383,8 @@ export class SessionManager {
         autoMode: !!row.auto_mode,
         autoActionEnabled: !!row.auto_action_enabled,
         waterlineMode: row.waterline_mode || 'auto',
+        waterlinePhase: row.waterline_phase || 'idle',
+        waterlineHandoffRounds: row.waterline_rounds || 0,
         createdAt: new Date(row.created_at),
         skipPty: false,
         isNew: false  // 恢复已有会话
@@ -1471,6 +1497,8 @@ export class SessionManager {
             autoMode: !!row.auto_mode,
             autoActionEnabled: !!row.auto_action_enabled,
             waterlineMode: row.waterline_mode || 'auto',
+            waterlinePhase: row.waterline_phase || 'idle',
+            waterlineHandoffRounds: row.waterline_rounds || 0,
             createdAt: new Date(row.created_at),
             skipPty: true,
             isNew: false
@@ -1696,8 +1724,8 @@ export class SessionManager {
     const stats = session.stats || { total: 0, success: 0, failed: 0, aiAnalyzed: 0, aiFailed: 0, preAnalyzed: 0, hookFallback: 0 };
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO sessions
-      (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, status, created_at, updated_at, ai_type, claude_provider, codex_provider, gemini_provider, stats_total, stats_success, stats_failed, stats_ai_analyzed, stats_pre_analyzed, stats_ai_failed, stats_hook_fallback, working_dir, project_name, project_desc, team_id, team_role, waterline_mode)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, status, created_at, updated_at, ai_type, claude_provider, codex_provider, gemini_provider, stats_total, stats_success, stats_failed, stats_ai_analyzed, stats_pre_analyzed, stats_ai_failed, stats_hook_fallback, working_dir, project_name, project_desc, team_id, team_role, waterline_mode, waterline_phase, waterline_rounds)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       session.id,
@@ -1728,7 +1756,9 @@ export class SessionManager {
       session.projectDesc || '',
       session.teamId || null,
       session.teamRole || null,
-      session.waterlineMode || 'auto'
+      session.waterlineMode || 'auto',
+      session._waterlinePhase || 'idle',
+      session._waterlineHandoffRounds || 0
     );
   }
 
@@ -2323,6 +2353,8 @@ export class SessionManager {
       autoMode: Boolean(row.auto_mode),
       autoActionEnabled: Boolean(row.auto_action_enabled),
       waterlineMode: row.waterline_mode || 'auto',
+      waterlinePhase: row.waterline_phase || 'idle',
+      waterlineHandoffRounds: row.waterline_rounds || 0,
       aiType: row.ai_type,
       projectName: row.project_name,
       projectDesc: row.project_desc,

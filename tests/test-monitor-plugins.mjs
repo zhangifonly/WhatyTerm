@@ -183,6 +183,38 @@ console.log('\n=== 模块三测试结果汇总 ===\n');
 console.log(`通过: ${results.passed}`);
 console.log(`失败: ${results.failed}`);
 
+
+// ============ 后台 shell ≠ 主循环在跑（v1.2.98 回归锁）============
+// 实测缺陷：Claude 干完一批活后屏上留下
+//   ✻ Crunched for 15m 36s · done 15:16 · 2 shells still running
+// 主循环已回到空闲 ❯、底栏无 esc to interrupt，但 DefaultPlugin 的弱判据里
+// 裸 /running/ 命中了「2 shells still running」→ phase=running →
+// 「程序运行中，等待完成」→ 永不发「继续」，而后台 shell 可能常驻，会话僵住等人工。
+await testAsync('后台 shell 在跑但主循环空闲：判 waiting 而非 running', async () => {
+  const { default: DefaultPlugin } = await import('../server/services/MonitorPlugins/plugins/DefaultPlugin.js');
+  const p = new DefaultPlugin();
+  const idleScreen = [
+    '正文若干行，讲了一堆修复内容。',
+    '✻ Crunched for 15m 36s · done 15:16 · 2 shells still running',
+    '─'.repeat(60), '❯', '─'.repeat(60),
+    '  ⏵⏵ auto mode on · 2 shells · ← 6 agents · ↓ to manage',
+  ].join('\n');
+  const phase = p.detectPhase ? p.detectPhase(idleScreen) : null;
+  if (phase === 'running') throw new Error('后台 shell 被当成主循环在跑，会永不发继续');
+  if (p.isIdle && p.isIdle(idleScreen) === false) throw new Error('isIdle 被后台 shell 措辞否决，等待输入分支也进不去');
+});
+await testAsync('真运行中（esc to interrupt + 计时器）仍判 running，不许误打断', async () => {
+  const { default: DefaultPlugin } = await import('../server/services/MonitorPlugins/plugins/DefaultPlugin.js');
+  const p = new DefaultPlugin();
+  const runScreen = [
+    '正文', '✶ Mustering… (3m 13s · ↓ 9.4k tokens)',
+    '─'.repeat(60), '❯', '─'.repeat(60),
+    '  ⏵⏵ auto mode on · 2 shells · esc to interrupt · ← 6 agents',
+  ].join('\n');
+  const phase = p.detectPhase ? p.detectPhase(runScreen) : null;
+  if (phase !== 'running') throw new Error(`真运行中却判成 ${phase}，会打断正在跑的任务`);
+});
+
 if (results.errors.length > 0) {
   console.log('\n失败的测试:');
   results.errors.forEach(e => {

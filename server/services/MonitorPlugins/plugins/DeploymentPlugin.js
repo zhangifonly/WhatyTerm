@@ -279,8 +279,11 @@ class DeploymentPlugin extends BasePlugin {
     const lastLines = terminalContent.split('\n').slice(-10).join('\n');
 
     // SSH/Shell 提示符
-    if (/\$\s*$|#\s*$|>\s*$/.test(lastLines) &&
-        !/running|processing|loading/i.test(lastLines)) {
+    // 同 DefaultPlugin 的坑：裸 `running` 会命中「2 shells still running」这类
+    // 后台任务措辞，把已回到提示符的空闲会话判成非空闲。先排除后台措辞、动词只认行首。
+    const bgTaskOnly = /\d+\s+(shells?|tasks?|agents?)\s+still\s+running/i.test(lastLines);
+    const runVerbLine = /^[\s✢✻✽✳✶✴✵✷·+*]*(running|processing|loading)\b/im.test(lastLines);
+    if (/\$\s*$|#\s*$|>\s*$/.test(lastLines) && (bgTaskOnly || !runVerbLine)) {
       return true;
     }
 

@@ -101,7 +101,16 @@ function stripBoxBorders(line) {
 }
 
 // 面板底部的按键提示。出现它就说明这是个等按键的模态面板，而不是 AI 打印的编号列表。
-const MENU_HINT = /Esc to (cancel|exit|close|go back)|Enter to |↵|to select\b|to confirm\b|to adjust\b|to use this session|↑\/↓|arrow keys|tab to/i;
+// ⚠️ 曾经含裸 `tab to`，而 Claude Code 的**常驻底栏**就写着 `(shift+tab to cycle)`
+//    —— 24/40 个会话时刻挂着它。后果：AI 回复正文里只要有从 1 开始的编号列表
+//    （列待办、列风险，极常见），叠加这条永真的 hint 就被判成"未知选项面板"→
+//    earlyRules 的 panel-no-escape 规则全拦自动操作 → 屏幕不再变化 → 又撞上
+//    "内容无变化跳过分析"短路 → 机械继续停手、AI 也没接手 → **会话零操作挂死**。
+//    实测两段：WriterZhangZhen 连续 36 分钟零按键（135 次拦截 + 72 次跳过分析，
+//    最后靠用户手动关自动开关才停）、RustCandance 约 14 分钟（58 次）。
+//    真菜单的 tab 提示是「Tab to amend」「Tab to edit」，不是模式指示器的
+//    「shift+tab to cycle」——所以只认后接明确动词的形态。
+const MENU_HINT = /Esc to (cancel|exit|close|go back)|Enter to |↵|to select\b|to confirm\b|to adjust\b|to use this session|↑\/↓|arrow keys|\btab to (amend|edit|select|choose|toggle)\b/i;
 
 /**
  * 结构化识别「屏上开着一个编号选项面板」——**不依赖面板标题**。

@@ -48,7 +48,19 @@ function hash(screen) {
 const RUNNING = /esc to interrupt|正在|Running \d+ Task|\bthinking\b/i;
 const INTERRUPTED = /Interrupted\s*[·•]\s*What should Claude do instead/i;
 // v1.2.89 起与 AIEngine 的 Codex 验活闸共用一份定义（liveMenu.js），防止两处漂移
-import { CONFIRM_MENU_NEAR as CONFIRM_MENU } from './liveMenu.js';
+import { CONFIRM_MENU_NEAR as CONFIRM_MENU, isLiveConfirmMenu, isCodexLiveConfirm } from './liveMenu.js';
+
+// 落账与按键必须用**同一条**判据。曾经落账用 CONFIRM_MENU_NEAR（问句与选项相距 ≤400 字符），
+// 而按键侧早在 v1.2.90 就因「长命令撑破 400 字符」换成了 footer 贴底判据 —— 两边漂开的后果：
+// Codex 弹长命令确认框 → 按键侧正确识别、按 1 → 菜单消失、命令开始执行（本来一切正常）
+// → 落账侧 CONFIRM_MENU_NEAR 失配 → hadConfirmMenu=false → menuGone=false → 记 no_effect
+// → 连累 3 次触发 shouldPause → 把一条**运转正常**的会话停掉等人工。日志里已发生 4 次。
+// 更要紧的是台账是"监控策略到底有没有用"的唯一度量基准，基准偏了，
+// 后面每一轮据此调正则都是在修不存在的问题。
+function hasConfirmMenu(text) {
+  if (!text) return false;
+  return isLiveConfirmMenu(text) || isCodexLiveConfirm(text) || CONFIRM_MENU.test(text);
+}
 
 class ActionOutcome {
   constructor() {
@@ -83,7 +95,7 @@ class ActionOutcome {
       action: typeof info.action === 'string' ? info.action.slice(0, 40) : String(info.action || ''),
       source: info.source || 'rule',
       beforeHash: hash(before),
-      hadConfirmMenu: CONFIRM_MENU.test(before),
+      hadConfirmMenu: hasConfirmMenu(before),
       // v1.2.88：声明式规则 id（aiRules/earlyRules.js），空转率可精确归因到单条规则
       rule: info.rule || null
     };
@@ -110,7 +122,7 @@ class ActionOutcome {
     const changed = hash(after) !== entry.beforeHash;
     const interrupted = INTERRUPTED.test(after);
     const running = RUNNING.test(after);
-    const menuGone = entry.hadConfirmMenu && !CONFIRM_MENU.test(after);
+    const menuGone = entry.hadConfirmMenu && !hasConfirmMenu(after);
 
     let outcome;
     if (interrupted) {
@@ -121,7 +133,10 @@ class ActionOutcome {
       // 否则往一个正忙的会话里乱发按键会被记成满分。
       outcome = 'no_effect';
     } else if (entry.actionType === 'select') {
-      outcome = menuGone ? 'advanced' : 'no_effect';   // 菜单没消失说明按键没被 Ink 收到
+      // 菜单没消失通常说明按键没被 Ink 收到。但**屏幕已变且 CLI 跑起来了**是比
+      // 菜单识别更硬的证据（按下 1 → 菜单关闭 → 命令开始执行），此时哪条菜单正则
+      // 边界如何都不该判成空转 —— 判据漂移一次就误熔断一条正常会话，代价太大。
+      outcome = (menuGone || running) ? 'advanced' : 'no_effect';
     } else if (running) {
       outcome = 'advanced';             // CLI 真的动起来了，最强的成功信号
     } else {

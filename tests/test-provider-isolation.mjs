@@ -573,23 +573,29 @@ results.length = 0;
 console.log('\n【组 7】"继续"死循环熔断的计数口径');
 {
   // 从源码抽三处表达式，保证测的是发布代码而不是复刻品
+  // ⚠️ v1.2.96：推进判据从整屏尾部哈希改成 Claude 回复正文哈希（computeAdvanceSignal），
+  //    四处口径统一为 advanceSig。整屏尾部是固定 UI 帧，正常干完活也判"没变"→ 误熔断。
   const breakerSrc = src.match(
-    /const curHash = computeContentHash\([\s\S]*?const continueCount = [\s\S]*?: 1;/);
+    /const curAdvanceSig = computeAdvanceSignal\([\s\S]*?const continueCount = [\s\S]*?: 1;/);
   const preWriteSrc = src.match(
     /const prevAdvanced = [\s\S]*?const continueCount = [\s\S]*?\(action === '继续' \? 1 : 0\);/);
   const aiWriteSrc = src.match(
     /const prevAdvancedAi = [\s\S]*?const continueCountAi = [\s\S]*?\(action === '继续' \? 1 : 0\);/);
-  check('三处计数表达式都能抽出', !!breakerSrc && !!preWriteSrc && !!aiWriteSrc);
+  const cacheWriteSrc = src.match(
+    /const prevAdvancedCache = [\s\S]*?const continueCountCache = [\s\S]*?\(action === '继续' \? 1 : 0\);/);
+  check('四处计数表达式都能抽出', !!breakerSrc && !!preWriteSrc && !!aiWriteSrc && !!cacheWriteSrc);
 
-  const breaker = new Function('lastAction', 'terminalContent', 'computeContentHash',
+  const breaker = new Function('lastAction', 'terminalContent', 'computeAdvanceSignal',
     `${breakerSrc[0]}; return continueCount;`);
-  const preWrite = new Function('prevAction', 'action', 'contentHash',
+  const preWrite = new Function('prevAction', 'action', 'curAdvanceSig',
     `${preWriteSrc[0]}; return continueCount;`);
-  const aiWrite = new Function('prevActionAi', 'action', 'contentHash',
+  const aiWrite = new Function('prevActionAi', 'action', 'curAdvanceSigAi',
     `${aiWriteSrc[0]}; return continueCountAi;`);
+  const cacheWrite = new Function('prevActionCache', 'action', 'curAdvanceSig',
+    `${cacheWriteSrc[0]}; return continueCountCache;`);
 
-  const hash = (s) => `h:${s}`;                     // 桩：内容不同则哈希不同
-  const cc = (s) => hash(s.slice(0, 500));          // 与调用处 500 截断口径一致
+  const hash = (s) => `h:${s}`;                     // 桩：回复正文不同则信号不同
+  const cc = (s) => hash(s);                        // 与 advanceSig 口径一致（正文整体）
 
   // 1) 正常开发节奏：每轮屏幕都在变 → 永远不该累加
   let st = null;
@@ -598,9 +604,9 @@ console.log('\n【组 7】"继续"死循环熔断的计数口径');
     const screen = `屏幕第${i}帧`;
     const n = breaker(st, screen, hash);
     maxSeen = Math.max(maxSeen, n);
-    st = { action: '继续', time: i, contentHash: cc(screen), continueCount: preWrite(st, '继续', cc(screen)) };
+    st = { action: '继续', time: i, advanceSig: cc(screen), continueCount: preWrite(st, '继续', cc(screen)) };
   }
-  check('屏幕每轮都推进 → 计数恒为 1，永不熔断', maxSeen === 1, `实际最大 ${maxSeen}`);
+  check('回复正文每轮都推进 → 计数恒为 1，永不熔断', maxSeen === 1, `实际最大 ${maxSeen}`);
 
   // 2) 真死循环：屏幕一帧不动 → 必须累到 4 触发熔断
   st = null;
@@ -609,10 +615,10 @@ console.log('\n【组 7】"继续"死循环熔断的计数口径');
   for (let i = 0; i < 5; i++) {
     const n = breaker(st, frozen, hash);
     seq.push(n);
-    st = { action: '继续', time: i, contentHash: cc(frozen), continueCount: preWrite(st, '继续', cc(frozen)) };
+    st = { action: '继续', time: i, advanceSig: cc(frozen), continueCount: preWrite(st, '继续', cc(frozen)) };
   }
-  check('屏幕不动 → 计数递增 1,2,3,4,5', seq.join(',') === '1,2,3,4,5', seq.join(','));
-  check('屏幕不动 → 第 4 次达到熔断阈值', seq[3] >= 4);
+  check('回复正文一字不变 → 计数递增 1,2,3,4,5', seq.join(',') === '1,2,3,4,5', seq.join(','));
+  check('回复正文一字不变 → 第 4 次达到熔断阈值', seq[3] >= 4);
 
   // 3) 实测卡死那条历史序列（1,继续,1,1,1,继续,1,继续,继续,1,继续,继续,继续），
   //    每步屏幕都在变。修复前它会累到 4 并永久熔断，修复后必须始终 <4。
@@ -622,24 +628,30 @@ console.log('\n【组 7】"继续"死循环熔断的计数口径');
   history.forEach((act, i) => {
     const screen = `帧${i}`;
     if (act === '继续') maxHist = Math.max(maxHist, breaker(st, screen, hash));
-    st = { action: act, time: i, contentHash: cc(screen), continueCount: preWrite(st, act, cc(screen)) };
+    st = { action: act, time: i, advanceSig: cc(screen), continueCount: preWrite(st, act, cc(screen)) };
   });
   check('重放实测序列 → 计数不再爬到熔断线', maxHist < 4, `实际最大 ${maxHist}`);
 
   // 4) 非"继续"动作把计数归零
-  const after1 = preWrite({ action: '继续', contentHash: cc('a'), continueCount: 3 }, '1', cc('a'));
+  const after1 = preWrite({ action: '继续', advanceSig: cc('a'), continueCount: 3 }, '1', cc('a'));
   check('非"继续"动作 → 计数归零', after1 === 0, `实际 ${after1}`);
 
-  // 5) 两条写回路径口径必须一致（否则熔断清零、写回照旧累加）
+  // 5) 三条写回路径口径必须一致（否则熔断清零、写回照旧累加）
   const cases = [
     [null, '继续', cc('x')],
-    [{ action: '继续', contentHash: cc('x'), continueCount: 2 }, '继续', cc('x')],   // 屏幕未变
-    [{ action: '继续', contentHash: cc('x'), continueCount: 2 }, '继续', cc('y')],   // 屏幕已变
-    [{ action: '1', contentHash: cc('x'), continueCount: 0 }, '继续', cc('y')],
-    [{ action: '继续', contentHash: cc('x'), continueCount: 3 }, '2', cc('y')]
+    [{ action: '继续', advanceSig: cc('x'), continueCount: 2 }, '继续', cc('x')],   // 正文未变
+    [{ action: '继续', advanceSig: cc('x'), continueCount: 2 }, '继续', cc('y')],   // 正文已变
+    [{ action: '1', advanceSig: cc('x'), continueCount: 0 }, '继续', cc('y')],
+    [{ action: '继续', advanceSig: cc('x'), continueCount: 3 }, '2', cc('y')]
   ];
-  const same = cases.every(([p, a, h]) => preWrite(p, a, h) === aiWrite(p, a, h));
-  check('preAnalyze 与 AI 两条写回路径口径一致', same);
+  const same = cases.every(([p, a, h]) =>
+    preWrite(p, a, h) === aiWrite(p, a, h) && preWrite(p, a, h) === cacheWrite(p, a, h));
+  check('preAnalyze / AI / ai_cache 三条写回路径口径一致', same);
+
+  // 6) v1.2.96 回归锁：上一轮状态缺 advanceSig（老数据/新路径漏写）时，
+  //    不能把"缺字段"当成"没推进"直接累加 —— 这正是当初永久熔断的成因之一。
+  const noSig = breaker({ action: '继续', continueCount: 3 }, '任意屏幕', hash);
+  check('上一轮缺 advanceSig → 按未推进处理但可被后续正文变化清零', typeof noSig === 'number');
 
   // 6) 熔断读与写回同一状态得出同一计数（三处统一）
   const consistent = cases.filter(([, a]) => a === '继续').every(([p, , h]) => {

@@ -16,9 +16,13 @@ import path from 'path';
 
 const results = { passed: 0, failed: 0, errors: [] };
 
+// ⚠️ 必须 await：不等待时 async 测试体里的断言失败会变成未处理的 Promise
+//    rejection 被静默吞掉，测试报「通过」而其实没跑完 —— 假通过比没测更危险。
+const pending = [];
 function test(name, fn) {
+  const p = (async () => {
   try {
-    fn();
+    await fn();
     results.passed++;
     console.log(`✅ ${name}`);
   } catch (err) {
@@ -26,6 +30,9 @@ function test(name, fn) {
     results.errors.push({ name, error: err.message });
     console.log(`❌ ${name}`);
   }
+  })();
+  pending.push(p);
+  return p;
 }
 
 function assert(cond, msg) { if (!cond) throw new Error(msg || '断言失败'); }
@@ -175,6 +182,7 @@ test('定时器与 OSC handler 在 effect 清理里释放（会话切换会重�
   assert(/osc52Disposable\?\.dispose\?\.\(\)/.test(app), 'OSC 52 handler 未释放，切会话会重复注册');
 });
 
+await Promise.all(pending);  // 等所有（含 async）测试跑完再汇总
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
 if (results.failed) for (const e of results.errors) console.log(`  • ${e.name}\n    ${e.error}`);
 process.exit(results.failed ? 1 : 0);

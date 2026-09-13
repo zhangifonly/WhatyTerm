@@ -57,7 +57,7 @@ import { Server } from 'socket.io';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 // Trigger restart
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, unlinkSync, watch, statSync, promises as fsp } from 'fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, unlinkSync, watch, statSync, readdirSync, openSync, readSync, closeSync, promises as fsp } from 'fs';
 import session from 'express-session';
 import crypto from 'crypto';
 import { execSync, spawnSync, exec as execCb } from 'child_process';
@@ -169,7 +169,7 @@ import { getProjectRecordingService } from './services/ProjectRecordingService.j
 import cliRegistry from './services/CliRegistry.js';
 import HookServer from './services/HookServer.js';
 import cliLearner from './services/CliLearner.js';
-import { readContextWaterline, decideWaterlineAction, HANDOFF_PROMPT } from './services/contextWaterline.js';
+import { readContextWaterline, decideWaterlinePhase, isMemoryWritten, HANDOFF_PROMPT, COMPACT_COMMAND, RESUME_PROMPT } from './services/contextWaterline.js';
 import tokenStatsService from './services/TokenStatsService.js';
 import builtinProviderDB from './services/BuiltinProviderDB.js';
 import ccSwitchAudit from './services/CCSwitchAudit.js';
@@ -1003,10 +1003,62 @@ async function probeModelFromTranscript(transcriptPath) {
  * 选择"的持久值、常陈旧（如 opus[1m]），transcript 才是实际在跑的模型。
  * 用于 hook 未收到事件（会话在 hook 安装前启动）的会话兜底。
  */
+/**
+ * probeModelByWorkingDir 的同步版本，供 getCurrentProvider（同步构造返回值）使用。
+ * 为什么必须有这条：settings.json 的 model 字段是「最后一次 /model 选择」的持久值，
+ * 与实际在跑的模型无关（实测 35 个会话里 9 个显示 glm-5.3-flash，而 transcript 里
+ * 是 claude-opus-5 / claude-sonnet-5）。而 configSource=global/local 分支会把这个
+ * 陈旧值直接当 actualModel 返回，25 秒一轮的周期刷新纠正后又被下一次
+ * getCurrentProvider 回写 —— 两者来回打，面板模型看起来"时对时错"。
+ * 所以在返回值统一出口处用 transcript 兜底，从源头断掉这个竞态。
+ * 只读尾部 64KB，35 会话逐个读实测 <20ms，可接受。
+ */
+/**
+ * 把工作目录换算成 Claude Code 的 transcript 目录名。
+ * ⚠️ 规则是「**非字母数字一律换成 -**」，不只是 / 和 .：
+ *   /Users/zhangzhen/Documents/ClaudeCode/GigaPlace_Engine
+ *   → -Users-zhangzhen-Documents-ClaudeCode-GigaPlace-Engine   （下划线也变 -）
+ * 老实现只换 [/.]，带下划线（或中文、空格等）的项目路径一律推算错，
+ * transcript 找不到 → 模型探测静默失效 → 回落到 settings.json 的陈旧值。
+ * 实测 GigaPlace_Engine 会话就是这么显示成 glm-5.3-flash 的。
+ * 大小写保留（实测目录名里 ClaudeCode / GigaPlace 的大写都在）。
+ */
+function claudeProjectDirName(workingDir) {
+  return String(workingDir || '').replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+function probeModelByWorkingDirSync(workingDir) {
+  if (!workingDir) return null;
+  try {
+    const dir = path.join(os.homedir(), '.claude', 'projects', claudeProjectDirName(workingDir));
+    let newest = null, newestMs = 0;
+    for (const f of readdirSync(dir)) {
+      if (!f.endsWith('.jsonl')) continue;
+      const st = statSync(path.join(dir, f));
+      if (st.mtimeMs > newestMs) { newestMs = st.mtimeMs; newest = path.join(dir, f); }
+    }
+    if (!newest) return null;
+    const st = statSync(newest);
+    if (!st.size) return null;
+    const readLen = Math.min(st.size, 64 * 1024);
+    const fd = openSync(newest, 'r');
+    const buf = Buffer.alloc(readLen);
+    readSync(fd, buf, 0, readLen, st.size - readLen);
+    closeSync(fd);
+    let model = null;
+    for (const m of buf.toString('utf-8').matchAll(/"model"\s*:\s*"([^"]+)"/g)) {
+      if (/^[a-z0-9][\w.:/-]{2,63}$/i.test(m[1])) model = m[1];
+    }
+    return model;
+  } catch {
+    return null;
+  }
+}
+
 async function probeModelByWorkingDir(workingDir) {
   if (!workingDir) return null;
   try {
-    const escaped = workingDir.replace(/[/.]/g, '-');
+    const escaped = claudeProjectDirName(workingDir);
     const dir = path.join(os.homedir(), '.claude', 'projects', escaped);
     const files = await fsp.readdir(dir);
     let newest = null, newestMs = 0;
@@ -1893,12 +1945,22 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
       const url = extras.url !== undefined ? extras.url : '';
       const isOAuth = !url && appType === 'claude' && !!extras.exists;
       const cs = extras.configSource || 'global';
+      // 模型口径统一收口：configSource 决定 URL/密钥的可信来源，但**模型另算**。
+      // settings.json / settings.local.json 的 model 是「最后一次 /model 选择」的持久值，
+      // 与实际在跑的模型无关（实测 glm-5.3-flash vs transcript 里的 claude-opus-5）。
+      // transcript 是每次请求实际落盘的 model 字段，唯一反映"此刻在跑什么"。
+      // relay 例外：那是请求体嗅探，物理同源，比 transcript 更即时。
+      let finalModel = extras.model !== undefined ? extras.model : '';
+      if (appType === 'claude' && cs !== 'relay') {
+        const probed = probeModelByWorkingDirSync(workingDir);
+        if (probed) finalModel = probed;
+      }
       return {
         id: extras.id,
         name: extras.name,
         url,
         apiKey: extras.apiKey !== undefined ? extras.apiKey : maskApiKey(''),
-        model: extras.model !== undefined ? extras.model : '',
+        model: finalModel,
         apiType: extras.apiType || computeApiType(),
         app: appType,
         exists: !!extras.exists,
@@ -3497,8 +3559,10 @@ const CHECK_INTERVALS = {
   BURST: 3 * 1000,     // 爆发模式 3 秒（执行操作后立即快速检测）
   FAST: 8 * 1000,      // 快速模式 8 秒（连续操作期间）
   MIN: 15 * 1000,      // 最小 15 秒（正常模式）
-  DEFAULT: 30 * 1000,  // 默认 30 秒
-  MAX: 30 * 60 * 1000, // 最大 30 分钟
+  DEFAULT: 30 * 1000,  // 默认 30 秒，**同时也是退避上限**（见 3844）
+  // ⚠️ 曾经有个 MAX: 30 分钟，但全代码库零引用——退避实际封顶在 DEFAULT（30 秒），
+  //    因为 auto-action 会话必须持续监控，等几十分钟等于没在监控。
+  //    留着它只会让人（和文档）以为阶梯能爬到 30 分钟，已删除。
   BURST_COUNT: 10      // 爆发模式持续次数（执行操作后连续快速检测10次，共30秒）
 };
 
@@ -4605,45 +4669,116 @@ async function runBackgroundAutoAction() {
       {
         const usedPercent = readContextWaterline(terminalContent);
         const isIdleNow = !!(preResult && preResult.needsAction && preResult.suggestedAction === '继续');
-        const wl = decideWaterlineAction({
-          usedPercent,
-          isIdle: isIdleNow,
-          alreadyHandedOff: !!session._waterlineHandedOff,
-          mode: session.waterlineMode || 'auto',  // 用户开关：off/warn/auto
+        // 压缩进行中信号（与 AIEngine 同款判据）：压缩动词 + 计时器/箭头。
+        // ⚠️ 必须先剥码再切窗口：terminalContent 来自 capture-pane -e（保留颜色码），
+        //    600 字节里色码能占掉大半，动词行与计时器行会被挤出窗口 → isCompacting 恒 false
+        //    → 压缩进行中就把 resume 指令发出去。窗口按可见字符放宽到 1500，对齐
+        //    hasConfirmMenuOnScreen 的口径。
+        const wlTail = stripAnsiForProbe(terminalContent).slice(-1500);
+        const isCompacting = /Evaporat|Compact|Summariz|Churning/i.test(wlTail)
+          && /\(\d+[ms]\s*\d*s?\s*[·•]?\s*[↓↑]/i.test(wlTail);
+        // 阶段机：收尾指令发出后按"记忆是否写完"推进；轮数兜底防措辞不匹配卡死。
+        const phase = session._waterlinePhase || 'idle';
+        // 兜底轮数**只在空闲轮 +1**：爆发模式 3 秒一轮，按所有轮计数则 9 秒就放行兜底，
+        // /compact 会撞在会话正写记忆的过程中（Write/Edit 连着跑，措辞一时没命中很正常）。
+        // 只数空闲轮 = 只在「它确实停下来了、却没说写完」时才耗兜底额度。
+        const roundsSinceHandoff = (phase === 'handoff_sent' && isIdleNow)
+          ? (session._waterlineHandoffRounds = (session._waterlineHandoffRounds || 0) + 1)
+          : (phase === 'handoff_sent' ? (session._waterlineHandoffRounds || 0) : 0);
+        const memoryWritten = phase === 'handoff_sent'
+          && isMemoryWritten(getLastClaudeReply(terminalContent), roundsSinceHandoff);
+        const wl = decideWaterlinePhase({
+          usedPercent, isIdle: isIdleNow, phase, memoryWritten, isCompacting,
+          mode: session.waterlineMode || 'auto',
         });
-        // 单独推一个轻量事件给前端右栏显示：ai:status 有多处 emit，逐个塞易漏，
-        // 用独立通道最省心。拿不到读数（非 Claude CLI 或底栏无该行）时推 null，前端不渲染。
+        // ⚠️⚠️ 阶段**只提议、不落地**（v1.2.98 修致命缺陷）。
+        // 老实现在这里直接 `session._waterlinePhase = wl.nextPhase`，但真正的发送在
+        // 4968（sendInput），两者之间有 **5 处会跳掉整轮的 continue** 且都不回滚阶段：
+        //   4852 shouldAutoFix / 4869 安全闸 / 4888 冷却去重 / 4896 开关二次核验 / 4961 末端保护
+        // 尤其末端保护那处，重新抓的是**另一帧**（getScreenContent 带 1.5s TTL 缓存），
+        // 与决策所用的 4576 那帧不是同一份数据，「决策时空闲、发送时在跑」是常态。
+        // 后果实测：收尾指令被拦 → 阶段却已翻成 handoff_sent → 冷却去重让它下轮再被跳过
+        // → 3 轮兜底放行 → **记忆一个字没写就发了 /compact**，上下文当场被压掉，
+        // 恰恰是这个功能要防的事故。
+        // 所以：不缺步靠「没确认发出就不推进、下轮重试同一步」，
+        //       不重复靠「阶段只在确认发出后推进一次」。
+        const wlNextPhase = wl.nextPhase;
+        // 轻量事件给前端右栏。阶段一律显示**当前已落地**的 phase，不显示提议值，
+        // 否则前端会看到一个其实没发生的阶段。
         session._waterline = (usedPercent !== null)
-          ? { usedPercent, level: wl.level, mode: session.waterlineMode || 'auto' }
+          ? { usedPercent, level: wl.level, phase, mode: session.waterlineMode || 'auto' }
           : null;
         io.to(`session:${sessionData.id}`).emit('ai:waterline', {
           sessionId: sessionData.id,
           waterline: session._waterline,
         });
-        if (wl.level === 'handoff') {
-          // 把这轮的「继续」升级为「收尾指令」：改写 preResult，复用下游全部门控
-          //（autoActionEnabled 开关、分两次发送、循环检测因动作内容变化而自动归零）。
-          console.log(`[水位交接] 会话 ${session.name}: ${wl.reason}，将「继续」改为收尾指令`);
-          session._waterlineHandedOff = true;  // 会话级只发一次，避免每轮复读
+
+        if (wl.level === 'handoff' || wl.level === 'resume') {
+          // 收尾/恢复都是文本指令：改写 preResult，复用下游全部门控
+          //（autoActionEnabled 开关、分两次发送、末端保护、循环检测因内容变化自动归零）。
+          const prompt = wl.level === 'handoff' ? HANDOFF_PROMPT : RESUME_PROMPT;
+          console.log(`[水位交接] 会话 ${session.name}: ${wl.reason}`);
           preResult = {
             ...preResult,
-            suggestedAction: HANDOFF_PROMPT,
+            needsAction: true,
+            suggestedAction: prompt,
             actionType: 'text_input',
-            currentState: `上下文水位 ${usedPercent}%，接近自动压缩`,
-            actionReason: '接近自动压缩，先写记忆再继续（上下文交接）',
-            _source: 'context_waterline_handoff',
+            currentState: `上下文水位 ${usedPercent}%（${phase}→${wlNextPhase}）`,
+            actionReason: wl.level === 'handoff' ? '接近自动压缩，先写记忆（上下文交接）' : '压缩后先读 MEMORY.md 再续（上下文交接）',
+            _source: `context_waterline_${wl.level}`,
+            // 阶段提议随 status 一路带到发送点，发送成功后才由 5026 那段公共尾巴落地。
+            _waterlineNextPhase: wlNextPhase,
           };
+        } else if (wl.level === 'compact') {
+          // /compact 是斜杠命令，不能走文本两阶段路径——比照 /quit 直发（send-keys 整行 + 延迟 Enter）。
+          // 发完本轮不再走「继续」：把 preResult 置空，跳过下游文本发送。
+          preResult = null;
+          // /compact 走直发，**绕开了下游 4961 的末端保护**（那三道闸只管文本输入分支），
+          // 所以这里必须自己复核一遍：压缩指令撞在会话正跑活/正写记忆时，
+          // 会把待写的内容连同上下文一起抹掉，比不做交接更糟。
+          const compactScreen = session.getScreenContent ? session.getScreenContent() : '';
+          const compactTail = stripAnsiForProbe(compactScreen).slice(-1500);
+          const compactBlocked = hasRunningTimer(compactTail) ? '运行状态指示器'
+            : /esc to interrupt/i.test(compactTail) ? 'esc to interrupt'
+            : /Press up to edit queued messages/i.test(compactScreen) ? '排队消息'
+            : null;
+          if (!session.autoActionEnabled || !isIdleNow || isCompacting) {
+            // 条件不满足：阶段不推进，下轮重试同一步（不缺步）。
+          } else if (compactBlocked) {
+            console.log(`[水位交接] 会话 ${session.name}: /compact 暂缓（${compactBlocked}），下轮重试`);
+          } else {
+            console.log(`[水位交接] 会话 ${session.name}: ${wl.reason}`);
+            try {
+              execSync(`${getTmuxPrefix()} send-keys -t "${session.tmuxSessionName}" ${JSON.stringify(COMPACT_COMMAND)}`);
+              setTimeout(() => {
+                try { execSync(`${getTmuxPrefix()} send-keys -t "${session.tmuxSessionName}" Enter`); }
+                catch { session.write('\r'); }
+              }, 120);
+              // 直发成功才落地阶段（与文本分支同一口径：确认发出后才推进）。
+              session._waterlinePhase = wlNextPhase;
+              session._waterlineHandoffRounds = 0;
+              try { sessionManager.updateSession(session); } catch {}  // 阶段落库，跨进程存活
+            } catch (e) {
+              console.error(`[水位交接] 会话 ${session.name}: /compact 直发失败:`, e.message);
+            }
+          }
         } else if (wl.level === 'warn') {
-          // 只在右栏提示、不改动作。水位回落到安全区后允许再次交接。
-          if (usedPercent < 80) session._waterlineHandedOff = false;
           if (!session._waterlineWarnedAt || Date.now() - session._waterlineWarnedAt > 120000) {
             session._waterlineWarnedAt = Date.now();
             console.log(`[水位交接] 会话 ${session.name}: ${wl.reason}`);
           }
-        } else if (usedPercent !== null && usedPercent < 80) {
-          // 水位已回落（多半是发生过压缩），重置一次性标记，下个周期可再交接。
-          session._waterlineHandedOff = false;
         }
+      }
+
+      // 规则标了「需要 AI 读屏定夺」（当前只有 panel-no-escape）：必须真交出去，
+      // 不能落到 warning 分支了事。warning 只展示不按键 → 屏幕不再变化 →
+      // 又撞上 AI 循环那条「内容无变化 + 有缓存 → 跳过分析」短路 → 两个循环一起空转，
+      // 会话零操作挂死（实测最长 36 分钟，靠用户手动关开关才停）。
+      // 所以照熔断那处的写法：清 preResult 交给 AI，并**作废内容哈希**让短路失效。
+      if (preResult && preResult._needsAiJudgement) {
+        console.log(`[规则升级] 会话 ${session.name}: ${preResult.currentState} → 交给 AI 读屏定夺`);
+        preResult = null;
+        aiContentHashCache.delete(sessionData.id);
       }
 
       // 循环检测：preResult 建议发送"继续"时，检查是否陷入死循环
@@ -4653,10 +4788,12 @@ async function runBackgroundAutoAction() {
         // 于是"继续→Claude 干活→回复新内容→继续"这种**完全正常**的开发节奏也会把它推到 4，
         // 之后每轮都 preResult=null 转 AI 分析，而 AI 路径未必落到执行，会话就永久卡住
         // （paperflow 实测：10:08 之后 28 分钟零操作，屏幕挂在同一帧不动）。
-        // 死循环的真正特征是"发了继续但屏幕没变"，不是"发过几次继续"。所以先比对内容哈希：
-        // Claude 确实产出了新内容 → 上一轮继续是有效的，计数清零重新开始。
-        const curHash = computeContentHash(terminalContent, 500);
-        const screenAdvanced = lastAction?.contentHash && lastAction.contentHash !== curHash;
+        // 死循环的真正特征是"发了继续但屏幕没变"，不是"发过几次继续"。所以先比对推进信号：
+        // Claude 确实产出了新回复正文 → 上一轮继续是有效的，计数清零重新开始。
+        // ⚠️ v1.2.96：判据从整屏尾部哈希改为 Claude 回复正文哈希（computeAdvanceSignal），
+        //    整屏尾部是固定 UI 帧、正常干完活也判"没变"，害得正常节奏被误熔断永久挂死。
+        const curAdvanceSig = computeAdvanceSignal(terminalContent);
+        const screenAdvanced = lastAction?.advanceSig && lastAction.advanceSig !== curAdvanceSig;
         const continueCount = (lastAction?.action === '继续' && !screenAdvanced)
           ? (lastAction.continueCount || 1) + 1
           : 1;
@@ -4992,13 +5129,23 @@ async function runBackgroundAutoAction() {
           }
 
           const prevAction = lastActionMap.get(session.id);
-          // 与上面的熔断判据保持同一口径：屏幕相比上次操作已推进 → 上轮"继续"有效，计数重开。
-          // 两处口径必须一致，否则熔断这边清零、写回这边继续累加，计数照旧只增不减。
-          const prevAdvanced = prevAction?.contentHash && prevAction.contentHash !== contentHash;
+          // 与上面的熔断判据保持同一口径：回复正文相比上次操作已推进 → 上轮"继续"有效，计数重开。
+          // 两处口径必须一致（都用 advanceSig），否则熔断这边清零、写回这边继续累加，计数照旧只增不减。
+          const curAdvanceSig = computeAdvanceSignal(terminalContent);
+          const prevAdvanced = prevAction?.advanceSig && prevAction.advanceSig !== curAdvanceSig;
           const continueCount = (action === '继续' && prevAction?.action === '继续' && !prevAdvanced)
             ? (prevAction.continueCount || 1) + 1
             : (action === '继续' ? 1 : 0);
-          lastActionMap.set(session.id, { action, time: now, contentHash, continueCount });
+          lastActionMap.set(session.id, { action, time: now, contentHash, advanceSig: curAdvanceSig, continueCount });
+          // 水位阶段在这里才落地——「确认发出」的收口点（与 lastActionMap/台账同一处）。
+          // 上面 5 处 continue 天然到不了这里，阶段留在原地 → 下轮重试同一步（不缺步）；
+          // 到了这里就只推进一次（不重复）。
+          if (status._waterlineNextPhase) {
+            session._waterlinePhase = status._waterlineNextPhase;
+            session._waterlineHandoffRounds = 0;
+            try { sessionManager.updateSession(session); } catch {}  // 阶段落库，跨进程存活
+            console.log(`[水位交接] 会话 ${session.name}: 阶段落地 → ${status._waterlineNextPhase}`);
+          }
           // 效果台账：延迟回读，按判定类型统计这次操作到底有没有推动事情发生
           actionOutcome.record(session, {
             state: status.currentState, actionType: status.actionType, action, beforeScreen: terminalContent,
@@ -5094,7 +5241,17 @@ async function runBackgroundAutoAction() {
             session.sendInput(action, { submit: true });  // v1.2.87 直达 tmux server
           }
 
-          lastActionMap.set(session.id, { action, contentHash, time: now });
+          // v1.2.96：ai_cache 路径也要维护 advanceSig + continueCount，否则下一轮熔断判定
+          //   读到的 lastAction 缺 advanceSig，screenAdvanced 恒为 false，计数照样只增不减。
+          {
+            const prevActionCache = lastActionMap.get(session.id);
+            const curAdvanceSig = computeAdvanceSignal(terminalContent);
+            const prevAdvancedCache = prevActionCache?.advanceSig && prevActionCache.advanceSig !== curAdvanceSig;
+            const continueCountCache = (action === '继续' && prevActionCache?.action === '继续' && !prevAdvancedCache)
+              ? (prevActionCache.continueCount || 1) + 1
+              : (action === '继续' ? 1 : 0);
+            lastActionMap.set(session.id, { action, contentHash, advanceSig: curAdvanceSig, continueCount: continueCountCache, time: now });
+          }
           actionOutcome.record(session, {
             state: status.currentState, actionType: status.actionType, action, beforeScreen: terminalContent,
             source: 'ai_cache', rule: status._rule || null
@@ -5267,12 +5424,13 @@ async function runBackgroundAutoAction() {
 
         // 记录本次操作（包含内容哈希，用于检测终端内容变化）
         const prevActionAi = lastActionMap.get(session.id);
-        // 同上：屏幕已推进则计数重开（三处口径必须统一）
-        const prevAdvancedAi = prevActionAi?.contentHash && prevActionAi.contentHash !== contentHash;
+        // 同上：回复正文已推进则计数重开（三处口径必须统一，都用 advanceSig）
+        const curAdvanceSigAi = computeAdvanceSignal(terminalContent);
+        const prevAdvancedAi = prevActionAi?.advanceSig && prevActionAi.advanceSig !== curAdvanceSigAi;
         const continueCountAi = (action === '继续' && prevActionAi?.action === '继续' && !prevAdvancedAi)
           ? (prevActionAi.continueCount || 1) + 1
           : (action === '继续' ? 1 : 0);
-        lastActionMap.set(session.id, { action, time: now, contentHash, continueCount: continueCountAi });
+        lastActionMap.set(session.id, { action, time: now, contentHash, advanceSig: curAdvanceSigAi, continueCount: continueCountAi });
         actionOutcome.record(session, {
           state: status.currentState, actionType: status.actionType, action, beforeScreen: terminalContent,
           source: status._source || (status.preAnalyzed ? 'rule' : 'ai'),
@@ -5477,17 +5635,32 @@ setInterval(async () => {
       const session = sessionManager.getSession(sd.id);
       if (!session || !session.workingDir) continue;
       if (session.aiType && session.aiType !== 'claude') continue;
-      // status/relay 有更权威的实测来源，不覆盖
-      if (['status', 'relay'].includes(session.claudeProvider?.configSource)) continue;
+      // relay 是物理同源（面板显示的就是实际转发目标），永不覆盖。
+      // ⚠️ status 曾也在这个豁免名单里，但 `/status` 探针**只在用户手动敲 /status 的那一刻**
+      //    才更新——之后用户在 CLI 里 /model 换了模型，这份陈旧快照会永久压住 transcript 兜底。
+      //    实测 35 个会话里 3 个 src=status 显示 glm-5.3-flash（那是 ~/.claude/settings.json
+      //    的持久值，即"最后一次 /model 选择"，不是在跑的模型），还有一个 src=status 是空值
+      //    却同样被保护。所以 status 只在"确有非空模型且比 transcript 更新"时才优先。
+      const cp = session.claudeProvider;
+      if (cp?.configSource === 'relay') continue;
       const model = await probeModelByWorkingDir(session.workingDir);
-      if (model && model !== session.currentModel) {
+      if (!model) continue;
+      // 只在**面板实际显示的值**（cp.model）与 transcript 不一致时才动。
+      // ⚠️ 不能写成 `model !== currentModel || cp?.model !== model`：currentModel 只是
+      //    内部缓存，buildResult 重建 claudeProvider 时不同步，会让这里每 25 秒都判成
+      //    "有变化"→ 广播 + 落库 + 打一行 `claude-opus-5 → claude-opus-5` 的空日志刷屏。
+      const shown = cp?.model || '';
+      if (shown !== model) {
         session.currentModel = model;
-        if (session.claudeProvider) {
-          session.claudeProvider = { ...session.claudeProvider, model };
+        if (cp) {
+          session.claudeProvider = { ...cp, model };
+          // ⚠️ 必须落库：老实现只改内存 + 推前端，服务一重启就回到旧值
+          //    （实测日志刚把 RustCandance 刷成 claude-opus-5，库里仍是 opus[1m]）。
+          try { sessionManager.updateSession(session); } catch {}
           io.emit('sessions:updated', sessionManager.listSessions());
           io.to(`session:${session.id}`).emit('session:updated', session.toJSON());
         }
-        console.log(`[模型周期刷新] 会话 ${session.name}: ${model}`);
+        console.log(`[模型周期刷新] 会话 ${session.name}: ${cp?.model || '(空)'} → ${model}`);
       }
     } catch {}
   }
@@ -5540,14 +5713,34 @@ function getLastClaudeReply(terminalContent) {
   }
   if (promptIdx <= 0) return '';
 
-  // 从提示符往前收集回复内容，遇到"继续"或上一个提示符停止
+  // 从提示符往前收集回复内容，遇到"继续"或上一个提示符停止。
+  // ⚠️ 必须挡住**用户输入回显**：Claude Code 把用户消息回显成 `❯ <文本>`，行首有内容，
+  //    `^[❯>]\s*$` 这个停止条件只拦得住空提示符。回显混进来的后果有两处：
+  //    ① 水位交接把自己发的收尾指令读成"会话说记忆写完了"→ 立刻 /compact（最严重）；
+  //    ② 熔断判据与 computeAdvanceSignal 把用户输入当成"新进展"→ 判断一起失真。
+  //    老实现只挡了裸「继续」这一种，形同虚设。
   const replyLines = [];
   for (let i = promptIdx - 1; i >= 0 && i >= promptIdx - 10; i--) {
     const line = cleanLines[i];
     if (/^[❯>]\s*$/.test(line) || line === '继续') break;
+    if (/^[❯>]\s+\S/.test(line)) break;  // 带内容的回显行：到此为止，往前都是更早的轮次
     replyLines.unshift(line);
   }
   return replyLines.join('\n').trim();
+}
+
+// v1.2.96：循环检测"是否推进"的判据。
+// ⚠️ 老实现用 computeContentHash(整屏尾部500)——但整屏尾部永远是那一帧固定 UI
+//    （footer + 空 ❯ + `auto mode on · ← N agents`），Claude 每批干完活回到空闲态时
+//    这块尾部逐字节相同。于是「继续→干活17分钟→产出新回复→回到空闲」这种完全正常的
+//    节奏被判成"屏幕没变"，continueCount 一路爬到 4 触发熔断，之后再不发继续，屏幕
+//    真的不动了、哈希永远相同——永久挂死（RustCandance 实测：Baked 17m done 后空 ❯ 静止）。
+// 真正能反映"上一轮继续有没有推动进展"的是 **Claude 回复正文**，不是整屏尾部。
+// 正文为空时（运行中/无提示符）回退整屏尾部，避免全判为未推进。
+function computeAdvanceSignal(terminalContent) {
+  const reply = getLastClaudeReply(terminalContent);
+  if (reply && reply.length > 0) return computeContentHash(reply, 0);
+  return computeContentHash(terminalContent, 500);
 }
 
 // 廉价探针：屏幕上是否挂着"等用户选"的确认菜单（不调 AI，纯正则）

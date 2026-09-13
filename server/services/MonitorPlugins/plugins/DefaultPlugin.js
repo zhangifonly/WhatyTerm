@@ -245,10 +245,25 @@ class DefaultPlugin extends BasePlugin {
       return 'error';
     }
 
-    // 检测运行中状态
-    if (/running|processing|loading|compiling|building|installing/i.test(lastLines) ||
-        /\.\.\.|\u280b|\u2819|\u2839|\u2838|\u283c|\u2834|\u2826|\u2827|\u2807|\u280f|\u28fe|\u28fd|\u28fb|\u28bf|\u28bf|\u28df|\u28ef|\u28f7/.test(lastLines) ||
-        /\d+%|ETA:|eta:/i.test(lastLines)) {
+    // 检测运行中状态（弱判据兜底——上面的强判据没命中时才走到这里）
+    // ⚠️ 这里原来是裸词 /running|processing|loading|compiling|building|installing/，
+    //    实测把**空闲会话判成运行中、永不发「继续」**：Claude 干完一批活后屏上留下
+    //      `✻ Crunched for 15m 36s · done 15:16 · 2 shells still running`
+    //    那句 `2 shells still running` 说的是**后台 shell** 在跑（run_in_background），
+    //    Claude 主循环早已回到空闲的 `❯`、底栏也没有 `esc to interrupt`。
+    //    裸 `running` 一命中 → phase=running →「程序运行中，等待完成」→ 不发继续，
+    //    而后台 shell 可能挂很久甚至常驻（dev server），会话就此僵住等人工。
+    //    同理裸 `building`/`loading` 会被正文里任何一句「building the index」命中。
+    // 修法：① 显式排除「N shells/tasks/agents still running」这种后台任务措辞；
+    //       ② 这些动词必须出现在**行首的状态行**上才算，不认句中任意位置的英文单词。
+    //    真正的运行证据（esc to interrupt / spinner / 计时器）已由上面的强判据覆盖。
+    const strongProgress = /\.{3}|…/.test(lastLines)
+      || /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⣟⣯⣷]/.test(lastLines)
+      || /\d+%|ETA:|eta:/i.test(lastLines);
+    const bgTaskOnly = /\d+\s+(shells?|tasks?|agents?)\s+still\s+running/i.test(lastLines);
+    const verbStateLine = !bgTaskOnly
+      && /^[\s✢✻✽✳✶✴✵✷·+*]*(running|processing|loading|compiling|building|installing)\b/im.test(lastLines);
+    if (strongProgress || verbStateLine) {
       return 'running';
     }
 
@@ -510,7 +525,13 @@ class DefaultPlugin extends BasePlugin {
     const lastLines = cleanContent.split('\n').slice(-15).join('\n');
 
     // 排除运行中状态（Claude Code 运行中显示 "esc to interrupt"）
-    if (/esc to interrupt|running|processing|loading|compiling|building/i.test(lastLines)) {
+    // ⚠️ 同 phase 判定处的坑（见上方注释）：裸 `running` 会命中
+    //    "2 shells still running" —— 那是后台 shell，主循环已空闲。
+    //    这条更要紧：isIdle 返回 false 会让「等待输入」分支也进不去，会话彻底僵住。
+    //    所以后台任务措辞必须先排除，动词也只认行首状态行。
+    const bgTaskOnly = /\d+\s+(shells?|tasks?|agents?)\s+still\s+running/i.test(lastLines);
+    const runVerbLine = /^[\s✢✻✽✳✶✴✵✷·+*]*(running|processing|loading|compiling|building)\b/im.test(lastLines);
+    if (/esc to interrupt/i.test(lastLines) || (!bgTaskOnly && runVerbLine)) {
       return false;
     }
 
@@ -528,9 +549,12 @@ class DefaultPlugin extends BasePlugin {
     // Claude Code 空闲提示符（更宽松的匹配）
     // 匹配单独的 > 提示符，允许前面有空格，后面可能有光标等
     // OpenCode 空闲提示符：@general、[build] 或 [plan] 后跟空行
-    const claudeCodeIdle = /^[\s>]*>\s*$/m.test(lastLines) ||
-                          /\n>\s*$/.test(lastLines) ||
-                          />\s*[\x00-\x1f]*$/.test(lastLines);
+    // ⚠️ 必须同时认 `❯`（U+276F）：Claude Code 实际渲染的提示符是它，不是 ASCII `>`。
+    //    只认 `>` 的后果是**空闲的 Claude 会话永远判不出空闲** —— 与上面那条
+    //    「后台 shell 措辞否决 isIdle」叠加，会话彻底僵住等人工（实测 Hitech 会话）。
+    const claudeCodeIdle = /^[\s❯>]*[❯>]\s*$/m.test(lastLines) ||
+                          /\n[❯>]\s*$/.test(lastLines) ||
+                          /[❯>]\s*[\x00-\x1f]*$/.test(lastLines);
 
     // OpenCode 空闲提示符
     const openCodeIdle = /@general\s*$/m.test(lastLines) ||
