@@ -4,6 +4,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import Anser from 'anser';
+import PinyinMatch from 'pinyin-match';
 import { ToastContainer, toast } from './components/Toast';
 import { useTranslation } from './i18n';
 import ScheduleManager from './components/ScheduleManager';
@@ -983,6 +984,14 @@ export default function App() {
     // （canvas 渲染），浏览器的 Cmd+C 拿不到，必须自己接管。
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true;
+      // ⚠️ 会话切换快捷键必须在这里先放掉，交给 window 上的全局监听。
+      //    不拦的话 xterm 会把它们当普通输入写进 CLI —— ⌘1 变成往 Claude
+      //    输入框里打个 "1"（那正好是确认菜单的选项 1，后果不只是打错字）。
+      //    ⌘K / ⌘↓ / ⌘1~⌘9 都不是终端里有意义的按键，全部让行。
+      const switchMod = e.metaKey || e.ctrlKey;
+      if (switchMod && (e.key === 'k' || e.key === 'K' || e.key === 'ArrowDown' || /^[1-9]$/.test(e.key))) {
+        return false;   // 不交给终端；window keydown 已注册处理（那里做 preventDefault）
+      }
       const isCopy = (e.metaKey && e.key === 'c') || (e.ctrlKey && e.shiftKey && (e.key === 'C' || e.key === 'c'));
       if (isCopy) {
         const sel = term.getSelection();
@@ -1182,6 +1191,233 @@ export default function App() {
     setSuggestion(null);
     emitAttach(sessionId);
   }, [emitAttach]);
+
+  // ===== 会话序号与快速切换（35 个会话时一屏只放得下 8~9 个，靠滚找不现实）=====
+  //
+  // 「门牌号」语义：序号钉在会话上，按 createdAt 固定编号。切换显示排序时号码
+  // 跟着会话走、不重排 —— 否则 ⌘1 今天是 A 明天是 B，肌肉记忆无法积累。
+  // 服务端 _loadSessions 已补 ORDER BY created_at，这里再按同一键排一次兜底
+  //（socket 增量更新 setSessions(prev => prev.map(...)) 不保证顺序）。
+  const sessionNumbers = useMemo(() => {
+    const byCreated = [...sessions].sort((a, b) => {
+      const ta = new Date(a.createdAt || 0).getTime();
+      const tb = new Date(b.createdAt || 0).getTime();
+      if (ta !== tb) return ta - tb;
+      return String(a.id).localeCompare(String(b.id));  // createdAt 相同时用 id 兜底
+    });
+    const map = {};
+    byCreated.forEach((s, i) => { map[s.id] = i + 1; });
+    return map;
+  }, [sessions]);
+
+  // 置顶存 localStorage（sessions 本来就从 localStorage 缓存初始化，同一套机制）。
+  // ⚠️ 用**数组**而非 Set 作唯一状态源：置顶顺序决定快捷键位（先置顶的拿 ⌘1），
+  //    Set 不保证顺序语义清晰，两份状态更会不同步。pinnedIds 只是它的派生视图。
+  const [pinnedOrder, setPinnedOrder] = useState(() => {
+    try {
+      const raw = localStorage.getItem('webtmux_pinned_sessions');
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  });
+  const pinnedIds = useMemo(() => new Set(pinnedOrder), [pinnedOrder]);
+  const togglePinned = useCallback((sessionId) => {
+    setPinnedOrder(prev => {
+      const next = prev.includes(sessionId)
+        ? prev.filter(id => id !== sessionId)
+        : [...prev, sessionId];        // 追加到末尾：先置顶的先拿小号
+      try { localStorage.setItem('webtmux_pinned_sessions', JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
+
+  // 显示排序模式：fixed（门牌号顺序）/ active（最近活跃）/ pending（待处理优先）
+  const [sortMode, setSortMode] = useState(() => {
+    try { return localStorage.getItem('webtmux_session_sort') || 'fixed'; } catch { return 'fixed'; }
+  });
+  const cycleSortMode = useCallback(() => {
+    setSortMode(prev => {
+      const next = prev === 'fixed' ? 'active' : prev === 'active' ? 'pending' : 'fixed';
+      try { localStorage.setItem('webtmux_session_sort', next); } catch {}
+      return next;
+    });
+  }, []);
+
+  // 需要人工介入的会话（自动操作开着时它自己会处理，不算待办）
+  const needsActionIds = useMemo(() => {
+    const s = new Set();
+    for (const ses of sessions) {
+      if (aiStatusMap[ses.id]?.needsAction && !ses.autoActionEnabled) s.add(ses.id);
+    }
+    return s;
+  }, [sessions, aiStatusMap]);
+
+  // 快捷键位：与门牌号**分开的第二套编号**，只发给置顶会话。
+  //
+  // 为什么要两套：门牌号按 createdAt 排，实测 ⌘1~⌘9 全落在 2026-08-03 创建的老会话上
+  //（AetherEDA、AIPsychology…），而常用的 WebTmux / cadance 排在 28 位之后，
+  // 永远拿不到快捷键 —— 门牌号的稳定性和快捷键的实用性在这里是矛盾的。
+  // 解法：门牌号继续按创建序钉死（永不偏移），快捷键位按**置顶顺序**单独发，
+  // 置顶谁谁就拿 ⌘1、⌘2…。改置顶只影响这套号，不动门牌号。
+  // 置顶顺序即 pinnedOrder 数组顺序（加入时追加到末尾），所以先置顶的先拿小号。
+  const hotkeySlots = useMemo(() => {
+    const map = {};
+    // 只给仍然存在的会话发号，已关闭的置顶项不占位
+    const alive = pinnedOrder.filter(id => sessions.some(s => s.id === id));
+    alive.slice(0, 9).forEach((id, i) => { map[id] = i + 1; });
+    return map;
+  }, [pinnedOrder, sessions]);
+
+  // 实际渲染顺序：置顶永远在最前，其余按当前排序模式。门牌号不参与重排。
+  const orderedSessions = useMemo(() => {
+    const num = (s) => sessionNumbers[s.id] || 9999;
+    const arr = [...sessions];
+    arr.sort((a, b) => {
+      const pa = pinnedIds.has(a.id) ? 0 : 1;
+      const pb = pinnedIds.has(b.id) ? 0 : 1;
+      if (pa !== pb) return pa - pb;
+      if (sortMode === 'active') {
+        const ta = new Date(a.updatedAt || a.createdAt || 0).getTime();
+        const tb = new Date(b.updatedAt || b.createdAt || 0).getTime();
+        if (ta !== tb) return tb - ta;   // 新的在前
+      } else if (sortMode === 'pending') {
+        const na = needsActionIds.has(a.id) ? 0 : 1;
+        const nb = needsActionIds.has(b.id) ? 0 : 1;
+        if (na !== nb) return na - nb;
+      }
+      return num(a) - num(b);            // 同档内按门牌号，保证顺序确定
+    });
+    return arr;
+  }, [sessions, pinnedIds, sortMode, sessionNumbers, needsActionIds]);
+
+  // ===== ⌘K 快速切换面板 =====
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [switcherQuery, setSwitcherQuery] = useState('');
+  const [switcherIndex, setSwitcherIndex] = useState(0);
+  const switcherInputRef = useRef(null);
+
+  // 子序列模糊匹配：输入 wtx 能命中 WebTmux。纯 includes 做不到，
+  // 而 35 个会话里靠首字母缩写定位是最省按键的方式。
+  const fuzzyScore = (text, query) => {
+    if (!query) return 0;
+    const t = String(text || '').toLowerCase();
+    const q = query.toLowerCase();
+    if (t.includes(q)) return 1000 - t.indexOf(q);   // 连续匹配优先，越靠前越高
+    let ti = 0, hits = 0, lastHit = -1, bonus = 0;
+    for (const ch of q) {
+      const found = t.indexOf(ch, ti);
+      if (found === -1) return -1;                    // 有字符匹配不上 → 不命中
+      if (lastHit >= 0 && found === lastHit + 1) bonus += 3;  // 相邻加分
+      if (found === 0 || /[^a-z0-9]/.test(t[found - 1])) bonus += 5;  // 词首加分
+      lastHit = found; ti = found + 1; hits++;
+    }
+    return hits * 2 + bonus;
+  };
+
+  // 拼音匹配：中文首字母 / 全拼 / 中英混排都支持（sxzm → 数学之美，kjkk → 可监可控）。
+  //
+  // 为什么必须有：实测 35 个会话**名字全是英文**，但**目标和项目说明全含中文**
+  //（「WhatyMind 心镜」「星鉴 StellarForge」「可监可控」「AI 论文写作助手」）——
+  // 那才是脑子里记住一个会话的方式，而上面的子序列匹配对汉字完全无能
+  //（汉字进不了 a-z 的字符流）。
+  // 选 pinyin-match 而非 pinyin-pro：实测同一批真实数据，pinyin-pro 误命中明显更多
+  //（`xj` 命中 4 条、`daili` 把「心镜」也算上），且体积 1.1M vs 524K。
+  // 注意它**不做英文子序列**（`wtx` 匹配不到 WebTmux），所以两套匹配并存：
+  // 子序列管英文缩写，pinyin-match 管中文。
+  const pinyinHit = (text, query) => {
+    if (!text || !query) return false;
+    // 目标不含汉字时直接跳过——省掉整批英文文本的拼音解析开销
+    if (!/[一-龥]/.test(text)) return false;
+    try { return !!PinyinMatch.match(text, query); } catch { return false; }
+  };
+
+  const switcherResults = useMemo(() => {
+    const q = switcherQuery.trim();
+    if (!q) return orderedSessions;
+    // 纯数字直接按门牌号命中，输 "12" 就到 12 号
+    if (/^\d+$/.test(q)) {
+      const hit = sessions.filter(s => String(sessionNumbers[s.id]) === q);
+      if (hit.length) return hit;
+    }
+    return sessions
+      .map(s => {
+        const name = s.projectName || s.name || '';
+        const dir = s.workingDir || '';
+        // 目标和项目说明必须参与搜索：实测会话名全是英文，而中文关键词
+        //（心镜 / 星鉴 / 可监可控 / 论文写作）只存在于 goal 和 projectDesc 里，
+        // 不搜它们等于拼音功能没有可匹配的文本。截断到 120 字避免长说明拖慢匹配。
+        const goal = String(s.goal || '').slice(0, 120);
+        const desc = String(s.projectDesc || '').slice(0, 120);
+        // 英文子序列：名字 > 目录（目录命中降权，重名会话靠它区分）
+        let best = Math.max(
+          fuzzyScore(name, q),
+          fuzzyScore(s.name || '', q),
+          fuzzyScore(dir, q) - 200,
+        );
+        // 拼音：命中即给一个明确高于"弱子序列"但低于"名字连续命中"的分。
+        // 名字命中优先于目标/说明命中——前者更准，后者是兜底。
+        if (pinyinHit(name, q)) best = Math.max(best, 900);
+        if (pinyinHit(goal, q)) best = Math.max(best, 700);
+        if (pinyinHit(desc, q)) best = Math.max(best, 650);
+        // 中文直接输入（不转拼音）也要能搜到目标/说明里的词
+        const ql = q.toLowerCase();
+        if (goal.toLowerCase().includes(ql)) best = Math.max(best, 720);
+        if (desc.toLowerCase().includes(ql)) best = Math.max(best, 670);
+        return { s, score: best };
+      })
+      .filter(x => x.score > -1)
+      .sort((a, b) => b.score - a.score || (sessionNumbers[a.s.id] || 0) - (sessionNumbers[b.s.id] || 0))
+      .map(x => x.s);
+  }, [switcherQuery, orderedSessions, sessions, sessionNumbers]);
+
+  const openSwitcher = useCallback(() => {
+    setSwitcherQuery('');
+    setSwitcherIndex(0);
+    setSwitcherOpen(true);
+    setTimeout(() => switcherInputRef.current?.focus(), 0);
+  }, []);
+
+  // ⌘↓ / Ctrl↓：依次跳到需要人工介入的会话（35 个会话里真正等你的通常只有两三个）
+  const jumpToNextPending = useCallback(() => {
+    const list = orderedSessions.filter(s => needsActionIds.has(s.id));
+    if (!list.length) return;
+    const curIdx = list.findIndex(s => s.id === currentSession?.id);
+    const next = list[(curIdx + 1) % list.length];
+    if (next) attachSession(next.id);
+  }, [orderedSessions, needsActionIds, currentSession, attachSession]);
+
+  // 全局快捷键。⚠️ 终端聚焦时按键先经过 xterm 的 attachCustomKeyEventHandler，
+  //    那边必须放行这些组合键（见终端初始化处），否则会被当成输入发给 CLI。
+  useEffect(() => {
+    const onKey = (e) => {
+      const mod = e.metaKey || e.ctrlKey;   // mac 用 ⌘，Win/Linux 用 Ctrl
+      if (!mod) return;
+      // ⌘K：开/关快速切换
+      if (e.key === 'k' || e.key === 'K') {
+        e.preventDefault();
+        if (switcherOpen) setSwitcherOpen(false); else openSwitcher();
+        return;
+      }
+      // ⌘↓：循环待处理
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        jumpToNextPending();
+        return;
+      }
+      // ⌘1~⌘9：走**快捷键位**（置顶顺序），不是门牌号。
+      // 门牌号按 createdAt 排，1~9 全是最早创建的老会话；常用会话排 28 位之后，
+      // 用门牌号绑快捷键等于把 9 个键位浪费在你从不切的会话上。
+      if (/^[1-9]$/.test(e.key)) {
+        const slot = Number(e.key);
+        const targetId = Object.keys(hotkeySlots).find(id => hotkeySlots[id] === slot);
+        if (targetId && sessions.some(s => s.id === targetId)) {
+          e.preventDefault();
+          attachSession(targetId);
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [switcherOpen, openSwitcher, jumpToNextPending, sessions, hotkeySlots, attachSession]);
 
   // 创建会话
   const createSession = (data) => {
@@ -1414,8 +1650,39 @@ export default function App() {
           </div>
         </div>
 
+        {/* 待处理摘要 + 排序模式：35 个会话里真正等你的通常只有两三个，让它们自己浮上来。
+            没有待办时整条不渲染，不占空间。 */}
+        <div className="session-toolbar">
+          <button
+            className="session-toolbar-btn"
+            onClick={openSwitcher}
+            title="快速切换会话（⌘K / Ctrl+K）：可搜名字、目录，或直接输门牌号"
+          >
+            <span className="stb-ico">⌕</span>搜索
+            <kbd>⌘K</kbd>
+          </button>
+          <button
+            className="session-toolbar-btn"
+            onClick={cycleSortMode}
+            title={'切换列表排序（门牌号不受影响，始终跟着会话走）\n固定：按创建顺序\n最近活跃：新的在前\n待处理优先：需要你介入的排前面'}
+          >
+            {sortMode === 'fixed' ? '固定顺序' : sortMode === 'active' ? '最近活跃' : '待处理优先'}
+          </button>
+        </div>
+        {needsActionIds.size > 0 && (
+          <button
+            className="session-pending-bar"
+            onClick={jumpToNextPending}
+            title="跳到下一个需要你确认的会话（⌘↓ / Ctrl+↓）"
+          >
+            <span className="spb-dot" />
+            {needsActionIds.size} 个等确认
+            <kbd>⌘↓</kbd>
+          </button>
+        )}
+
         <div className="session-list">
-          {sessions.map((session) => (
+          {orderedSessions.map((session) => (
             <div
               key={session.id}
               className={`session-item ${currentSession?.id === session.id ? 'active' : ''} ${aiStatusMap[session.id]?.needsAction && !session.autoActionEnabled ? 'needs-action' : ''}`}
@@ -1439,6 +1706,20 @@ export default function App() {
               )}
               <div className="session-header">
                 <div className="session-name">
+                  {/* 门牌号：按创建序钉死，永不偏移。⌘K 里输这个号可直达。 */}
+                  <span
+                    className="session-num"
+                    title={`门牌号 ${sessionNumbers[session.id]}（⌘K 里输入 ${sessionNumbers[session.id]} 可直达）`}
+                  >
+                    {sessionNumbers[session.id]}
+                  </span>
+                  {pinnedIds.has(session.id) && <span className="session-pin" title="已置顶">📌</span>}
+                  {/* 快捷键位：另一套编号，只发给置顶会话，改置顶不影响门牌号 */}
+                  {hotkeySlots[session.id] && (
+                    <span className="session-hotkey" title={`按 ⌘${hotkeySlots[session.id]} 直达`}>
+                      ⌘{hotkeySlots[session.id]}
+                    </span>
+                  )}
                   <span className={`session-status ${session.autoActionEnabled ? 'auto' : 'paused'}`} />
                   {session.projectName || session.name}
                   {sessionMemory[session.id]?.memory > 0 && (
@@ -2765,6 +3046,73 @@ export default function App() {
         />
       )}
 
+      {/* ⌘K 快速切换面板 */}
+      {switcherOpen && (
+        <div className="switcher-overlay" onClick={() => setSwitcherOpen(false)}>
+          <div className="switcher" onClick={(e) => e.stopPropagation()}>
+            <input
+              ref={switcherInputRef}
+              className="switcher-input"
+              placeholder="搜会话名 / 项目目录，或直接输门牌号…"
+              value={switcherQuery}
+              onChange={(e) => { setSwitcherQuery(e.target.value); setSwitcherIndex(0); }}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape') { setSwitcherOpen(false); return; }
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  setSwitcherIndex(i => Math.min(i + 1, switcherResults.length - 1));
+                } else if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  setSwitcherIndex(i => Math.max(i - 1, 0));
+                } else if (e.key === 'Enter') {
+                  e.preventDefault();
+                  const target = switcherResults[switcherIndex];
+                  if (target) { attachSession(target.id); setSwitcherOpen(false); }
+                }
+              }}
+            />
+            <div className="switcher-list">
+              {switcherResults.length === 0 && (
+                <div className="switcher-empty">没有匹配的会话</div>
+              )}
+              {switcherResults.slice(0, 12).map((s, i) => (
+                <div
+                  key={s.id}
+                  className={`switcher-item ${i === switcherIndex ? 'active' : ''}`}
+                  onMouseEnter={() => setSwitcherIndex(i)}
+                  onClick={() => { attachSession(s.id); setSwitcherOpen(false); }}
+                >
+                  <span className="switcher-num">{sessionNumbers[s.id]}</span>
+                  {hotkeySlots[s.id] && <span className="session-hotkey">⌘{hotkeySlots[s.id]}</span>}
+                  <span className={`session-status ${s.autoActionEnabled ? 'auto' : 'paused'}`} />
+                  <div className="switcher-main">
+                    <div className="switcher-line1">
+                      <span className="switcher-name">{s.projectName || s.name}</span>
+                      {needsActionIds.has(s.id) && <span className="switcher-flag" title="等你确认">⚠</span>}
+                      {/* 目录区分重名会话（实测 RustCandance 有 codex/claude 两个） */}
+                      <span className="switcher-dir">{(s.workingDir || '').split('/').slice(-2).join('/')}</span>
+                      <span className="switcher-type">{s.aiType || 'claude'}</span>
+                    </div>
+                    {/* 中文摘要：会话名全是英文，拼音搜到的其实是这一行的内容，
+                        不显示出来用户看不出为什么这条被搜出来 */}
+                    {(() => {
+                      const sub = String(s.goal || s.projectDesc || '').replace(/\s+/g, ' ').trim();
+                      const generic = /^.{1,20}\s*项目开发$/.test(sub);   // 模板式目标没信息量，不占行
+                      return sub && !generic
+                        ? <div className="switcher-sub" title={sub}>{sub.slice(0, 60)}</div>
+                        : null;
+                    })()}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="switcher-hint">
+              ↑↓ 选择 · Enter 进入 · Esc 关闭 · ⌘1~⌘9 直达前九个 · ⌘↓ 跳下一个待确认
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 会话右键菜单 */}
       {sessionContextMenu && (
         <div
@@ -2785,6 +3133,16 @@ export default function App() {
               }}
             >
               {sessionContextMenu.session.autoActionEnabled ? '关闭自动操作' : '开启自动操作'}
+            </div>
+            <div
+              className="context-menu-item"
+              onClick={() => {
+                togglePinned(sessionContextMenu.session.id);
+                setSessionContextMenu(null);
+              }}
+              title="置顶只影响列表位置，门牌号不变"
+            >
+              {pinnedIds.has(sessionContextMenu.session.id) ? '取消置顶' : '置顶到列表最前'}
             </div>
             <div className="context-menu-separator" />
             <div
