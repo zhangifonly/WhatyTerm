@@ -4105,6 +4105,11 @@ const USER_INPUT_PAUSE_DURATION = 5000; // 用户输入后暂停 5 秒
 // 错误检测对每个会话做抓屏+进程检测(同步execSync)，会话多时每秒串行跑全部会话会
 // 周期性阻塞主线程、拖慢输入回显。错误不是高频事件，每会话 4 秒检一次足够。
 const errorCheckLastTime = new Map();
+// AI 状态与内容哈希缓存。声明位置提前到这里：下面的确认菜单快速探测要用，
+// 它跑在 4 秒一轮的循环里、不受自动操作开关限制（见该处注释）。
+const aiStatusCache = new Map();        // 每个会话的最新 AI 状态
+const aiContentHashCache = new Map();   // 每个会话的终端内容哈希，用于检测内容变化
+
 const ERROR_CHECK_INTERVAL = 4000;
 
 // 记录用户输入，暂停自动操作
@@ -4239,6 +4244,46 @@ async function runBackgroundAutoAction() {
     // 异步抓屏+进程检测：不阻塞事件循环，按键输入可在 await 间隙即时处理
     const terminalContent = await session.getScreenContentAsync();
     if (!terminalContent || terminalContent.length < 50) continue;
+
+    // ===== 确认菜单快速探测（本循环 4 秒一轮，不受自动操作开关限制）=====
+    // 为什么要单独在这里做：自动操作**关着**的会话不进下面那个循环
+    //（4565 行 `if (!sessionData.autoActionEnabled) continue`），状态只能靠
+    // AI 分析循环刷新，而那是 **30 秒**一轮 —— 于是确认框弹出后，侧栏的
+    // 「N 个等确认」最多迟 30 秒才出现。而这类会话恰恰是你手动盯着的，最需要及时。
+    // 确认菜单识别是纯正则、零 API 开销，放在这里代价可忽略。
+    {
+      const onScreen = hasConfirmMenuOnScreen(terminalContent);
+      const wasOnScreen = !!session._confirmOnScreen;
+      if (onScreen !== wasOnScreen) {
+        session._confirmOnScreen = onScreen;
+        const cached = aiStatusCache.get(sessionData.id);
+        if (onScreen) {
+          // 出现确认框：立即把缓存状态改成 select，前端摘要马上能看到
+          const st = {
+            ...(cached || {}),
+            currentState: '确认界面',
+            actionType: 'select',
+            needsAction: true,
+            suggestedAction: (cached && cached.actionType === 'select' && cached.suggestedAction) || '1',
+            actionReason: '屏上开着确认菜单，等待选择',
+            preAnalyzed: true,
+            _source: 'confirm_probe',
+            updatedAt: new Date().toISOString(),
+          };
+          aiStatusCache.set(sessionData.id, st);
+          io.emit('ai:status', { sessionId: sessionData.id, ...st, ...getAIProviderInfo() });
+        } else if (cached && cached.actionType === 'select') {
+          // 确认框消失（被选掉或 Esc）：作废陈旧的 select 状态，别让摘要继续显示
+          aiStatusCache.delete(sessionData.id);
+          aiContentHashCache.delete(sessionData.id);
+          io.emit('ai:status', {
+            sessionId: sessionData.id, currentState: '确认已处理', actionType: 'none',
+            needsAction: false, suggestedAction: null, preAnalyzed: true,
+            _source: 'confirm_probe', updatedAt: new Date().toISOString(), ...getAIProviderInfo(),
+          });
+        }
+      }
+    }
 
     // 实测供应商（最权威非侵入源）：终端出现 /status 输出时解析 base URL/登录方式/模型。
     // 触发认多种行——第三方 token 登录的 /status 只有 "Auth token:" + "Anthropic base URL:"，
@@ -5693,8 +5738,10 @@ setTimeout(async () => {
 }, 10000);
 
 // 后台 AI 状态分析：定期分析所有会话的状态（不依赖前端请求）
-const aiStatusCache = new Map(); // 缓存每个会话的最新 AI 状态
-const aiContentHashCache = new Map(); // 缓存每个会话的终端内容哈希，用于检测内容变化
+// ⚠️ aiStatusCache / aiContentHashCache 已前移到 ERROR_CHECK_INTERVAL 旁声明 ——
+//    确认菜单快速探测（runBackgroundAutoAction 里，4 秒一轮）要用它们，
+//    而 const 没有变量提升；虽然那里是 setInterval 异步调用、运行时 TDZ 已解除，
+//    但那属于巧合式安全，不该依赖声明顺序。
 const aiNoChangeStartTime = new Map(); // 记录内容开始无变化的时间
 const AI_ANALYSIS_INTERVAL = 30000; // 30秒
 const AI_NO_CHANGE_FORCE_ANALYZE_TIME = 2 * 60 * 1000; // 内容无变化 2 分钟后强制 AI 分析

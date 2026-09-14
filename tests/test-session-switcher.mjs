@@ -348,6 +348,39 @@ test('「待推进」摘要条已移除（常驻十几个、点进去无事可�
   assert(/idleWaitingIds/.test(APP), 'idleWaitingIds 应保留给列表红点与排序使用');
 });
 
+
+// ---------- ⑨ 确认菜单快速探测：解决「等确认」延时 30 秒 ----------
+// 现象：确认框弹出后侧栏「N 个等确认」最多迟 30 秒才出现。
+// 根因：自动操作**关着**的会话不进 runBackgroundAutoAction 的第二个循环
+//（`if (!sessionData.autoActionEnabled) continue`），状态只能靠 AI 分析循环刷新，
+// 而那是 AI_ANALYSIS_INTERVAL = 30 秒一轮。而这类会话恰恰是手动盯着的，最需要及时。
+// 修法：在第一个循环（4 秒一轮、不受开关限制、已抓屏）里加纯正则探测，零 API 开销。
+test('快速探测放在不受自动操作开关限制的循环里', () => {
+  const probeAt = SRV.indexOf('const wasOnScreen = !!session._confirmOnScreen');
+  assert(probeAt > 0, '找不到快速探测代码');
+  const guardAt = SRV.indexOf('if (!sessionData.autoActionEnabled) continue;');
+  assert(guardAt > 0, '找不到自动操作守卫');
+  assert(probeAt < guardAt, '探测在守卫之后 —— 自动操作关着的会话仍然收不到及时状态');
+});
+test('探测同时处理「出现」和「消失」两个方向', () => {
+  const at = SRV.indexOf('const wasOnScreen = !!session._confirmOnScreen');
+  const block = SRV.slice(at, at + 2200);
+  assert(/aiStatusCache\.set/.test(block), '确认框出现时未写入状态');
+  assert(/aiStatusCache\.delete/.test(block), '确认框消失时未作废陈旧 select 状态');
+  assert(/_confirmOnScreen/.test(block), '未记录上一次状态，会每轮重复推送');
+});
+test('探测只在状态翻转时推送（不每轮刷屏）', () => {
+  const at = SRV.indexOf('const wasOnScreen = !!session._confirmOnScreen');
+  const block = SRV.slice(at, at + 2200);
+  assert(/onScreen !== wasOnScreen/.test(block), '未做状态翻转判断，会每 4 秒推一次');
+});
+test('缓存 Map 声明早于使用点（const 无提升）', () => {
+  const declAt = SRV.indexOf('const aiStatusCache = new Map()');
+  const useAt = SRV.indexOf('const wasOnScreen = !!session._confirmOnScreen');
+  assert(declAt > 0 && useAt > 0, '找不到声明或使用点');
+  assert(declAt < useAt, 'aiStatusCache 声明晚于使用点 —— 依赖 TDZ 巧合式安全');
+});
+
 await Promise.all(pending);
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
 if (results.failed) for (const e of results.errors) console.log(`  • ${e.name}\n    ${e.error}`);
