@@ -215,6 +215,43 @@ await testAsync('真运行中（esc to interrupt + 计时器）仍判 running，
   if (phase !== 'running') throw new Error(`真运行中却判成 ${phase}，会打断正在跑的任务`);
 });
 
+
+// ============ 省略号不能裸着当运行证据（v1.3.5 回归锁）============
+// 实测缺陷：Codex 会话 Worked for 1h 19m 31s 已结束、输入框空着、无 esc to
+// interrupt，却被判「程序运行中」永不发继续。根因是弱判据里的裸 /\.{3}|…/
+// 同时命中三处无关内容：
+//   `│ … +1 lines`                             Codex 折叠输出标记
+//   `… +5 lines (ctrl + t to view transcript)`  同上
+//   `SHA-256 为 c158788f…`                      正文里的哈希截断
+await testAsync('Codex 已完成：折叠标记与哈希截断里的省略号不算运行中', async () => {
+  const { default: DefaultPlugin } = await import('../server/services/MonitorPlugins/plugins/DefaultPlugin.js');
+  const p = new DefaultPlugin();
+  const idle = [
+    '│ … +1 lines',
+    '… +5 lines (ctrl + t to view transcript)',
+    '- 默认 P1-482 profile 仍逐字节一致，SHA-256 为 c158788f…。',
+    '─ Worked for 1h 19m 31s ────────────────────────────',
+    '› Ask Codex to do anything',
+    'gpt-5.6-sol high · ~/Documents/ClaudeCode/iSpring · 继续当前任务',
+  ].join('\n');
+  const phase = p.detectPhase(idle);
+  if (phase === 'running') throw new Error('省略号误判成运行中 —— 会话会永不发继续');
+  if (p.isIdle(idle) === false) throw new Error('isIdle 被误否决');
+});
+await testAsync('真 spinner（省略号紧跟计时器）仍判运行中', async () => {
+  const { default: DefaultPlugin } = await import('../server/services/MonitorPlugins/plugins/DefaultPlugin.js');
+  const p = new DefaultPlugin();
+  const run = ['正文', '✶ Mustering… (3m 13s · ↓ 9.4k tokens)', '❯',
+    '  ⏵⏵ auto mode on · esc to interrupt'].join('\n');
+  if (p.detectPhase(run) !== 'running') throw new Error('真 spinner 漏判，会打断正在跑的任务');
+});
+await testAsync('Codex 运行中（带 esc to interrupt）仍判运行中', async () => {
+  const { default: DefaultPlugin } = await import('../server/services/MonitorPlugins/plugins/DefaultPlugin.js');
+  const p = new DefaultPlugin();
+  const cx = ['正文', '  Working (12s · esc to interrupt)', '› Ask Codex to do anything'].join('\n');
+  if (p.detectPhase(cx) !== 'running') throw new Error('Codex 运行帧漏判');
+});
+
 if (results.errors.length > 0) {
   console.log('\n失败的测试:');
   results.errors.forEach(e => {

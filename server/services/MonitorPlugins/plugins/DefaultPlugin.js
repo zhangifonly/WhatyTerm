@@ -257,8 +257,19 @@ class DefaultPlugin extends BasePlugin {
     // 修法：① 显式排除「N shells/tasks/agents still running」这种后台任务措辞；
     //       ② 这些动词必须出现在**行首的状态行**上才算，不认句中任意位置的英文单词。
     //    真正的运行证据（esc to interrupt / spinner / 计时器）已由上面的强判据覆盖。
-    const strongProgress = /\.{3}|…/.test(lastLines)
-      || /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⣟⣯⣷]/.test(lastLines)
+    // ⚠️ 省略号**不能裸着当运行证据**。它本意是认进行时 spinner（`Mustering…`），
+    //    但 `…` 在这些地方同样出现，实测把已完成 1h19m 的 Codex 会话判成运行中、
+    //    永不发继续（iSpring 会话现场三处同时命中）：
+    //      `│ … +1 lines`                            ← Codex 折叠输出标记
+    //      `… +5 lines (ctrl + t to view transcript)` ← 同上
+    //      `SHA-256 为 c158788f…`                     ← 正文里的哈希截断
+    //    收紧为两种形态之一才算：
+    //      ① 省略号紧跟计时器 —— `Mustering… (3m 13s`（真 spinner 必带耗时）
+    //      ② 行首是 spinner 符号 + 进行时词 —— `✶ Working…`
+    //    真运行还有 esc to interrupt 那条强判据兜底（上面 218 行），不怕这里收紧。
+    const spinnerWithTimer = /[…]\s*\(\s*(?:\d+h\s*)?(?:\d+m\s*)?\d+s|\.{3}\s*\(\s*(?:\d+h\s*)?(?:\d+m\s*)?\d+s/.test(lastLines);
+    const spinnerLine = /(?:^|\n)\s*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏⣾⣽⣻⢿⣟⣯⣷✢✻✽✳✶✴✵✷]\s*\S{0,30}?(?:ing|…)/.test(lastLines);
+    const strongProgress = spinnerWithTimer || spinnerLine
       || /\d+%|ETA:|eta:/i.test(lastLines);
     const bgTaskOnly = /\d+\s+(shells?|tasks?|agents?)\s+still\s+running/i.test(lastLines);
     const verbStateLine = !bgTaskOnly
