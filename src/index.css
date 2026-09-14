@@ -4516,3 +4516,40 @@ body {
 .session-pending-bar.error:hover { background: hsl(0 84% 60% / 0.2); }
 .session-pending-bar.error .spb-dot { background: hsl(0 84% 65%); }
 .switcher-flag.err { color: hsl(0 84% 68%); font-weight: 700; }
+
+/* 通用面板关闭按钮：放在面板右上角，符合窗口习惯。
+   原来只能回到上方那排按钮里找「隐藏」，视线要来回跳。 */
+.panel-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+  color: hsl(var(--muted-foreground));
+  background: none;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.panel-close:hover {
+  color: hsl(var(--foreground));
+  background: hsl(var(--muted) / 0.5);
+}
+.ai-debug-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 模态框标题栏：标题在左、关闭在右，让 X 落在窗口右上角 */
+.modal-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}

@@ -3054,7 +3054,18 @@ export default function App() {
             <div className="ai-debug-panel">
               <div className="ai-debug-header">
                 <span>AI 自动操作记录</span>
-                <button className="btn btn-small" onClick={() => setAiDebugLogs([])}>清空</button>
+                <div className="ai-debug-header-actions">
+                  <button className="btn btn-small" onClick={() => setAiDebugLogs([])}>清空</button>
+                  {/* 关闭放在右上角：符合窗口习惯，不必回上面找「隐藏」按钮 */}
+                  <button
+                    className="panel-close"
+                    onClick={() => setShowDebugPanel(false)}
+                    title="关闭（也可点上方「隐藏」）"
+                    aria-label="关闭"
+                  >
+                    ×
+                  </button>
+                </div>
               </div>
               <div className="ai-debug-logs">
                 {aiDebugLogs.filter(log => log.type === 'autoAction').length === 0 ? (
@@ -5141,7 +5152,17 @@ function QRCodeWidget({ url, onClose }) {
       {showAccessLog && (
         <div className="modal-overlay" onClick={() => setShowAccessLog(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
-            <h2>外部访问记录</h2>
+            <div className="modal-titlebar">
+              <h2 style={{ margin: 0 }}>外部访问记录</h2>
+              <button
+                className="panel-close"
+                onClick={() => setShowAccessLog(false)}
+                title="关闭"
+                aria-label="关闭"
+              >
+                ×
+              </button>
+            </div>
             <div style={{ padding: '16px', backgroundColor: '#f5f5f5', borderRadius: '4px', marginBottom: '16px' }}>
               <div style={{ fontSize: '12px', color: '#666', marginBottom: '8px' }}>当前 Tunnel URL:</div>
               <div style={{ fontSize: '14px', color: '#333', wordBreak: 'break-all' }}>{url}</div>

@@ -261,6 +261,30 @@ if (results.errors.length > 0) {
   });
 }
 
+
+// ============ 面板/模态框都要有右上角关闭按钮（符合窗口习惯）============
+// 原来「AI 自动操作记录」面板只能回到上方那排按钮里找「隐藏」，视线来回跳。
+test('AI 调试面板有右上角关闭按钮', () => {
+  const app = fs.readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf-8');
+  const i = app.indexOf('ai-debug-header');
+  if (i < 0) throw new Error('找不到 ai-debug-header');
+  const block = app.slice(i, i + 900);
+  if (!/panel-close/.test(block)) throw new Error('面板头部缺关闭按钮');
+  if (!block.includes('setShowDebugPanel(false)')) throw new Error('关闭按钮没有真正关闭面板');
+});
+test('外部访问记录模态框有右上角关闭按钮', () => {
+  const app = fs.readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf-8');
+  const i = app.indexOf('外部访问记录');
+  if (i < 0) throw new Error('找不到外部访问记录模态框');
+  const block = app.slice(i - 400, i + 500);
+  if (!/panel-close/.test(block)) throw new Error('模态框缺右上角关闭按钮');
+});
+test('panel-close 样式已定义（否则按钮没样式）', () => {
+  const css = fs.readFileSync(new URL('../src/index.css', import.meta.url), 'utf-8');
+  if (!/^\.panel-close\s*\{/m.test(css)) throw new Error('缺 .panel-close 样式定义');
+  if (!/\.panel-close:hover/.test(css)) throw new Error('缺 hover 反馈，点击目标不明确');
+});
+
 export { results };
 
 // 失败必须反映到退出码（跑批时红的不能被当成绿的）
