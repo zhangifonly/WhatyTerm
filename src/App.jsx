@@ -874,16 +874,23 @@ export default function App() {
         setSwitchMessage('');
         setSwitchProgress(0);
       }, 2000);
-      // needRestart：CLI 进程内还是启动时读的旧地址（Claude Code 不热更新配置）。
-      // 必须如实告知，否则用户以为切好了、实际请求还发往旧供应商。
-      if (data.needRestart) {
-        toast.info(`已为本会话设置 ${data.providerName}（不影响全局）。CLI 需重启才生效：/quit 后 claude -c`);
+      // 三种结局如实告知（Claude Code 启动时读一次配置、不热更新）：
+      //   restarted    服务端已自动 /exit + claude -c，新供应商已生效
+      //   not_running  CLI 没在跑，下次启动自动读到新配置，无需操作
+      //   needRestart  自动重启没成（等退出超时等），只能手动，必须明说，
+      //                否则用户以为切好了、请求实际还发往旧供应商
+      let tail;
+      if (data.restartResult === 'restarted') {
+        toast.success(`本会话已切到 ${data.providerName}，已自动重启 CLI 生效（不影响全局）`);
+        tail = '（已自动重启生效）';
+      } else if (data.needRestart) {
+        toast.info(`已为本会话设置 ${data.providerName}（不影响全局），但自动重启未完成：请 /quit 后 claude -c`);
+        tail = '（自动重启未完成，待手动重启）';
       } else {
         toast.success(`本会话已切到 ${data.providerName}，即刻生效（不影响全局）`);
+        tail = data.restartResult === 'not_running' ? '（CLI 未运行，下次启动生效）' : '（已生效）';
       }
-      addDebugLog('providerSwitch', {
-        message: `会话级切换到 ${data.providerName}${data.needRestart ? '（待重启生效）' : '（已生效）'}`,
-      });
+      addDebugLog('providerSwitch', { message: `会话级切换到 ${data.providerName}${tail}` });
     });
 
     // 监听供应商切换错误

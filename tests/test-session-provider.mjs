@@ -16,6 +16,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { spawnSync } from 'child_process';
 
 const results = { passed: 0, failed: 0, errors: [] };
 
@@ -240,14 +241,15 @@ const SRV = fs.readFileSync(new URL('../server/index.js', import.meta.url), 'utf
 const handlerBlock = (() => {
   const i = SRV.indexOf("socket.on('provider:switch'");
   if (i < 0) return '';
-  return SRV.slice(i, i + 4000);
+  const end = SRV.indexOf("socket.on('system:info'", i);
+  return SRV.slice(i, end > i ? end : i + 8000);
 })();
 
 test('provider:switch 走 applySessionProvider，不走污染全局的状态机', () => {
   if (!handlerBlock) throw new Error('找不到 provider:switch handler');
   if (!/applySessionProvider\(session, type, providerId\)/.test(handlerBlock))
     throw new Error('未改走会话级 applySessionProvider');
-  if (/switchProviderStateMachine/.test(handlerBlock))
+  if (/switchProviderStateMachine\s*\(/.test(handlerBlock))
     throw new Error('仍在调用会污染全局的 switchProviderStateMachine');
 });
 test('handler 不碰全局 settings.json，也不写 -g 作用域的 tmux env', () => {
@@ -275,6 +277,51 @@ test('切换后作废供应商实测缓存（否则面板显示切换前那家�
     throw new Error('未清 statusProbe，面板会显示旧供应商');
   if (!/session\.effectiveEnv = null/.test(handlerBlock))
     throw new Error('未清 effectiveEnv');
+});
+
+// ============ 切换后自动重启 CLI（v1.3.9 找回 v1.3.8 丢失的行为）============
+// 老下拉走 switchProviderStateMachine，切完会 Esc → /exit → 等 shell → export 新 env && claude -c。
+// v1.3.8 改走 applySessionProvider 时漏了这一步，用户只能自己 /quit。现两条路径共用
+// restartClaudeWithEnv 一份实现。
+test('会话级切换在需要重启时自动调用 restartClaudeWithEnv', () => {
+  if (!/if \(type === 'claude' && needRestart\)[\s\S]{0,300}restartClaudeWithEnv\(session, r\.providerEnv/.test(handlerBlock))
+    throw new Error('handler 需要重启时没有自动重启，用户又得手动 /quit');
+  if (!/restartResult/.test(handlerBlock)) throw new Error('未把重启结果回传前端');
+});
+test('状态机与会话级切换共用同一份重启实现（不再各写一份）', () => {
+  if (!/await restartClaudeWithEnv\(session, localConfig\.env/.test(SRV)) throw new Error('状态机未改用共用函数');
+  const exits = SRV.split('send-keys -t "${tmuxName}" "/exit"').length - 1;
+  if (exits !== 1) throw new Error(`/exit 重启序列应只有 1 份实现，实际 ${exits} 份`);
+});
+test('重启命令经 tmuxSendLiteral 免 shell 发送，不再拼进 execSync 双引号', () => {
+  const i = SRV.indexOf('async function restartClaudeWithEnv');
+  const body = SRV.slice(i, SRV.indexOf('\nasync function waitForShellPrompt', i));
+  if (body.includes('"${restartCmd}"')) throw new Error('仍把 restartCmd 拼进外层双引号，引号会互相翻转');
+  if (!body.includes('tmuxSendLiteral(tmuxName, restartCmd)')) throw new Error('未改用 tmuxSendLiteral');
+  const h0 = SRV.indexOf('function tmuxSendLiteral');
+  const h = SRV.slice(h0, h0 + 600);
+  if (!/spawnSync\(/.test(h) || !h.includes("'-l'")) throw new Error('tmuxSendLiteral 未用数组传参 + -l 字面量');
+});
+test('shellQuoteSq 经真实交互式 zsh/bash 回读逐字节一致（含 ! 历史展开）', () => {
+  const src = SRV.slice(SRV.indexOf('function shellQuoteSq'));
+  const shellQuoteSq = new Function(src.slice(0, src.indexOf('\n')) + '\nreturn shellQuoteSq;')();
+  // 必须 stdin 喂**交互式** shell（-i）：! 历史展开只在交互输入里发生。
+  // 实测用 -c 模式时，老的双引号转义方案在 ! 用例上也全绿——那样测等于没测。
+  const cases = ['sk-a$HOME"b`id`c\\d e$(whoami)', 'sk-ab!cd!!ef', "sk-it's", 'http://127.0.0.1:3928/relay/x'];
+  const shells = [['zsh', ['-f', '-i']], ['bash', ['--norc', '--noprofile', '-i']]];
+  let ran = 0;
+  for (const [sh, args] of shells) {
+    for (const v of cases) {
+      const r = spawnSync(sh, args, { input: `export X=${shellQuoteSq(v)}; printf '<<%s>>\\n' "$X"\nexit\n`, encoding: 'utf8' });
+      if (r.error && r.error.code === 'ENOENT') break;   // 本机没装这个 shell
+      ran++;
+      const m = [...((r.stdout || '') + (r.stderr || '')).matchAll(/<<([\s\S]*?)>>/g)];
+      const got = m.length ? m[m.length - 1][1] : '(命令未执行)';
+      if (got !== v) throw new Error(`${sh} 回读不一致：期望 ${JSON.stringify(v)} 实际 ${JSON.stringify(got)}`);
+    }
+  }
+  if (ran === 0) throw new Error('zsh/bash 都不可用，无法验证');
+  if (!/export \$\{v\}=\$\{shellQuoteSq\(/.test(SRV)) throw new Error('restartClaudeWithEnv 未改用单引号字面量');
 });
 
 summary();

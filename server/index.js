@@ -112,6 +112,16 @@ function tmuxSetEnv({ target, scope = '', name, value }) {
   spawnSync(bin, args, { stdio: 'ignore' });
 }
 
+// 把一段文本原样打进 tmux 会话（数组传参无 shell + send-keys -l 字面量模式）。
+// 不能用 execSync 拼 `send-keys "..."`：文本自身若含双引号（如 `export X="…"`），
+// 会与外层引号互相翻转，值段落进无引号区——$ 和反引号被外层 shell 先吃掉，空格直接拆词。
+// -l 让 tmux 不把 Enter / C-c 这类词当按键名解析。回车需另发（Ink TextInput 要求分开）。
+function tmuxSendLiteral(target, text) {
+  const { bin, baseArgs } = getTmuxArgv();
+  const r = spawnSync(bin, [...baseArgs, 'send-keys', '-t', target, '-l', String(text)], { stdio: 'ignore' });
+  if (r.status !== 0) throw new Error(`tmux send-keys 失败（status=${r.status}）`);
+}
+
 // 从 PowerShell 终端输出中解析工作目录
 // PowerShell 提示符格式: PS D:\AI\WhatyTerm>
 // Claude Code 格式: Working directory: D:\AI\WhatyTerm
@@ -6504,87 +6514,7 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
 
     // 自动重启 Claude Code 让新配置生效（仅当检测到 Claude Code 正在运行时）
     if (appType === 'claude') {
-      // 优先用进程树检测（最可靠，不受 /status 等对话框影响）
-      const tmuxName = session.tmuxSessionName;
-      let isClaudeRunning = false;
-      try {
-        const det = processDetector.detectCLI(tmuxName);
-        if (det && det.detected && det.cli === 'claude') isClaudeRunning = true;
-      } catch (e) {
-        console.error('[Provider Switch] 进程检测失败，回退到屏幕内容检测:', e.message);
-      }
-      // 进程检测失败时回退到屏幕正则
-      if (!isClaudeRunning) {
-        const screenContent = session.getScreenContent?.() || '';
-        isClaudeRunning = /esc to interrupt|Context left|\? for shortcuts|accept edits|Bypass mode/i.test(screenContent)
-          || /^>\s*$/m.test(screenContent.split('\n').slice(-5).join('\n'));
-      }
-
-      if (isClaudeRunning) {
-        emitStatus('RESTARTING', '正在重启 Claude Code...', 70);
-
-        // 0. 先发 Esc 关闭可能打开的对话框（如 /status、/help）
-        //    Esc 在主提示符下无副作用，不会触发任何动作
-        try {
-          if (tmuxName) {
-            execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" Escape`);
-            await new Promise(r => setTimeout(r, 150));
-          } else {
-            session.write('\x1b');
-            await new Promise(r => setTimeout(r, 150));
-          }
-        } catch (e) {}
-
-        // 1. 发送 /exit 退出 Claude Code
-        try {
-          if (tmuxName) {
-            execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" "/exit"`);
-            await new Promise(r => setTimeout(r, 100));
-            execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" Enter`);
-          } else {
-            session.write('/exit');
-            await new Promise(r => setTimeout(r, 100));
-            session.write('\r');
-          }
-        } catch (e) {
-          session.write('/exit');
-          await new Promise(r => setTimeout(r, 100));
-          session.write('\r');
-        }
-
-        // 2. 等待 shell 提示符出现（说明 Claude Code 已退出）
-        const exited = await waitForShellPrompt(session, 8000);
-        if (exited) {
-          // 3. 先 export 新的 ANTHROPIC 环境变量，再启动 claude -c
-          const newEnvForShell = localConfig.env || {};
-          const anthropicVars = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
-                                 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'];
-          const envCmds = anthropicVars.map(v =>
-            newEnvForShell[v] ? `export ${v}="${newEnvForShell[v]}"` : `unset ${v}`
-          ).join('; ');
-          const restartCmd = `${envCmds} && claude -c`;
-          try {
-            if (tmuxName) {
-              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" "${restartCmd}"`);
-              await new Promise(r => setTimeout(r, 100));
-              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" Enter`);
-            } else {
-              session.write(restartCmd);
-              await new Promise(r => setTimeout(r, 100));
-              session.write('\r');
-            }
-          } catch (e) {
-            session.write(restartCmd);
-            await new Promise(r => setTimeout(r, 100));
-            session.write('\r');
-          }
-          console.log('[Provider Switch] 已自动重启 Claude Code');
-        } else {
-          console.log('[Provider Switch] 等待 Claude Code 退出超时，跳过自动重启');
-        }
-      } else {
-        console.log('[Provider Switch] Claude Code 未运行，无需重启');
-      }
+      await restartClaudeWithEnv(session, localConfig.env || {}, emitStatus);
     }
 
     // 更新会话的 provider 信息（直接用 targetProvider，避免 URL 反查匹配到同 URL 的其他 provider）
@@ -6688,6 +6618,115 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
 /**
  * 等待 shell 提示符出现
  */
+// 把值包成单引号 shell 字面量 '...'，值里的单引号写成 '\''。
+// 不能用双引号转义：restartClaudeWithEnv 经 tmuxSendLiteral 打进的是**交互式** shell，
+// 交互式 zsh/bash 在双引号里会做 ! 历史展开，转义 \ " $ 反引号也挡不住——实测值含 ! 时
+// 报 event not found，export && claude -c 整条没执行。单引号内任何字符都不被解释。
+function shellQuoteSq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
+
+/**
+ * 退出并用新的环境变量重启 Claude Code，让刚切换的供应商配置生效。
+ *
+ * Claude Code 启动时读一次配置、不热更新，换供应商后必须重启进程才生效。
+ * 流程：Esc 关对话框 → /exit → 等 shell 提示符 → export 新 env && claude -c（续接上次会话）。
+ *
+ * 全局状态机 switchProviderStateMachine 与会话级下拉切换共用这一份。
+ * v1.3.8 把下拉改走 applySessionProvider 时漏掉了这一步——用户切完供应商
+ * 只能自己 /quit 再 claude -c。抽成共用函数，两条路径不再各写一份、再漏一次。
+ *
+ * @param {object} session
+ * @param {object} envForShell 新 env；值为空或 null 的键会被 unset
+ * @param {(step:string, message:string, progress:number) => void} emitStatus
+ * @returns {Promise<'restarted'|'not_running'|'exit_timeout'>}
+ */
+async function restartClaudeWithEnv(session, envForShell, emitStatus) {
+  let result = 'not_running';
+  // 优先用进程树检测（最可靠，不受 /status 等对话框影响）
+  const tmuxName = session.tmuxSessionName;
+  let isClaudeRunning = false;
+  try {
+    const det = processDetector.detectCLI(tmuxName);
+    if (det && det.detected && det.cli === 'claude') isClaudeRunning = true;
+  } catch (e) {
+    console.error('[Provider Switch] 进程检测失败，回退到屏幕内容检测:', e.message);
+  }
+  // 进程检测失败时回退到屏幕正则
+  if (!isClaudeRunning) {
+    const screenContent = session.getScreenContent?.() || '';
+    isClaudeRunning = /esc to interrupt|Context left|\? for shortcuts|accept edits|Bypass mode/i.test(screenContent)
+      || /^[❯>]\s*$/m.test(screenContent.split('\n').slice(-5).join('\n'));
+  }
+
+  if (isClaudeRunning) {
+    emitStatus('RESTARTING', '正在重启 Claude Code...', 70);
+
+    // 0. 先发 Esc 关闭可能打开的对话框（如 /status、/help）
+    //    Esc 在主提示符下无副作用，不会触发任何动作
+    try {
+      if (tmuxName) {
+        execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" Escape`);
+        await new Promise(r => setTimeout(r, 150));
+      } else {
+        session.write('\x1b');
+        await new Promise(r => setTimeout(r, 150));
+      }
+    } catch (e) {}
+
+    // 1. 发送 /exit 退出 Claude Code
+    try {
+      if (tmuxName) {
+        execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" "/exit"`);
+        await new Promise(r => setTimeout(r, 100));
+        execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" Enter`);
+      } else {
+        session.write('/exit');
+        await new Promise(r => setTimeout(r, 100));
+        session.write('\r');
+      }
+    } catch (e) {
+      session.write('/exit');
+      await new Promise(r => setTimeout(r, 100));
+      session.write('\r');
+    }
+
+    // 2. 等待 shell 提示符出现（说明 Claude Code 已退出）
+    const exited = await waitForShellPrompt(session, 8000);
+    if (exited) {
+      // 3. 先 export 新的 ANTHROPIC 环境变量，再启动 claude -c
+      const newEnvForShell = envForShell || {};
+      const anthropicVars = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
+                             'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'];
+      const envCmds = anthropicVars.map(v =>
+        newEnvForShell[v] ? `export ${v}=${shellQuoteSq(newEnvForShell[v])}` : `unset ${v}`
+      ).join('; ');
+      const restartCmd = `${envCmds} && claude -c`;
+      try {
+        if (tmuxName) {
+          tmuxSendLiteral(tmuxName, restartCmd);
+          await new Promise(r => setTimeout(r, 100));
+          execSync(`${getTmuxPrefix()} send-keys -t "${tmuxName}" Enter`);
+        } else {
+          session.write(restartCmd);
+          await new Promise(r => setTimeout(r, 100));
+          session.write('\r');
+        }
+      } catch (e) {
+        session.write(restartCmd);
+        await new Promise(r => setTimeout(r, 100));
+        session.write('\r');
+      }
+      console.log('[Provider Switch] 已自动重启 Claude Code');
+      result = 'restarted';
+    } else {
+      console.log('[Provider Switch] 等待 Claude Code 退出超时，跳过自动重启');
+      result = 'exit_timeout';
+    }
+  } else {
+    console.log('[Provider Switch] Claude Code 未运行，无需重启');
+  }
+  return result;
+}
+
 async function waitForShellPrompt(session, timeout = 10000) {
   const startTime = Date.now();
   let lastLines = [];
@@ -8652,7 +8691,7 @@ ${terminalContext ? terminalContext : '（无）'}
   // ⚠️ 老实现走 switchProviderStateMachine，那条路会污染全局：
   //    - OAuth 分支 `stripAnthropicEnv(~/.claude/settings.json)` 清掉全局 env
   //    - `tmuxSetEnv({ scope: '-g' })` 写全局 tmux env
-  //    - 还会 /quit + claude -c 重启 CLI
+  //    - 无条件 /exit + claude -c 重启 CLI（重启本身有用，下面保留，改为仅在 CLI 未指向 relay 时做）
   //    于是「给会话 A 换供应商」会把全局和其他会话一起带走，而用户的诉求恰恰是
   //    「单独给这个会话设，不影响别的」。
   // 现在改走 applySessionProvider：写 <workdir>/.claude/settings.local.json 的
@@ -8724,10 +8763,26 @@ ${terminalContext ? terminalContext : '（无）'}
         } catch { needRestart = true; }
       }
 
+      // 需要重启就自动重启：Esc → /exit → 等 shell → export 新 env && claude -c。
+      // 这是老下拉切换（switchProviderStateMachine）本来就有的行为，v1.3.8 改走
+      // applySessionProvider 时漏掉了，用户切完只能自己 /quit。现与状态机共用
+      // restartClaudeWithEnv，两条路径同一份实现。
+      // export 的是 applySessionProvider 返回的会话级 env：relay 占位地址 + 占位 token
+      //（不含真实密钥），OAuth 时为 null 即 unset。
+      // CLI 已指向 relay 时不重启——只改服务端映射即刻生效，没必要打断会话。
+      let restartResult = null;
+      if (type === 'claude' && needRestart) {
+        restartResult = await restartClaudeWithEnv(session, r.providerEnv || {}, emit);
+        // 自动重启成功或 CLI 根本没在跑（下次启动自动读新配置），都不需要用户再动手
+        if (restartResult === 'restarted' || restartResult === 'not_running') needRestart = false;
+      }
+
       const name = resolveProviderInfo(type, providerId)?.provider?.name || providerId;
-      emit('DONE', needRestart ? '已写入，需重启 CLI 生效' : '切换完成', 100);
+      const doneMsg = restartResult === 'restarted' ? '已自动重启 CLI，切换生效'
+        : needRestart ? '已写入，自动重启未完成，需手动重启' : '切换完成';
+      emit('DONE', doneMsg, 100);
       socket.emit('provider:switchComplete', {
-        sessionId, providerId, providerName: name, needRestart,
+        sessionId, providerId, providerName: name, needRestart, restartResult,
       });
       io.emit('sessions:updated', sessionManager.listSessions());
       io.to(`session:${sessionId}`).emit('session:updated', session.toJSON());
