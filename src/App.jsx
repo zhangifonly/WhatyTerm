@@ -1348,6 +1348,24 @@ export default function App() {
     return arr;
   }, [sessions, pinnedIds, sortMode, sessionNumbers, needsActionIds]);
 
+  // 切到某个会话后，左侧列表滚到它所在的位置。
+  // 35 个会话一屏只放得下 8~9 个，用 ⌘K 搜索 / ⌘数字 / ⌘↓ 切过去后，
+  // 列表往往还停在原处，看不出自己切到了哪一条，还得手动滚着找。
+  const sessionItemRefs = useRef({});
+  useEffect(() => {
+    const id = currentSession?.id;
+    if (!id || sidebarCollapsed) return;
+    // 等一帧再滚：切换瞬间列表可能正在重排（置顶/排序模式），此时量到的位置是旧的
+    const raf = requestAnimationFrame(() => {
+      const el = sessionItemRefs.current[id];
+      // block:'nearest' —— 已在可视区内就不动，避免每次切换都无谓地滚一下
+      if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    });
+    return () => cancelAnimationFrame(raf);
+    // ⚠️ 依赖只放会话 id，不要放 orderedSessions：会话状态每几秒就更新一次，
+    //    把列表数组放进依赖会在用户手动滚开去看别的会话时，被反复拽回当前会话。
+  }, [currentSession?.id, sidebarCollapsed]);
+
   // ===== ⌘K 快速切换面板 =====
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [switcherQuery, setSwitcherQuery] = useState('');
@@ -1769,6 +1787,10 @@ export default function App() {
           {orderedSessions.map((session) => (
             <div
               key={session.id}
+              ref={(el) => {
+                if (el) sessionItemRefs.current[session.id] = el;
+                else delete sessionItemRefs.current[session.id];
+              }}
               className={`session-item ${currentSession?.id === session.id ? 'active' : ''} ${aiStatusMap[session.id]?.needsAction && !session.autoActionEnabled ? 'needs-action' : ''}`}
               onClick={() => attachSession(session.id)}
               onContextMenu={(e) => {
