@@ -231,5 +231,51 @@ test('代理选择优先用"上次真的调通过"的那个（静态优先级名
   assert(e._proxyLastGood === null, '拉黑后 _proxyLastGood 未清空');
 });
 
+
+// ============ 供应商下拉切换必须只作用于当前会话（v1.3.8）============
+// 老实现走 switchProviderStateMachine，那条路会 stripAnthropicEnv(~/.claude/settings.json)
+// 清全局 env、tmuxSetEnv({scope:"-g"}) 写全局 tmux env、还 /quit + claude -c 重启 CLI。
+// 于是「给会话 A 换供应商」把全局和其他会话一起带走 —— 与用户诉求正相反。
+const SRV = fs.readFileSync(new URL('../server/index.js', import.meta.url), 'utf-8');
+const handlerBlock = (() => {
+  const i = SRV.indexOf("socket.on('provider:switch'");
+  if (i < 0) return '';
+  return SRV.slice(i, i + 4000);
+})();
+
+test('provider:switch 走 applySessionProvider，不走污染全局的状态机', () => {
+  if (!handlerBlock) throw new Error('找不到 provider:switch handler');
+  if (!/applySessionProvider\(session, type, providerId\)/.test(handlerBlock))
+    throw new Error('未改走会话级 applySessionProvider');
+  if (/switchProviderStateMachine/.test(handlerBlock))
+    throw new Error('仍在调用会污染全局的 switchProviderStateMachine');
+});
+test('handler 不碰全局 settings.json，也不写 -g 作用域的 tmux env', () => {
+  if (/homedir\(\)[\s\S]{0,60}settings\.json/.test(handlerBlock))
+    throw new Error('handler 触碰了全局 ~/.claude/settings.json');
+  if (/scope:\s*'-g'/.test(handlerBlock))
+    throw new Error('handler 写了全局作用域 tmux env');
+});
+test('applySessionProvider 本体只用会话级 tmux target，不用 -g', () => {
+  const i = SRV.indexOf('function applySessionProvider');
+  if (i < 0) throw new Error('找不到 applySessionProvider');
+  const body = SRV.slice(i, i + 4200);
+  if (/scope:\s*'-g'/.test(body)) throw new Error('applySessionProvider 写了全局 tmux env');
+  if (!/tmuxSetEnv\(\{\s*target:/.test(body)) throw new Error('未使用会话级 target');
+  if (/homedir\(\)[\s\S]{0,60}'\.claude',\s*'settings\.json'/.test(body))
+    throw new Error('applySessionProvider 触碰了全局配置');
+});
+test('切换后如实告知是否需重启（Claude Code 启动时读一次配置、不热更新）', () => {
+  if (!/needRestart/.test(handlerBlock)) throw new Error('未返回 needRestart，用户会误以为已生效');
+  if (!/relay\\\//.test(handlerBlock) && !/relay\//.test(handlerBlock))
+    throw new Error('未按「进程内是否已指向 relay」判断，无法区分首次设置与热切换');
+});
+test('切换后作废供应商实测缓存（否则面板显示切换前那家）', () => {
+  if (!/session\.statusProbe = null/.test(handlerBlock))
+    throw new Error('未清 statusProbe，面板会显示旧供应商');
+  if (!/session\.effectiveEnv = null/.test(handlerBlock))
+    throw new Error('未清 effectiveEnv');
+});
+
 summary();
 

@@ -8647,6 +8647,18 @@ ${terminalContext ? terminalContext : '（无）'}
   });
 
   // 切换供应商
+  // 供应商下拉切换：**只作用于当前会话**，不动全局配置。
+  //
+  // ⚠️ 老实现走 switchProviderStateMachine，那条路会污染全局：
+  //    - OAuth 分支 `stripAnthropicEnv(~/.claude/settings.json)` 清掉全局 env
+  //    - `tmuxSetEnv({ scope: '-g' })` 写全局 tmux env
+  //    - 还会 /quit + claude -c 重启 CLI
+  //    于是「给会话 A 换供应商」会把全局和其他会话一起带走，而用户的诉求恰恰是
+  //    「单独给这个会话设，不影响别的」。
+  // 现在改走 applySessionProvider：写 <workdir>/.claude/settings.local.json 的
+  //    relay 占位地址 + 会话级 tmux env（target 而非 -g），真实 URL/密钥存服务端
+  //    映射。全局配置一字不动，外部 CC Switch 再切也影响不到本会话。
+  // 需要整机全局切换时用 CC Switch 本身，WebTmux 不再提供污染全局的入口。
   socket.on('provider:switch', async (data) => {
     const { sessionId, appType, providerId } = data;
     const session = sessionManager.getSession(sessionId);
@@ -8655,10 +8667,75 @@ ${terminalContext ? terminalContext : '（无）'}
       return;
     }
 
-    console.log(`[Provider Switch] 开始切换供应商: ${appType} -> ${providerId}`);
+    const type = appType || session.aiType || 'claude';
+    console.log(`[Provider Switch] 会话级切换: ${session.name} ${type} -> ${providerId}`);
 
-    // 启动切换状态机
-    await switchProviderStateMachine(session, appType, providerId, socket);
+    const emit = (step, message, progress) => {
+      socket.emit('provider:switchStatus', { sessionId, step, message, progress });
+    };
+
+    try {
+      emit('APPLYING', '正在写入会话级配置...', 30);
+      const r = applySessionProvider(session, type, providerId);
+      if (!r.ok) {
+        socket.emit('provider:switchError', { sessionId, error: r.error || '写入会话配置失败' });
+        return;
+      }
+
+      // 落库会话级供应商快照，让面板与重启后都能显示正确来源
+      emit('PERSISTING', '正在保存...', 70);
+      try {
+        const info = resolveProviderInfo(type, providerId);
+        if (info) {
+          const snap = {
+            id: info.provider.id,
+            name: info.provider.name,
+            url: info.env?.ANTHROPIC_BASE_URL || '',
+            apiType: type,
+            app: type,
+            exists: true,
+            configSource: 'relay',
+            isOAuth: !!info.isOAuth,
+          };
+          if (type === 'claude') session.claudeProvider = snap;
+          else if (type === 'codex') session.codexProvider = snap;
+          else if (type === 'gemini') session.geminiProvider = snap;
+          sessionManager.updateSession(session);
+        }
+      } catch (e) {
+        console.warn('[Provider Switch] 落库会话供应商快照失败:', e.message);
+      }
+
+      // 供应商实测缓存作废：statusProbe/hook 里存的是切换前那家，不清会显示旧值
+      session.statusProbe = null;
+      session.effectiveEnv = null;
+
+      // relay 地址只与 sessionId 绑定、切供应商时地址不变，所以：
+      //   CLI 已指向 relay → 只改服务端映射即刻生效，**不用重启**（relay 的核心优势）
+      //   CLI 还在用旧地址（首次设置/原本直连）→ 进程内是启动时读的配置，必须重启才生效
+      // Claude Code 启动时读一次配置、不热更新，所以这里必须如实告知，不能假装已生效。
+      let needRestart = false;
+      if (type === 'claude') {
+        try {
+          const procEnv = await readClaudeProcessEnv(session.tmuxSessionName);
+          const cur = procEnv?.ANTHROPIC_BASE_URL || '';
+          // 取不到进程 env 时保守认为需要重启（宁可多提示一次，不要让用户以为已生效）
+          needRestart = !/^http:\/\/127\.0\.0\.1:\d+\/relay\//.test(cur);
+        } catch { needRestart = true; }
+      }
+
+      const name = resolveProviderInfo(type, providerId)?.provider?.name || providerId;
+      emit('DONE', needRestart ? '已写入，需重启 CLI 生效' : '切换完成', 100);
+      socket.emit('provider:switchComplete', {
+        sessionId, providerId, providerName: name, needRestart,
+      });
+      io.emit('sessions:updated', sessionManager.listSessions());
+      io.to(`session:${sessionId}`).emit('session:updated', session.toJSON());
+      console.log(`[Provider Switch] 会话级切换完成: ${session.name} -> ${name}（全局未改动）`);
+    } catch (e) {
+      console.error('[Provider Switch] 会话级切换异常:', e.message);
+      socket.emit('provider:switchError', { sessionId, error: e.message });
+    }
   });
 
   // 获取系统信息

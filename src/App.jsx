@@ -868,13 +868,22 @@ export default function App() {
     socket.on('provider:switchComplete', (data) => {
       setSwitchingProvider(false);
       setSwitchProgress(100);
-      setSwitchMessage('切换完成！');
+      setSwitchMessage(data.needRestart ? '已写入，需重启生效' : '切换完成！');
       setShowProviderDropdown(false);
       setTimeout(() => {
         setSwitchMessage('');
         setSwitchProgress(0);
       }, 2000);
-      addDebugLog('providerSwitch', { message: `切换到 ${data.providerName} 完成` });
+      // needRestart：CLI 进程内还是启动时读的旧地址（Claude Code 不热更新配置）。
+      // 必须如实告知，否则用户以为切好了、实际请求还发往旧供应商。
+      if (data.needRestart) {
+        toast.info(`已为本会话设置 ${data.providerName}（不影响全局）。CLI 需重启才生效：/quit 后 claude -c`);
+      } else {
+        toast.success(`本会话已切到 ${data.providerName}，即刻生效（不影响全局）`);
+      }
+      addDebugLog('providerSwitch', {
+        message: `会话级切换到 ${data.providerName}${data.needRestart ? '（待重启生效）' : '（已生效）'}`,
+      });
     });
 
     // 监听供应商切换错误
