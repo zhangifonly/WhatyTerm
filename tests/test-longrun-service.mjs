@@ -12,7 +12,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { LongRunService } from '../server/services/LongRunService.js';
+import { LongRunService, REQUIREMENT_DIR, deriveName, EVENT_BUFFER } from '../server/services/LongRunService.js';
 import { sandboxRoots } from '../server/services/LongRunSandbox.js';
 
 const results = { passed: 0, failed: 0, errors: [] };
@@ -224,6 +224,93 @@ test('status 无参数时列出全部任务', () => {
   const svc = new LongRunService({ aiEngine: fakeEngine() });
   assert(Array.isArray(svc.status()), '无参数应返回数组');
   assert(svc.status().length === 0, '空服务应返回空数组');
+});
+
+// ── 粘贴需求：网页拿不到本机绝对路径，文本要先落成文件 ────────
+test('粘贴的需求落盘，且按内容哈希幂等（plan+start 不攒两份）', () => {
+  const svc = new LongRunService({ aiEngine: fakeEngine() });
+  const text = '# 待办应用\n\n支持 add/list/done';
+  const a = svc.resolveDocPath({ requirementText: text });
+  const b = svc.resolveDocPath({ requirementText: text });
+  assert(a === b, `同一段文本应落到同一个文件: ${a} vs ${b}`);
+  assert(a.startsWith(REQUIREMENT_DIR), `应落在需求目录: ${a}`);
+  assert(fs.readFileSync(a, 'utf8').includes('支持 add/list/done'), '内容要原样');
+  const c = svc.resolveDocPath({ requirementText: text + '\n另加一条' });
+  assert(c !== a, '内容不同应是不同文件');
+  for (const f of [a, c]) fs.rmSync(f, { force: true });
+});
+
+test('给了文档路径就直接用，不落盘', () => {
+  const svc = new LongRunService({ aiEngine: fakeEngine() });
+  const doc = writeDoc('x');
+  assert(svc.resolveDocPath({ docPath: doc, requirementText: '忽略我' }) === doc, '路径优先');
+});
+
+test('需求为空时报可操作的错', () => {
+  const svc = new LongRunService({ aiEngine: fakeEngine() });
+  let threw = null;
+  try { svc.resolveDocPath({ requirementText: '   ' }); } catch (e) { threw = e; }
+  assert(threw && threw.message.includes('粘贴'), `报错要告诉人怎么补: ${threw?.message}`);
+});
+
+test('沙箱名从需求标题取，不用哈希文件名', () => {
+  assert(deriveName('# 待办 应用\n正文') === '待办-应用', `实际 ${deriveName('# 待办 应用')}`);
+  assert(deriveName('没有标题的第一行\n第二行') === '没有标题的第一行', '无标题取首行');
+  assert(deriveName('') === 'longrun', '空文本兜底');
+  assert(!/[\\/]/.test(deriveName('# a/b\\c')), '不能含路径分隔符（会越出白名单）');
+  const svc = new LongRunService({ aiEngine: fakeEngine() });
+  const plan = svc.plan({ requirementText: '# 贪吃蛇\n做个贪吃蛇' });
+  assert(plan.sandboxName === '贪吃蛇', `plan 应按标题取名，实际 ${plan.sandboxName}`);
+  assert(plan.docPath.endsWith('.md'), 'plan 要回传落盘后的路径，供 start 复用');
+  fs.rmSync(plan.docPath, { force: true });
+});
+
+// ── 事件推送：序号、缓冲、快照 ──────────────────────────────
+function fakeTask() {
+  return { id: 't1', room: 'longrun:t1', seq: 0, events: [], loop: { spentUsd: 1.5 },
+    snapshot: { legs: 0, handoffs: 0, costUsd: 0, contextPeak: 0, occupied: 0, lastLabel: '' } };
+}
+
+test('事件序号单调递增（前端折叠状态按它做键，不能用下标）', () => {
+  const emitted = [];
+  const io = { to: () => ({ emit: (_n, ev) => emitted.push(ev) }) };
+  const svc = new LongRunService({ io, aiEngine: fakeEngine() });
+  const t = fakeTask();
+  svc._push(t, 'log', { msg: 'a' });
+  svc._push(t, 'log', { msg: 'b' });
+  assert(emitted[0].seq === 1 && emitted[1].seq === 2, `序号应递增: ${emitted.map((e) => e.seq)}`);
+  assert(emitted[0].taskId === 't1', '要带 taskId，前端才分得清多个任务');
+});
+
+test('数据里的 kind 字段不能覆盖事件类型', () => {
+  const svc = new LongRunService({ io: null, aiEngine: fakeEngine() });
+  const t = fakeTask();
+  svc._push(t, 'exec.tool', { kind: '伪造', names: ['bash'] });
+  assert(t.events[0].kind === 'exec.tool', `事件类型被数据覆盖: ${t.events[0].kind}`);
+});
+
+test('回放缓冲封顶，丢最旧的', () => {
+  const svc = new LongRunService({ io: null, aiEngine: fakeEngine() });
+  const t = fakeTask();
+  for (let i = 0; i < EVENT_BUFFER + 25; i++) svc._push(t, 'log', { msg: String(i) });
+  assert(t.events.length === EVENT_BUFFER, `缓冲应封顶在 ${EVENT_BUFFER}，实际 ${t.events.length}`);
+  assert(t.events[0].seq === 26, `应丢掉最旧的 25 条，首条 seq 实际 ${t.events[0].seq}`);
+  svc.tasks.set('t1', t);
+  assert(svc.history('t1').length === EVENT_BUFFER, 'history 应返回缓冲内容');
+  assert(svc.history('nope').length === 0, '不存在的任务返回空数组');
+});
+
+test('快照：水位跟 exec.context 走，新一发归零；费用取 loop 实账', () => {
+  const svc = new LongRunService({ io: null, aiEngine: fakeEngine() });
+  const t = fakeTask();
+  svc._push(t, 'exec.context', { occupied: 120000, peak: 150000 });
+  assert(t.snapshot.occupied === 120000 && t.snapshot.contextPeak === 150000, '水位快照未更新');
+  svc._push(t, 'exec.send', { label: 'new' });
+  assert(t.snapshot.occupied === 0, '新一发水位应归零');
+  assert(t.snapshot.contextPeak === 150000, '峰值不该被新一发清掉');
+  svc._push(t, 'result', { leg: 3, label: '催继续', contextPeak: 90000 });
+  assert(t.snapshot.legs === 3 && t.snapshot.lastLabel === '催继续', '发次与段名要更新');
+  assert(t.snapshot.costUsd === 1.5, `费用应取 loop.spentUsd 实账，实际 ${t.snapshot.costUsd}`);
 });
 
 await Promise.all(pending);

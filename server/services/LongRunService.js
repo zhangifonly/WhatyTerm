@@ -10,6 +10,8 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
 import path from 'path';
+import os from 'os';
+import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { loadPrompts, loadRequirement, renderRefsSection, extraDirsOf } from './LongRunPrompts.js';
 import { LongRunSandbox, sandboxRoots, assertSandboxed } from './LongRunSandbox.js';
@@ -19,6 +21,22 @@ import { LongRunLoop, Stop, HANDOFF_FLOOR, HANDOFF_CEILING, HARD_KILL } from './
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROMPT_FILE = path.join(HERE, '..', 'prompts', 'longrun', '提示词.txt');
+/**
+ * 面板粘贴的需求文本落盘处。网页拿不到本机文件的绝对路径，所以粘贴的文本要先
+ * 变成文件再走原流程（编排器全程只认文档路径）。**不放沙箱根里**：沙箱名可能撞上。
+ */
+/** 每个任务在内存里留多少条事件供回放。一轮实测过程事件与对话约 30:1，给宽 */
+export const EVENT_BUFFER = 1000;
+
+export const REQUIREMENT_DIR = path.join(os.homedir(), '.webtmux', 'longrun-requirements');
+
+/** 从需求正文取名：首个 Markdown 标题，其次首个非空行。 */
+export function deriveName(text) {
+  const lines = String(text || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const head = lines.find((l) => /^#{1,3}\s+\S/.test(l)) || lines[0] || '';
+  return head.replace(/^#+\s*/, '').replace(/[^\w\u4e00-\u9fa5-]/g, '-')
+    .replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'longrun';
+}
 
 /**
  * 一次运行的实例。
@@ -35,7 +53,14 @@ class LongRunTask {
     this.state = 'running';      // running | done | failed
     this.report = null;
     /** 最近的运行态快照，供 longrun:status 查询 */
-    this.snapshot = { legs: 0, handoffs: 0, costUsd: 0, contextPeak: 0, lastLabel: '' };
+    this.snapshot = { legs: 0, handoffs: 0, costUsd: 0, contextPeak: 0, occupied: 0, lastLabel: '' };
+    /**
+     * 事件自增序号。前端折叠状态必须按它做键 —— 用数组下标的话，条目被挤出缓冲时
+     * 下标整体错位，展开状态会跳到别的条目上（原编排器看板踩过）。
+     */
+    this.seq = 0;
+    /** 最近事件的环形缓冲，刷新页面后 longrun:subscribe 靠它回放 */
+    this.events = [];
   }
 
   get room() { return `longrun:${this.id}`; }
@@ -120,12 +145,31 @@ export class LongRunService {
    * 预检：解析需求文档，给出沙箱建议与外部参考清单。**不启动任何进程。**
    * 对应编排器的 --plan-only。
    */
-  plan({ docPath, sandboxName }) {
+  /**
+   * 粘贴的文本 → 文件路径。按内容哈希命名，**幂等**：plan 与 start 各调一次
+   * 只会落同一个文件，不会攒出两份。
+   */
+  resolveDocPath({ docPath, requirementText }) {
+    if (docPath) return docPath;
+    const text = String(requirementText || '').trim();
+    if (!text) throw new Error('需求为空：请粘贴需求文本，或填写本机需求文档的绝对路径');
+    const hash = createHash('sha256').update(text).digest('hex').slice(0, 12);
+    const file = path.join(REQUIREMENT_DIR, `${deriveName(text)}-${hash}.md`);
+    mkdirSync(REQUIREMENT_DIR, { recursive: true });
+    if (!existsSync(file)) writeFileSync(file, text + '\n', 'utf8');
+    return file;
+  }
+
+  plan({ docPath: rawDoc, requirementText, sandboxName }) {
+    const docPath = this.resolveDocPath({ docPath: rawDoc, requirementText });
     const prompts = loadPrompts(PROMPT_FILE);          // 缺段就在这里硬失败
     const req = loadRequirement(docPath, null);         // spec=null：只解析不登记
-    const name = sandboxName || path.basename(docPath).replace(/\.[^.]+$/, '')
+    const baseName = requirementText && !rawDoc
+      ? deriveName(requirementText) : path.basename(docPath);
+    const name = sandboxName || baseName.replace(/\.[^.]+$/, '')
       .replace(/[^\w一-龥-]/g, '-').slice(0, 40) || 'longrun';
     return {
+      docPath,
       sandboxName: name,
       sandboxRoot: path.join(sandboxRoots()[0], name),
       requirementChars: req.text.length,
@@ -145,16 +189,18 @@ export class LongRunService {
    * 启动一次长程运行。
    * @returns {object} 任务快照（异步跑，通过 socket 房间推事件）
    */
-  start({ docPath, sandboxName, providerId = null, thresholds = {}, totalBudgetUsd,
+  start({ docPath: rawDoc, requirementText, sandboxName, providerId = null, thresholds = {}, totalBudgetUsd,
           maxLegs = 0, skipInit = false, costCeiling = 0 } = {}) {
     const prompts = loadPrompts(PROMPT_FILE);
+    const docPath = this.resolveDocPath({ docPath: rawDoc, requirementText });
     const plan = this.plan({ docPath, sandboxName });
     const sandbox = LongRunSandbox.create(plan.sandboxName);
     // 需求文档要在沙箱建好之后再解析一次：这次带 spec，外部参考才会被登记 + 校验
     const req = loadRequirement(docPath, sandbox);
     sandbox.verifyClean();                            // 运行前复核
 
-    const requirementText = req.text + (req.refs.length || req.urls.length
+    // 发给执行者的正文 = 需求原文 + 参考清单（与编排器一致）
+    const fullRequirement = req.text + (req.refs.length || req.urls.length
       ? '\n\n' + renderRefsSection(req) : '');
 
     const complete = this._makeComplete(providerId);
@@ -166,7 +212,7 @@ export class LongRunService {
     const task = new LongRunTask({ id, sandbox, loop: null, requirement: req, io: this.io });
 
     const loop = new LongRunLoop({
-      sandbox, prompts, requirementText, supervisor,
+      sandbox, prompts, requirementText: fullRequirement, supervisor,
       handoffFloor: thresholds.handoffFloor ?? HANDOFF_FLOOR,
       handoffCeiling: thresholds.handoffCeiling ?? HANDOFF_CEILING,
       hardKill: thresholds.hardKill ?? HARD_KILL,
@@ -180,12 +226,12 @@ export class LongRunService {
         extraDirs: sandbox.extraDirs,
         wallTimeout: 7200,
         checkInject: () => loop.takeInject(),
-        emit: (k, d) => this._push(task, k, d),
+        // 执行层事件加 exec. 前缀：runner 与 loop 都有 send，不区分前端会一发显示两条
+        emit: (k, d) => this._push(task, `exec.${k}`, d),
       }),
-      askHuman: () => new Promise((resolve) => {
-        task._humanWaiter = resolve;
-        this._push(task, 'need_human.waiting', {});
-      }),
+      // 不再推 need_human.waiting：loop.askHumanFor 调这里之前已带着原因推过一次。
+      // Promise 执行器同步运行，waiter 在同一 tick 挂好，不存在答复先到的竞态。
+      askHuman: () => new Promise((resolve) => { task._humanWaiter = resolve; }),
       emit: (k, d) => this._push(task, k, d),
     });
     task.loop = loop;
@@ -195,7 +241,8 @@ export class LongRunService {
     loop.run().then((report) => {
       task.report = report;
       task.state = report.stop === Stop.PROJECT_DONE ? 'done' : 'failed';
-      this._push(task, 'finished', report);
+      // finished 事件 loop.run 已推过；这里只补一条状态，供面板切换徽标
+      this._push(task, 'state', { state: task.state, stop: report.stop });
     }).catch((e) => {
       task.state = 'failed';
       task.report = { stop: Stop.ERROR, needsFromHuman: e.message };
@@ -214,10 +261,23 @@ export class LongRunService {
       task.snapshot.lastLabel = data.label || '';
     } else if (kind === 'handoff.done') {
       task.snapshot.handoffs = data.count ?? task.snapshot.handoffs;
-    } else if (kind === 'context') {
+    } else if (kind === 'exec.context') {
       task.snapshot.contextPeak = Math.max(task.snapshot.contextPeak, data.peak || 0);
+      task.snapshot.occupied = data.occupied || 0;
+    } else if (kind === 'exec.send') {
+      task.snapshot.occupied = 0;                    // 新的一发，水位从头算
     }
-    this.io?.to(task.room).emit('longrun:event', { taskId: task.id, kind, ...data });
+    task.seq += 1;
+    // ⚠ kind 放在展开之后：data 里若也带 kind 字段会把事件类型覆盖掉
+    const ev = { ...data, taskId: task.id, seq: task.seq, ts: Date.now(), kind };
+    task.events.push(ev);
+    if (task.events.length > EVENT_BUFFER) task.events.splice(0, task.events.length - EVENT_BUFFER);
+    this.io?.to(task.room).emit('longrun:event', ev);
+  }
+
+  /** 某任务最近的事件（刷新页面后回放用）。 */
+  history(taskId) {
+    return this.tasks.get(taskId)?.events.slice() || [];
   }
 
   status(taskId) {

@@ -7251,7 +7251,8 @@ io.on('connection', (socket) => {
   /** 订阅已有任务的事件流（刷新页面后重连用）。 */
   socket.on('longrun:subscribe', ({ taskId }, cb) => {
     if (taskId) socket.join(`longrun:${taskId}`);
-    const d = { ok: true, task: longRunService.status(taskId) };
+    // 带上最近事件：刷新页面后时间线不是空的
+    const d = { ok: true, task: longRunService.status(taskId), events: longRunService.history(taskId) };
     if (typeof cb === 'function') cb(d);
   });
 
