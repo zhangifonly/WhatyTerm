@@ -231,17 +231,20 @@ export function buildArgs({
  *
  * @param {object} state 运行态：{ toolInFlight, taskWaitStarted, tasks }
  */
-export function silenceTolerance(state) {
+export function silenceTolerance(state, over = {}) {
+  const bash = over.bash ?? SILENCE_TOOL_BASH;
+  const other = over.other ?? SILENCE_TOOL_OTHER;
+  const idle = over.idle ?? SILENCE_IDLE;
   const inFlight = state.toolInFlight;
-  let tolerance = inFlight === 'bash' ? SILENCE_TOOL_BASH
-    : inFlight ? SILENCE_TOOL_OTHER
-    : SILENCE_IDLE;
+  let tolerance = inFlight === 'bash' ? bash
+    : inFlight ? other
+    : idle;
   // 正在等后台 subagent：容忍度放到 Bash 档。等待期间事件流通常是活的
   // （实测 task_progress 每个工具调用一条，间隔 5-30 秒），但 agent 自己在跑一个
   // 长 Bash（建模、构建）时可以几分钟不发进度，那不是挂死。
   // 整体上限由 taskWait 管，这里只是别让 idle 档误杀。
   if (state.taskWaitStarted != null && agentTasks(state.tasks).length > 0) {
-    tolerance = Math.max(tolerance, SILENCE_TOOL_BASH);
+    tolerance = Math.max(tolerance, bash);
   }
   return tolerance;
 }
@@ -286,7 +289,7 @@ export function watchdogDecide(state, now, cfg) {
     };
   }
 
-  const tolerance = silenceTolerance(state);
+  const tolerance = silenceTolerance(state, cfg.silence);
   const silent = now - state.lastEvent;
   if (silent > tolerance) {
     // 把判据本身记下来。上一次误杀之所以要翻事件文件才查清，就是因为日志只说了
@@ -433,4 +436,252 @@ export function handleEvent(event, state, meter, cfg, emit = () => {}) {
   }
 
   return {};
+}
+
+/**
+ * 一次 `claude -p` 调用的完整生命周期。
+ *
+ * 与 Python 版的差异：判定逻辑已抽成上面那些纯函数，这个类只管进程、按行解析、
+ * 定时器、stdin 控制消息、组装结果。
+ */
+export class LongRunRunner {
+  /**
+   * @param {object} o
+   * @param {string} o.cwd            工作目录（必须是已校验的沙箱根）
+   * @param {object} o.env            子进程环境变量（走 sandbox.childEnv()）
+   * @param {string} o.eventsPath     事件落盘路径（.run/orchestrator.jsonl）
+   * @param {number} o.contextLimit   水位刹车线，0 关闭
+   * @param {number} o.costCeiling    费用刹车线，0 关闭
+   * @param {number} o.wallTimeout    墙钟上限（秒）
+   * @param {number} o.taskWait       等后台 subagent 上限（秒），0 关闭
+   * @param {function} o.checkInject  返回 [文本, 是否立即] 或 null
+   * @param {function} o.emit         事件回调 (kind, data) => void
+   * @param {string}  o.claudeBin     可执行文件，测试可换成假 CLI
+   * @param {string[]} o.binPrefixArgs  插在 claude 参数**之前**的参数。
+   *                                    测试用 node 跑假 CLI 时放脚本路径。
+   */
+  constructor(o = {}) {
+    this.cwd = o.cwd;
+    this.env = o.env || process.env;
+    this.eventsPath = o.eventsPath || null;
+    this.contextLimit = o.contextLimit || 0;
+    this.costCeiling = o.costCeiling || 0;
+    this.wallTimeout = o.wallTimeout ?? 7200;
+    this.taskWait = o.taskWait ?? TASK_WAIT;
+    this.allowedTools = o.allowedTools || '';
+    this.extraDirs = o.extraDirs || [];
+    this.model = o.model || '';
+    this.maxTurns = o.maxTurns || 0;
+    this.extraFlags = o.extraFlags || [];
+    this.checkInject = o.checkInject || (() => null);
+    this.emit = o.emit || (() => {});
+    this.claudeBin = o.claudeBin || 'claude';
+    this.binPrefixArgs = o.binPrefixArgs || [];
+    this.watchdogInterval = o.watchdogInterval ?? WATCHDOG_INTERVAL;
+    /** 静默档位覆盖 { bash, other, idle }，仅测试用（生产别传） */
+    this.silence = o.silence || undefined;
+    /** 注入到 stdin 的原始内容，供测试核对 */
+    this.sentToStdin = [];
+  }
+
+  _writeEvent(kind, data) {
+    this.emit(kind, data);
+    if (!this.eventsPath) return;
+    try {
+      mkdirSync(path.dirname(this.eventsPath), { recursive: true });
+      appendFileSync(this.eventsPath,
+        JSON.stringify({ ts: Date.now() / 1000, kind, ...data }) + '\n', 'utf8');
+    } catch { /* 落盘失败不该拖垮运行 */ }
+  }
+
+  /**
+   * 跑一发。
+   * @param {string} prompt      提示词原文（经 stdin 送，**不作为 -p 的参数**）
+   * @param {string} sessionId   会话 id（新建时由调用方生成 uuid）
+   * @param {boolean} resume     续会话还是新建
+   * @returns {Promise<object>}  RunResult
+   */
+  async run(prompt, sessionId, resume = false) {
+    const args = [...this.binPrefixArgs, ...buildArgs({
+      sessionId, resume,
+      allowedTools: this.allowedTools, extraDirs: this.extraDirs,
+      model: this.model, maxTurns: this.maxTurns, extraFlags: this.extraFlags,
+    })];
+    const t0 = Date.now() / 1000;
+    const now = () => Date.now() / 1000;
+    const state = {
+      started: t0, lastEvent: t0, sawDelta: false, toolInFlight: null,
+      interruptSent: false, interruptAt: null, injectText: '',
+      tasks: {}, taskWaitStarted: null, toolNames: {},
+      finalText: '', resultEvent: null, sessionId,
+      killReason: null, killDetail: '', taskWaitTimeout: false,
+    };
+    const meter = new ContextMeter();
+    const cfg = {
+      contextLimit: this.contextLimit, costCeiling: this.costCeiling, now,
+    };
+
+    this._writeEvent('send', {
+      label: resume ? 'resume' : 'new', sessionId,
+      promptChars: prompt.length, cmd: [this.claudeBin, ...args].join(' '),
+    });
+
+    const proc = spawn(this.claudeBin, args, {
+      cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    // ⚠ 提示词经 stdin 送，格式是 stream-json 的 user 消息
+    try {
+      proc.stdin.write(JSON.stringify({
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'text', text: prompt }] },
+      }) + '\n');
+    } catch { /* 进程已死，下面的 close 会收尾 */ }
+
+    let stderr = '';
+    proc.stderr.on('data', (b) => { stderr += b.toString(); });
+
+    const terminate = () => {
+      try { proc.kill('SIGTERM'); } catch {}
+      // 给 2 秒收尾，不走就 SIGKILL（照 Python 的 _terminate）
+      setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 2000);
+    };
+
+    /** 送出 interrupt 控制消息。协议见 BASE_FLAGS 注释。 */
+    const sendInterrupt = () => {
+      const msg = JSON.stringify({
+        type: 'control_request', request_id: `r${Date.now()}`,
+        request: { subtype: 'interrupt' },
+      }) + '\n';
+      try {
+        proc.stdin.write(msg);
+        this.sentToStdin.push(msg);
+        state.interruptSent = true;
+        state.interruptAt = now();
+        return true;
+      } catch { return false; }
+    };
+
+    // ── 看门狗 ──
+    const watchdog = setInterval(() => {
+      if (proc.exitCode !== null || proc.signalCode) return;
+      const d = watchdogDecide(state, now(), {
+        wallTimeout: this.wallTimeout, taskWait: this.taskWait, silence: this.silence,
+      });
+      if (d.action !== 'kill') {
+        // 顺带看有没有人工注入要处理
+        this._maybeInterrupt(state, sendInterrupt);
+        return;
+      }
+      if (d.taskTimeout) {
+        state.taskWaitTimeout = true;
+        this._writeEvent('tasks.timeout', {
+          count: d.count, waited: Math.round(d.waited * 10) / 10, limit: this.taskWait,
+        });
+      } else {
+        state.killReason = d.reason;
+        state.killDetail = d.detail || '';
+      }
+      terminate();
+    }, this.watchdogInterval * 1000);
+
+    // ── 按行读 stdout ──
+    await new Promise((resolve) => {
+      let buf = '';
+      proc.stdout.on('data', (chunk) => {
+        buf += chunk.toString();
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          let ev = null;
+          try { ev = JSON.parse(line); } catch { continue; }  // 非 JSON 行忽略
+          const r = handleEvent(ev, state, meter, cfg, (k, d) => this._writeEvent(k, d));
+          if (r.kill) {
+            state.killReason = r.kill;
+            state.killDetail = r.detail || '';
+            terminate();
+          }
+          // 主线给了 result：开始等后台 subagent（若有）
+          if (ev.type === 'result' && state.taskWaitStarted == null) {
+            if (this.taskWait && agentTasks(state.tasks).length) {
+              state.taskWaitStarted = now();
+              this._writeEvent('tasks.waiting', {
+                count: agentTasks(state.tasks).length, limit: this.taskWait,
+              });
+            } else {
+              terminate();   // 没有要等的，收工
+            }
+          }
+        }
+      });
+      proc.on('close', resolve);
+      proc.on('error', (e) => { stderr += String(e.message); resolve(); });
+    });
+    clearInterval(watchdog);
+
+    return this._assemble(state, meter, proc, t0, stderr);
+  }
+
+  /** 看有没有人工注入；立即模式不等工具间隙。 */
+  _maybeInterrupt(state, sendInterrupt) {
+    if (state.interruptSent) return;
+    const got = this.checkInject();
+    if (!got) return;
+    const [text, immediate] = got;
+    // 非立即模式要等工具间隙：工具在飞时打断会留下脏会话
+    if (!immediate && state.toolInFlight) {
+      state.pendingInject = [text, immediate];
+      return;
+    }
+    state.injectText = text;
+    if (sendInterrupt()) {
+      this._writeEvent('inject.sent', { immediate, chars: text.length });
+    }
+  }
+
+  /** 组装 RunResult。 */
+  _assemble(state, meter, proc, t0, stderr) {
+    const ev = state.resultEvent;
+    let reason = state.killReason;
+    if (!reason) {
+      if (ev && isEmptyResult(ev, meter)) reason = ExitReason.EMPTY_RESULT;
+      else if (ev?.is_error) reason = ExitReason.ERROR;
+      else if (ev && Number(ev.num_turns) && this.maxTurns
+               && Number(ev.num_turns) >= this.maxTurns) reason = ExitReason.MAX_TURNS;
+      else if (ev) reason = ExitReason.COMPLETED;
+      else reason = ExitReason.ERROR;    // 没拿到 result 就是异常
+    }
+    return {
+      sessionId: state.sessionId,
+      exitReason: reason,
+      exitCode: proc.exitCode,
+      contextPeak: meter.peak,
+      totalTokens: meter.outputTotal,
+      costUsd: Number(ev?.total_cost_usd) || 0,
+      costEstimate: Math.round(meter.costEstimate * 1e4) / 1e4,
+      numTurns: Number(ev?.num_turns) || 0,
+      stopReason: ev?.stop_reason ?? null,
+      terminalReason: ev?.terminal_reason ?? null,
+      permissionDenials: ev?.permission_denials || [],
+      injectText: state.injectText || '',
+      finalText: state.finalText || String(ev?.result ?? ''),
+      durationS: Math.round((Date.now() / 1000 - t0) * 10) / 10,
+      error: state.killDetail || (reason === ExitReason.ERROR ? stderr.slice(0, 500) : ''),
+      pendingTasks: agentTasks(state.tasks),
+      taskWaitTimeout: state.taskWaitTimeout,
+    };
+  }
+}
+
+/**
+ * 粗判是否停下来等人。仅作信号，最终由 supervisor 判定。
+ * 提问退出时 stop_reason 的确切取值尚未确认，因此用组合信号而非单一字段。
+ */
+export function looksLikeQuestion(result) {
+  if (result.exitReason !== ExitReason.COMPLETED) return false;
+  const tail = String(result.finalText || '').trimEnd().slice(-200);
+  if (/[?？]$/.test(tail)) return true;
+  return ['请确认', '是否', '要我', '需要我', '请问', '怎么处理'].some((k) => tail.includes(k));
 }
