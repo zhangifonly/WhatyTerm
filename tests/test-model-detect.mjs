@@ -66,7 +66,8 @@ test('周期刷新：豁免名单只剩 relay，status 不再永久压制', () =
   const block = SRC.slice(i - 1600, i);
   assert(!/\['status',\s*'relay'\]\.includes/.test(block),
     "status 仍在豁免名单里，陈旧快照会永久压住 transcript 兜底");
-  assert(/configSource === 'relay'/.test(block), 'relay 应仍然豁免（请求体嗅探，物理同源）');
+  assert(/configSource === 'relay' && sessionRelay\.getStats\(session\.id\)\?\.lastModel/.test(block),
+    '周期刷新对 relay 的豁免应附加「已嗅探到模型」条件');
 });
 
 // ---------- ④ 返回值出口统一用 transcript 兜底，断掉竞态 ----------
@@ -79,7 +80,10 @@ test('getCurrentProvider：buildResult 出口用 transcript 覆盖模型', () =>
   assert(/probeModelByWorkingDirSync\(workingDir\)/.test(block),
     'buildResult 没有用 transcript 兜底，陈旧 global 值会回写造成竞态');
   assert(/model: finalModel/.test(block), '返回值应使用兜底后的 finalModel');
-  assert(/cs !== 'relay'/.test(block), 'relay 应跳过（比 transcript 更即时）');
+  // relay 的豁免只在**真嗅探到模型**时成立：没转发过请求时 lastModel 为空，
+  // 若仍按 configSource 豁免，面板会永久停在切换前的旧值（phyviz 实测踩到）。
+  assert(/!modelFromRelay/.test(block), 'relay 豁免应按「是否真嗅探到模型」判定，而非按 configSource');
+  assert(!/cs !== 'relay'/.test(block), '仍在按 configSource 无条件豁免 relay');
 });
 test('同步探测函数存在且只读尾部（不整文件读）', () => {
   assert(/function probeModelByWorkingDirSync/.test(SRC), '缺少同步探测函数');

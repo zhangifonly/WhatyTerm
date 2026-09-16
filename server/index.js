@@ -1630,6 +1630,7 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
     let localIsOAuth = false;    // 会话本地 settings.local.json 明确标记为官方 OAuth
     let localProviderId = '';    // 会话级切换记录的所选供应商 id（同URL+Key重名时精确命中）
     let relayInfo = null;        // 反代实测信息 { stats: {lastAt,lastTarget,lastStatus,count}, providerName }
+    let modelFromRelay = false;  // 模型是否真来自 relay 请求体嗅探（没转发过请求时为 false）
 
     // 始终读取全局配置（用于显示和同步参考）
     let globalApiUrl = '';
@@ -1815,7 +1816,11 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
             configSource = 'relay';
             if (relayTarget.providerId) localProviderId = relayTarget.providerId;
             const relayStats = sessionRelay.getStats(relayMatch[1]);
-            if (relayStats?.lastModel) actualModel = relayStats.lastModel; // 请求体嗅探的实测模型
+            // 只有真转发过请求才有 lastModel。刚切到 relay 或刚重启的会话还没发过请求，
+            // 此时不能把它当成「已有更可信的模型」，否则下面会跳过 transcript 兜底、
+            // 让面板永久停在切换前的旧值（phyviz 实测：面板 claude-fable-5[1m] vs
+            // transcript 真值 claude-opus-5）。
+            if (relayStats?.lastModel) { actualModel = relayStats.lastModel; modelFromRelay = true; }
             relayInfo = { stats: relayStats, providerName: relayTarget.providerName };
           } else {
             // 映射丢失（异常）：如实显示反代地址并标注，请用户重选供应商
@@ -1959,9 +1964,10 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
       // settings.json / settings.local.json 的 model 是「最后一次 /model 选择」的持久值，
       // 与实际在跑的模型无关（实测 glm-5.3-flash vs transcript 里的 claude-opus-5）。
       // transcript 是每次请求实际落盘的 model 字段，唯一反映"此刻在跑什么"。
-      // relay 例外：那是请求体嗅探，物理同源，比 transcript 更即时。
+      // relay 例外只在**真嗅探到**时成立：那是请求体实测，物理同源、比 transcript 更即时；
+      // 但没转发过请求时 lastModel 为空，此时必须回落 transcript，否则停在旧值。
       let finalModel = extras.model !== undefined ? extras.model : '';
-      if (appType === 'claude' && cs !== 'relay') {
+      if (appType === 'claude' && !modelFromRelay) {
         const probed = probeModelByWorkingDirSync(workingDir);
         if (probed) finalModel = probed;
       }
@@ -5712,7 +5718,9 @@ setInterval(async () => {
       //    的持久值，即"最后一次 /model 选择"，不是在跑的模型），还有一个 src=status 是空值
       //    却同样被保护。所以 status 只在"确有非空模型且比 transcript 更新"时才优先。
       const cp = session.claudeProvider;
-      if (cp?.configSource === 'relay') continue;
+      // relay 只在**真嗅探到模型**时豁免；没转发过请求时 lastModel 为空，
+      // 仍要走 transcript 兜底，否则 relay 会话的模型显示永久停在切换前的值。
+      if (cp?.configSource === 'relay' && sessionRelay.getStats(session.id)?.lastModel) continue;
       const model = await probeModelByWorkingDir(session.workingDir);
       if (!model) continue;
       // 只在**面板实际显示的值**（cp.model）与 transcript 不一致时才动。
