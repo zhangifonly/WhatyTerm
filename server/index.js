@@ -194,6 +194,7 @@ import crashReporter from './services/CrashReporter.js';
 import sleepPrevention from './services/SleepPreventionService.js';
 import PuppeteerReaper from './services/PuppeteerReaper.js';
 import SessionRelay from './services/SessionRelay.js';
+import { LongRunService } from './services/LongRunService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1184,6 +1185,9 @@ const projectRecordingService = getProjectRecordingService();
 const aiEngine = new AIEngine();
 const plannerService = new PlannerService(aiEngine);
 const evaluatorService = new EvaluatorService(aiEngine);
+// 长程编排（替代旧 Ralph）：沙箱里无人值守跑长任务。
+// 凭据经 aiEngine 从 CC Switch 取，不引入编排器原来的 .env 机制。
+const longRunService = new LongRunService({ io, aiEngine });
 const authService = new AuthService();
 const providerService = new ProviderService(io);
 const healthCheckScheduler = new HealthCheckScheduler(io);
@@ -7212,6 +7216,82 @@ io.on('connection', (socket) => {
   };
 
   // 自主模式任务拆分（带 acceptanceCriteria/dependsOn/branch）
+  // ══ 长程编排（替代旧 Ralph）══════════════════════════════════
+  //
+  // 让执行者在**沙箱**里无人值守连续跑几十小时：按序发提示词原文、监控 token 水位
+  // 做上下文交接、让监督者判继续/叫人/完成。编排器不拆任务、不定验证命令 ——
+  // 执行者自己管 git、自己跑测试、自己判断做完没做完。
+  //
+  // 人工干预走**文件约定**（.run/inject.txt / inject!.txt / pause），
+  // 面板上的按钮也是写这些文件，与从终端投件是同一条路。
+
+  /** 预检：解析需求文档，给出沙箱建议与外部参考清单。不启动任何进程。 */
+  socket.on('longrun:plan', ({ docPath, sandboxName }, cb) => {
+    const reply = (d) => { socket.emit('longrun:planned', d); if (typeof cb === 'function') cb(d); };
+    try {
+      reply({ ok: true, ...longRunService.plan({ docPath, sandboxName }) });
+    } catch (e) {
+      reply({ ok: false, error: e.message });
+    }
+  });
+
+  /** 启动一次长程运行。事件推到 longrun:<taskId> 房间。 */
+  socket.on('longrun:start', (opts, cb) => {
+    const reply = (d) => { socket.emit('longrun:started', d); if (typeof cb === 'function') cb(d); };
+    try {
+      const task = longRunService.start(opts || {});
+      socket.join(`longrun:${task.id}`);     // 发起方自动订阅
+      reply({ ok: true, task });
+    } catch (e) {
+      // 隔离层拒绝启动（受保护路径、白名单外）也走这里 —— 报错要原样给用户看
+      reply({ ok: false, error: e.message });
+    }
+  });
+
+  /** 订阅已有任务的事件流（刷新页面后重连用）。 */
+  socket.on('longrun:subscribe', ({ taskId }, cb) => {
+    if (taskId) socket.join(`longrun:${taskId}`);
+    const d = { ok: true, task: longRunService.status(taskId) };
+    if (typeof cb === 'function') cb(d);
+  });
+
+  socket.on('longrun:status', ({ taskId } = {}, cb) => {
+    const d = { ok: true, task: longRunService.status(taskId) };
+    socket.emit('longrun:status', d);
+    if (typeof cb === 'function') cb(d);
+  });
+
+  /**
+   * 人工注入。immediate=true 走 inject!.txt 立即打断，不等工具间隙 ——
+   * 人要打断的场景往往正是"它在死循环里反复跑同一个 Bash"。
+   */
+  socket.on('longrun:inject', ({ taskId, text, immediate }, cb) => {
+    const d = longRunService.inject(taskId, text, !!immediate);
+    if (typeof cb === 'function') cb(d);
+  });
+
+  /**
+   * 暂停/继续。⚠ 删掉 pause 后编排器发的是「继续完成项目」，执行者会**接着干** ——
+   * 暂停不是终止。
+   */
+  socket.on('longrun:pause', ({ taskId, on }, cb) => {
+    const d = longRunService.pause(taskId, on !== false);
+    if (typeof cb === 'function') cb(d);
+  });
+
+  /** 优雅停止：先立即打断当前发次，再挂暂停闸（顺序不能反）。 */
+  socket.on('longrun:stop', ({ taskId, reason }, cb) => {
+    const d = longRunService.stop(taskId, reason || '用户请求停止');
+    if (typeof cb === 'function') cb(d);
+  });
+
+  /** 回答 needs_human。空回答等于让它停机等人。 */
+  socket.on('longrun:answer', ({ taskId, text }, cb) => {
+    const task = longRunService.tasks.get(taskId);
+    const ok = task ? task.answerHuman(text) : false;
+    if (typeof cb === 'function') cb({ ok, error: ok ? '' : '任务不存在或当前不在等人' });
+  });
+
   socket.on('ralph:plan', async ({ sessionId, goal }) => {
     if (ralphGate(socket, sessionId)) return;
     try {
