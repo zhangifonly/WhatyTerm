@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
-import LongRunIntervene from './LongRunIntervene.jsx';
 import { ctxView, verdictClass, STOP_LABEL, VERDICT_LABEL } from './longrunBoard.js';
 
 /**
- * 右侧面板（沿用 AI 面板的外壳与卡片样式）：会话进度、监督者判定、人工干预、启动自检、需求。
+ * 右侧面板（沿用 AI 面板的外壳与卡片样式）：只读状态 —— 会话进度、监督者判定、启动自检、需求。
+ * 人要输入的（回答、投件、暂停、转终端）都在主区底部，与 Claude Code 输入框同一位置。
  */
-const LongRunSide = ({ lr, collapsed, onToggle, onResume, onHandover }) => {
+const LongRunSide = ({ lr, collapsed, onToggle }) => {
   const { board, meta, view } = lr;
   const [showCheck, setShowCheck] = useState(false);
   const task = meta.task;
@@ -58,21 +58,6 @@ const LongRunSide = ({ lr, collapsed, onToggle, onResume, onHandover }) => {
             <div className="lr-kv">{sup.reason || ''}</div>
             {sup.needs_from_human ? <div className="lr-kv">需你提供：<b>{sup.needs_from_human}</b></div>
               : sup.reply ? <div className="lr-kv">代你答复：<b>{sup.reply}</b></div> : null}
-          </div>
-        )}
-
-        {live && <LongRunIntervene lr={lr} task={task} />}
-
-        {!live && view?.kind !== 'pending' && (
-          <div className="ai-status-section">
-            <h4>接着做</h4>
-            <div className="lr-kv">项目与记忆（.memory）都在，两种方式任选：</div>
-            <div className="lr-kv">· <b>转为终端</b>：同一条目切回终端，用交互式 claude 接着开发（按水位自动选续同一对话或开新对话）</div>
-            <div className="lr-kv">· <b>续跑长程</b>：追加需求，执行者从记忆接上继续无人值守开发</div>
-            <div className="lr-row">
-              <button className="btn btn-primary btn-small" onClick={onHandover}>转为终端…</button>
-              <button className="btn btn-secondary btn-small" onClick={onResume}>续跑长程…</button>
-            </div>
           </div>
         )}
 

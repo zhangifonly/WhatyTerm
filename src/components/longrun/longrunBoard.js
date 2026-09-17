@@ -34,6 +34,11 @@ export const INJECT_PHASE = { waiting: '等工具间隙…', sent: '已发中断
 export const TRACE_ROLES = new Set(['thinking', 'tool', 'toolout']);
 
 /** 暂停时发给执行者的安全措辞：暂停不是终止，写"停下别干了"会留在会话历史里与继续指令矛盾 */
+/** 底部输入框的提交键：Enter 提交，Shift+Enter 换行；输入法组字中的 Enter 是选词，不能提交 */
+export function isSubmitKey(e) {
+  return e.key === 'Enter' && !e.shiftKey && !e.nativeEvent?.isComposing && e.keyCode !== 229;
+}
+
 export const PAUSE_TEMPLATE = '先停一下，把当前在做的这一步收个尾、记下进度。我看完就让你接着做，不要写"任务终止"之类的结论。';
 
 export function fmtDur(s) {

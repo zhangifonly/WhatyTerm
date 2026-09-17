@@ -2,8 +2,8 @@
 
 /* ── 左侧会话条目上的长程徽标 ── */
 /* 项目名优先：整行不折行，空间不够时截断徽标而不是把名字挤成两行 */
-.lr-item-badge { margin-left: 6px; font-size: 10px; padding: 0 5px; min-width: 0; flex: 0 3 auto; overflow: hidden; text-overflow: ellipsis; }
-.lr-item .session-name { display: flex; align-items: center; gap: 6px; min-width: 0; white-space: nowrap; }
+.lr-item-badge { font-size: 10px; padding: 0 5px; min-width: 0; flex: 0 3 auto; overflow: hidden; text-overflow: ellipsis; }
+.lr-item .session-name { display: flex; align-items: center; gap: 6px; min-width: 0; white-space: nowrap; overflow: hidden; }
 .lr-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: #555b66; }
 .lr-dot.run { background: #4a9eda; box-shadow: 0 0 6px rgba(74, 158, 218, .6); }
 .lr-dot.wait { background: #e08865; animation: lr-pulse 1.1s ease-in-out infinite; }
@@ -32,21 +32,29 @@
 .lr-small { font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .lr-err { color: #e08865; font-size: 12px; white-space: pre-wrap; }
 .lr-card { background: #252538; border: 1px solid #333; border-radius: 10px; padding: 10px 14px; }
-.lr-banner pre, .lr-bell pre, .lr-pre {
+.lr-banner pre, .lr-composer-question pre, .lr-pre {
   margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 150px; overflow-y: auto;
   font: 12px/1.55 Menlo, Consolas, monospace;
 }
-.lr-bell { background: #3d251c; border: 1px solid #7a4433; border-radius: 10px; padding: 12px 14px; font-size: 13px; }
 .lr-bell-title { display: flex; align-items: center; gap: 8px; color: #e08865; font-weight: 600; margin-bottom: 6px; }
 .lr-bell-dot { width: 8px; height: 8px; border-radius: 50%; background: #e08865; animation: lr-pulse 1.1s ease-in-out infinite; }
 @keyframes lr-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
 .lr-mute { margin-left: auto; font-size: 11px; color: hsl(var(--muted-foreground)); background: none;
   border: 1px solid #555; border-radius: 3px; padding: 1px 8px; cursor: pointer; }
-.lr-answer { display: flex; gap: 8px; align-items: flex-end; margin-top: 8px; }
-.lr-answer textarea, .lr-textarea {
-  flex: 1; width: 100%; min-height: 60px; resize: vertical; padding: 8px; border-radius: 6px;
-  background: #1a1a2e; border: 1px solid #444; color: hsl(var(--foreground)); font-size: 13px;
-}
+
+/* ── 主区底部输入区：位置与外壳同终端会话底部的设置卡（Claude Code 输入框的位置） ── */
+.lr-composer { flex-shrink: 0; background: hsl(var(--card)); border: 1px solid hsl(var(--border));
+  border-radius: var(--radius); padding: 10px 12px; font-size: 13px; }
+.lr-composer.need { border-color: #7a4433; box-shadow: 0 0 0 1px rgba(224, 136, 101, .25); }
+.lr-composer-question { background: #3d251c; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+.lr-composer-question pre { max-height: 180px; }
+.lr-composer-input { display: block; width: 100%; box-sizing: border-box; min-height: 44px; max-height: 200px; resize: vertical;
+  padding: 8px 10px; border-radius: 6px; background: hsl(var(--background)); border: 1px solid hsl(var(--border));
+  color: hsl(var(--foreground)); font-family: inherit; font-size: 13px; line-height: 1.5; }
+.lr-composer-input:focus { outline: none; border-color: hsl(var(--primary)); }
+.lr-composer-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; font-size: 12px; }
+.lr-composer.ended .lr-composer-bar { margin-top: 0; }
+.lr-grow { flex: 1; min-width: 120px; overflow: hidden; text-overflow: ellipsis; }
 .lr-tabs { display: flex; gap: 4px; border-bottom: 1px solid #333; }
 .lr-tab { background: none; border: none; border-bottom: 2px solid transparent; padding: 6px 12px;
   color: hsl(var(--muted-foreground)); cursor: pointer; font-size: 13px; }
@@ -64,7 +72,7 @@
 .lr-note.wait { background: #3a3216; color: #d9b945; }
 .lr-note.bad { background: #3d251c; color: #e08865; }
 .lr-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; font-size: 12px; }
-.lr-actions .lr-danger { background: #5a2a1f; color: #f0b09a; border: 1px solid #7a4433; }
+.lr-danger { background: #5a2a1f; color: #f0b09a; border: 1px solid #7a4433; }
 .lr-link { background: none; border: none; color: hsl(var(--primary)); cursor: pointer; font-size: 12px; padding: 0; }
 .lr-check { font-size: 11.5px; line-height: 1.55; color: hsl(var(--muted-foreground)); white-space: pre-wrap; overflow-wrap: anywhere; }
 .lr-check.warn { color: #d9b945; }

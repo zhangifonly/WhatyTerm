@@ -1,37 +1,25 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import LongRunTimeline from './LongRunTimeline.jsx';
 import LongRunLogs from './LongRunLogs.jsx';
 import LongRunTranscript from './LongRunTranscript.jsx';
+import LongRunComposer from './LongRunComposer.jsx';
 import { fmtDur, INJECT_PHASE } from './longrunBoard.js';
 
 const TABS = [['timeline', '对话与关键节点'], ['logs', '编排日志'], ['transcript', '对话记录']];
 
 /**
- * 主区（原终端位置）：头部一行、三张状态横幅、三个标签页。
- * 横幅放主区而不是右侧：等人回答是最要紧的事，得在视线正中。
+ * 主区（原终端位置）：头部一行、状态横幅、三个标签页，底部是输入区（位置同 Claude Code 输入框）。
+ * 等人回答、投件、暂停、转终端都在底部 —— 人要输入的地方只有一处，和终端会话的习惯一致。
  */
-const LongRunMain = ({ lr }) => {
+const LongRunMain = ({ lr, onResume, onHandover }) => {
   const { board, meta, view } = lr;
   const [tab, setTab] = useState('timeline');
-  const [answer, setAnswer] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState('');
   const viewKey = view ? `${view.kind}:${view.id || view.sessionId}` : '';
-  useEffect(() => { setAnswer(''); setMsg(''); }, [viewKey]);
 
   if (meta.error) return <div className="lr-main"><div className="lr-err lr-pad">{meta.error}</div></div>;
   if (!board) return <div className="lr-main"><div className="lr-dim lr-pad">加载中…</div></div>;
 
   const task = meta.task;
-  const live = view?.kind === 'task' && task?.state === 'running';
-  const nh = board.need_human;
-  const sendAnswer = async () => {
-    setBusy(true);
-    const r = await lr.call('longrun:answer', { taskId: task.id, text: answer });
-    setBusy(false);
-    setMsg(r.ok ? '' : `失败：${r.error}`);
-    if (r.ok) setAnswer('');
-  };
 
   return (
     <div className="lr-main">
@@ -48,28 +36,6 @@ const LongRunMain = ({ lr }) => {
         {meta.notices?.map((n) => <span key={n} className="lr-est">{n}</span>)}
       </div>
 
-      {nh && (
-        <div className="lr-bell">
-          <div className="lr-bell-title">
-            <span className="lr-bell-dot" />执行者需要你拍板
-            {live && <button className="lr-mute" onClick={() => lr.setMuted(!lr.muted)}>{lr.muted ? '取消静音' : '静音'}</button>}
-          </div>
-          <div>需要你提供：<b>{nh.needs || ''}</b></div>
-          {nh.reason && <div className="lr-dim">依据：{nh.reason}</div>}
-          <pre>{nh.question || ''}</pre>
-          {live && task.awaitingHuman ? (
-            <div className="lr-answer">
-              <textarea value={answer} onChange={(e) => setAnswer(e.target.value)}
-                placeholder="你的回答会原样发给执行者（不加包装），续同一会话。留空提交 = 停机" />
-              <button className="btn btn-primary btn-small" disabled={busy} onClick={sendAnswer}>
-                {answer.trim() ? '回答并续跑' : '不回答，停机'}
-              </button>
-              {msg && <span className="lr-err">{msg}</span>}
-            </div>
-          ) : <div className="lr-dim">{board.replay ? '这是历史现场，当时的提问。' : '任务已不在等待。'}</div>}
-        </div>
-      )}
-
       {board.inject && (
         <div className="lr-card lr-banner">
           <b>人工打断</b> <span className="lr-est">{INJECT_PHASE[board.inject.phase] || board.inject.phase}</span>
@@ -79,7 +45,7 @@ const LongRunMain = ({ lr }) => {
       {board.paused && (
         <div className="lr-card lr-banner">
           <b>已暂停</b> 下一发「{board.paused.label || ''}」暂不派发。执行者已停在上一发结束处，不烧钱。
-          <div className="lr-dim">点右侧「继续」，或删掉 {board.paused.path || 'pause 文件'} 即继续</div>
+          <div className="lr-dim">点底部「继续」，或删掉 {board.paused.path || 'pause 文件'} 即继续</div>
         </div>
       )}
 
@@ -93,6 +59,7 @@ const LongRunMain = ({ lr }) => {
         {tab === 'logs' && <LongRunLogs logs={board.logs} />}
         {tab === 'transcript' && <LongRunTranscript call={lr.call} defaultDir={task?.sandboxRoot || board.sandbox} />}
       </div>
+      <LongRunComposer lr={lr} onResume={onResume} onHandover={onHandover} />
     </div>
   );
 };

@@ -1836,7 +1836,7 @@ export default function App() {
 
         <div className="session-list">
           {orderedSessions.map((session) => {
-            // 长程模式的条目：徽标与进度行来自它最近一次长程任务（服务重启后没有任务时显示「长程·已结束」，点开是上一轮回放）
+            // 长程模式的条目：徽标与进度行来自它最近一次长程任务（服务重启后没有任务时显示「已结束」，点开是上一轮回放）
             const lrMode = session.runMode === 'longrun';
             const lrTask = lrMode ? longRun.taskForSession(session.id) : null;
             const [lrTone, lrText] = lrTask ? taskBadge(lrTask) : ['idle', '已结束'];
@@ -1848,7 +1848,7 @@ export default function App() {
                 if (el) sessionItemRefs.current[session.id] = el;
                 else delete sessionItemRefs.current[session.id];
               }}
-              className={`session-item ${currentSession?.id === session.id ? 'active' : ''} ${(lrMode ? lrWaiting : aiStatusMap[session.id]?.needsAction && !session.autoActionEnabled) ? 'needs-action' : ''}`}
+              className={`session-item ${lrMode ? 'lr-item' : ''} ${currentSession?.id === session.id ? 'active' : ''} ${(lrMode ? lrWaiting : aiStatusMap[session.id]?.needsAction && !session.autoActionEnabled) ? 'needs-action' : ''}`}
               onClick={() => attachSession(session.id)}
               onContextMenu={(e) => {
                 e.preventDefault();
@@ -1887,7 +1887,7 @@ export default function App() {
                     ? <span className={`lr-dot ${lrTone}`} title={`长程 · ${lrText}`} />
                     : <span className={`session-status ${session.autoActionEnabled ? 'auto' : 'paused'}`} />}
                   {session.projectName || session.name}
-                  {lrMode && <span className={`lr-badge ${lrTone} lr-item-badge`}>长程·{lrText}</span>}
+                  {lrMode && <span className={`lr-badge ${lrTone} lr-item-badge`} title={`长程 · ${lrText}`}>{lrText}</span>}
                   {sessionMemory[session.id]?.memory > 0 && (
                     <span className={`session-memory ${sessionMemory[session.id]?.memory > 500 ? 'high' : ''}`}>
                       {sessionMemory[session.id]?.processCount > 1 && (
@@ -2001,7 +2001,9 @@ export default function App() {
       {/* 主内容区 */}
       <main className="main-content">
         {currentSession && longRunView ? (
-          <LongRunMain lr={longRun} />
+          <LongRunMain lr={longRun}
+            onResume={() => setLongRunNew({ mode: 'resume', projectRoot: currentSession.workingDir })}
+            onHandover={() => setLongRunHandover(currentSession.id)} />
         ) : currentSession ? (
           <div className="terminal-container">
             <div
@@ -2397,8 +2399,6 @@ export default function App() {
           lr={longRun}
           collapsed={aiPanelCollapsed}
           onToggle={() => setAiPanelCollapsed(!aiPanelCollapsed)}
-          onResume={() => setLongRunNew({ mode: 'resume', projectRoot: currentSession.workingDir })}
-          onHandover={() => setLongRunHandover(currentSession.id)}
         />
       )}
       {currentSession && !longRunView && (

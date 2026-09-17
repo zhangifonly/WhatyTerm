@@ -16,7 +16,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import {
   applyEvent, normalizeSnapshot, mergedEntries, timelineCount, entryView, ctxView, taskBadge,
-  fmtDur, STOP_LABEL, VERDICT_LABEL, ROLE_ICON,
+  fmtDur, STOP_LABEL, VERDICT_LABEL, ROLE_ICON, isSubmitKey,
 } from '../src/components/longrun/longrunBoard.js';
 import { LongRunBoard, TIMELINE_RULES } from '../server/services/LongRunBoard.js';
 import { LongRunLoop, Stop } from '../server/services/LongRunLoop.js';
@@ -139,6 +139,15 @@ await test('水位条、耗时、列表徽标与文案表', () => {
   for (const v of Object.values(Verdict)) assert(VERDICT_LABEL[v], `缺判定文案 ${v}`);
   const roles = new Set(TIMELINE_RULES.map(([, r]) => r));
   for (const r of roles) assert(ROLE_ICON[r], `缺角色图标 ${r}`);
+});
+
+await test('底部输入框提交键：Enter 提交，Shift+Enter 换行，输入法组字中的回车是选词', () => {
+  const k = (o) => ({ key: 'Enter', shiftKey: false, keyCode: 13, nativeEvent: { isComposing: false }, ...o });
+  assert(isSubmitKey(k({})), 'Enter 提交');
+  assert(!isSubmitKey(k({ shiftKey: true })), 'Shift+Enter 换行');
+  assert(!isSubmitKey(k({ nativeEvent: { isComposing: true } })), '组字中不提交');
+  assert(!isSubmitKey(k({ keyCode: 229 })), 'Safari 组字结束的回车 keyCode 229 不提交');
+  assert(!isSubmitKey(k({ key: 'a' })));
 });
 
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
