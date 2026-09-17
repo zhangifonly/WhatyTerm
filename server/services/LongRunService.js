@@ -8,7 +8,7 @@
  * 项目规矩是禁止硬编码 Key。这是与原版唯一的凭据来源差异。
  */
 
-import { existsSync, writeFileSync, mkdirSync, unlinkSync, statSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, statSync } from 'fs';
 import path from 'path';
 import os from 'os';
 import { createHash } from 'crypto';
@@ -23,6 +23,7 @@ import { TASK_WAIT } from './LongRunRunner.js';
 import { LongRunBoard } from './LongRunBoard.js';
 import { replay as replayRun, EVENTS_FILE } from './LongRunReplay.js';
 import { apiSessions, apiSession } from './LongRunTranscript.js';
+import { resolveClaudeSessionId, lastContextPeak, decideHandover, buildLaunchCommand } from './LongRunHandover.js';
 import {
   LaunchError, deriveSandboxName, memoryFiles, priorState, checkRejectedRefs, requirementInput,
   previewRequirement, resolveProjectRoot, projectDirState, prepareProject, listLongRunProjects,
@@ -437,6 +438,32 @@ export class LongRunService {
     const s = this.sessionBinder?.get(sessionId);
     if (!s?.workingDir) return { ok: false, error: '会话不存在或没有工作目录' };
     return { ...this.replay({ projectRoot: s.workingDir }), projectRoot: s.workingDir };
+  }
+
+  /**
+   * 长程 → 终端的交接计划（只读，不动任何东西；执行在 index.js 的 longrun:toTerminal）。
+   * @param {'auto'|'resume'|'fresh'} mode
+   */
+  handoverPlan(sessionId, { mode = 'auto' } = {}) {
+    const task = [...this.tasks.values()].filter((t) => t.sessionId === sessionId).sort((a, b) => b.startedAt - a.startedAt)[0];
+    if (task?.state === 'running') return { ok: false, error: '长程还在跑，先等它结束或点「终止」' };
+    const root = task?.sandbox.root || this.sessionBinder?.get(sessionId)?.workingDir;
+    if (!root || !existsSync(root)) return { ok: false, error: '找不到这个条目的项目目录' };
+    const found = resolveClaudeSessionId({ root, liveSessionId: task?.loop?.sessionId || null });
+    const peak = lastContextPeak(root);
+    const handoffFloor = task?.loop?.handoffFloor ?? HANDOFF_FLOOR;
+    const decided = decideHandover(mode, { peak, handoffFloor, hasSessionId: !!found });
+    const backup = (() => { try { return JSON.parse(readFileSync(path.join(root, '.run', 'provider-env.backup.json'), 'utf8')); } catch { return null; } })();
+    return {
+      ok: true, root, mode: decided.mode, reason: decided.reason, peak, handoffFloor,
+      claudeSessionId: decided.mode === 'resume' ? found.id : null, idSource: found?.source || '',
+      command: buildLaunchCommand({ mode: decided.mode, claudeSessionId: found?.id,
+        extraDirs: task?.loop?.extraDirs || [], model: task?.options?.model || '' }),
+      // 开新对话时要发的第一句：与长程交接后一样，让它从记忆接上
+      resumePrompt: decided.mode === 'fresh' ? loadPrompts(task?.options?.promptsFile || PROMPT_FILE).resume : '',
+      // 长程期间从项目配置移走的会话级供应商：转回终端时重新应用
+      providerId: backup?._localProviderId || null,
+    };
   }
 
   /** 会话记录（transcript.py）：列出某工作目录的会话，缺省为沙箱根。 */

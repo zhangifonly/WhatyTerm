@@ -9,6 +9,7 @@ import path from 'path';
 
 const execAsync = promisify(exec);
 import os from 'os';
+import { claudeStartCommand } from './sessionMode.js';
 import fs from 'fs';
 
 // 导入 Mux 模块桥接（新架构：mux-server 守护进程）
@@ -1371,11 +1372,16 @@ export class SessionManager {
         recreated = this._recreateTmuxSession(row);
         if (recreated) {
           tmuxExists = true;
-          this._pendingCliResume.push({
-            tmuxSessionName: sanitizeTmuxSessionName(row.tmux_session_name || ''),
-            aiType: row.ai_type || 'claude',
-            name: row.name
-          });
+          // 长程模式的条目 tmux 里只该有 shell（由服务端长程驱动），重建后不起 CLI
+          if (row.run_mode !== 'longrun') {
+            this._pendingCliResume.push({
+              tmuxSessionName: sanitizeTmuxSessionName(row.tmux_session_name || ''),
+              aiType: row.ai_type || 'claude',
+              name: row.name,
+              origin: row.origin || null,
+              claudeSessionId: row.claude_session_id || null,
+            });
+          }
         }
       }
 
@@ -1488,6 +1494,8 @@ export class SessionManager {
         try {
           startCmd = cliRegistry.getTool(item.aiType)?.commands?.start || startCmd;
         } catch {}
+        // 来自长程的会话用 --resume（-c 找不到 claude -p 跑出的会话）
+        if ((item.aiType || 'claude') === 'claude') startCmd = claudeStartCommand(item, startCmd);
         const tmuxCmd = getTmuxPrefix();
         try {
           execSync(`${tmuxCmd} send-keys -t "${item.tmuxSessionName}" ${JSON.stringify(startCmd)}`, { stdio: 'ignore' });

@@ -184,7 +184,8 @@ import cloudflareTunnel from './services/CloudflareTunnel.js';
 import frpTunnel from './services/FrpTunnel.js';
 import { createProcessSnapshot, createLimiter, paneProcesses } from './services/processTable.js';
 import { isPathWithin, argsMentionDir } from './services/pathBoundary.js';
-import { isLongRunMode, sessionsInDir } from './services/sessionMode.js';
+import { isLongRunMode, sessionsInDir, claudeStartCommand } from './services/sessionMode.js';
+import { clearLeftoverInjections, isClaudeInputReady, bracketedPaste } from './services/LongRunHandover.js';
 import projectTaskReader from './services/ProjectTaskReader.js';
 import RecentProjectsService from './services/RecentProjectsService.js';
 import processDetector from './services/ProcessDetector.js';
@@ -1167,6 +1168,11 @@ function _wireHookServer() {
     // 这是面板供应商显示的最高优先级证据（getCurrentProvider 消费）。
     if (event._effectiveEnv) {
       session.effectiveEnv = { ...event._effectiveEnv, at: Date.now(), claudeSessionId: claudeId };
+    }
+    // 持久化当前 claude 会话 id：来自长程的会话重启时靠它 --resume（只在变化时落库）
+    if (claudeId && session.claudeSessionId !== claudeId && !isLongRunMode(session)) {
+      session.claudeSessionId = claudeId;
+      try { sessionManager.updateSession(session); } catch { /* 落库失败不影响 hook 处理 */ }
     }
 
     // 实测模型：hook 载荷带 transcript_path，节流(30s/会话)读取尾部提取实际模型，
@@ -4597,9 +4603,10 @@ async function runBackgroundAutoAction() {
         session.lastClaudeFixTime = now;
 
         // 步骤3: 重启 Claude Code
-        console.log(`[错误修复] 会话 ${session.name}: 步骤3 - 发送 claude -c 继续开发`);
+        const startCmd = claudeStartCommand(session);   // 来自长程的会话用 --resume（-c 找不到 -p 会话）
+        console.log(`[错误修复] 会话 ${session.name}: 步骤3 - 发送 ${startCmd} 继续开发`);
         try {
-          execSync(`${getTmuxPrefix()} send-keys -t "${ctx.tmuxSession}" "claude -c"`);
+          tmuxSendLiteral(ctx.tmuxSession, startCmd);
           setTimeout(() => {
             try {
               execSync(`${getTmuxPrefix()} send-keys -t "${ctx.tmuxSession}" Enter`);
@@ -4608,7 +4615,7 @@ async function runBackgroundAutoAction() {
             }
           }, 100);
         } catch (e) {
-          session.write('claude -c');
+          session.write(startCmd);
           setTimeout(() => session.write('\r'), 100);
         }
 
@@ -6764,7 +6771,7 @@ async function restartClaudeWithEnv(session, envForShell, emitStatus) {
       const envCmds = anthropicVars.map(v =>
         newEnvForShell[v] ? `export ${v}=${shellQuoteSq(newEnvForShell[v])}` : `unset ${v}`
       ).join('; ');
-      const restartCmd = `${envCmds} && claude -c`;
+      const restartCmd = `${envCmds} && ${claudeStartCommand(session)}`;   // 来自长程的会话用 --resume（-c 找不到 -p 会话）
       try {
         if (tmuxName) {
           tmuxSendLiteral(tmuxName, restartCmd);
@@ -7318,6 +7325,70 @@ io.on('connection', (socket) => {
     let d;
     try { d = longRunService.forSession(sessionId); } catch (e) { d = { ok: false, error: e.message }; }
     if (typeof cb === 'function') cb(d);
+  });
+
+  /** 转为终端的计划预览：接续方式（按水位自动）、理由、要打的命令。只读 */
+  socket.on('longrun:handoverPlan', ({ sessionId, mode } = {}, cb) => {
+    let d;
+    try { d = longRunService.handoverPlan(sessionId, { mode }); } catch (e) { d = { ok: false, error: e.message }; }
+    if (typeof cb === 'function') cb(d);
+  });
+
+  /**
+   * 长程 → 终端：同一条目切回终端模式，在它的 tmux 里接着用交互式 claude 开发。
+   * 顺序：计划 → 确认 CLI 没在跑 → 清残留投件 → 重新应用会话级供应商 → 切模式并落库 → 打启动命令
+   * → 开新对话时等输入框就绪再粘贴「新对话开始提示词」。切模式在打命令之前：监控循环据此不再跳过这个条目。
+   */
+  socket.on('longrun:toTerminal', async ({ sessionId, mode } = {}, cb) => {
+    const reply = (d) => { if (typeof cb === 'function') cb(d); };
+    try {
+      const session = sessionManager?.getSession(sessionId);
+      if (!session) return reply({ ok: false, error: '会话不存在' });
+      if (!isLongRunMode(session)) return reply({ ok: false, error: '这个条目不在长程模式' });
+      const plan = longRunService.handoverPlan(sessionId, { mode });
+      if (!plan.ok) return reply(plan);
+      const tmux = session.tmuxSessionName;
+      if (!tmux) return reply({ ok: false, error: '会话没有 tmux，无法在终端里启动 claude' });
+      if (processDetector.isCliRunning(tmux)) return reply({ ok: false, error: '这个会话里已经有 CLI 在运行' });
+
+      const removed = clearLeftoverInjections(plan.root);
+      let providerNote = '';
+      if (plan.providerId) {
+        const r = applySessionProvider(session, 'claude', plan.providerId);
+        providerNote = r?.ok === false ? `会话级供应商未能恢复：${r.error}` : '已恢复长程期间移走的会话级供应商';
+      }
+      session.runMode = 'terminal';
+      session.origin = 'longrun';
+      session.aiType = 'claude';
+      session.claudeSessionId = plan.claudeSessionId || session.claudeSessionId || null;
+      session.autoActionEnabled = false;      // 接手后由人决定何时打开自动操作
+      session.waterlineMode = 'warn';         // 接手时水位可能已经很高：只告警，不自动收尾/压缩
+      sessionManager.updateSession(session);
+      io.emit('sessions:updated', sessionManager.listSessions());
+
+      tmuxSendLiteral(tmux, `cd ${shellQuoteSq(plan.root)} && ${plan.command}`);
+      await new Promise((r) => setTimeout(r, 100));
+      execSync(`${getTmuxPrefix()} send-keys -t "${tmux}" Enter`);
+
+      let promptSent = false;
+      if (plan.mode === 'fresh' && plan.resumePrompt) {
+        for (const t0 = Date.now(); Date.now() - t0 < 60000; await new Promise((r) => setTimeout(r, 1000))) {
+          if (isClaudeInputReady(await session.getScreenContentAsync())) {
+            // 文本与回车分两次发（Claude Code 输入规则）；多行用 bracketed paste，否则第一个换行就提交
+            tmuxSendLiteral(tmux, bracketedPaste(plan.resumePrompt));
+            await new Promise((r) => setTimeout(r, 50));
+            execSync(`${getTmuxPrefix()} send-keys -t "${tmux}" Enter`);
+            promptSent = true;
+            break;
+          }
+        }
+      }
+      const { resumePrompt, ...rest } = plan;
+      reply({ ok: true, ...rest, removed, providerNote, promptSent,
+        note: plan.mode === 'fresh' && !promptSent ? '60 秒内没等到 claude 输入框就绪，没有发「新对话开始提示词」，请手动让它先读记忆' : '' });
+    } catch (e) {
+      reply({ ok: false, error: e.message });
+    }
   });
 
   /** 事后回放（原版 view.py）：按沙箱名读 .run/orchestrator.jsonl。只读。 */
