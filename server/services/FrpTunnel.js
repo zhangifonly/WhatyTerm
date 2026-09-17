@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { spawn, spawnSync } from 'child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
@@ -9,6 +9,27 @@ import net from 'net';
 import https from 'https';
 import dependencyManager from './DependencyManager.js';
 import NativeFrpClient from './frp/NativeFrpClient.js';
+
+/**
+ * 从 `ps -Ao pid=,ppid=,command=` 的输出里找**孤儿** frpc：用的是同一份配置文件，且父进程已是 launchd（ppid=1）。
+ *
+ * 为什么会有孤儿：服务被 kill -9、崩溃，或早期版本收到 SIGTERM 直接退出，frpc 子进程都会被 launchd 收养继续跑。
+ * 它一直占着隧道名，新 frpc 注册时反复报 "proxy already exists"（2026-09-17 重启实测）。
+ * 只认 ppid=1：另一个活着的 WebTmux/Electron 实例用同一份配置时，它的 frpc 父进程不是 1，不能误杀。
+ */
+export function findOrphanFrpc(psOutput, configPath) {
+  const pids = [];
+  for (const line of String(psOutput || '').split('\n')) {
+    const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const [, pid, ppid, command] = m;
+    const args = command.split(/\s+/);
+    const isFrpc = /(^|\/)frpc(\.exe)?$/.test(args[0] || '');
+    const cIdx = args.indexOf('-c');
+    if (isFrpc && ppid === '1' && cIdx >= 0 && args[cIdx + 1] === configPath) pids.push(Number(pid));
+  }
+  return pids;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -476,6 +497,7 @@ subdomain = "${this.subdomain}"
     }
 
     this._createConfig(server);
+    await this.killOrphanFrpc();
 
     console.log(`[FrpTunnel] 启动 FRP 客户端 (${server.name}: ${server.addr}:${server.frpPort})...`);
 
@@ -575,6 +597,36 @@ subdomain = "${this.subdomain}"
         }
       }, 10000);
     });
+  }
+
+  /**
+   * 清掉上一个服务实例留下的孤儿 frpc（见 findOrphanFrpc）。先 SIGTERM，3 秒不退再 SIGKILL。
+   * Windows 走进程内的 NativeFrpClient，不会留孤儿，跳过。
+   */
+  async killOrphanFrpc() {
+    if (process.platform === 'win32' || !this.configPath) return [];
+    const r = spawnSync('/bin/ps', ['-Ao', 'pid=,ppid=,command='], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const pids = findOrphanFrpc(r.stdout, this.configPath);
+    const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    for (const pid of pids) {
+      console.log(`[FrpTunnel] 发现上个实例遗留的 frpc (PID ${pid})，结束它以免占用隧道名`);
+      try { process.kill(pid, 'SIGTERM'); } catch { /* 已退出 */ }
+    }
+    for (let i = 0; i < 30 && pids.some(alive); i++) await new Promise((res) => setTimeout(res, 100));
+    for (const pid of pids.filter(alive)) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* 已退出 */ }
+    }
+    return pids;
+  }
+
+  /**
+   * 进程退出前同步结束 frpc 子进程。给信号处理器用：那里不能等异步，也不该改写隧道地址缓存
+   * （下次启动还要沿用固定域名）。
+   */
+  killChildSync() {
+    if (this.frpProcess && this.frpProcess.exitCode === null) {
+      try { this.frpProcess.kill('SIGTERM'); } catch { /* 已退出 */ }
+    }
   }
 
   /**

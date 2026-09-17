@@ -43,9 +43,21 @@ function recordSignalForensics(sig) {
   console.error(text);
 }
 
-process.on('SIGTERM', () => { recordSignalForensics('SIGTERM'); sleepPrevention?.destroy(); process.exit(0); });
-process.on('SIGINT', () => { recordSignalForensics('SIGINT'); sleepPrevention?.destroy(); process.exit(0); });
-process.on('SIGHUP', () => { recordSignalForensics('SIGHUP'); sleepPrevention?.destroy(); process.exit(0); });
+/**
+ * 收到退出信号：取证 → 释放休眠阻止 → 结束 frpc 子进程 → 退出。
+ * ⚠ frpc 必须显式结束：它是普通子进程，服务退出后会被 launchd 收养继续跑，一直占着隧道名，
+ *   下次启动的 frpc 反复 "proxy already exists"（2026-09-17 重启实测）。kill -9 与崩溃跑不到这里，
+ *   由 FrpTunnel 启动前的孤儿清理兜底。
+ */
+function shutdownOnSignal(sig) {
+  recordSignalForensics(sig);
+  sleepPrevention?.destroy();
+  try { frpTunnel?.killChildSync?.(); } catch { /* 退出路径上不能再抛 */ }
+  process.exit(0);
+}
+process.on('SIGTERM', () => shutdownOnSignal('SIGTERM'));
+process.on('SIGINT', () => shutdownOnSignal('SIGINT'));
+process.on('SIGHUP', () => shutdownOnSignal('SIGHUP'));
 process.on('exit', (code) => {
   if (code !== 0) { try { appendFileSync(SIGNAL_FORENSIC_PATH,
     `\n===== ${new Date().toISOString()} process.exit(${code}) uptime=${Math.round(process.uptime())}s =====\n`); } catch {} }
@@ -170,6 +182,7 @@ import ccSwitchRoutes from './routes/ccSwitchRoutes.js';
 import { DEFAULT_MODEL, CLAUDE_MODEL_FALLBACK_LIST } from './config/constants.js';
 import cloudflareTunnel from './services/CloudflareTunnel.js';
 import frpTunnel from './services/FrpTunnel.js';
+import { createProcessSnapshot, createLimiter, paneProcesses } from './services/processTable.js';
 import projectTaskReader from './services/ProjectTaskReader.js';
 import RecentProjectsService from './services/RecentProjectsService.js';
 import processDetector from './services/ProcessDetector.js';
@@ -1409,29 +1422,27 @@ function isLocalRequest(req) {
   return localIPs.includes(ip);
 }
 
+// macOS 的 ps 是串行的，多个会话同时各跑一次 ps 会一起撞超时（见 processTable.js）。
+// 进程表整张取一次共享；读环境变量的 ps eww 排队逐个执行，超时从轮到它时才开始算。
+const processSnapshot = createProcessSnapshot(async () => (await execAsync('ps -Ao pid=,ppid=,pgid=,comm=', {
+  encoding: 'utf-8', timeout: 10000, maxBuffer: 16 * 1024 * 1024
+})).stdout);
+const psEnvLimit = createLimiter(2);
+
 // 从运行中的 claude 进程读取实际环境变量（最高优先级，反映真实在用配置）
 async function readClaudeProcessEnv(tmuxSessionName) {
   if (!tmuxSessionName || process.platform === 'win32') return null;
   try {
     const panePid = (await execAsync(`${getTmuxPrefix()} list-panes -t "${tmuxSessionName}" -F "#{pane_pid}"`, {
       encoding: 'utf-8', timeout: 3000
-    })).stdout.trim();
+    })).stdout.trim().split('\n')[0];
     if (!panePid) return null;
-    const descendants = (await execAsync(`{ pgrep -P ${panePid}; pgrep -g ${panePid}; } 2>/dev/null || true`, {
-      encoding: 'utf-8', timeout: 3000, shell: '/bin/bash'
-    })).stdout.trim().split('\n').filter(Boolean);
-    const allPids = [...new Set([panePid, ...descendants])].join(',');
-    const psOut = (await execAsync(`ps -o pid=,comm= -p ${allPids} 2>/dev/null || true`, {
-      encoding: 'utf-8', timeout: 3000
-    })).stdout.trim();
-    for (const line of psOut.split('\n')) {
-      const m = line.trim().match(/^(\d+)\s+(.+)$/);
-      if (!m) continue;
-      const [, pid, comm] = m;
+    const candidates = paneProcesses(await processSnapshot(), panePid);
+    for (const { pid, comm } of candidates) {
       if (!/claude/i.test(comm)) continue;
-      const { stdout: envOut } = await execAsync(`ps eww -p ${pid} 2>/dev/null || true`, {
+      const { stdout: envOut } = await psEnvLimit(() => execAsync(`ps eww -p ${pid} 2>/dev/null || true`, {
         encoding: 'utf-8', timeout: 3000, maxBuffer: 4 * 1024 * 1024
-      });
+      }));
       const env = {};
       for (const tok of envOut.split(/\s+/)) {
         const eq = tok.indexOf('=');
