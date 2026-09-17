@@ -24,7 +24,7 @@ process.env.LONGRUN_CLAUDE_JSON = path.join(TMP, 'claude.json');
 fs.mkdirSync(process.env.LONGRUN_SANDBOX_BASE, { recursive: true });
 fs.writeFileSync(process.env.LONGRUN_CLAUDE_JSON, JSON.stringify({ projects: {} }));
 
-const { LongRunService, normalizeOptions, deriveName, EVENT_BUFFER, STOP_REASON } = await import('../server/services/LongRunService.js');
+const { LongRunService, normalizeOptions, deriveName, STOP_REASON } = await import('../server/services/LongRunService.js');
 const { HANDOFF_FLOOR, HANDOFF_CEILING, HARD_KILL, MAINTENANCE_EVERY, TOTAL_BUDGET_USD, MAX_LEGS } =
   await import('../server/services/LongRunLoop.js');
 const { TASK_WAIT } = await import('../server/services/LongRunRunner.js');
@@ -94,8 +94,17 @@ function fakeRunners({ blockAt = 0 } = {}) {
   return { sent, opts, factory };
 }
 
-const svc = (engine = fakeEngine(), runners = fakeRunners()) =>
-  Object.assign(new LongRunService({ aiEngine: engine, runnerFactory: runners.factory }), { engine, runners });
+/** 服务实例：注入假引擎、假执行者，并捕获推给 socket 房间的每条事件（s.pushed） */
+function svc(engine = fakeEngine(), runners = fakeRunners()) {
+  const pushed = [];
+  const io = { to: (room) => ({ emit: (name, ev) => pushed.push({ room, name, ...ev }) }),
+    emit: (name, task) => pushed.push({ room: '*', name, task }) };
+  return Object.assign(new LongRunService({ io, aiEngine: engine, runnerFactory: runners.factory }), { engine, runners, pushed });
+}
+/** 某任务推送过的事件 */
+const evs = (s, id) => s.pushed.filter((e) => e.taskId === id);
+/** 广播给所有客户端的任务摘要 */
+const broadcasts = (s, id) => s.pushed.filter((e) => e.room === '*' && e.task.id === id);
 const finished = (s, id) => waitFor(() => s.status(id).state !== 'running', '任务收工');
 
 // ── 参数 ────────────────────────────────────────────────────
@@ -233,7 +242,7 @@ await test('密钥不出现在任务快照、事件、执行者环境里', async
   const s = svc();
   const t = s.start({ docPath: writeDoc('# 密钥'), sandboxName: 'no_leak' });
   await finished(s, t.id);
-  const blob = JSON.stringify([s.status(t.id), s.history(t.id), s.runners.opts.map((o) => o.env)]);
+  const blob = JSON.stringify([s.status(t.id), evs(s, t.id), s.runners.opts.map((o) => o.env)]);
   assert(!blob.includes(SECRET), '监督者密钥泄漏');
   assert(!JSON.stringify(s.status(t.id)).includes(loadSystemPrompt().text.slice(0, 40)), '快照不该塞提示词全文');
 });
@@ -242,7 +251,7 @@ await test('启动自检：第一条事件就是自检，含连坐、投件、�
   const s = svc();
   const t = s.start({ docPath: writeDoc('# 自检'), sandboxName: 'selfcheck', model: 'claude-sonnet-5', taskWait: 60 });
   await finished(s, t.id);
-  const ev = s.history(t.id);
+  const ev = evs(s, t.id);
   assert(ev[0].kind === 'selfcheck' && ev[0].seq === 1 && ev[0].items.length === t.selfCheck.length, ev[0].kind);
   const text = t.selfCheck.map((i) => i.text).join('\n');
   for (const need of ['子进程连坐', 'inject!.txt', '暂停不是终止', '代答权', '判定提示词', '记忆目录（已覆盖）', 'maintain_2']) {
@@ -269,7 +278,8 @@ await test('监督者叫人 → 面板回答原样发给执行者（不加包装
   const s = svc(fakeEngine({ verdicts: ['needs_human', 'project_done'] }));
   const t = s.start({ docPath: writeDoc('# 叫人'), sandboxName: 'ask_me' });
   await waitFor(() => s.status(t.id).awaitingHuman, '进入等人');
-  assert(s.history(t.id).some((e) => e.kind === 'need_human' && e.needs === '请定数据库'), 'need_human 事件要带需要人做什么');
+  assert(evs(s, t.id).some((e) => e.kind === 'need_human' && e.needs === '请定数据库'), 'need_human 事件要带需要人做什么');
+  assert(broadcasts(s, t.id).some((b) => b.task.awaitingHuman), '挂起等人后要广播（need_human 事件那一刻还没挂起），否则列表与回答框出不来');
   const r = s.answer(t.id, '改用 SQLite');
   assert(r.ok && r.answered, JSON.stringify(r));
   await finished(s, t.id);
@@ -299,7 +309,7 @@ await test('终止长跑中的发次：执行者被结束，本轮以人工终�
   const st = s.status(t.id);
   assert(st.report.stop === 'interrupted' && st.state === 'failed' && st.aborted === '方向错了', JSON.stringify(st.report));
   assert(runners.sent.length === 2, '终止后不该再派发');
-  assert(s.history(t.id).some((e) => e.kind === 'finished' && e.stop === 'interrupted'));
+  assert(evs(s, t.id).some((e) => e.kind === 'finished' && e.stop === 'interrupted'));
   assert(s.inject(t.id, '继续').error === '任务已结束' && s.pause(t.id, true).error === '任务已结束', '结束后的投件会在下次续跑时突然生效，必须拒');
 });
 
@@ -335,6 +345,7 @@ await test('投件/暂停/停下写的是原版文件约定；停下 = 立即打
   assert(s.inject(t.id, '马上停', true).path === path.join(run, 'inject!.txt'));
   assert(s.inject(t.id, '   ').error === '注入内容为空');
   assert(s.pause(t.id, true).ok && s.status(t.id).pauseArmed && !s.status(t.id).halted, '闸挂上 ≠ 已停住');
+  assert(broadcasts(s, t.id).at(-1).task.pauseArmed, '面板暂停后要广播，列表徽标才会变');
   assert(s.pause(t.id, false).ok && !fs.existsSync(path.join(run, 'pause')));
   fs.rmSync(path.join(run, 'inject!.txt'));
   const r = s.stop(t.id);
@@ -345,23 +356,40 @@ await test('投件/暂停/停下写的是原版文件约定；停下 = 立即打
 });
 
 // ── 快照与事件 ──────────────────────────────────────────────
-await test('快照跟事件走：发次、费用取 loop 实账、水位峰值、最近段落；推送到任务房间', async () => {
-  const pushed = [];
-  const io = { to: (room) => ({ emit: (name, ev) => pushed.push({ room, name, ev }) }) };
-  const engine = fakeEngine(), runners = fakeRunners();
-  const s = new LongRunService({ io, aiEngine: engine, runnerFactory: runners.factory });
+await test('快照跟事件走：发次、费用取 loop 实账、水位峰值；推送带时间线条目；订阅快照与推送序号对得上', async () => {
+  const s = svc();
   const t = s.start({ docPath: writeDoc('# 快照'), sandboxName: 'snapshot' });
   await finished(s, t.id);
   const st = s.status(t.id);
-  assert(st.legs === runners.sent.length && Math.abs(st.costUsd - 0.25 * st.legs) < 1e-9 && st.contextPeak === 1000, JSON.stringify(st));
-  assert(pushed.length === s.history(t.id).length && pushed.every((p) => p.room === `longrun:${t.id}` && p.name === 'longrun:event'));
-  const seqs = s.history(t.id).map((e) => e.seq);
+  assert(st.legs === s.runners.sent.length && Math.abs(st.costUsd - 0.25 * st.legs) < 1e-9 && st.contextPeak === 1000, JSON.stringify(st));
+  const pushed = evs(s, t.id);
+  assert(pushed.every((p) => p.room === `longrun:${t.id}` && p.name === 'longrun:event'));
+  const seqs = pushed.map((e) => e.seq);
   assert(seqs.every((q, i) => i === 0 || q === seqs[i - 1] + 1), '序号必须连续递增');
-  const task = s.tasks.get(t.id);
-  s._emit(task, 'state', { kind: 'evil' });
-  assert(s.history(t.id).at(-1).kind === 'state', '数据里的 kind 不能覆盖事件类型');
-  for (let i = 0; i < EVENT_BUFFER + 50; i++) s._emit(task, 'log', { message: String(i) });
-  assert(s.history(t.id).length === EVENT_BUFFER && s.history(t.id)[0].seq > 1, '回放缓冲封顶，丢最旧的');
+  const send = pushed.find((e) => e.kind === 'send');
+  assert(send._entry && send._entry.role === 'injected' && send._entry.body.startsWith('【初始化提示词】'), '命中归类规则的事件要带条目');
+  assert(!pushed.find((e) => e.kind === 'selfcheck')._entry, '不在归类规则里的事件不带条目');
+  const b = s.board(t.id);
+  assert(b.seq === seqs.at(-1), `快照序号 ${b.seq} 应等于最后一条推送 ${seqs.at(-1)}`);
+  assert(b.snapshot.title === path.basename(t.docPath) && b.snapshot.requirement === '# 快照', '标题是文档名、需求卡片是原文');
+  assert(b.snapshot.finished.stop === 'project_done' && b.snapshot.timeline.length > 0 && b.snapshot.logs.length > 0);
+  s._emit(s.tasks.get(t.id), 'state', { kind: 'evil' });
+  assert(evs(s, t.id).at(-1).kind === 'state', '数据里的 kind 不能覆盖事件类型');
+  assert(s.board('nope') === null);
+  const bs = broadcasts(s, t.id);
+  assert(bs.length > 3 && bs.every((b) => b.name === 'longrun:task'), '关键变化要广播任务摘要给列表');
+  assert(bs.at(-1).task.state === 'done' && !JSON.stringify(bs).includes('sk-secret'), '最后一条是收工状态，且不带密钥');
+});
+
+await test('回放：内存里有该沙箱的任务就给实时看板，否则读落盘文件；会话记录接口可达', async () => {
+  const s = svc();
+  const live = s.replay({ sandboxName: 'snapshot' });
+  assert(live.ok && !live.live && live.snapshot.replay === true && live.count > 0, '新服务实例（模拟重启）应从文件回放');
+  const t = s.start({ docPath: writeDoc('# 回放'), sandboxName: 'replay_live' });
+  await finished(s, t.id);
+  const r = s.replay({ sandboxName: 'replay_live' });
+  assert(r.ok && r.live && r.taskId === t.id && r.snapshot.replay === false, JSON.stringify({ ...r, snapshot: undefined }));
+  assert(s.transcriptSessions('').error === '没给目录' && s.transcriptSession('/etc/passwd').error.includes('已拒绝'));
 });
 
 await test('沙箱清单带上次运行痕迹与占用情况', () => {

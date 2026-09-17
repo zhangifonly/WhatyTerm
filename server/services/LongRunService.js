@@ -19,6 +19,9 @@ import { Supervisor, loadSystemPrompt } from './LongRunSupervisor.js';
 import { LongRunLoop, Stop, assertThresholds, HANDOFF_FLOOR, HANDOFF_CEILING, HARD_KILL,
   MAINTENANCE_EVERY, TOTAL_BUDGET_USD, MAX_LEGS } from './LongRunLoop.js';
 import { TASK_WAIT } from './LongRunRunner.js';
+import { LongRunBoard } from './LongRunBoard.js';
+import { replay as replayRun, EVENTS_FILE } from './LongRunReplay.js';
+import { apiSessions, apiSession } from './LongRunTranscript.js';
 import {
   LaunchError, sandboxBase, deriveSandboxName, assertSandboxName, listSandboxes, memoryFiles,
   prepareFreshSandbox, checkResumableSandbox, priorState, checkRejectedRefs, requirementInput,
@@ -32,8 +35,6 @@ import {
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const PROMPT_FILE = path.join(HERE, '..', 'prompts', 'longrun', '提示词.txt');
 
-/** 每个任务在内存里留多少条事件供回放。一轮实测过程事件与对话约 30:1，给宽 */
-export const EVENT_BUFFER = 1000;
 
 /**
  * 「停下」时发给执行者的默认打断语（与面板的安全措辞模板一致）。
@@ -46,6 +47,13 @@ export const STOP_REASON = '先停一下，把当前在做的这一步收个尾�
  * 面板粘贴的需求文本落盘处。网页拿不到本机文件的绝对路径，粘贴的文本要先变成文件再走原流程
  * （编排器全程只认文档路径）。**不放沙箱根里**：沙箱名可能撞上。
  */
+/**
+ * 这些事件会改变左侧列表上看得见的东西（徽标、发次、费用），发生时向**所有**客户端广播任务摘要。
+ * 列表要显示每个任务是否在等你，而只有打开的那个任务才入了房间收全量事件。
+ */
+const LIST_KINDS = new Set(['selfcheck', 'send', 'result', 'handoff.done', 'supervisor.decided', 'need_human',
+  'need_human.done', 'paused', 'resumed', 'finished', 'state', 'error']);
+
 export const REQUIREMENT_DIR = path.join(os.homedir(), '.webtmux', 'longrun-requirements');
 
 /** 粘贴需求的名字：首个 Markdown 标题，其次首个非空行；再按 start.py 规则清洗成沙箱名。 */
@@ -55,19 +63,23 @@ export function deriveName(text) {
   return deriveSandboxName(`${head}.md`);
 }
 
-/** 一次运行的实例。事件落盘由 loop 负责（.run/orchestrator.jsonl），这里只推 socket 与留回放缓冲。 */
+/**
+ * 一次运行的实例。事件落盘由 loop 负责（.run/orchestrator.jsonl）；这里维护看板状态并推 socket。
+ * 刷新页面时 longrun:subscribe 拿看板快照（时间线/过程明细/编排日志都在里面），之后收增量。
+ */
 class LongRunTask {
-  constructor({ id, mode, sandbox, docPath, requirementText, options, selfCheck, supervisorInfo }) {
+  constructor({ id, mode, sandbox, docPath, requirementText, requirementDoc, options, selfCheck, supervisorInfo }) {
     Object.assign(this, { id, mode, sandbox, docPath, requirementText, options, selfCheck, supervisorInfo });
+    // 与原版 start_web 一致：标题是文档名，需求卡片显示需求文档原文（不是拼了参考资料/续跑包装的那份）
+    this.board = new LongRunBoard({ title: path.basename(docPath), requirement: requirementDoc, sandbox: sandbox.root });
     this.loop = null;
     this.startedAt = Date.now();
     this.state = 'running';      // running | done | failed
     this.report = null;
     this.snapshot = { legs: 0, handoffs: 0, maintenances: 0, decisions: 0, costUsd: 0,
       contextPeak: 0, occupied: 0, lastLabel: '' };
-    /** 事件自增序号。前端折叠状态按它做键 —— 用下标的话条目被挤出缓冲时整体错位 */
+    /** 推送序号：前端据此丢弃订阅快照之前的重复增量 */
     this.seq = 0;
-    this.events = [];
     /** 等人回答的挂起点（need_human 时由 loop 经 humanChannel 挂上） */
     this._humanWaiter = null;
   }
@@ -287,7 +299,7 @@ export class LongRunService {
     const { promptText, builtinText, ...supervisorInfo } = info;   // 全文不进快照
 
     const id = `${path.basename(sandbox.root)}-${Date.now().toString(36)}`;
-    const task = new LongRunTask({ id, mode: o.mode, sandbox, docPath, requirementText: input,
+    const task = new LongRunTask({ id, mode: o.mode, sandbox, docPath, requirementText: input, requirementDoc: req.text,
       options: { ...o }, selfCheck: sc.toJSON(), supervisorInfo });
     task.loop = new LongRunLoop({
       sandbox, prompts, requirementText: input, supervisor,
@@ -296,7 +308,9 @@ export class LongRunService {
       taskWait: o.taskWait, askHuman: !o.noAsk, skipInit: resume,
       onEvent: (ev) => this._push(task, ev),
       // Promise 执行器同步运行，waiter 在同一 tick 挂好，不存在回答先到的竞态
-      humanChannel: () => new Promise((resolve) => { task._humanWaiter = resolve; }),
+      // 挂起点就绪后立刻广播：need_human 事件先于挂起发出，那一刻的摘要里 awaitingHuman 还是 false，
+      // 不补这一下列表徽标和回答框都出不来
+      humanChannel: () => new Promise((resolve) => { task._humanWaiter = resolve; this._broadcast(task); }),
       ...(this.runnerFactory ? { runnerFactory: this.runnerFactory } : {}),
     });
     this.tasks.set(id, task);
@@ -343,20 +357,46 @@ export class LongRunService {
         break;
       default: break;
     }
+    // 看板状态吃事件；命中归类规则的会带回 _entry（时间线条目），随事件一起推
+    const handled = task.board.handle(ev);
     task.seq += 1;
     // ⚠ kind 放在展开之后：数据里若也带 kind 字段不能覆盖事件类型
-    const out = { ...ev, taskId: task.id, seq: task.seq, kind: ev.kind };
-    task.events.push(out);
-    if (task.events.length > EVENT_BUFFER) task.events.splice(0, task.events.length - EVENT_BUFFER);
+    const out = { ...handled, taskId: task.id, seq: task.seq, kind: ev.kind };
     this.io?.to(task.room).emit('longrun:event', out);
+    if (LIST_KINDS.has(ev.kind)) this._broadcast(task);
+  }
+
+  /** 向所有客户端广播任务摘要（左侧列表用）。不走事件的状态变化（挂起等人、面板暂停）也要调它 */
+  _broadcast(task) {
+    this.io?.emit?.('longrun:task', task.toJSON());
   }
 
   // ── 查询 ───────────────────────────────────────────────────
 
-  /** 某任务最近的事件（刷新页面后回放用）。 */
-  history(taskId) {
-    return this.tasks.get(taskId)?.events.slice() || [];
+  /** 看板快照（刷新页面/首次打开时用；之后收增量）。seq 是快照对应的推送序号，前端丢弃 ≤ 它的增量。 */
+  board(taskId) {
+    const task = this.tasks.get(taskId);
+    return task ? { seq: task.seq, snapshot: task.board.snapshot() } : null;
   }
+
+  /**
+   * 事后回放（view.py）。内存里有这个沙箱最近的任务就直接给它的看板 —— 那份比落盘文件多了实时状态；
+   * 否则读 .run/orchestrator.jsonl（服务重启后、或原版 Python 跑出来的轮次）。
+   */
+  replay({ sandboxName, file } = {}) {
+    if (sandboxName && !file) {
+      const root = path.join(sandboxBase(), assertSandboxName(sandboxName));
+      const live = [...this.tasks.values()].filter((t) => t.sandbox.root === root).sort((a, b) => b.startedAt - a.startedAt)[0];
+      if (live) return { ok: true, live: true, taskId: live.id, file: path.join(root, '.run', EVENTS_FILE), sandboxRoot: root,
+        notices: [], snapshot: live.board.snapshot() };
+    }
+    return replayRun({ sandboxName, file });
+  }
+
+  /** 会话记录（transcript.py）：列出某工作目录的会话，缺省为沙箱根。 */
+  transcriptSessions(dir) { return apiSessions(dir); }
+
+  transcriptSession(file) { return apiSession(file); }
 
   status(taskId) {
     if (taskId) return this.tasks.get(taskId)?.toJSON() || null;
@@ -368,6 +408,7 @@ export class LongRunService {
     return listSandboxes().map((name) => {
       const root = path.join(sandboxBase(), name);
       return { name, root, resumable: memoryFiles(root).length > 0, prior: priorState(root),
+        hasEvents: existsSync(path.join(root, '.run', EVENTS_FILE)),
         runningTaskId: this._runningOn(root)?.id || null };
     });
   }
@@ -408,6 +449,7 @@ export class LongRunService {
     } else if (existsSync(f)) {
       try { unlinkSync(f); } catch (e) { return { ok: false, error: `删除暂停文件失败: ${e.message}` }; }
     }
+    this._broadcast(task);
     return { ok: true, pauseArmed: !!on };
   }
 
@@ -431,6 +473,7 @@ export class LongRunService {
     const resolve = task._humanWaiter;
     task._humanWaiter = null;
     resolve(String(text || ''));
+    this._broadcast(task);
     return { ok: true, answered: !!String(text || '').trim() };
   }
 
@@ -447,6 +490,7 @@ export class LongRunService {
       task._humanWaiter = null;
       resolve('');
     }
+    this._broadcast(task);
     return { ok: true, note: '已终止：执行者已被结束，本轮收工并打快照。沙箱与记忆都保留，可以续跑。' };
   }
 }

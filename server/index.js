@@ -7248,11 +7248,35 @@ io.on('connection', (socket) => {
     }
   });
 
-  /** 订阅已有任务的事件流（刷新页面后重连用）。 */
-  socket.on('longrun:subscribe', ({ taskId }, cb) => {
-    if (taskId) socket.join(`longrun:${taskId}`);
-    // 带上最近事件：刷新页面后时间线不是空的
-    const d = { ok: true, task: longRunService.status(taskId), events: longRunService.history(taskId) };
+  /**
+   * 订阅已有任务：先入房间再取看板快照（同一 tick 内），之后的增量一定排在快照之后到达。
+   * 快照带 seq，前端丢弃 seq ≤ 它的增量。
+   */
+  socket.on('longrun:subscribe', ({ taskId } = {}, cb) => {
+    const board = taskId ? longRunService.board(taskId) : null;
+    if (board) socket.join(`longrun:${taskId}`);
+    const d = board ? { ok: true, task: longRunService.status(taskId), ...board }
+      : { ok: false, error: '任务不存在（服务重启后内存里的任务会丢失，可从沙箱回放）' };
+    if (typeof cb === 'function') cb(d);
+  });
+
+  /** 事后回放（原版 view.py）：按沙箱名读 .run/orchestrator.jsonl。只读。 */
+  socket.on('longrun:replay', ({ sandboxName, file } = {}, cb) => {
+    let d;
+    try { d = longRunService.replay({ sandboxName, file }); } catch (e) { d = { ok: false, error: e.message }; }
+    if (typeof cb === 'function') cb(d);
+  });
+
+  /** 会话记录（原版 transcript.py）：列出某工作目录下的 Claude 会话；读单个会话（路径限定在 ~/.claude/projects）。 */
+  socket.on('longrun:transcript:sessions', ({ dir } = {}, cb) => {
+    let d;
+    try { d = longRunService.transcriptSessions(dir); } catch (e) { d = { error: `读取失败: ${e.message}` }; }
+    if (typeof cb === 'function') cb(d);
+  });
+
+  socket.on('longrun:transcript:session', ({ file } = {}, cb) => {
+    let d;
+    try { d = longRunService.transcriptSession(file); } catch (e) { d = { error: `解析失败: ${e.message}` }; }
     if (typeof cb === 'function') cb(d);
   });
 

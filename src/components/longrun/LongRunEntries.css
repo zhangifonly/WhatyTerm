@@ -1,0 +1,84 @@
+/* 时间线条目、对话记录、新建弹窗。角色配色取自原版看板 */
+
+.lr-tl, .lr-tr { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.lr-tl-bar { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; padding: 8px 0; font-size: 12px;
+  color: hsl(var(--muted-foreground)); }
+.lr-tl-bar label { display: flex; gap: 4px; align-items: center; cursor: pointer; }
+.lr-tl-box, .lr-logs { flex: 1; min-height: 0; overflow-y: auto; padding-right: 6px; }
+.lr-logline { font: 12px/1.5 Menlo, Consolas, monospace; color: hsl(var(--muted-foreground)); padding: 1px 0; overflow-wrap: anywhere; }
+.lr-logline b { color: hsl(var(--foreground)); font-weight: 400; }
+
+.lr-entry { border-left: 3px solid #333; padding: 6px 0 6px 10px; margin-bottom: 10px; }
+.lr-entry-head { display: flex; gap: 8px; align-items: baseline; font-size: 11px; color: hsl(var(--muted-foreground)); margin-bottom: 3px; }
+.lr-entry-head .who { font-weight: 600; }
+.lr-entry-body { white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.6 Menlo, Consolas, "PingFang SC", monospace;
+  max-height: 260px; overflow-y: auto; }
+.lr-more { font-size: 11px; color: #4a9eda; cursor: pointer; user-select: none; margin-top: 2px; }
+/* 折叠成单行：整行可点 */
+.lr-entry.one { display: flex; gap: 8px; align-items: baseline; cursor: pointer; margin-bottom: 2px;
+  padding: 2px 0 2px 10px; font-size: 12px; white-space: nowrap; overflow: hidden; }
+.lr-entry.one:hover { background: hsl(var(--primary) / .08); }
+.lr-entry.one .who, .lr-entry.one .lbl, .lr-entry.one .ts { flex: none; }
+.lr-entry.one .lbl { font-weight: 600; font-size: 11px; }
+.lr-entry.one .sum { flex: 1; min-width: 0; color: hsl(var(--muted-foreground)); overflow: hidden; text-overflow: ellipsis;
+  font-family: Menlo, Consolas, monospace; font-size: 11.5px; }
+.lr-entry.one .ts { color: hsl(var(--muted-foreground)); font-size: 11px; }
+/* 过程明细整体压暗，与对话主线区分 */
+.lr-entry.trace { opacity: .82; }
+.lr-entry.trace .lr-entry-body { font-size: 11.5px; max-height: 340px; }
+
+.r-executor { border-left-color: #4a9eda; } .r-executor .who { color: #6cb6ea; }
+.r-say { border-left-color: #4a9eda; } .r-say .who, .r-say .lbl { color: #8fc4ec; } .r-say .lr-entry-body { color: #cfd4dc; }
+.r-injected { border-left-color: #6b5bd2; } .r-injected .who, .r-injected .lbl { color: #9a8ce8; }
+.r-supervisor { border-left-color: #c9a227; } .r-supervisor .who, .r-supervisor .lbl { color: #ddb63c; }
+/* 代答用橙色，比普通判定更抢眼：它替人做了决定 */
+.r-decided { border-left-color: #d98324; } .r-decided .who, .r-decided .lbl { color: #eda054; }
+.r-human { border-left-color: #4ea672; } .r-human .who, .r-human .lbl { color: #6cc490; }
+.r-memory { border-left-color: #b06fc4; } .r-memory .who, .r-memory .lbl { color: #c98bd8; }
+.r-handoff { border-left-color: #d2694a; } .r-handoff .who, .r-handoff .lbl { color: #e08865; }
+.r-alert { border-left-color: #d2694a; background: #2a1e19; } .r-alert .who, .r-alert .lbl { color: #e08865; }
+.r-tool { border-left-color: #3d434e; } .r-tool .who, .r-tool .lbl { color: #99a1ae; }
+.r-tool .lr-entry-body { color: hsl(var(--muted-foreground)); font-size: 11.5px; }
+.r-toolout { border-left-color: #34506b; } .r-toolout .who, .r-toolout .lbl { color: #7f9fbd; }
+.r-thinking { border-left-color: #5c6470; } .r-thinking .who, .r-thinking .lbl { color: #a2a9b5; }
+.r-thinking .lr-entry-body { color: #b6bcc6; font-style: italic; }
+.r-system { border-left-color: #555b66; }
+.r-meta { border-left-color: #3d4457; }
+
+/* ── 对话记录 ── */
+.lr-input { flex: 1; min-width: 220px; padding: 5px 8px; border-radius: 6px; background: #1a1a2e; border: 1px solid #444;
+  color: hsl(var(--foreground)); font-size: 12px; }
+.lr-tr-body { flex: 1; min-height: 0; display: flex; gap: 12px; }
+.lr-tr-side { width: 300px; flex: none; overflow-y: auto; }
+.lr-tr-pane { flex: 1; min-width: 0; overflow-y: auto; }
+.lr-tr-card { padding: 8px 10px; border-radius: 8px; margin-bottom: 6px; cursor: pointer; background: hsl(var(--card) / .5);
+  border: 1px solid transparent; font-size: 12px; }
+.lr-tr-card:hover { border-color: hsl(var(--primary) / .2); }
+.lr-tr-card.on { border-color: hsl(var(--primary) / .5); background: hsl(var(--primary) / .12); }
+.lr-tr-title { margin: 2px 0; overflow-wrap: anywhere; }
+.lr-tag { font-size: 10px; padding: 0 5px; border-radius: 3px; background: #333; }
+.lr-tag.sdk { background: #3a2a55; color: #bb9af7; }
+.lr-tr-head { font-size: 12px; color: hsl(var(--muted-foreground)); margin-bottom: 10px; }
+.lr-tr-head b { color: hsl(var(--foreground)); }
+.lr-warn { margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: #3a3216; color: #d9b945; }
+.lr-tr-entry { border-left: 3px solid #3d4457; padding: 4px 0 4px 10px; margin-bottom: 8px; font-size: 12px; }
+.lr-tr-entry pre { margin: 3px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.55 Menlo, Consolas, monospace; }
+.lr-tr-entry summary { cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lr-tr-entry .sum { color: hsl(var(--muted-foreground)); font-family: Menlo, Consolas, monospace; }
+.lr-tr-entry.err { border-left-color: #f7768e; }
+
+/* ── 新建弹窗 ── */
+.lr-modal { max-width: 720px; width: 92vw; max-height: 90vh; overflow-y: auto; }
+.lr-req-input { min-height: 160px; font-family: Menlo, Consolas, monospace; font-size: 12.5px; }
+.lr-select { width: 100%; padding: 8px; background: #2a2a2a; border: 1px solid #444; border-radius: 4px; color: #fff; }
+.lr-seg { margin-left: 10px; display: inline-flex; gap: 2px; }
+.lr-seg button { font-size: 11px; padding: 1px 8px; border: 1px solid #444; background: none; color: hsl(var(--muted-foreground));
+  border-radius: 3px; cursor: pointer; }
+.lr-seg button.on { color: hsl(var(--foreground)); border-color: hsl(var(--primary)); }
+.lr-adv { margin: 8px 0; padding: 10px 12px; border: 1px solid #333; border-radius: 8px; }
+.lr-adv > .lr-row:first-child { margin: 0 0 12px; }
+.lr-grid { display: flex; flex-wrap: wrap; gap: 0 12px; }
+.lr-grid .form-group.half { flex: 1 1 45%; }
+.lr-check-row { display: block; font-size: 12px; margin: 6px 0; cursor: pointer; }
+.lr-plan { margin: 10px 0; padding: 10px 12px; border-radius: 8px; background: #252538; border: 1px solid #333; font-size: 12px; }
+.lr-legacy { display: block; margin: 12px auto 0; color: hsl(var(--muted-foreground)); }

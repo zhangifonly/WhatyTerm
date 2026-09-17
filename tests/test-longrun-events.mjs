@@ -1,217 +1,146 @@
 /**
- * 长程任务面板：事件显示与运行态 —— 回归测试
+ * 长程任务看板：前端增量逻辑（src/components/longrun/longrunBoard.js）—— 回归测试
  *
- * 最要紧的是第一条**结构性守卫**：扫服务端源码里真实发出的每种事件类型，逐个断言
- * 前端有专门的显示规则。原编排器看板有过 exec.text 一直在发却从未上屏，丢了 139 条
- * 执行者旁白才被发现。以后加事件忘了配显示，这条会立刻变红。
+ * 最要紧的是第一条**结构性守卫**：同一串事件，走后端 LongRunBoard.handle 得到的快照，
+ * 与从空快照开始逐条走前端 applyEvent 得到的状态必须一致 —— 刷新页面（取快照）与
+ * 一直开着（收增量）看到的东西不能不一样。原版页面脚本在这里有四处走偏（见模块注释）。
+ *
+ * 事件串直接由真实 loop 跑出来（假执行者 + 假监督者），不是手写的，字段改名会被带进来。
  *
  * 运行: node tests/test-longrun-events.mjs
  */
 
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import {
-  describeEvent, reduceLive, liveFromTask, waterlinePercent, thresholdError,
-  THRESHOLD_PRESETS, STOP_TEXT, EXIT_TEXT,
-} from '../src/components/longrun/longrunEvents.js';
-import { ExitReason } from '../server/services/LongRunRunner.js';
-import { Stop } from '../server/services/LongRunLoop.js';
+  applyEvent, normalizeSnapshot, mergedEntries, timelineCount, entryView, ctxView, taskBadge,
+  fmtDur, STOP_LABEL, VERDICT_LABEL, ROLE_ICON,
+} from '../src/components/longrun/longrunBoard.js';
+import { LongRunBoard, TIMELINE_RULES } from '../server/services/LongRunBoard.js';
+import { LongRunLoop, Stop } from '../server/services/LongRunLoop.js';
+import { Supervisor, Verdict } from '../server/services/LongRunSupervisor.js';
+import { loadPrompts } from '../server/services/LongRunPrompts.js';
 
 const results = { passed: 0, failed: 0, errors: [] };
-const pending = [];
-function test(name, fn) {
-  const p = (async () => {
-    try { await fn(); results.passed++; console.log(`✅ ${name}`); }
-    catch (err) { results.failed++; results.errors.push({ name, error: err.message }); console.log(`❌ ${name}`); }
-  })();
-  pending.push(p);
-  return p;
-}
 function assert(cond, msg) { if (!cond) throw new Error(msg || '断言失败'); }
-
-const read = (f) => fs.readFileSync(new URL(`../server/services/${f}`, import.meta.url), 'utf8');
-
-/** 从源码抽事件类型。只认字面量第一个参数，动态拼的另行列出。 */
-function kindsIn(src, pattern) {
-  return [...new Set([...src.matchAll(pattern)].map((m) => m[1]))];
+async function test(name, fn) {
+  try { await fn(); results.passed++; console.log(`✅ ${name}`); }
+  catch (err) { results.failed++; results.errors.push({ name, error: err.message }); console.log(`❌ ${name}`); }
 }
 
-const loopKinds = kindsIn(read('LongRunLoop.js'), /this\.emit\('([a-z_.]+)'/g);
-const runnerKinds = [
-  ...kindsIn(read('LongRunRunner.js'), /this\._writeEvent\('([a-z_.]+)'/g),
-  // _emit 前是下划线、没有词边界，\bemit 会漏抽（inject.waiting / inject.sent 就这样漏过）
-  ...kindsIn(read('LongRunRunner.js'), /(?:\b|_)emit\('([a-z_.]+)'/g),
-].map((k) => `exec.${k}`);
-const serviceKinds = kindsIn(read('LongRunService.js'), /this\._emit\(task, '([a-z_.]+)'/g);
-
-/** 兜底样式的特征：标题就是类型名本身 */
-const isFallback = (ev, desc) => desc.icon === '•' && desc.title === ev.kind;
-
-test('源码里确实抽到了事件（否则下面的守卫是空转）', () => {
-  assert(loopKinds.length >= 12, `loop 事件太少，正则可能失配: ${loopKinds}`);
-  assert(runnerKinds.length >= 8, `runner 事件太少，正则可能失配: ${runnerKinds}`);
-  assert(['state', 'error', 'selfcheck'].every((k) => serviceKinds.includes(k)), `service 事件抽取失配: ${serviceKinds}`);
-});
-
-test('服务端发出的每种事件，前端都有专门的显示规则（不走兜底）', () => {
-  const all = [...new Set([...loopKinds, ...runnerKinds, ...serviceKinds])];
-  const missing = all.filter((kind) => {
-    const ev = { kind };
-    const desc = describeEvent(ev);
-    return desc.lane !== 'hidden' && isFallback(ev, desc);
+/** 用真实 loop 跑一轮：交接、维护、代答、叫人并回答、人工注入、暂停与继续，事件全收下来 */
+async function realEvents() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lr_events_'));
+  const spec = { root, memoryDir: path.join(root, '.memory'), runDir: path.join(root, '.run'), extraDirs: [],
+    verifyClean() {}, childEnv: () => ({ ...process.env }) };
+  for (const d of [spec.memoryDir, spec.runDir]) fs.mkdirSync(d, { recursive: true });
+  const verdicts = ['decide', 'needs_human', 'continue', 'project_done'];
+  const events = [];
+  let n = 0;
+  const loop = new LongRunLoop({
+    sandbox: spec, prompts: loadPrompts(fileURLToPath(new URL('../server/prompts/longrun/提示词.txt', import.meta.url))),
+    requirementText: '做个待办', maintenanceEvery: 1, onEvent: (ev) => events.push(ev),
+    humanChannel: async () => '用 SQLite',
+    supervisor: new Supervisor({ systemPrompt: 'x', complete: async () => {
+      const v = verdicts.shift() || 'project_done';
+      return { text: JSON.stringify({ verdict: v, confidence: 0.95, reason: `桩 ${v}`, reply: v === 'decide' ? '按需求来' : '', needs_from_human: '定库' }),
+        stopReason: 'end_turn', inputTokens: 1, outputTokens: 1 };
+    } }),
+    runnerFactory: (ro) => ({ abort() {}, run: async (prompt, sid) => {
+      n += 1;
+      ro.onStream({ kind: 'context', occupied: 1000 * n, peak: 1000 * n, limit: ro.contextLimit, cost_estimate: 0.01 * n, calls: n });
+      ro.onStream({ kind: 'thinking', text: `想 ${n}` });
+      ro.onStream({ kind: 'tool', names: ['bash'], calls: [{ id: `t${n}`, name: 'Bash', brief: 'npm test', detail: 'command: npm test' }] });
+      ro.onStream({ kind: 'tool_result', id: `t${n}`, name: 'Bash', is_error: n === 2, text: 'ok' });
+      ro.onStream({ kind: 'text', text: `第 ${n} 发的旁白` });
+      if (n === 3) fs.writeFileSync(path.join(spec.runDir, 'pause'), '');
+      if (n === 3) setTimeout(() => fs.rmSync(path.join(spec.runDir, 'pause')), 500);
+      const inject = n === 4 ? '改方向' : '';
+      if (inject) { ro.onStream({ kind: 'inject.waiting', text: inject }); ro.onStream({ kind: 'inject.sent', text: inject, immediate: true }); }
+      return { sessionId: sid || `sid-${n}`, exitReason: inject ? 'interrupted_by_human' : 'completed',
+        contextPeak: n >= 5 ? 250000 : 1000 * n, finalText: `完成第 ${n} 步`, stopReason: 'end_turn', costUsd: 0.1,
+        costEstimate: 0, injectText: inject, pendingTasks: [], numTurns: 1, error: '', durationS: 3, permissionDenials: [] };
+    } }),
   });
-  assert(missing.length === 0,
-    `这些事件没配显示规则，会以兜底样式出现（等于没人认真显示）: ${missing.join(', ')}`);
-});
-
-test('未知事件不静默丢弃，走兜底照样显示', () => {
-  const desc = describeEvent({ kind: 'some.future.kind', foo: 1 });
-  assert(desc.lane !== 'hidden', '未知事件不能被藏起来');
-  assert(desc.title === 'some.future.kind' && desc.detail.includes('foo'), '兜底要带类型名和数据');
-  assert(!desc.detail.includes('seq'), '兜底详情不该塞元数据');
-});
-
-test('停机原因与退出原因的人话覆盖全部枚举', () => {
-  for (const v of Object.values(Stop)) assert(STOP_TEXT[v], `缺停机原因文案: ${v}`);
-  for (const v of Object.values(ExitReason)) assert(EXIT_TEXT[v], `缺退出原因文案: ${v}`);
-});
-
-// ── 运行态归约 ──────────────────────────────────────────────
-const base = () => liveFromTask({
-  state: 'running', occupied: 0, contextPeak: 0, costUsd: 0, legs: 0, handoffs: 0,
-  thresholds: { hardKill: 400000 },
-});
-
-test('水位跟 exec.context 走，新一发归零，峰值保留', () => {
-  let l = reduceLive(base(), { kind: 'exec.context', occupied: 200000, peak: 210000 });
-  assert(l.occupied === 200000 && l.peak === 210000, '水位未更新');
-  assert(waterlinePercent(l) === 50, `分母应是 hardKill，实际 ${waterlinePercent(l)}%`);
-  l = reduceLive(l, { kind: 'send', label: '催继续' });
-  assert(l.occupied === 0 && l.peak === 210000, '新一发应归零但保留峰值');
-});
-
-test('暂停/继续驱动横幅（停着和挂死在看板上都表现为不动，必须区分）', () => {
-  let l = reduceLive(base(), { kind: 'paused', label: '催继续' });
-  assert(l.paused === true, '应显示已暂停');
-  l = reduceLive(l, { kind: 'resumed' });
-  assert(l.paused === false, '继续后横幅应消失');
-});
-
-test('等人回答：带原因进入，回答后清掉', () => {
-  let l = reduceLive(base(), { kind: 'need_human', reason: 'r', needs: '选哪个库', question: '用 A 还是 B？' });
-  assert(l.awaiting?.needs === '选哪个库' && l.awaiting.question.includes('A 还是 B'), '要带出需要人做什么与执行者原话');
-  l = reduceLive(l, { kind: 'need_human.done', answered: true });
-  assert(l.awaiting === null, '回答后应清掉');
-});
-
-test('收工报告的费用是权威实账，覆盖前端累加', () => {
-  let l = reduceLive(base(), { kind: 'result', leg: 1, cost_usd: 1.1, context_peak: 1 });
-  l = reduceLive(l, { kind: 'result', leg: 2, cost_usd: 2.2, context_peak: 1 });
-  assert(Math.abs(l.costUsd - 3.3) < 1e-9, `运行中应累加，实际 ${l.costUsd}`);
-  l = reduceLive(l, { kind: 'finished', stop: 'project_done', cost_usd: 3.47, legs: 2, handoffs: 0, decisions: 0 });
-  assert(l.costUsd === 3.47 && l.state === 'done', '收工后以报告为准');
-});
-
-test('非完成的收工与服务异常都记为失败态', () => {
-  assert(reduceLive(base(), { kind: 'finished', stop: 'budget' }).state === 'failed');
-  assert(reduceLive(base(), { kind: 'error', message: 'x' }).state === 'failed');
-});
-
-test('归约是纯函数：不改原对象', () => {
-  const l = base();
-  const snap = JSON.stringify(l);
-  reduceLive(l, { kind: 'paused' });
-  assert(JSON.stringify(l) === snap, '原运行态被改了');
-});
-
-test('快照恢复：刷新后从服务端快照重建（含暂停与等人）', () => {
-  const l = liveFromTask({ state: 'running', occupied: 5, contextPeak: 9, costUsd: 1.2,
-    legs: 4, handoffs: 1, paused: true, awaitingHuman: true, thresholds: { hardKill: 100 } });
-  // paused 文件在只代表闸已挂上，不代表已停住（见下一条用例）
-  assert(l.pauseArmed && !l.paused && l.awaiting && l.legs === 4 && l.hardKill === 100, '快照字段没接全');
-  assert(liveFromTask(null) === null, '无任务返回 null');
-});
-
-/**
- * 从源码抽每种事件的字段名：找到 emit('kind', { … }) 的对象字面量，按括号/字符串深度切出顶层键。
- * 同一类型多处发出时取并集。
- */
-function fieldsIn(src, pattern) {
-  const out = {};
-  for (const m of src.matchAll(pattern)) {
-    let i = m.index + m[0].length;
-    while (src[i] === ' ') i++;
-    if (src[i] !== '{') continue;
-    const keys = out[m[1]] || (out[m[1]] = new Set());
-    let depth = 0, seg = '', quote = null;
-    for (; i < src.length; i++) {
-      const c = src[i];
-      if (quote) { if (c === quote && src[i - 1] !== '\\') quote = null; if (depth === 1) seg += c; continue; }
-      if (c === "'" || c === '"' || c === '`') { quote = c; if (depth === 1) seg += c; continue; }
-      if ('{(['.includes(c)) { depth++; if (depth === 1) continue; }
-      if ('})]'.includes(c)) { depth--; if (depth === 0) { addKey(keys, seg); break; } }
-      if (depth === 1 && c === ',') { addKey(keys, seg); seg = ''; continue; }
-      if (depth === 1) seg += c;
-    }
-  }
-  return out;
+  const report = await loop.run();
+  fs.rmSync(root, { recursive: true, force: true });
+  return { events, report };
 }
-function addKey(keys, seg) {
-  const t = seg.trim();
-  const m = t.match(/^([A-Za-z_$][\w$]*)\s*(?::|$)/);
-  if (m) keys.add(m[1]);
+
+const { events, report } = await realEvents();
+const FIELDS = ['spent_usd', 'running_cost', 'context', 'logs', 'last_tool', 'supervisor', 'finished', 'timeline',
+  'trace', 'need_human', 'legs', 'handoffs', 'maintenances', 'decisions', 'current_label', 'session_id', 'paused'];
+const board = new LongRunBoard({ title: 't', requirement: 'r', sandbox: '/s', startedAt: 0 });
+const empty = normalizeSnapshot(new LongRunBoard({ title: 't', requirement: 'r', sandbox: '/s', startedAt: 0 }).snapshot());
+// 逐条比较：只比最终状态会漏掉"中途不一致、最后碰巧对上"的情况（如新一发不清监督者判定）
+let frontend = empty;
+let firstMismatch = '';
+for (const [i, ev] of events.entries()) {
+  frontend = applyEvent(frontend, board.handle(ev));
+  if (firstMismatch) continue;
+  const snap = board.snapshot();
+  const f = FIELDS.find((k) => JSON.stringify(frontend[k]) !== JSON.stringify(snap[k]));
+  if (f) firstMismatch = `第 ${i} 条（${ev.kind}）后 ${f}: 前端=${JSON.stringify(frontend[f])?.slice(0, 160)} 后端=${JSON.stringify(snap[f])?.slice(0, 160)}`;
 }
-const META = new Set(['kind', 'at', 'seq', 'taskId']);
-const prefixed = (obj, p) => Object.fromEntries(Object.entries(obj).map(([k, v]) => [p + k, v]));
-const sourceFields = {
-  ...fieldsIn(read('LongRunLoop.js'), /this\.emit\('([a-z_.]+)',/g),
-  ...prefixed(fieldsIn(read('LongRunRunner.js'), /(?:\b|_)emit\('([a-z_.]+)',/g), 'exec.'),
-  ...fieldsIn(read('LongRunService.js'), /this\._emit\(task, '([a-z_.]+)',/g),
-};
+const backend = board.snapshot();
 
-test('前端读的每个事件字段，源码里真的发了（改名一边忘改另一边会满屏 undefined 却照样绿）', () => {
-  assert(sourceFields.result?.has('exit_reason') && sourceFields['exec.tool']?.has('calls'),
-    `字段抽取失配: ${JSON.stringify(Object.fromEntries(Object.entries(sourceFields).map(([k, v]) => [k, [...v]])))}`);
-  const wrong = [];
-  for (const [kind, fields] of Object.entries(sourceFields)) {
-    const read = new Set();
-    const ev = new Proxy({ kind }, { get: (t, p) => { if (typeof p === 'string') read.add(p); return t[p]; } });
-    describeEvent(ev);
-    reduceLive(base(), ev);
-    for (const f of read) if (!META.has(f) && !fields.has(f)) wrong.push(`${kind}.${f}`);
-  }
-  assert(wrong.length === 0, `前端读了源码没发的字段: ${wrong.join(', ')}`);
+await test('真实 loop 事件串覆盖了关键看板状态（否则下面的一致性比较有盲区）', () => {
+  const kinds = new Set(events.map((e) => e.kind));
+  for (const k of ['send', 'result', 'exec.context', 'exec.tool', 'exec.text', 'supervisor', 'supervisor.decided',
+    'need_human', 'need_human.done', 'exec.inject.sent', 'inject.applied', 'paused', 'resumed', 'handoff.done',
+    'maintenance.done', 'finished', 'log']) assert(kinds.has(k), `事件串缺 ${k}；实有: ${[...kinds].join(',')}`);
+  assert(report.stop === Stop.PROJECT_DONE, report.stop);
 });
 
-// ── 阈值 ────────────────────────────────────────────────────
-test('两个预设本身满足有序（否则一选就报错）', () => {
-  for (const [k, p] of Object.entries(THRESHOLD_PRESETS)) {
-    assert(thresholdError(p) === '', `预设 ${k} 自相矛盾: ${thresholdError(p)}`);
-  }
+await test('刷新（取后端快照）与一直开着（收前端增量）看到的状态，每一步都一致', () => {
+  assert(!firstMismatch, firstMismatch);
 });
 
-test('阈值写反或缺值时给出说清后果的报错', () => {
-  assert(thresholdError({ handoffFloor: 300, handoffCeiling: 200, hardKill: 400 }).includes('刚开跑'));
-  assert(thresholdError({ handoffFloor: '', handoffCeiling: 200, hardKill: 400 }).includes('正整数'));
+await test('修正：注入已被后续发送消化后，快照与增量都不再显示「已注入，续跑中」', () => {
+  assert(frontend.inject === null, `增量应已收起: ${JSON.stringify(frontend.inject)}`);
+  assert(backend.inject?.phase === 'applied', '后端与原版一致地保留最后阶段');
+  assert(normalizeSnapshot(backend).inject === null, '快照入场时应收起');
+  const pending = normalizeSnapshot({ ...backend, inject: { phase: 'applied', text: 'x', at: 1e12 } });
+  assert(pending.inject, '之后还没有发送的注入要保留');
 });
 
-test("展开 result 能看到执行者这一发的原话与遗留任务", () => {
-  const d = describeEvent({ kind: "result", label: "继续完成项目", exit_reason: "completed",
-    context_peak: 1, duration_s: 1, cost_usd: 0.1, text: "我实现了 add 命令", pending_tasks: [{}] });
-  assert(d.full.includes("我实现了 add 命令"), "展开内容缺执行者原话");
-  assert(d.full.includes("后台任务仍在飞"), "展开内容要提示遗留任务");
-  assert(!d.detail.includes("我实现了"), "折叠摘要不该塞整段原话");
+await test('修正：增量时时间线上限与后端一致（1000，不是原版页面的 400）', () => {
+  let s = empty;
+  for (let i = 0; i < 1100; i++) s = applyEvent(s, { kind: 'exec.text', _entry: { id: i + 1, at: i, role: 'say', stream: 'main', body: 'x' } });
+  assert(s.timeline.length === 1000 && s.timeline[0].id === 101, `${s.timeline.length}`);
 });
 
-test("暂停闸已挂 ≠ 已停住：闸挂上时当前这发照常跑完", () => {
-  const l = liveFromTask({ state: "running", paused: true, thresholds: { hardKill: 1 } });
-  assert(l.pauseArmed === true && l.paused === false, "快照只知道 pause 文件在，不能当成已停住");
-  const h = liveFromTask({ state: "running", pauseArmed: true, halted: true, thresholds: { hardKill: 1 } });
-  assert(h.paused === true, "服务端明确 halted 才算已停住");
-  const r = reduceLive(reduceLive(l, { kind: "paused" }), { kind: "resumed" });
-  assert(r.paused === false && r.pauseArmed === false, "继续后两个状态都清掉");
+await test('修正：隐藏过程明细时计数不再说"含过程"；合并按时间与 id 排序', () => {
+  assert(!timelineCount(backend, false).includes('含过程') && timelineCount(backend, true).includes('含过程'));
+  const m = mergedEntries(backend, true);
+  assert(m.every((e, i) => i === 0 || m[i - 1].at < e.at || (m[i - 1].at === e.at && m[i - 1].id < e.id)), '合并顺序');
+  assert(mergedEntries(backend, false).every((e) => e.stream === 'main'));
 });
 
-await Promise.all(pending);
+await test('折叠规则：过程明细默认折叠；旁白 900 字才折；不折叠时非过程条目常开且不给「收起」（修正）', () => {
+  const ex = new Set();
+  const v = (role, len, fold = true) => entryView({ id: 1, role, body: 'x'.repeat(len) }, { fold, expanded: ex });
+  assert(!v('tool', 5).open && v('tool', 5).collapsible, '过程明细再短也折叠');
+  assert(v('say', 800).open && !v('say', 901).open && !v('executor', 261).open && v('executor', 260).open);
+  assert(v('executor', 5000, false).open && !v('executor', 5000, false).collapsible, '不折叠时不该有收起');
+  assert(!v('thinking', 10, false).open, '过程明细不受「折叠长内容」开关影响');
+  assert(entryView({ id: 7, role: 'tool', body: 'x' }, { fold: true, expanded: new Set([7]) }).open, '点开后展开');
+});
+
+await test('水位条、耗时、列表徽标与文案表', () => {
+  assert(ctxView({}).text === '水位 —' && ctxView({ occupied: 81, peak: 90, limit: 100 }).hot && !ctxView({ occupied: 80, peak: 1, limit: 100 }).hot);
+  assert(fmtDur(59.4) === '59s' && fmtDur(725) === '12m05s');
+  assert(taskBadge({ state: 'running', awaitingHuman: true, halted: true })[1].includes('等你回答'), '等人优先');
+  assert(taskBadge({ state: 'running', pauseArmed: true })[1].includes('暂停闸'), '闸挂上≠已停住');
+  assert(taskBadge({ state: 'failed', report: { stop: 'interrupted' } })[1] === '已中断');
+  for (const v of Object.values(Stop)) assert(STOP_LABEL[v], `缺停机文案 ${v}`);
+  for (const v of Object.values(Verdict)) assert(VERDICT_LABEL[v], `缺判定文案 ${v}`);
+  const roles = new Set(TIMELINE_RULES.map(([, r]) => r));
+  for (const r of roles) assert(ROLE_ICON[r], `缺角色图标 ${r}`);
+});
+
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
 if (results.failed) for (const e of results.errors) console.log(`  • ${e.name}\n    ${e.error}`);
 process.exitCode = results.failed ? 1 : 0;

@@ -22,6 +22,14 @@ import ClaudeConfigManager from './components/ClaudeConfigManager';
 import VoiceInput from './components/VoiceInput';
 import SprintProgress from './components/SprintProgress';
 import RalphWizard from './components/RalphWizard';
+import { useLongRun } from './components/longrun/useLongRun';
+import { useLongRunBell } from './components/longrun/useLongRunBell';
+import LongRunSidebarGroup from './components/longrun/LongRunSidebarGroup';
+import LongRunMain from './components/longrun/LongRunMain';
+import LongRunSide from './components/longrun/LongRunSide';
+import LongRunNewTask from './components/longrun/LongRunNewTask';
+import './components/longrun/LongRun.css';
+import './components/longrun/LongRunEntries.css';
 import { registerOsc52, writeClipboard } from './terminalClipboard';
 import { fitTerminal, measureScrollbarWidth } from './terminalFit';
 
@@ -152,6 +160,13 @@ export default function App() {
   const [currentSession, setCurrentSession] = useState(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showRalphWizard, setShowRalphWizard] = useState(false);
+  // 长程任务：与终端会话互斥占用主区与右侧面板（打开一个就关掉另一个）
+  const longRun = useLongRun(socket);
+  const longRunCloseRef = useRef(longRun.close);
+  longRunCloseRef.current = longRun.close;
+  const [longRunNew, setLongRunNew] = useState(null);   // null | {mode, sandboxName}
+  useLongRunBell(longRun.tasks, longRun.muted);
+  const openLongRun = useCallback((view) => { setCurrentSession(null); longRun.open(view); }, [longRun.open]);
   const [suggestion, setSuggestion] = useState(null);
   const [showHistory, setShowHistory] = useState(false);
   const [playbackSessionId, setPlaybackSessionId] = useState(null); // 用于存储管理的回放
@@ -447,6 +462,7 @@ export default function App() {
       setPendingScreenContent(data.fullContent || data.screenContent || '');
       setPendingCursorPosition(data.cursorPosition);
       setCurrentSession(data.session);
+      longRunCloseRef.current?.();
       // 持久化上次活跃会话 ID，重启后自动恢复
       try { localStorage.setItem('webtmux_last_session_id', data.session.id); } catch { /* 忽略 */ }
     });
@@ -1717,7 +1733,7 @@ export default function App() {
         <div className="sidebar-header">
           <div
             className="sidebar-brand"
-            onClick={() => setCurrentSession(null)}
+            onClick={() => { setCurrentSession(null); longRun.close(); }}
             title={t('welcome.startHint')}
           >
             <span className="sidebar-brand-mark">W</span>
@@ -1730,8 +1746,9 @@ export default function App() {
             <button className="btn btn-primary btn-small btn-new" onClick={() => setShowCreateModal(true)}>
               <span className="btn-ico">＋</span>{t('sidebar.newSession').replace(/^\+\s*/, '')}
             </button>
-            <button className="btn btn-small btn-ralph" onClick={() => setShowRalphWizard(true)} title="自主开发：描述需求，AI 自动拆分并逐个完成">
-              <span className="btn-ico">🏭</span>自主开发
+            <button className="btn btn-small btn-ralph" onClick={() => setLongRunNew({ mode: 'start' })}
+              title="长程开发：执行者在独立沙箱里无人值守连续开发，水位高了自动交接，监督者判断继续/叫你/完成">
+              <span className="btn-ico">🧭</span>长程开发
             </button>
           </div>
         </div>
@@ -1784,6 +1801,7 @@ export default function App() {
             idleWaitingIds 保留给列表红点与「待处理优先」排序使用。 */}
 
         <div className="session-list">
+          <LongRunSidebarGroup tasks={longRun.tasks} sandboxes={longRun.sandboxes} view={longRun.view} onOpen={openLongRun} />
           {orderedSessions.map((session) => (
             <div
               key={session.id}
@@ -2174,6 +2192,8 @@ export default function App() {
             {currentSession && <SprintProgress socket={socket} sessionId={currentSession.id} goal={currentSession.goal} />}
 
           </div>
+        ) : longRun.view ? (
+          <LongRunMain lr={longRun} />
         ) : (
           <div className="empty-state welcome-page">
             {/* 顶部标题区 */}
@@ -2325,7 +2345,15 @@ export default function App() {
         )}
       </main>
 
-      {/* 右侧面板 */}
+      {/* 右侧面板：长程任务沿用同一个外壳与折叠状态 */}
+      {!currentSession && longRun.view && (
+        <LongRunSide
+          lr={longRun}
+          collapsed={aiPanelCollapsed}
+          onToggle={() => setAiPanelCollapsed(!aiPanelCollapsed)}
+          onResume={(sandboxName) => setLongRunNew({ mode: 'resume', sandboxName })}
+        />
+      )}
       {currentSession && (
         <aside className={`ai-panel ${aiPanelCollapsed ? 'collapsed' : ''}`}>
           <button
@@ -3154,7 +3182,18 @@ export default function App() {
         />
       )}
 
-      {/* 自主开发向导 */}
+      {/* 长程开发（新建 / 续跑） */}
+      {longRunNew && (
+        <LongRunNewTask
+          lr={longRun}
+          preset={longRunNew}
+          onClose={() => setLongRunNew(null)}
+          onStarted={(task) => { setLongRunNew(null); longRun.refreshLists(); openLongRun({ kind: 'task', id: task.id }); }}
+          onOpenLegacy={() => { setLongRunNew(null); setShowRalphWizard(true); }}
+        />
+      )}
+
+      {/* 旧版自主开发向导（拆任务逐个做），入口收在长程开发弹窗底部 */}
       {showRalphWizard && (
         <RalphWizard
           socket={socket}
