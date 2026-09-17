@@ -90,9 +90,19 @@ test('旧式 > 提示符同样识别', () => {
 
 // ============ 2. 只提交自己打进去的 ============
 
-test('以自动指令开头的算我们自己的', () => {
+test('没有发送记录时只认完全等于自动指令的；以「继续」开头的用户草稿不算（2026-09-18 实测误提交）', () => {
   eq(isOwnPendingInput('继续', ['继续']), true);
-  eq(isOwnPendingInput('继续 format 组', ['继续']), true);
+  eq(isOwnPendingInput(' 继续 ', ['继续']), true, '首尾空白不影响');
+  eq(isOwnPendingInput('继续 format 组', ['继续']), false, '宁可漏判成用户的，也不替用户提交');
+  eq(isOwnPendingInput('继续做上级端的写能力', ['继续']), false, '真实样本：用户在回答 CLI 的提问');
+});
+
+test('有发送记录：相等算；屏上截到所发长文本的前一截（≥10 字）算；用户在我们发过的话后面接着打不算', () => {
+  eq(isOwnPendingInput('继续做上级端的写能力', ['继续'], '继续'), false, '发过「继续」≠ 用户接着敲的话是我们的');
+  const long = '请先把上级端的组织管理与应用下发两块写能力做完，再补对应的接口测试';
+  eq(isOwnPendingInput(long, ['继续'], long), true);
+  eq(isOwnPendingInput(long.slice(0, 20), ['继续'], long), true, '折行只截到前一截');
+  eq(isOwnPendingInput('请先', ['继续'], long), false, '太短的前缀更像用户正在打字');
 });
 
 test('用户自己敲的不算 —— 哪怕里面含「继续」二字', () => {
@@ -107,15 +117,19 @@ test('未配置 autoActions 时回落到「继续」', () => {
 
 // ============ 3. 端到端 ============
 
+// 截图场景里「继续 format 组」是监控 AI 替用户回答 CLI 的话（CLI 刚问"要继续的话，format 组风险最低"），
+// 有发送记录才认得出是自己的；2026-09-18 起没有发送记录时不再按「继续」前缀认（会误提交用户草稿）
+const SENT = { lastSentText: '继续 format 组' };
+
 test('截图场景：卡住的「继续」→ 发回车提交，不再判「状态不明确」', () => {
-  const r = engine.preAnalyzeStatus(screenWith('❯ 继续 format 组'), 'claude');
+  const r = engine.preAnalyzeStatus(screenWith('❯ 继续 format 组'), 'claude', null, SENT);
   eq(r?.actionType, 'key', `应发按键，实际 ${r?.actionType}`);
   eq(r?.suggestedAction, 'Enter');
   assert(r?.needsAction, '应提示需要操作');
 });
 
 test('绝不在已有内容后再追加「继续」', () => {
-  const r = engine.preAnalyzeStatus(screenWith('❯ 继续 format 组'), 'claude');
+  const r = engine.preAnalyzeStatus(screenWith('❯ 继续 format 组'), 'claude', null, SENT);
   assert(!/继续/.test(String(r?.suggestedAction || '')),
     `发了文本会拼成「继续 format 组继续」：${r?.suggestedAction}`);
 });
@@ -137,8 +151,14 @@ test('通用策略插件：同一屏不再判「状态不明确」', () => {
   const s = screenWith('❯ 继续 format 组');
   const phase = plugin.detectPhase(s, {});
   eq(phase, 'waiting', `阶段应为 waiting，实际 ${phase}`);
-  const r = plugin.analyzeStatus(s, phase, {});
-  eq(r?.suggestedAction, 'Enter');
+  eq(plugin.analyzeStatus(s, phase, SENT)?.suggestedAction, 'Enter');
+  eq(plugin.analyzeStatus(s, phase, {})?.needsAction, false, '没有发送记录时认不出是自己的，就不替用户按回车');
+});
+
+test('真实误提交样本：以「继续」开头的用户草稿，两条路径都不按回车', () => {
+  const s = screenWith('❯ 继续做上级端的写能力');
+  eq(engine.preAnalyzeStatus(s, 'claude', null, { lastSentText: '继续' })?.needsAction, false, 'AIEngine 路径');
+  eq(plugin.analyzeStatus(s, plugin.detectPhase(s, {}), { lastSentText: '继续' })?.needsAction, false, '插件路径');
 });
 
 test('通用策略插件：用户内容同样不碰', () => {

@@ -52,6 +52,9 @@ export function hasUnsentInput(cleanText) {
   return typeof t === 'string' && t.length > 0;
 }
 
+/** 屏上截断的前缀至少这么长才认作「我们所发长文本的前一截」；太短的前缀（如「继」）更可能是用户正在打字 */
+const MIN_TRUNCATED_PREFIX = 10;
+
 /**
  * 这段未提交的文本是不是**我们自己**打进去的。
  *
@@ -62,7 +65,7 @@ export function hasUnsentInput(cleanText) {
  *   1. lastSentText —— 我们上一次真正发出去的文本。这是**事实**，最可靠。
  *      监控 AI 回答 CLI 提问时会生成任意内容（如「检查 Clash 里的分流规则」），
  *      光看内容根本认不出是自己打的，必须靠这个。
- *   2. 认不到 lastSentText 时（重启后、测试里）退回启发式：以自动指令开头。
+ *   2. 认不到 lastSentText 时（重启后、测试里）退回启发式：完全等于自动指令。
  *      宁可漏判成"用户的"而不操作，也不能误判成"自己的"去提交用户的半截话。
  *
  * @param {string} pending 未提交的文本
@@ -70,14 +73,20 @@ export function hasUnsentInput(cleanText) {
  * @param {string} [lastSentText] 我们上一次发给该会话的文本
  */
 export function isOwnPendingInput(pending, autoActions = ['继续'], lastSentText = null) {
-  if (!pending) return false;
+  const text = typeof pending === 'string' ? pending.trim() : '';
+  if (!text) return false;
   if (lastSentText && typeof lastSentText === 'string') {
     const sent = lastSentText.trim();
-    if (sent && (pending === sent || pending.startsWith(sent))) return true;
+    // 相等，或屏上只截到了我们所发长文本的前一截（输入框折行/截断）。
+    // ⚠ 方向不能反：原来写成 text.startsWith(sent)，发过「继续」后用户接着敲「继续做上级端的写能力」
+    //   也被认成自己的，监控就替用户按回车提交半截话（2026-09-18 Hitech 会话实测）
+    if (sent && (text === sent || (text.length >= MIN_TRUNCATED_PREFIX && sent.startsWith(text)))) return true;
   }
+  // 认不到发送记录时只认「完全等于」自动指令。原来按前缀认（以「继续」开头就算），
+  // 中文里「继续做…」「继续修…」是最常见的用户草稿开头，等于把用户的话当成自己的
   const list = (autoActions || []).filter(a => typeof a === 'string' && a.trim());
   const known = list.length ? list : ['继续'];
-  return known.some(a => pending === a || pending.startsWith(a));
+  return known.some(a => text === a.trim());
 }
 
 export default { promptPendingText, isEmptyPrompt, hasUnsentInput, isOwnPendingInput };
