@@ -16,7 +16,7 @@ import { fileURLToPath } from 'url';
 import { loadPrompts, loadRequirement, extraDirsOf, PROMPT_SLOTS } from './LongRunPrompts.js';
 import { LongRunSandbox, sandboxRoots } from './LongRunSandbox.js';
 import { Supervisor, loadSystemPrompt } from './LongRunSupervisor.js';
-import { SupervisorCredentials } from './LongRunSupervisorCreds.js';
+import { makeSupervisorChannel } from './LongRunSupervisorCreds.js';
 import { LongRunLoop, Stop, assertThresholds, HANDOFF_FLOOR, HANDOFF_CEILING, HARD_KILL,
   MAINTENANCE_EVERY, TOTAL_BUDGET_USD, MAX_LEGS } from './LongRunLoop.js';
 import { TASK_WAIT } from './LongRunRunner.js';
@@ -164,17 +164,17 @@ export class LongRunService {
   /**
    * @param {object} o
    * @param {object} o.io        socket.io 实例（推事件用）
-   * @param {object} o.aiEngine  取 CC Switch 凭据 + 调监督者 LLM
+   * @param {object} o.aiEngine  读 CC Switch 当前配置（展示）；面板明确选了供应商时解析并调用它
    * @param {function} [o.runnerFactory]  执行者工厂（仅测试注入；缺省起真 claude 进程）
-   * @param {() => string[]} [o.providerPriority]  借用供应商时的名称优先级，与 AI 监控共用
+   * @param {function} [o.supervisorCli]  监督者 CLI 客户端工厂 (model) => {complete}（仅测试注入；缺省起真 claude -p）
    * @param {object} [o.sessionBinder]  会话条目绑定（index.js 注入）：
    *   bind(root, {projectName}) → Promise<sessionId>  找/建该目录的会话条目并切到长程模式；claude 正在跑则抛错
    *   get(sessionId) → 会话摘要（含 workingDir、runMode）或 null
    */
-  constructor({ io, aiEngine, runnerFactory = null, providerPriority = () => [], sessionBinder = null } = {}) {
+  constructor({ io, aiEngine, runnerFactory = null, supervisorCli = undefined, sessionBinder = null } = {}) {
     this.io = io;
     this.aiEngine = aiEngine;
-    this.providerPriority = providerPriority;
+    this.supervisorCli = supervisorCli;
     this.sessionBinder = sessionBinder;
     this.runnerFactory = runnerFactory;
     /** id → LongRunTask */
@@ -188,27 +188,17 @@ export class LongRunService {
    * 凭据来源与轮换见 LongRunSupervisorCreds.js。
    * @param {() => object} getTask  换供应商时往该任务的编排日志里记一笔（任务在监督者之后才建出来）
    */
-  _makeSupervisor(o, requirementText, getTask = () => null) {
+  _makeSupervisor(o, requirementText) {
     if (o.noSupervisor) return { supervisor: null, info: { status: 'off' } };
     const { text, source } = loadSystemPrompt(o.supervisorPrompt || null);
     const builtinText = o.supervisorPrompt ? loadSystemPrompt().text : text;
-    const creds = new SupervisorCredentials({
-      engine: this.aiEngine, providerId: o.providerId, priority: this.providerPriority,
-      onSwitch: ({ from, to, error }) => getTask()?.loop?.log(`  监督者供应商 ${from} 调不通（${String(error).slice(0, 80)}），换用 ${to}`),
-    });
-    const cred = creds.resolve();
-    if (!cred) {
-      return { supervisor: null, info: { status: 'unavailable', error: o.providerId
-        ? '所选供应商没有可用的地址与密钥（明确选定的供应商不会被自动换掉）'
-        : 'CC Switch 里没有带地址与密钥的 Claude 供应商' } };
-    }
+    const channel = makeSupervisorChannel({ engine: this.aiEngine, providerId: o.providerId,
+      ...(this.supervisorCli ? { cliFactory: this.supervisorCli } : {}) });
+    if (!channel.complete) return { supervisor: null, info: channel.info };
     const supervisor = new Supervisor({
-      requirementText, systemPrompt: text, promptSource: source, maxTokens: 4000,
-      complete: (system, user) => creds.complete(system, user),
+      requirementText, systemPrompt: text, promptSource: source, maxTokens: 4000, complete: channel.complete,
     });
-    return { supervisor,
-      info: { status: 'on', model: cred.config.model, baseUrl: cred.config.apiUrl, providerName: cred.name,
-        borrowed: cred.borrowed, promptSource: source, promptText: text, builtinText } };
+    return { supervisor, info: { ...channel.info, promptSource: source, promptText: text, builtinText } };
   }
 
   /** 粘贴的文本 → 文件路径。按内容哈希命名，幂等：plan 与 start 各调一次只落同一个文件。 */
@@ -350,7 +340,7 @@ export class LongRunService {
 
     const input = requirementInput(req, { resume: continuing });
     let task = null;
-    const { supervisor, info } = this._makeSupervisor(o, input, () => task);
+    const { supervisor, info } = this._makeSupervisor(o, input);
     reportSupervisor(sc, info);
     const { promptText, builtinText, ...supervisorInfo } = info;   // 全文不进快照
 

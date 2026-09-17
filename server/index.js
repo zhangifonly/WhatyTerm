@@ -1260,8 +1260,7 @@ const longRunSessionBinder = {
     return sessionManager?.getSession(sessionId)?.toJSON() || null;
   },
 };
-const longRunService = new LongRunService({ io, aiEngine, providerPriority: () => CLAUDE_PROVIDER_PRIORITY,
-  sessionBinder: longRunSessionBinder });
+const longRunService = new LongRunService({ io, aiEngine, sessionBinder: longRunSessionBinder });
 const authService = new AuthService();
 const providerService = new ProviderService(io);
 const healthCheckScheduler = new HealthCheckScheduler(io);
@@ -7347,6 +7346,16 @@ io.on('connection', (socket) => {
   socket.on('longrun:openProject', async (payload = {}, cb) => {
     let d;
     try { d = await longRunService.openProject(payload); } catch (e) { d = { ok: false, error: e.message }; }
+    if (typeof cb === 'function') cb(d);
+  });
+
+  /**
+   * 长程右侧面板的 CLAUDE 卡：CC Switch 当前全局配置（与 AI 面板同一个 getCurrentProvider 口径）。
+   * 不带工作目录与 tmux：执行者与监督者用的是全局配置（项目里的会话级 relay 已被剥离），不是这个目录的会话配置。
+   */
+  socket.on('longrun:provider', async (_ = {}, cb) => {
+    let d;
+    try { d = { ok: true, provider: await getCurrentProvider('claude') }; } catch (e) { d = { ok: false, error: e.message }; }
     if (typeof cb === 'function') cb(d);
   });
 

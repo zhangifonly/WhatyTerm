@@ -152,7 +152,7 @@ const LongRunNewTask = ({ lr, preset, sessions = [], onClose, onStarted, onOpene
         <div className="form-group">
           <label>监督者供应商（CC Switch）</label>
           <select className="lr-select" value={form.providerId} onChange={(e) => set({ providerId: e.target.value })}>
-            <option value="">跟随当前 Claude 供应商（无密钥时借用带凭据的供应商）</option>
+            <option value="">跟随 CC Switch 当前 Claude 配置（经 claude CLI，与执行者同一套地址、登录与代理）</option>
             {providers.map((p) => <option key={p.id} value={p.id}>{p.name}{p.isCurrent ? '（当前）' : ''}</option>)}
           </select>
         </div>

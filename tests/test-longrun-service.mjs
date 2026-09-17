@@ -111,11 +111,16 @@ function fakeRunners({ blockAt = 0 } = {}) {
 }
 
 /** 服务实例：注入假引擎、假执行者，并捕获推给 socket 房间的每条事件（s.pushed） */
-function svc(engine = fakeEngine(), runners = fakeRunners()) {
+function svc(engine = fakeEngine(), runners = fakeRunners(), extra = {}) {
   const pushed = [];
   const io = { to: (room) => ({ emit: (name, ev) => pushed.push({ room, name, ...ev }) }),
     emit: (name, task) => pushed.push({ room: '*', name, task }) };
-  return Object.assign(new LongRunService({ io, aiEngine: engine, runnerFactory: runners.factory }), { engine, runners, pushed });
+  // 监督者 CLI 通道的桩：记下工厂拿到的模型，调用转给假引擎（apiUrl 标成 cli，便于断言走的是哪条通道）
+  const cliModels = [];
+  const supervisorCli = (model) => { cliModels.push(model); return {
+    complete: (system, user) => engine.callClaudeMessages({ config: { apiUrl: 'cli', model }, system, user, maxTokens: 4000 }) }; };
+  return Object.assign(new LongRunService({ io, aiEngine: engine, runnerFactory: runners.factory, supervisorCli, ...extra }),
+    { engine, runners, pushed, cliModels });
 }
 /** 某任务推送过的事件 */
 const evs = (s, id) => s.pushed.filter((e) => e.taskId === id);
@@ -273,21 +278,25 @@ await test('续跑：不发初始化，先发新对话开始提示词，再发"�
     '续跑自检要复述上次运行与记忆索引');
 });
 
-await test('监督者凭据走 CC Switch：未指定供应商用全局，指定了用会话级；提示词走 system 位', async () => {
-  const a = svc();
-  await finished(a, (await a.start({ docPath: writeDoc('# a'), sandboxName: 'cfg_global' })).id);
-  assert(a.engine.calls[0].config.apiUrl === 'https://global.example.com', a.engine.calls[0].config.apiUrl);
+await test('监督者通道：未指定供应商经 claude CLI 跟随 CC Switch 当前配置（Opus）；明确选定的走该供应商 HTTP；提示词走 system 位', async () => {
+  const a = svc(fakeEngine({ global: false }));
+  const ta = await a.start({ docPath: writeDoc('# a'), sandboxName: 'cfg_cli' });
+  await finished(a, ta.id);
+  assert(a.engine.calls[0].config.apiUrl === 'cli' && a.cliModels.join() === 'claude-opus-5', JSON.stringify(a.engine.calls[0].config));
   assert(a.engine.calls[0].system === loadSystemPrompt().text && a.engine.calls[0].maxTokens === 4000, '判定提示词与 max_tokens');
+  assert(ta.supervisor.status === 'on' && ta.supervisor.via === 'cli' && /OAuth/.test(ta.supervisor.baseUrl), JSON.stringify(ta.supervisor));
+  assert(ta.selfCheck.some((i) => /claude CLI，跟随 CC Switch 当前 Claude 配置/.test(i.text)), '自检要说明走 CLI');
+  assert(a.status(ta.id).report.stop === 'project_done', '全局无密钥（OAuth）也能判定：不再依赖借用');
   const b = svc();
   const t = await b.start({ docPath: writeDoc('# b'), sandboxName: 'cfg_session', providerId: 'p42' });
   await finished(b, t.id);
-  assert(b.engine.calls[0].config.apiUrl === 'https://session-p42.example.com', '指定供应商应走会话级解析');
-  assert(t.supervisor.status === 'on' && t.supervisor.baseUrl === 'https://session-p42.example.com', JSON.stringify(t.supervisor));
+  assert(b.engine.calls[0].config.apiUrl === 'https://session-p42.example.com' && b.cliModels.length === 0, '指定供应商应走会话级解析，不起 CLI');
+  assert(t.supervisor.status === 'on' && t.supervisor.via === 'http' && t.supervisor.baseUrl === 'https://session-p42.example.com', JSON.stringify(t.supervisor));
 });
 
 await test('密钥不出现在任务快照、事件、执行者环境里', async () => {
   const s = svc();
-  const t = await s.start({ docPath: writeDoc('# 密钥'), sandboxName: 'no_leak' });
+  const t = await s.start({ docPath: writeDoc('# 密钥'), sandboxName: 'no_leak', providerId: 'p42' });   // 只有明确选定的 HTTP 通道才碰密钥
   await finished(s, t.id);
   const blob = JSON.stringify([s.status(t.id), evs(s, t.id), s.runners.opts.map((o) => o.env)]);
   assert(!blob.includes(SECRET), '监督者密钥泄漏');
@@ -308,49 +317,25 @@ await test('启动自检：第一条事件就是自检，含连坐、投件、�
   assert(s.runners.opts[0].model === 'claude-sonnet-5' && s.runners.opts[0].taskWait === 60, '模型与后台等待要传到执行者');
 });
 
-await test('全局是 OAuth（无密钥）时借用带凭据的供应商，模型用原版默认的 Opus，自检说明是借用', async () => {
-  const s = svc(fakeEngine({ global: false, proxies: ['duojie'] }));
-  const t = await s.start({ docPath: writeDoc('# 借用'), sandboxName: 'borrow' });
-  await finished(s, t.id);
-  const c = s.engine.calls[0];
-  assert(c.config.apiUrl === 'https://duojie.example.com' && c.config.model === 'claude-opus-5', JSON.stringify(c.config));
-  assert(c.maxRetries === 0, '借来的不做内部重试，换家就是重试');
-  assert(t.supervisor.borrowed && t.supervisor.providerName === 'duojie', JSON.stringify(t.supervisor));
-  assert(t.selfCheck.some((i) => /借用带凭据的供应商/.test(i.text)), '自检要说明借用');
-  assert(s.status(t.id).report.stop === 'project_done' && s.engine._proxyLastGood === 'claude:duojie', '调通后记为上次调通，与监控共享');
-});
-
-await test('借来的调不通：拉黑换下一家、判定照常完成，编排日志里记下换了谁', async () => {
-  const s = svc(fakeEngine({ global: false, proxies: ['foxcode', 'crs', 'duojie'], dead: ['foxcode', 'crs'] }));
-  const t = await s.start({ docPath: writeDoc('# 轮换'), sandboxName: 'rotate' });
-  await finished(s, t.id);
-  assert([...s.engine.blacklist].join() === 'claude:foxcode,claude:crs', [...s.engine.blacklist].join());
-  assert(s.status(t.id).report.stop === 'project_done', `应在第三家判定完成: ${s.status(t.id).report.stop}`);
-  const logs = s.board(t.id).snapshot.logs.map((l) => l.message).join('\n');
-  assert(/foxcode 调不通.*换用 crs/.test(logs) && /crs 调不通.*换用 duojie/.test(logs), logs.slice(-400));
-});
-
-await test('明确选定的供应商没有密钥时不偷偷换成别家；全部借用都调不通时降级为叫人', async () => {
-  const a = svc(fakeEngine({ global: false, proxies: ['duojie'] }));
-  const t = await a.start({ docPath: writeDoc('# 选定'), sandboxName: 'chosen_oauth', providerId: 'oauth', noAsk: true });
+await test('CLI 通道调用失败：不换别家，降级为叫人；明确选定的供应商没有密钥时报不可用、不偷偷换', async () => {
+  const a = svc(fakeEngine({ dead: ['cli'] }));
+  const t = await a.start({ docPath: writeDoc('# CLI 挂'), sandboxName: 'cli_dead', noAsk: true });
   await finished(a, t.id);
-  assert(t.supervisor.status === 'unavailable' && /不会被自动换掉/.test(t.supervisor.error) && a.engine.calls.length === 0, JSON.stringify(t.supervisor));
-  const b = svc(fakeEngine({ global: false, proxies: ['x1', 'x2'], dead: ['x1', 'x2'] }));
-  const t2 = await b.start({ docPath: writeDoc('# 全挂'), sandboxName: 'all_dead', noAsk: true });
+  assert(a.status(t.id).report.stop === 'needs_human' && a.engine.calls.length === 1, `CLI 调不通应叫人: ${a.status(t.id).report.stop}`);
+  const b = svc();
+  const t2 = await b.start({ docPath: writeDoc('# 选定'), sandboxName: 'chosen_oauth', providerId: 'oauth', noAsk: true });
   await finished(b, t2.id);
-  assert(b.status(t2.id).report.stop === 'needs_human', `全挂应降级叫人: ${b.status(t2.id).report.stop}`);
+  assert(t2.supervisor.status === 'unavailable' && /不会被自动换掉/.test(t2.supervisor.error) && b.engine.calls.length === 0 && b.cliModels.length === 0,
+    JSON.stringify(t2.supervisor));
+  assert(t2.selfCheck.some((i) => i.level === 'warn' && /监督者不可用/.test(i.text)), '不可用要在自检里警告');
+  assert(b.status(t2.id).report.stop === 'needs_human', `没有监督者且不等人应停机: ${b.status(t2.id).report.stop}`);
 });
 
-await test('监督者凭据缺失：不启用并在自检里警告；不启用监督者时如实说明', async () => {
-  const s = svc(fakeEngine({ global: false }));
-  const t = await s.start({ docPath: writeDoc('# 无凭据'), sandboxName: 'no_cfg', noAsk: true });
-  await finished(s, t.id);
-  assert(t.supervisor.status === 'unavailable' && t.selfCheck.some((i) => i.level === 'warn' && /监督者不可用/.test(i.text)));
-  assert(s.status(t.id).report.stop === 'needs_human', `没有监督者且不等人应停机: ${s.status(t.id).report.stop}`);
+await test('不启用监督者时如实说明，也不调 LLM', async () => {
   const off = svc();
   const t2 = await off.start({ docPath: writeDoc('# 关'), sandboxName: 'sup_off', noSupervisor: true, noAsk: true });
   await finished(off, t2.id);
-  assert(t2.supervisor.status === 'off' && off.engine.calls.length === 0, '关了监督者不该调 LLM');
+  assert(t2.supervisor.status === 'off' && off.engine.calls.length === 0 && off.cliModels.length === 0, '关了监督者不该调 LLM');
 });
 
 // ── 会话条目绑定 ────────────────────────────────────────────
@@ -380,7 +365,7 @@ function fakeBinder({ cliRunning = false } = {}) {
 
 await test('启动时把项目绑到会话条目：任务带会话 id；按会话取视图先给实时任务', async () => {
   const binder = fakeBinder();
-  const s = Object.assign(new LongRunService({ aiEngine: fakeEngine(), runnerFactory: fakeRunners().factory, sessionBinder: binder }), {});
+  const s = svc(fakeEngine(), fakeRunners(), { sessionBinder: binder });
   const t = await s.start({ docPath: writeDoc('# 绑定'), sandboxName: 'bound' });
   assert(binder.calls.length === 1 && binder.calls[0].root === t.sandboxRoot && binder.calls[0].projectName === 'bound', JSON.stringify(binder.calls));
   assert(t.sessionId === 'sess-bound', t.sessionId);
@@ -391,10 +376,10 @@ await test('启动时把项目绑到会话条目：任务带会话 id；按会�
 
 await test('服务重启后（内存无任务）按会话条目的工作目录回放上一轮', async () => {
   const binder = fakeBinder();
-  const s1 = new LongRunService({ aiEngine: fakeEngine(), runnerFactory: fakeRunners().factory, sessionBinder: binder });
+  const s1 = svc(fakeEngine(), fakeRunners(), { sessionBinder: binder });
   const t = await s1.start({ docPath: writeDoc('# 重启'), sandboxName: 'restart_me' });
   await finished(s1, t.id);
-  const s2 = new LongRunService({ aiEngine: fakeEngine(), runnerFactory: fakeRunners().factory, sessionBinder: binder });
+  const s2 = svc(fakeEngine(), fakeRunners(), { sessionBinder: binder });
   const v = s2.forSession('sess-restart_me');
   assert(v.ok && !v.taskId && v.snapshot?.replay === true && v.projectRoot === t.sandboxRoot, JSON.stringify({ ...v, snapshot: undefined }));
   assert(s2.forSession('nope').ok === false);
@@ -402,10 +387,10 @@ await test('服务重启后（内存无任务）按会话条目的工作目录�
 
 await test('只看记录打开项目：跑过长程的目录给条目 id 并能回放；普通项目与缺失目录拒绝，不建条目', async () => {
   const binder = fakeBinder();
-  const s1 = new LongRunService({ aiEngine: fakeEngine(), runnerFactory: fakeRunners().factory, sessionBinder: binder });
+  const s1 = svc(fakeEngine(), fakeRunners(), { sessionBinder: binder });
   const t = await s1.start({ docPath: writeDoc('# 看记录'), sandboxName: 'view_only' });
   await finished(s1, t.id);
-  const s2 = new LongRunService({ aiEngine: fakeEngine(), runnerFactory: fakeRunners().factory, sessionBinder: binder });
+  const s2 = svc(fakeEngine(), fakeRunners(), { sessionBinder: binder });
   const r = await s2.openProject({ projectRoot: t.sandboxRoot });
   assert(r.ok && r.sessionId === 'sess-view_only', `已有条目直接用: ${JSON.stringify(r)}`);
   assert(s2.forSession(r.sessionId).snapshot?.replay === true, '打开后按条目回放');
@@ -423,7 +408,7 @@ await test('只看记录打开项目：跑过长程的目录给条目 id 并能�
 
 await test('同目录会话里 claude 正在运行 → 拒绝启动，目录什么都没动', async () => {
   const runners = fakeRunners();
-  const s = new LongRunService({ aiEngine: fakeEngine(), runnerFactory: runners.factory, sessionBinder: fakeBinder({ cliRunning: true }) });
+  const s = svc(fakeEngine(), runners, { sessionBinder: fakeBinder({ cliRunning: true }) });
   let e = null;
   try { await s.start({ docPath: writeDoc('# 冲突'), sandboxName: 'cli_busy' }); } catch (x) { e = x; }
   assert(e && /claude 正在运行/.test(e.message), e?.message);

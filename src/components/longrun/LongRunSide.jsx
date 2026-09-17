@@ -1,19 +1,32 @@
-import React, { useState } from 'react';
-import { ctxView, verdictClass, STOP_LABEL, VERDICT_LABEL } from './longrunBoard.js';
+import React, { useState, useEffect } from 'react';
+import ServerStaleBanner from '../ServerStaleBanner.jsx';
+import { HeaderStats, ProviderCards, WaterlineSection } from './LongRunSideCards.jsx';
+import { StatusSection, VerdictSection } from './LongRunSideStatus.jsx';
 
 /**
- * 右侧面板（沿用 AI 面板的外壳与卡片样式）：只读状态 —— 会话进度、监督者判定、启动自检、需求。
- * 人要输入的（回答、投件、暂停、转终端）都在主区底部，与 Claude Code 输入框同一位置。
+ * 右侧面板，外壳与版式照搬 AI 面板：头部（标题 · 健康点 · 状态 · 统计）→ 供应商卡 → 上下文水位 → 当前状态 →
+ * 工作目录 → 监督者判定 → 底部按钮。只读；人要输入的（回答、投件、暂停、转终端）都在主区底部。
  */
-const LongRunSide = ({ lr, collapsed, onToggle }) => {
+const LongRunSide = ({ lr, serverStale, collapsed, onToggle }) => {
   const { board, meta, view } = lr;
   const [showCheck, setShowCheck] = useState(false);
+  const [provider, setProvider] = useState(null);
   const task = meta.task;
   const live = view?.kind === 'task' && task?.state === 'running';
-  const ctx = ctxView(board?.context);
   const sup = board?.supervisor;
-  const f = board?.finished;
   const warns = (task?.selfCheck || []).filter((i) => i.level === 'warn').length;
+
+  // 执行者用的是 CC Switch 当前全局配置：切条目时刷新一次（切供应商后下一发才生效，不必轮询）
+  useEffect(() => {
+    let alive = true;
+    lr.call('longrun:provider', {}).then((r) => { if (alive && r.ok) setProvider(r.provider); });
+    return () => { alive = false; };
+  }, [view?.id, view?.sessionId]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const supDown = String(sup?.reason || '').startsWith('监督者不可用');
+  const health = !task || task.supervisor?.status !== 'on' ? 'offline' : supDown ? 'failed' : 'healthy';
+  const healthTitle = { healthy: '监督者正常', failed: `监督者调用失败：${sup?.reason || ''}`, offline: task ? '监督者未启用或不可用' : '只读回放' }[health];
+  const status = board?.replay ? '只读回放' : live ? (task.awaitingHuman ? '等你回答' : task.halted ? '已暂停' : '运行中') : task ? '已结束' : '';
 
   return (
     <aside className={`ai-panel ${collapsed ? 'collapsed' : ''}`}>
@@ -22,56 +35,32 @@ const LongRunSide = ({ lr, collapsed, onToggle }) => {
       </button>
       <div className="ai-panel-header">
         <h3>长程任务</h3>
-        <span className="lr-dim">{board?.replay ? '只读回放' : live ? '运行中' : task ? '已结束' : ''}</span>
+        <div className="lr-side-head">
+          <span className={`ai-health-dot ${health}`} title={healthTitle} />
+          <span className={`ai-status-indicator ${status === '等你回答' ? 'loading' : ''}`}>{status}</span>
+          {board && <HeaderStats board={board} task={task} />}
+        </div>
       </div>
       <div className="ai-panel-content">
-        {board && (
+        <ServerStaleBanner stale={serverStale} />
+        <ProviderCards provider={provider} task={task} />
+        {board && <WaterlineSection board={board} task={task} />}
+
+        {board && <StatusSection board={board} />}
+
+        <div className="ai-status-section">
+          <h4>工作目录</h4>
+          <p className="mono">{task?.sandboxRoot || board?.sandbox || '—'}</p>
+        </div>
+
+        {sup && <VerdictSection sup={sup} down={supDown} />}
+
+        {showCheck && task?.selfCheck?.length > 0 && (
           <div className="ai-status-section">
-            <h4>会话进度</h4>
-            {f ? (
-              <div>
-                <span className={`lr-badge ${f.stop === 'project_done' ? 'ok' : 'wait'}`}>已停机</span> {STOP_LABEL[f.stop] || f.stop}
-                {f.needs_from_human && <div className="lr-kv">需你提供：<b>{f.needs_from_human}</b></div>}
-              </div>
-            ) : (
-              <div>{board.current_label ? <>正在跑 <b>{board.current_label}</b></> : <span className="lr-dim">等待启动…</span>}</div>
-            )}
-            <div className={`lr-bar ${ctx.hot ? 'hot' : ''}`}><i style={{ width: `${ctx.pct}%` }} /></div>
-            <div className="lr-kv">{ctx.text}</div>
-            {board.last_tool?.length > 0 && <div className="lr-kv">工具 <b>{board.last_tool.join(', ')}</b></div>}
-            <div className="lr-kv">
-              调用 <b>{board.legs || 0}</b> 次 · 交接 <b>{board.handoffs || 0}</b> 次 · 记忆维护 <b>{board.maintenances || 0}</b> 轮
-              {/* 代答计数只在发生过时出现且高亮：代答不标注来源，这是发现"有 N 个决定不是我做的"的唯一入口 */}
-              {board.decisions > 0 && <span className="lr-dec"> · 代你作答 <b>{board.decisions}</b> 次</span>}
-            </div>
-            {board.session_id && <div className="lr-kv">会话 <b>{String(board.session_id).slice(0, 8)}</b></div>}
+            <h4>启动自检 <span className={warns ? 'lr-est' : 'lr-dim'}>{task.selfCheck.length} 项{warns ? `，${warns} 条提醒` : ''}</span></h4>
+            {task.selfCheck.map((i, k) => <div key={k} className={`lr-check ${i.level}`}>{i.level === 'warn' ? '⚠ ' : ''}{i.text}</div>)}
           </div>
         )}
-
-        {sup && (
-          <div className="ai-status-section">
-            <h4>监督者判定</h4>
-            <div>
-              <span className={`lr-badge ${verdictClass(sup.verdict)}`}>{VERDICT_LABEL[sup.verdict] || sup.verdict}</span>{' '}
-              <span className="lr-dim">置信度 {(sup.confidence || 0).toFixed(2)}</span>
-            </div>
-            <div className="lr-kv">{sup.reason || ''}</div>
-            {sup.needs_from_human ? <div className="lr-kv">需你提供：<b>{sup.needs_from_human}</b></div>
-              : sup.reply ? <div className="lr-kv">代你答复：<b>{sup.reply}</b></div> : null}
-          </div>
-        )}
-
-        {task?.selfCheck?.length > 0 && (
-          <div className="ai-status-section">
-            <h4 className="lr-clickable" onClick={() => setShowCheck(!showCheck)}>
-              启动自检 {showCheck ? '▾' : '▸'} <span className={warns ? 'lr-est' : 'lr-dim'}>{task.selfCheck.length} 项{warns ? `，${warns} 条提醒` : ''}</span>
-            </h4>
-            {showCheck && task.selfCheck.map((i, k) => (
-              <div key={k} className={`lr-check ${i.level}`}>{i.level === 'warn' ? '⚠ ' : ''}{i.text}</div>
-            ))}
-          </div>
-        )}
-
         {board?.requirement && (
           <div className="ai-status-section">
             <h4>需求</h4>
@@ -79,6 +68,15 @@ const LongRunSide = ({ lr, collapsed, onToggle }) => {
           </div>
         )}
         {meta.file && <div className="lr-dim lr-small">回放自 {meta.file} · {meta.count} 条事件 · 跨度 {meta.spanMinutes} 分钟</div>}
+      </div>
+      <div className="ai-panel-footer">
+        <button className={`btn btn-small ${lr.muted ? 'btn-secondary' : 'btn-primary'}`} onClick={() => lr.setMuted(!lr.muted)}
+          title="执行者需要你拍板时响铃提醒">{lr.muted ? '🔕 提醒:关' : '🔔 提醒:开'}</button>
+        {task?.selfCheck?.length > 0 && (
+          <button className={`btn btn-small ${showCheck ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setShowCheck(!showCheck)}>
+            📋 启动自检{warns ? `（${warns}）` : ''}
+          </button>
+        )}
       </div>
     </aside>
   );

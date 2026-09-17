@@ -77,7 +77,9 @@ test('接口返回足够定位问题的信息（版本 + 启动时刻）', () =>
 test('前端会轮询并渲染告警条', () => {
   assert(/\/api\/server\/state/.test(APP), '前端未拉取服务端状态');
   assert(/setInterval\(checkServerState/.test(APP), '只拉一次，重启后不会自动消除告警');
-  assert(/server-stale-banner/.test(APP), '未渲染告警条');
+  assert(/<ServerStaleBanner stale=\{serverStale\} \/>/.test(APP), 'AI 面板未渲染告警条');
+  const banner = fs.readFileSync(path.join(process.cwd(), 'src/components/ServerStaleBanner.jsx'), 'utf8');
+  assert(/server-stale-banner/.test(banner), '告警条组件缺样式类');
 });
 
 test('轮询定时器在 effect 清理里释放', () => {

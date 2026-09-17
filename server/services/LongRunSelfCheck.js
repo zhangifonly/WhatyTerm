@@ -130,13 +130,13 @@ export function reportSupervisor(sc, s) {
   if (s.status === 'off') { sc.info(g, '未启用监督者：执行者每次结束都会停机等人判断'); return; }
   if (s.status === 'unavailable') {
     sc.warn(g, `监督者不可用: ${s.error}`);
-    sc.warn(g, '  执行者每次结束都会停机等人判断。在 CC Switch 里配一个带地址与密钥的 Claude 供应商再跑可自动化。');
+    sc.warn(g, '  执行者每次结束都会停机等人判断。给所选供应商配上地址与密钥，或改回「跟随 CC Switch 当前配置」。');
     return;
   }
   sc.info(g, `监督者: ${s.model || '(默认模型)'} @ ${s.baseUrl}`);
-  if (s.providerName) {
-    sc.info(g, `  供应商: ${s.providerName}${s.borrowed ? '（全局 Claude 无密钥，借用带凭据的供应商，与 AI 监控同一机制；调不通会自动换下一家）' : ''}`);
-  }
+  sc.info(g, s.via === 'cli'
+    ? `  通道: claude CLI，跟随 CC Switch 当前 Claude 配置（${s.providerName}），与执行者同一套地址、登录与代理`
+    : `  通道: 直接调 HTTP，面板明确选定的供应商 ${s.providerName}（调不通不会换别家）`);
   // 换掉提示词等于换掉全部判定规则，来源必须打出来
   sc.info(g, `  判定提示词: ${s.promptSource}（${chars(s.promptText).toLocaleString('en-US')} 字）`);
   // 只在内容真的不同时才警告，按来源判会每次都喊狼来了

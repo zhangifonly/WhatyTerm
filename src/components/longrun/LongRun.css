@@ -81,3 +81,19 @@
 .lr-mt { margin-top: 8px; }
 .lr-mb { margin-bottom: 12px; }
 .lr-main code, .lr-small code, .lr-plan code, .lr-modal code { overflow-wrap: anywhere; }
+
+/* ── 右侧面板：供应商卡与水位（版式同 AI 面板） ── */
+.lr-side-head { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; flex-shrink: 0; }
+.lr-prov-title { display: flex; align-items: baseline; gap: 6px; margin: 0 0 8px; }
+.lr-prov-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.lr-prov-name { font-weight: 500; margin: 0; color: hsl(var(--muted-foreground)); }
+.lr-prov-name.on { color: hsl(var(--primary)); }
+.lr-prov-tag { font-size: 9px; padding: 1px 4px; border-radius: 3px; background: hsl(var(--primary) / 0.15); color: hsl(var(--primary)); cursor: help; }
+.lr-prov-line { font-size: 11px; word-break: break-all; margin: 4px 0 0; color: hsl(var(--muted-foreground)); display: flex; align-items: center; gap: 4px; }
+.lr-prov-line.lr-oauth { color: #10b981; }
+.lr-wl { display: flex; align-items: center; gap: 8px; }
+.lr-wl .lr-bar { flex: 1; margin: 0; height: 6px; }
+.lr-wl-pct { color: #4a9eda; font-weight: bold; font-size: 12px; min-width: 66px; text-align: right; }
+.lr-wl-pct.hot { color: #d2694a; }
+/* AI 面板的 .ai-status-section p 是 14px 正文；长程的说明行是次要信息，压回 12px */
+.ai-status-section p.lr-kv { font-size: 12px; line-height: 1.5; color: hsl(var(--muted-foreground)); margin-top: 4px; }

@@ -24,6 +24,7 @@ import SprintProgress from './components/SprintProgress';
 import RalphWizard from './components/RalphWizard';
 import { useLongRun } from './components/longrun/useLongRun';
 import { useLongRunBell } from './components/longrun/useLongRunBell';
+import ServerStaleBanner from './components/ServerStaleBanner.jsx';
 import LongRunHandoverDialog from './components/longrun/LongRunHandoverDialog';
 import { taskBadge, taskLine } from './components/longrun/longrunBoard';
 import LongRunMain from './components/longrun/LongRunMain';
@@ -2397,6 +2398,7 @@ export default function App() {
       {currentSession && longRunView && (
         <LongRunSide
           lr={longRun}
+          serverStale={serverStale}
           collapsed={aiPanelCollapsed}
           onToggle={() => setAiPanelCollapsed(!aiPanelCollapsed)}
         />
@@ -2500,18 +2502,7 @@ export default function App() {
             </div>
           </div>
           <div className="ai-panel-content">
-            {/* 服务端跑着旧代码时置顶告警：判定逻辑全在服务端，
-                不重启的话所有修复都不生效，而界面上原本毫无迹象 */}
-            {serverStale && (
-              <div className="server-stale-banner">
-                <strong>⚠️ 服务端运行的是旧代码</strong>
-                <p>
-                  进程内 v{serverStale.bootVersion}（启动于 {new Date(serverStale.startedAt).toLocaleString()}），
-                  磁盘上已是 v{serverStale.diskVersion}。
-                </p>
-                <p>状态判定全在服务端，重启前所有修复都不会生效。</p>
-              </div>
-            )}
+            <ServerStaleBanner stale={serverStale} />
             {/* 当前 AI 供应商信息 */}
             <div className="ai-status-section" style={{ position: 'relative' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
