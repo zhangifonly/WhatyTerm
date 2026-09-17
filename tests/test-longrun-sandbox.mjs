@@ -21,7 +21,13 @@ import path from 'path';
 import {
   LongRunSandbox, assertSandboxed, sandboxRoots, protectedRoots,
   userClaudeJson, templateClaudeDir, IsolationViolation,
+  WEBTMUX_ROOT, orchestratorRoot, realResolve,
 } from '../server/services/LongRunSandbox.js';
+
+// 测试沙箱根指到临时目录：不在用户真实的 _sandbox_longrun（原版产出都在那）里建测试沙箱
+const TEST_BASE = path.join(os.tmpdir(), 'longrun_sandbox_base_test');
+fs.mkdirSync(TEST_BASE, { recursive: true });
+process.env.LONGRUN_SANDBOX_BASE = TEST_BASE;
 
 const results = { passed: 0, failed: 0, errors: [] };
 const pending = [];
@@ -272,6 +278,93 @@ test('addExtraDir 拒绝受保护路径，接受正常路径', () => {
   assert(spec.extraDirs.includes(ok), '正常外部路径应登记成功');
   spec.addExtraDir(os.tmpdir());              // 去重
   assert(spec.extraDirs.filter((d) => d === ok).length === 1, '重复登记应去重');
+});
+
+// ── 审计补齐：G1 模板来源 ────────────────────────────────────
+// 早期移植把整个 ~/.claude 当模板：config.json 的密钥、带 token 的 settings 备份、
+// 全部历史提示词都会进沙箱，并被 git add -A 提交进快照。
+test('模板不是 ~/.claude，沙箱里不出现任何凭据类文件', () => {
+  const tpl = realResolve(templateClaudeDir());
+  assert(tpl !== realResolve(path.join(os.homedir(), '.claude')), `模板指向了用户全局 ~/.claude: ${tpl}`);
+  assert(tpl.startsWith(WEBTMUX_ROOT), `模板应在仓库内: ${tpl}`);
+  const spec = freshSandbox();
+  const found = [];
+  const walk = (d) => {
+    for (const n of fs.readdirSync(d)) {
+      const p = path.join(d, n);
+      if (fs.statSync(p).isDirectory()) walk(p);
+      else if (/^(config\.json|history\.jsonl|\.credentials.*|settings\.json(\.bak.*)?)$/.test(n)) found.push(p);
+    }
+  };
+  walk(path.join(spec.root, '.claude'));
+  assert(found.length === 0, `沙箱 .claude 里出现凭据类文件: ${found.join(', ')}`);
+});
+
+test('模板带原版护栏：危险 git 操作 deny、git push 走 ask、放行 puppeteer', () => {
+  const spec = freshSandbox();
+  const p = settingsOf(spec).permissions;
+  for (const rule of ['Bash(git reset --hard:*)', 'Bash(git push --force:*)', 'Bash(git clean -f:*)']) {
+    assert(p.deny.includes(rule), `缺 deny: ${rule}`);
+  }
+  assert((p.ask || []).includes('Bash(git push:*)'), 'git push 应走 ask（--permission-prompts none 下等于禁）');
+  assert(p.defaultMode === 'acceptEdits', `defaultMode 应为 acceptEdits，实际 ${p.defaultMode}`);
+  assert(p.allow.includes('mcp__puppeteer'), '用户选择放行 puppeteer，执行者才能自己看渲染结果');
+  assert(!p.allow.includes('Bash'), '裸 Bash 会盖过一切 ask/deny，不能出现');
+});
+
+// ── G3：受保护根从代码位置推导 ───────────────────────────────
+test('受保护根不随启动目录变（换 cwd 后仍保护仓库与原版编排器）', () => {
+  const orig = process.cwd();
+  try {
+    process.chdir(os.tmpdir());
+    const roots = protectedRoots();
+    assert(roots.includes(realResolve(WEBTMUX_ROOT)), `换 cwd 后丢了仓库根: ${roots}`);
+    assert(roots.includes(realResolve(orchestratorRoot())), '原版编排器目录（真实记忆库）也要受保护');
+    assert(!roots.includes(realResolve(os.tmpdir())), 'cwd 不该变成受保护根');
+  } finally { process.chdir(orig); }
+});
+
+// ── G5：符号链接不能绕过断言 ─────────────────────────────────
+test('沙箱根里的符号链接指进受保护目录时拒绝', () => {
+  const link = path.join(sandboxRoots()[0], 'evil_link');
+  // ⚠ 删符号链接必须 unlink：rmSync 会跟随链接去处理目标目录
+  const dropLink = () => { try { if (fs.lstatSync(link).isSymbolicLink()) fs.unlinkSync(link); } catch {} };
+  dropLink();
+  fs.symlinkSync(WEBTMUX_ROOT, link);
+  try {
+    let threw = null;
+    try { assertSandboxed(path.join(link, 'server'), '测试路径'); } catch (e) { threw = e; }
+    assert(threw instanceof IsolationViolation, '经符号链接指进仓库的路径应被拒');
+    assert(threw.message.includes('受保护'), `应按受保护路径拒: ${threw.message}`);
+  } finally { dropLink(); }
+});
+
+// ── G18：MCP 白名单读取 ─────────────────────────────────────
+test('白名单读不到或坏 JSON 时抛异常，不返回空（空=静默吊销授权）', () => {
+  const spec = freshSandbox();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-tpl-'));
+  let threw = null;
+  try { spec._readAllowedMcp(path.join(dir, 'nope.json')); } catch (e) { threw = e; }
+  assert(threw instanceof IsolationViolation && threw.message.includes('白名单'), '缺文件应抛');
+  const bad = path.join(dir, 'bad.json');
+  fs.writeFileSync(bad, '{ 坏', 'utf8');
+  threw = null;
+  try { spec._readAllowedMcp(bad); } catch (e) { threw = e; }
+  assert(threw instanceof IsolationViolation && threw.message.includes('解析失败'), '坏 JSON 应抛');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('服务器名按 "__" 切（名字里的单下划线不截断），排除通配 *', () => {
+  const spec = freshSandbox();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-tpl-'));
+  const f = path.join(dir, 's.json');
+  fs.writeFileSync(f, JSON.stringify({ permissions: { allow: [
+    'mcp__claude_ai_Claude_Docs', 'mcp__blender__render', 'mcp__*', 'Read', 'mcp__blender',
+  ] } }), 'utf8');
+  const names = spec._readAllowedMcp(f);
+  assert(JSON.stringify(names) === JSON.stringify(['claude_ai_Claude_Docs', 'blender']),
+    `解析错: ${JSON.stringify(names)}`);
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 await Promise.all(pending);

@@ -16,59 +16,98 @@ import {
 } from 'fs';
 import path from 'path';
 import os from 'os';
+import { fileURLToPath } from 'url';
 import { IsolationViolation } from './LongRunPrompts.js';
 
 export { IsolationViolation };
 
 /**
+ * WebTmux 仓库根。**从代码位置推导，不取 process.cwd()**：从别的目录启动
+ * （launchd、pm2、打包后）时 cwd 不是仓库，写死或取 cwd 都会让 isWithin 恒假 ——
+ * 整道防线静默失效，不报错，只是不再拦任何东西（原版 case_paths_derived_not_hardcoded）。
+ */
+export const WEBTMUX_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+/**
+ * 长程编排器（Python 原版）所在目录。沙箱默认建在它的**同级** `_sandbox_longrun/`，
+ * 与原版同一位置 —— `python view.py --sandbox` / `transcript.py` 能直接回放 WebTmux 跑出的沙箱。
+ * 它自己的 memory/ 是真实记忆库，所以也是受保护根。
+ */
+export function orchestratorRoot() {
+  return path.resolve(process.env.LONGRUN_ORCHESTRATOR_ROOT
+    || path.join(os.homedir(), 'Documents', '长程编排器'));
+}
+
+/**
+ * 解析路径并跟随符号链接（对应 Python Path.resolve()）。
+ * 路径还不存在时，解析到最长的已存在祖先再拼回剩余部分 —— 否则经符号链接
+ * 指进受保护目录的沙箱根会被放行。
+ */
+export function realResolve(p) {
+  let cur = path.resolve(p);
+  const rest = [];
+  for (;;) {
+    try {
+      return path.join(realpathSync(cur), ...rest.reverse());
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) return path.resolve(p);
+      rest.push(path.basename(cur));
+      cur = parent;
+    }
+  }
+}
+
+/**
  * 受保护根：这些目录下**绝不允许**子进程活动。
- * WebTmux 仓库自身首当其冲 —— 执行者若能写它，会污染我们的记忆库与源码。
- * 可用 LONGRUN_PROTECTED_ROOTS（冒号分隔）追加。
+ * WebTmux 仓库与原版编排器目录（两处都有真实记忆库）。
+ * LONGRUN_PROJECT_ROOT 可覆盖前者（原版同名变量），LONGRUN_PROTECTED_ROOTS 追加。
  */
 export function protectedRoots() {
-  const roots = [path.resolve(process.cwd())];
-  const extra = process.env.LONGRUN_PROTECTED_ROOTS || '';
-  for (const p of extra.split(path.delimiter).filter(Boolean)) {
-    roots.push(path.resolve(p));
+  const roots = [
+    realResolve(process.env.LONGRUN_PROJECT_ROOT || WEBTMUX_ROOT),
+    realResolve(orchestratorRoot()),
+  ];
+  for (const p of (process.env.LONGRUN_PROTECTED_ROOTS || '').split(path.delimiter).filter(Boolean)) {
+    roots.push(realResolve(p));
   }
   return [...new Set(roots)];
 }
 
-/**
- * 沙箱白名单：只有这些路径下允许子进程活动。
- * 默认 ~/.webtmux/longrun-sandbox（**不放在仓库内部** —— 那会撞上受保护根）。
- */
+/** 沙箱白名单。默认原版编排器同级的 `_sandbox_longrun/`；LONGRUN_SANDBOX_BASE 可指到别处。 */
 export function sandboxRoots() {
-  const base = process.env.LONGRUN_SANDBOX_BASE
-    || path.join(os.homedir(), '.webtmux', 'longrun-sandbox');
-  return [path.resolve(base)];
+  return [realResolve(process.env.LONGRUN_SANDBOX_BASE
+    || path.join(path.dirname(orchestratorRoot()), '_sandbox_longrun'))];
 }
 
-/** 用户级 CLI 配置。项目的「已信任」状态记在这里。 */
+/** 用户级 CLI 配置。项目的「已信任」状态与用户级 MCP 服务器都在这里。 */
 export function userClaudeJson() {
   return path.join(os.homedir(), '.claude.json');
 }
 
-/** 从这里把 skills 与权限配置复制进沙箱（只读取，不写入）。 */
+/**
+ * 沙箱 `.claude` 模板（只读取，不写入）。仓库内 server/prompts/longrun/claude-template/，
+ * 来自原版 examples/settings.local.json.template。
+ *
+ * ⚠ **绝不能是 ~/.claude**：那里有 config.json 的密钥、带 token 的 settings 备份、
+ *   全部项目的历史提示词。复制进沙箱等于交给能跑任意命令的执行者，还会被
+ *   git add -A 提交进快照、永久留在历史里。早期移植犯过这个错（审计 G1）。
+ */
 export function templateClaudeDir() {
   return process.env.LONGRUN_CLAUDE_TEMPLATE
-    || path.join(os.homedir(), '.claude');
+    || path.join(WEBTMUX_ROOT, 'server', 'prompts', 'longrun', 'claude-template');
 }
 
-/** 复制模板时跳过：缓存无意义，会话/待办是模板自己的运行状态 */
+/** 复制模板时跳过（与原版一致）：编译缓存没有意义，会话/待办是模板自己的运行状态 */
 const SKIP_NAMES = new Set(['__pycache__', '.DS_Store']);
-const SKIP_TOP = new Set([
-  'settings.json', 'todos', 'sessions', 'history', 'shell-snapshots',
-  'projects', 'file-history', 'daemon', 'jobs', 'backups', 'cache', 'debug',
-  'ide', 'downloads', 'statsig', 'logs',
-]);
+const SKIP_TOP = new Set(['settings.json', 'todos', 'sessions', 'history', 'shell-snapshots']);
 
-/** MCP 规则前缀。实测 `mcp__blender` 这种形式能匹配该服务器下所有工具。 */
+/** MCP 规则前缀。拼字符串的地方有三处，散着写迟早不一致。 */
 const MCP_RULE_PREFIX = 'mcp__';
 
-/** child 是否在 parent 之内（或就是它）。 */
+/** child 是否在 parent 之内（或就是它）。两边都跟随符号链接。 */
 function isWithin(child, parent) {
-  const c = path.resolve(child), p = path.resolve(parent);
+  const c = realResolve(child), p = realResolve(parent);
   return c === p || c.startsWith(p + path.sep);
 }
 
@@ -77,7 +116,7 @@ function isWithin(child, parent) {
  * @throws {IsolationViolation}
  */
 export function assertSandboxed(p, what = '路径') {
-  const rp = path.resolve(p);
+  const rp = realResolve(p);
   for (const guarded of protectedRoots()) {
     if (isWithin(rp, guarded)) {
       throw new IsolationViolation(
@@ -251,18 +290,34 @@ export class LongRunSandbox {
     this.mcpDenied = denied;
   }
 
-  /** 白名单读自模板 settings 的 allow 里的 mcp__ 条目，不在代码里写死。 */
-  _readAllowedMcp() {
-    const f = path.join(templateClaudeDir(), 'settings.local.json');
-    if (!existsSync(f)) return [];
-    let j = null;
-    try { j = JSON.parse(readFileSync(f, 'utf8')); } catch { return []; }
-    const allow = j?.permissions?.allow;
-    if (!Array.isArray(allow)) return [];
+  /**
+   * 从模板 settings 的 permissions.allow 里读出放行的 MCP 服务器名。
+   *
+   * 唯一真相就是那个文件：写 mcp__blender 就放行 blender。不在代码里另写一份常量 ——
+   * "同一份常量散落两处、改一处不够"是原版已经犯过的错。
+   *
+   * ⚠ **读不到时抛异常，不返回空列表**。空列表 = 什么都不放行，会静默吊销授权，
+   *   失败表现是执行者说"我没有这个工具" —— 几小时无人值守里几乎不可能归因。宁可启动前就炸。
+   */
+  _readAllowedMcp(template = null) {
+    const file = template || path.join(templateClaudeDir(), 'settings.local.json');
+    if (!existsSync(file) || !statSync(file).isFile()) {
+      throw new IsolationViolation(
+        `读不到模板 settings，无法确定 MCP 白名单：${file}\n`
+        + `该文件的 permissions.allow 里的 mcp__* 条目就是白名单。`);
+    }
+    let data;
+    try { data = JSON.parse(readFileSync(file, 'utf8')); } catch (e) {
+      throw new IsolationViolation(`模板 settings 解析失败，无法确定 MCP 白名单：${file}\n  ${e.message}`);
+    }
+    const allow = data?.permissions?.allow || [];
     const names = [];
     for (const rule of allow) {
-      const m = /^mcp__([^_\s()]+)/.exec(String(rule));
-      if (m && !names.includes(m[1])) names.push(m[1]);
+      if (typeof rule !== 'string' || !rule.startsWith(MCP_RULE_PREFIX)) continue;
+      // mcp__blender → blender；mcp__blender__some_tool 只取服务器名。
+      // ⚠ 按 "__" 切而不是遇到 "_" 就截：mcp__claude_ai_Claude_Docs 的服务器名含单下划线
+      const name = rule.slice(MCP_RULE_PREFIX.length).split('__')[0].trim();
+      if (name && name !== '*' && !names.includes(name)) names.push(name);
     }
     return names;
   }
@@ -274,7 +329,8 @@ export class LongRunSandbox {
     try {
       const j = JSON.parse(readFileSync(f, 'utf8'));
       const servers = j?.mcpServers;
-      return servers && typeof servers === 'object' ? Object.keys(servers) : [];
+      return servers && typeof servers === 'object' && !Array.isArray(servers)
+        ? Object.keys(servers).sort() : [];
     } catch { return []; }
   }
 
@@ -361,7 +417,7 @@ export class LongRunSandbox {
    * 受保护项目内**：那会让执行者拿到真实记忆库的写权限，是整个隔离设计的初衷。
    */
   addExtraDir(p) {
-    const rp = path.resolve(p);
+    const rp = realResolve(p);
     for (const guarded of protectedRoots()) {
       if (isWithin(rp, guarded)) {
         throw new IsolationViolation(
