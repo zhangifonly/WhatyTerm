@@ -14,6 +14,8 @@ import path from 'path';
 
 const BASE = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'longrun_replay_')));
 process.env.LONGRUN_SANDBOX_BASE = BASE;
+// 新项目默认建在项目根（真实 ~/Documents/ClaudeCode），测试必须同样指到临时目录
+process.env.LONGRUN_PROJECTS_ROOT = process.env.LONGRUN_SANDBOX_BASE;
 const { replay, loadEvents } = await import('../server/services/LongRunReplay.js');
 
 const results = { passed: 0, failed: 0, errors: [] };
@@ -64,16 +66,19 @@ await test('回放不出来要说清原因：太老（有无 CLI 原始事件）
   sandbox('empty', ['', 'garbage']);
   const empty = replay({ sandboxName: 'empty' });
   assert(!empty.ok && empty.error.startsWith('事件文件里没有可回放的事件'), empty.error);
-  assert(replay({}).error.includes('要么给沙箱名'));
+  assert(replay({}).error.includes('要么给项目目录'));
 });
 
 await test('直接给文件：只认 orchestrator.jsonl（远程可访问，不能当任意文件读取口）；沙箱名不能越界', () => {
   const r = replay({ file: path.join(BASE, 'ok', '.run', 'orchestrator.jsonl') });
   assert(r.ok && r.sandboxRoot === path.join(BASE, 'ok'), r.error);
   assert(replay({ file: '/etc/passwd' }).error.includes('只能回放'));
-  let e = null;
-  try { replay({ sandboxName: '../../etc' }); } catch (x) { e = x; }
-  assert(e && /不合法/.test(e.message), '沙箱名带路径分隔符应拒绝');
+  const bad = replay({ sandboxName: '../../etc' });
+  assert(!bad.ok && /不合法/.test(bad.error), '名字带路径分隔符应拒绝');
+  const byRoot = replay({ projectRoot: path.join(BASE, 'ok') });
+  assert(byRoot.ok && byRoot.count === 4, '按项目绝对路径回放');
+  const outside = replay({ projectRoot: '/etc' });
+  assert(!outside.ok && /白名单/.test(outside.error), '允许的根之外的目录不能回放');
 });
 
 fs.rmSync(BASE, { recursive: true, force: true });

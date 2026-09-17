@@ -9,7 +9,8 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import path from 'path';
 import { LongRunBoard, pyStr, pyFixed } from './LongRunBoard.js';
-import { sandboxBase, assertSandboxName } from './LongRunLaunch.js';
+import { sandboxBase, assertSandboxName, listLongRunProjects } from './LongRunLaunch.js';
+import { assertSandboxed } from './LongRunSandbox.js';
 
 export const EVENTS_FILE = 'orchestrator.jsonl';
 
@@ -33,12 +34,19 @@ export function loadEvents(file) {
 
 const isDir = (p) => { try { return statSync(p).isDirectory(); } catch { return false; } };
 
+/** 按名字找跑过长程的项目：先项目根、再旧沙箱根；都没有就按项目根拼（用于报"不存在"）。 */
+function rootByName(name) {
+  const n = assertSandboxName(name);
+  const hit = listLongRunProjects().find((p) => p.name === n);
+  return hit ? hit.root : path.join(sandboxBase(), n);
+}
+
 /**
- * 回放一轮。{sandboxName} 在沙箱根下查找；{file} 直接给事件文件（优先）。
+ * 回放一轮。{projectRoot} 项目绝对路径；{sandboxName} 按名字找；{file} 直接给事件文件（优先）。
  * @returns {{ok:true, file, sandboxRoot, count, bad, spanMinutes, notices:string[], snapshot}
  *          | {ok:false, error:string}}
  */
-export function replay({ sandboxName, file } = {}) {
+export function replay({ sandboxName, projectRoot, file } = {}) {
   let evFile, root;
   if (file) {
     evFile = path.resolve(String(file));
@@ -47,11 +55,13 @@ export function replay({ sandboxName, file } = {}) {
       return { ok: false, error: `只能回放 ${EVENTS_FILE}，收到: ${evFile}` };
     }
     root = path.dirname(path.dirname(evFile));
-  } else if (sandboxName) {
-    root = path.join(sandboxBase(), assertSandboxName(sandboxName));
+  } else if (projectRoot || sandboxName) {
+    try {
+      root = projectRoot ? assertSandboxed(String(projectRoot), '项目目录') : rootByName(sandboxName);
+    } catch (e) { return { ok: false, error: e.message }; }
     evFile = path.join(root, '.run', EVENTS_FILE);
   } else {
-    return { ok: false, error: `要么给沙箱名，要么给 ${EVENTS_FILE} 路径` };
+    return { ok: false, error: `要么给项目目录，要么给 ${EVENTS_FILE} 路径` };
   }
 
   if (!existsSync(evFile) || !statSync(evFile).isFile()) {

@@ -12,7 +12,7 @@
 
 import {
   existsSync, statSync, mkdirSync, readFileSync, writeFileSync, readdirSync,
-  copyFileSync, cpSync, renameSync, unlinkSync, realpathSync,
+  copyFileSync, renameSync, unlinkSync, realpathSync,
 } from 'fs';
 import path from 'path';
 import os from 'os';
@@ -74,10 +74,24 @@ export function protectedRoots() {
   return [...new Set(roots)];
 }
 
-/** 沙箱白名单。默认原版编排器同级的 `_sandbox_longrun/`；LONGRUN_SANDBOX_BASE 可指到别处。 */
+/**
+ * 项目根：长程项目与传统会话放在同一个地方（默认 ~/Documents/ClaudeCode/<项目名>），
+ * 与旧版自主开发向导的默认父目录一致。长程结束后同一个目录直接转成终端会话接着做。
+ * LONGRUN_PROJECTS_ROOT 可指到别处（测试必须指到临时目录）。
+ */
+export function projectsRoot() {
+  return realResolve(process.env.LONGRUN_PROJECTS_ROOT || path.join(os.homedir(), 'Documents', 'ClaudeCode'));
+}
+
+/** 旧沙箱根：原版编排器同级的 `_sandbox_longrun/`。只用于列出、回放、续跑已有的沙箱，新项目不再建在这里。 */
+export function legacySandboxRoot() {
+  return realResolve(process.env.LONGRUN_SANDBOX_BASE
+    || path.join(path.dirname(orchestratorRoot()), '_sandbox_longrun'));
+}
+
+/** 允许长程活动的根。第一个是新项目的默认位置。 */
 export function sandboxRoots() {
-  return [realResolve(process.env.LONGRUN_SANDBOX_BASE
-    || path.join(path.dirname(orchestratorRoot()), '_sandbox_longrun'))];
+  return [...new Set([projectsRoot(), legacySandboxRoot()])];
 }
 
 /** 用户级 CLI 配置。项目的「已信任」状态与用户级 MCP 服务器都在这里。 */
@@ -99,9 +113,29 @@ export function templateClaudeDir() {
     || path.join(WEBTMUX_ROOT, 'server', 'prompts', 'longrun', 'claude-template');
 }
 
-/** 复制模板时跳过（与原版一致）：编译缓存没有意义，会话/待办是模板自己的运行状态 */
-const SKIP_NAMES = new Set(['__pycache__', '.DS_Store']);
-const SKIP_TOP = new Set(['settings.json', 'todos', 'sessions', 'history', 'shell-snapshots']);
+/** 会话级 relay 地址形态（index.js applySessionProvider 写入）与它占用的环境变量 */
+const RELAY_URL = /^https?:\/\/127\.0\.0\.1:\d+\/relay\//;
+const RELAY_ENV_KEYS = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL'];
+
+/** Claude 会话记录与默认记忆所在目录。覆盖仅供测试。 */
+export function claudeProjectsDir() {
+  return process.env.LONGRUN_CLAUDE_PROJECTS || path.join(os.homedir(), '.claude', 'projects');
+}
+
+/**
+ * 禁止执行者编辑项目外 CLAUDE.md 的规则：从项目的上一级逐级到文件系统根，外加用户级 ~/.claude/CLAUDE.md。
+ * 规则里 `//绝对路径` 表示从文件系统根起算（Claude Code 权限规则语法）。
+ */
+export function ancestorClaudeMdDenies(root) {
+  const rules = [];
+  const add = (file) => { for (const tool of ['Edit', 'Write']) rules.push(`${tool}(/${file})`); };
+  for (let dir = path.dirname(root); ; dir = path.dirname(dir)) {
+    add(path.join(dir, 'CLAUDE.md'));
+    if (path.dirname(dir) === dir) break;
+  }
+  add(path.join(os.homedir(), '.claude', 'CLAUDE.md'));
+  return rules;
+}
 
 /** MCP 规则前缀。拼字符串的地方有三处，散着写迟早不一致。 */
 const MCP_RULE_PREFIX = 'mcp__';
@@ -128,6 +162,10 @@ export function assertSandboxed(p, what = '路径') {
     }
   }
   const roots = sandboxRoots();
+  // 根目录本身不能当项目：项目根是 ClaudeCode 工作区（一百多个项目、外层 git 仓库），在它里面跑等于碰所有项目
+  if (roots.includes(rp)) {
+    throw new IsolationViolation(`${what} 不能是项目根目录本身，必须是它下面的某个项目：\n  ${what}: ${rp}`);
+  }
   if (!roots.some((r) => isWithin(rp, r))) {
     throw new IsolationViolation(
       `${what} 不在沙箱白名单内，拒绝启动：\n`
@@ -138,84 +176,65 @@ export function assertSandboxed(p, what = '路径') {
 }
 
 /**
- * 一次长程运行的沙箱。所有路径在构造时即完成校验。
+ * 一次长程运行的项目目录。所有路径在构造时即完成校验。
  *
- * ⚠ create() 里的**顺序不能颠倒**：先复制 .claude 模板，再写 settings 覆盖
- *   autoMemoryDirectory。反过来会让模板里指向真实记忆库的那个值活下来。
+ * 配置分两份（2026-09-17 起，项目与传统会话同目录后必须拆开）：
+ *   · 执行者专用：`.run/executor-settings.json`，经 `--settings` 只交给长程执行者 ——
+ *     模板权限白名单、MCP 闸、具名 skills、禁止改项目外的 CLAUDE.md。
+ *     早先把这些写进项目 `.claude/settings.local.json`，同目录的终端会话会继承 85 条宽松放行与 acceptEdits。
+ *   · 项目配置 `.claude/settings.local.json`：**只合并写 autoMemoryDirectory**，终端会话与长程共用同一份记忆；
+ *     首次改动前备份原文件。会话级 relay 地址在长程期间移走（执行者不能走别的会话的 relay），转回终端时重新应用。
+ * 真实 `claude -p` 探针已验证：--settings 的权限生效、项目配置的记忆目录生效、改祖先 CLAUDE.md 被拦下。
  */
 export class LongRunSandbox {
   constructor({ root, memoryDir, runDir }) {
     this.root = root;
     this.memoryDir = memoryDir;
     this.runDir = runDir;
-    this.claudeCopied = [];    // 从模板复制进来的条目名，供启动时打印
+    this.executorSettingsPath = path.join(runDir, 'executor-settings.json');
     this.skillsGranted = [];   // 已写入具名 allow 规则的 skill 名
     this.trustGranted = false; // 是否已在用户级 .claude.json 标记信任
     this.mcpAllowed = [];      // 放行的 MCP 服务器
     this.mcpDenied = [];       // 已屏蔽的 MCP 服务器
+    this.projectSettingsBackup = '';   // 首次改项目配置前的备份路径（没有原文件则为空）
+    this.relayStripped = false;        // 是否移走了会话级 relay 地址
+    this.memoryImported = [];          // 接管已有项目时从 Claude 默认记忆位置复制进来的文件
     // 需求文档里指名的外部参考路径，通过 --add-dir 挂给执行者。
     // ⚠ --add-dir 给的是**读写**权限，不是只读：执行者能改这些目录里的文件。
     //   用户已明确选择信任这些路径，故不做改动检查，只在启动时提示。
     this.extraDirs = [];
   }
 
+  /** 按名字在项目根（或指定根）下打开。兼容旧调用；新代码用 open(绝对路径)。 */
   static create(name, base = null) {
     if (!name || /[\\/]/.test(name)) {
-      throw new IsolationViolation(`沙箱名不合法（不能含路径分隔符）: ${name}`);
+      throw new IsolationViolation(`项目名不合法（不能含路径分隔符）: ${name}`);
     }
-    const basePath = base ? path.resolve(base) : sandboxRoots()[0];
-    const root = assertSandboxed(path.join(basePath, name), '沙箱工作目录');
+    return LongRunSandbox.open(path.join(base ? path.resolve(base) : sandboxRoots()[0], name));
+  }
+
+  /**
+   * 打开（必要时新建）一个项目目录作为长程工作目录。
+   * @param {string} rootPath  项目绝对路径，必须在允许的根下
+   * @param {object} [o]
+   * @param {boolean} [o.importMemory]  接管已有项目：把它在 Claude 默认记忆位置的记忆复制进 .memory
+   */
+  static open(rootPath, { importMemory = false } = {}) {
+    const root = assertSandboxed(rootPath, '项目目录');
     const spec = new LongRunSandbox({
       root,
-      memoryDir: assertSandboxed(path.join(root, '.memory'), '沙箱记忆目录'),
+      memoryDir: assertSandboxed(path.join(root, '.memory'), '项目记忆目录'),
       runDir: assertSandboxed(path.join(root, '.run'), '运行现场目录'),
     });
     for (const d of [spec.root, spec.memoryDir, spec.runDir]) {
       mkdirSync(d, { recursive: true });
     }
-    // 顺序要紧：先复制模板，再写 settings 覆盖 autoMemoryDirectory
-    spec.claudeCopied = spec._copyClaudeTemplate();
-    spec._writeSettings();
-    // 写完 settings 还要让它真的被加载：未信任的项目整份 settings.local.json
-    // 都不生效，permissions.allow 白写
+    if (importMemory) spec.memoryImported = spec.importClaudeMemory();
+    spec._writeExecutorSettings();
+    spec._writeProjectSettings();
+    // 项目配置里的记忆目录要生效，前提是项目被信任（未信任的项目整份 settings.local.json 不加载）
     spec.trustGranted = spec._trustProject();
     return spec;
-  }
-
-  /**
-   * 把模板 .claude 复制进沙箱（skills、权限配置等）。
-   *
-   * 执行者需要 skills（如浏览器 skill 自己看渲染结果）和一份 permissions.allow，
-   * 否则每个 Bash 都会被 `--permission-prompts none` 自动拒绝。
-   * **复制而非 --add-dir 挂载**：挂载给的是读写权限，执行者改坏模板会影响后续所有运行。
-   *
-   * ⚠ 复制来的 settings.local.json 里 autoMemoryDirectory 指向**真实记忆库**。
-   *   _writeSettings 随后会强制覆盖它 —— 顺序不能颠倒。
-   */
-  _copyClaudeTemplate() {
-    const src = templateClaudeDir();
-    if (!existsSync(src) || !statSync(src).isDirectory()) return [];
-    const dst = path.join(this.root, '.claude');
-    mkdirSync(dst, { recursive: true });
-    const copied = [];
-    for (const name of readdirSync(src)) {
-      if (SKIP_NAMES.has(name) || SKIP_TOP.has(name)) continue;
-      const from = path.join(src, name), to = path.join(dst, name);
-      try {
-        if (statSync(from).isDirectory()) {
-          cpSync(from, to, {
-            recursive: true, force: true, dereference: false,
-            filter: (s) => !SKIP_NAMES.has(path.basename(s)),
-          });
-        } else {
-          copyFileSync(from, to);
-        }
-        copied.push(name);
-      } catch {
-        // 单个条目复制失败不该拖垮整次启动（权限、符号链接指向不存在等）
-      }
-    }
-    return copied;
   }
 
   /**
@@ -335,37 +354,95 @@ export class LongRunSandbox {
     } catch { return []; }
   }
 
-  /**
-   * 在沙箱内显式写入记忆目录配置。
-   *
-   * 不依赖从父进程继承 —— 继承会读到真实项目的 autoMemoryDirectory。
-   * 若 .claude 模板已复制进来，就在它基础上改，保留 permissions 等配置，
-   * 但 **autoMemoryDirectory 一律强制覆盖为沙箱路径**：模板里的原值指向真实
-   * 记忆库，照抄会让子进程直接写进去。
-   */
-  _writeSettings() {
-    const claudeDir = path.join(this.root, '.claude');
-    mkdirSync(claudeDir, { recursive: true });
-    const settings = path.join(claudeDir, 'settings.local.json');
-
-    let payload = {};
-    if (existsSync(settings)) {
-      try {
-        const loaded = JSON.parse(readFileSync(settings, 'utf8'));
-        if (loaded && typeof loaded === 'object' && !Array.isArray(loaded)) payload = loaded;
-      } catch {
-        payload = {};      // 读不动就重写一份干净的，不猜内容
-      }
+  /** 读模板 settings。读不到或坏了就抛 —— 没有它执行者既没有白名单也没有 MCP 闸。 */
+  _readTemplate() {
+    const file = path.join(templateClaudeDir(), 'settings.local.json');
+    if (!existsSync(file) || !statSync(file).isFile()) {
+      throw new IsolationViolation(`读不到执行者配置模板：${file}`);
     }
+    try { return JSON.parse(readFileSync(file, 'utf8')); } catch (e) {
+      throw new IsolationViolation(`执行者配置模板解析失败：${file}\n  ${e.message}`);
+    }
+  }
 
-    payload.autoMemoryDirectory = this.memoryDir;
+  /**
+   * 执行者专用配置（经 --settings 传入）。项目配置里原有的东西不受影响，终端会话看不到这份。
+   * 记忆目录在这里也写一份：即使项目未被信任、项目配置没加载，执行者的记忆仍落在项目内。
+   */
+  _writeExecutorSettings() {
+    const tpl = this._readTemplate();
+    const payload = {
+      autoMemoryDirectory: this.memoryDir,
+      permissions: JSON.parse(JSON.stringify(tpl.permissions || {})),
+    };
+    for (const k of ['sandbox', 'enableAllProjectMcpServers', 'enabledMcpjsonServers']) {
+      if (k in tpl) payload[k] = tpl[k];
+    }
+    // 维护提示词允许"无需确认修改 CLAUDE.md"；项目与工作区同目录后，祖先目录的 CLAUDE.md（如工作区说明）不能被它改
+    const deny = (payload.permissions.deny ||= []);
+    for (const rule of ancestorClaudeMdDenies(this.root)) if (!deny.includes(rule)) deny.push(rule);
     this._grantSkills(payload);
     this._gateMcp(payload);
-    writeFileSync(settings, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+    writeFileSync(this.executorSettingsPath, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+    const written = JSON.parse(readFileSync(this.executorSettingsPath, 'utf8'));
+    assertSandboxed(written.autoMemoryDirectory, '执行者配置里的记忆目录');
+  }
 
-    // 写完立刻自查：这是隔离的最后一道，配错了不会报错只会静默污染
-    const written = JSON.parse(readFileSync(settings, 'utf8'));
-    assertSandboxed(written.autoMemoryDirectory, '沙箱 settings 里的记忆目录');
+  /**
+   * 项目配置：只合并写 autoMemoryDirectory，移走会话级 relay。首次改动前整份备份。
+   * 其余字段（终端会话攒下的授权、非 relay 的供应商配置）原样保留。
+   */
+  _writeProjectSettings() {
+    const claudeDir = path.join(this.root, '.claude');
+    const file = path.join(claudeDir, 'settings.local.json');
+    let payload = {};
+    if (existsSync(file)) {
+      try {
+        const loaded = JSON.parse(readFileSync(file, 'utf8'));
+        if (loaded && typeof loaded === 'object' && !Array.isArray(loaded)) payload = loaded;
+      } catch { payload = null; }
+      if (payload === null) {
+        // 读不动不猜内容、不覆盖：记忆目录由执行者配置兜底，只是终端会话暂时不共用
+        this.projectSettingsBackup = '';
+        return;
+      }
+      const backup = path.join(this.runDir, 'settings.local.backup.json');
+      if (!existsSync(backup)) copyFileSync(file, backup);
+      this.projectSettingsBackup = backup;
+    }
+    let changed = payload.autoMemoryDirectory !== this.memoryDir;
+    payload.autoMemoryDirectory = this.memoryDir;
+    const env = payload.env || {};
+    if (payload._localProvider === 'relay-proxy' || RELAY_URL.test(String(env.ANTHROPIC_BASE_URL || ''))) {
+      const saved = { env: {}, _localProvider: payload._localProvider, _localProviderId: payload._localProviderId };
+      for (const k of RELAY_ENV_KEYS) if (k in env) { saved.env[k] = env[k]; delete env[k]; }
+      writeFileSync(path.join(this.runDir, 'provider-env.backup.json'), JSON.stringify(saved, null, 2) + '\n', 'utf8');
+      delete payload._localProvider;
+      delete payload._localProviderId;
+      if (!Object.keys(env).length) delete payload.env;
+      this.relayStripped = true;
+      changed = true;
+    }
+    if (!changed) return;
+    mkdirSync(claudeDir, { recursive: true });
+    writeFileSync(file, JSON.stringify(payload, null, 2) + '\n', 'utf8');
+  }
+
+  /**
+   * 接管已有项目：把它在 Claude 默认记忆位置（~/.claude/projects/<编码目录>/memory）的记忆复制进 .memory。
+   * 不覆盖同名文件、原处不删 —— 终端会话此后读 .memory，原位置留作备份。
+   */
+  importClaudeMemory() {
+    const src = path.join(claudeProjectsDir(), String(this.root).replace(/[^a-zA-Z0-9]/g, '-'), 'memory');
+    if (!existsSync(src) || !statSync(src).isDirectory()) return [];
+    const copied = [];
+    for (const name of readdirSync(src).sort()) {
+      const from = path.join(src, name), to = path.join(this.memoryDir, name);
+      if (!statSync(from).isFile() || existsSync(to)) continue;
+      copyFileSync(from, to);
+      copied.push(name);
+    }
+    return copied;
   }
 
   /**
@@ -457,6 +534,10 @@ export class LongRunSandbox {
    *
    * 清掉可能把子进程指回真实项目的变量，避免通过环境泄漏；
    * 也清掉监督者凭据 —— 执行者跑任意 Bash、写任意文件，没有任何理由拿到那把 key。
+   *
+   * 还要让 WebTmux 的全局 hook 认得出"这是长程执行者"：执行者会触发 ~/.claude/settings.json 里的 hooks，
+   * 服务端按 tmux pane 或工作目录把事件归到会话上 —— 项目与终端会话同目录后，不标记就会算到那个会话头上
+   * （模型、状态、会话 id 被污染）。所以去掉继承来的 TMUX/TMUX_PANE，并带上 WEBTMUX_LONGRUN=1。
    */
   childEnv(base = process.env) {
     const env = { ...base };
@@ -465,6 +546,9 @@ export class LongRunSandbox {
       if (upper.includes('CLAUDE') && upper.includes('MEMORY')) delete env[key];
       else if (upper.startsWith('SUPERVISOR_')) delete env[key];
     }
+    delete env.TMUX;
+    delete env.TMUX_PANE;
+    env.WEBTMUX_LONGRUN = '1';
     env.CLAUDE_PROJECT_DIR = this.root;
     return env;
   }

@@ -29,6 +29,7 @@ import path from 'path';
 import { ExitReason, LongRunRunner, DEFAULT_TOOLS, TASK_WAIT, looksLikeQuestion } from './LongRunRunner.js';
 import { Judgement, Verdict } from './LongRunSupervisor.js';
 import { CONTINUE_PROMPT } from './LongRunPrompts.js';
+import { realResolve } from './LongRunSandbox.js';
 
 /** 正常结束且水位过此线 → 交接（不再继续追问，换个干净窗口） */
 export const HANDOFF_FLOOR = 200_000;
@@ -199,23 +200,51 @@ export class LongRunLoop {
     }
   }
 
+  /** git 认为的仓库根（跟随符号链接）。不在任何仓库里返回空串。 */
+  _gitToplevel() {
+    const [code, out] = this._git(['rev-parse', '--show-toplevel']);
+    return code === 0 && out ? realResolve(out) : '';
+  }
+
   /**
-   * 沙箱是 git 仓库，纯为交接前打快照。判据是 rev-parse --git-dir 成功而非 .git 存在：
-   * 删除失败会留下只含 objects 的残壳，目录在但仓库不可用 —— 先清掉残壳再 init。
+   * 项目必须是**自己的** git 仓库，纯为交接前打快照。
+   *
+   * ⚠ 判据是 `--show-toplevel === 项目根`，不是 `rev-parse` 成功：项目放在 ~/Documents/ClaudeCode 下，
+   *   而 ClaudeCode 本身是个有远端、混着多个客户资料的仓库。子目录没有自己的 .git 时 rev-parse 会找到外层仓库，
+   *   快照的 `git add -A` 就把整个工作区暂存提交进去（原版只判 rev-parse 成功，放进嵌套目录必出事）。
+   *   外层仓库里已有 67 个自带 .git 的子项目，这里建的是同一种形态。
+   * 删除失败会留下只含 objects 的残壳（目录在但仓库不可用）—— 先清掉残壳再 init。
    * ⚠ .gitignore 只忽略 .run/：**.memory/ 必须进快照**，回滚时记忆与代码才一致（审计 #3）。
+   *   接管已有项目时它可能已有 .gitignore：只追加 .run/，别的不动。
    */
   ensureRepo() {
-    const [code, out] = this._git(['rev-parse', '--git-dir']);
-    if (code === 0 && out) return;
-    const shell = path.join(this.spec.root, '.git');
-    if (existsSync(shell)) rmSync(shell, { recursive: true, force: true });
-    this._git(['init', '-q']);
-    this._git(['config', 'user.email', 'orchestrator@local']);
-    this._git(['config', 'user.name', 'orchestrator']);
-    const gi = path.join(this.spec.root, '.gitignore');
-    if (!existsSync(gi)) writeFileSync(gi, '.run/\n__pycache__/\n*.pyc\n', 'utf8');
-    this._git(['add', '-A']);
-    this._git(['commit', '-q', '-m', 'orchestrator: init sandbox', '--allow-empty']);
+    const root = realResolve(this.spec.root);
+    if (this._gitToplevel() !== root) {
+      const shell = path.join(root, '.git');
+      if (existsSync(shell)) rmSync(shell, { recursive: true, force: true });
+      this._git(['init', '-q']);
+      this._git(['config', 'user.email', 'orchestrator@local']);
+      this._git(['config', 'user.name', 'orchestrator']);
+      if (this._gitToplevel() !== root) {
+        throw new Error(`项目目录没能成为独立的 git 仓库（git 认为仓库根是 ${this._gitToplevel() || '(无)'}），`
+          + '拒绝继续：否则快照会提交进外层仓库');
+      }
+      this._ensureIgnoreRun(root);
+      this._git(['add', '-A']);
+      this._git(['commit', '-q', '-m', 'orchestrator: init sandbox', '--allow-empty']);
+      return;
+    }
+    this._ensureIgnoreRun(root);
+  }
+
+  /** 保证 .run/（运行现场、执行者配置、备份）不进快照。已被忽略就不动 .gitignore。 */
+  _ensureIgnoreRun(root) {
+    const [ignored] = this._git(['check-ignore', '-q', '.run/']);
+    if (ignored === 0) return;
+    const gi = path.join(root, '.gitignore');
+    const cur = existsSync(gi) ? readFileSync(gi, 'utf8') : '';
+    const add = cur ? `${cur.endsWith('\n') ? '' : '\n'}.run/\n` : '.run/\n__pycache__/\n*.pyc\n';
+    writeFileSync(gi, cur + add, 'utf8');
   }
 
   /** 打一个快照 commit。只是存点保命，不做成败判定 —— 跑坏了能回退到任意一次交接点。 */
@@ -258,6 +287,8 @@ export class LongRunLoop {
       handoffLimit: 0,
       costCeiling: this.costCeiling(),
       extraDirs: this.extraDirs,
+      // 执行者专用配置（权限白名单、MCP 闸、禁改项目外 CLAUDE.md）。不写进项目配置，同目录的终端会话看不到
+      settingsFile: this.spec.executorSettingsPath || '',
       wallTimeout: this.wallTimeout,
       taskWait: this.taskWait,
       eventsDir: path.join(this.spec.runDir, 'events'),

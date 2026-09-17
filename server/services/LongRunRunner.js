@@ -202,10 +202,11 @@ export function isEmptyResult(resultEv, meter) {
 /** 构造 `claude -p` 的参数。⚠ 提示词不作为参数传（见 BASE_FLAGS 注释）。 */
 export function buildArgs({
   sessionId, resume = false, allowedTools = DEFAULT_TOOLS, extraDirs = [],
-  model = '', maxTurns = 0, extraFlags = [],
+  model = '', maxTurns = 0, extraFlags = [], settingsFile = '',
 } = {}) {
   const args = ['-p', ...BASE_FLAGS];
   args.push(resume ? '--resume' : '--session-id', sessionId);
+  if (settingsFile) args.push('--settings', String(settingsFile));
   if (allowedTools) args.push('--allowedTools', allowedTools);
   for (const d of extraDirs) args.push('--add-dir', String(d));   // ⚠ --add-dir 是读写权限
   if (model) args.push('--model', model);
@@ -429,6 +430,7 @@ export class LongRunRunner {
     this.taskWait = o.taskWait ?? TASK_WAIT;
     this.eventsDir = o.eventsDir || null;
     this.extraFlags = o.extraFlags || [];
+    this.settingsFile = o.settingsFile || '';          // 执行者专用配置，经 --settings 传入
     this.onStream = o.onStream || null;
     this.checkInject = o.checkInject || null;
     this.claudeBin = o.claudeBin || 'claude';
@@ -522,7 +524,7 @@ export class LongRunRunner {
     const sid = sessionId || randomUUID();
     const args = [...this.binPrefixArgs, ...buildArgs({
       sessionId: sid, resume, allowedTools: this.allowedTools, extraDirs: this.extraDirs,
-      model: this.model, maxTurns: this.maxTurns, extraFlags: this.extraFlags,
+      model: this.model, maxTurns: this.maxTurns, extraFlags: this.extraFlags, settingsFile: this.settingsFile,
     })];
     const now = () => Date.now() / 1000;
 

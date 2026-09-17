@@ -141,9 +141,8 @@ test('费用按 message id 去重（3+1 次上报 → 2 次调用，第一版标
 
 test('估算对得上真实发次的量级（防改动把估算搞错一个数量级）', () => {
   // 照搬原版：扫真实沙箱 .run/events/ 里最大的几个已结算发次，偏差须 < 50%
-  const base = sandboxRoots()[0];
   let files = [];
-  try {
+  for (const base of sandboxRoots()) try {
     for (const box of fs.readdirSync(base)) {
       const dir = path.join(base, box, '.run', 'events');
       if (!fs.existsSync(dir)) continue;

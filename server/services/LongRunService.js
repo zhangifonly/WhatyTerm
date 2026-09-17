@@ -24,9 +24,8 @@ import { LongRunBoard } from './LongRunBoard.js';
 import { replay as replayRun, EVENTS_FILE } from './LongRunReplay.js';
 import { apiSessions, apiSession } from './LongRunTranscript.js';
 import {
-  LaunchError, sandboxBase, deriveSandboxName, assertSandboxName, listSandboxes, memoryFiles,
-  prepareFreshSandbox, checkResumableSandbox, priorState, checkRejectedRefs, requirementInput,
-  previewRequirement,
+  LaunchError, deriveSandboxName, memoryFiles, priorState, checkRejectedRefs, requirementInput,
+  previewRequirement, resolveProjectRoot, projectDirState, prepareProject, listLongRunProjects,
 } from './LongRunLaunch.js';
 import {
   SelfCheck, reportPrompts, reportClaudeTemplate, reportJobguard, reportInject, reportPriorState,
@@ -54,6 +53,8 @@ export const STOP_REASON = '先停一下，把当前在做的这一步收个尾�
  */
 const LIST_KINDS = new Set(['selfcheck', 'send', 'result', 'handoff.done', 'supervisor.decided', 'need_human',
   'need_human.done', 'paused', 'resumed', 'finished', 'state', 'error']);
+
+const MODE_TEXT = { start: '新建', takeover: '接管已有项目', resume: '续跑' };
 
 export const REQUIREMENT_DIR = path.join(os.homedir(), '.webtmux', 'longrun-requirements');
 
@@ -133,7 +134,7 @@ function num(v, def, name, { min = 0, int = false } = {}) {
  * 返回规整后的副本，也原样挂在任务快照上供面板复述"这次是按什么参数跑的"。
  */
 export function normalizeOptions(o = {}) {
-  const mode = o.mode === 'resume' ? 'resume' : 'start';
+  const mode = ['resume', 'takeover'].includes(o.mode) ? o.mode : 'start';
   const out = {
     mode,
     sandboxName: o.sandboxName ? String(o.sandboxName).trim() : '',
@@ -221,28 +222,36 @@ export class LongRunService {
     return [...this.tasks.values()].find((t) => t.state === 'running' && t.sandbox.root === root) || null;
   }
 
+  /** 项目目录：给了绝对路径用它；否则名字 → 需求标题/文档名派生，放在项目根下。 */
+  _projectRoot(opts, docPath) {
+    const projectName = opts.projectName || opts.sandboxName
+      || (opts.requirementText && !opts.docPath ? deriveName(opts.requirementText) : deriveSandboxName(docPath));
+    return resolveProjectRoot({ projectRoot: opts.projectRoot, projectName });
+  }
+
   /**
-   * 预检：解析需求、给出沙箱现状与参考清单。**不建沙箱、不起进程、不删任何东西。**
-   * 面板据此决定是提示"已存在，续跑还是删掉重建"，还是直接新建。
+   * 预检：解析需求、给出项目目录现状与参考清单。**不建目录、不起进程、不删任何东西。**
+   * 面板据此提示：新建 / 接管已有项目 / 续跑。
    */
-  plan({ docPath: rawDoc, requirementText, sandboxName, promptsFile } = {}) {
+  plan({ docPath: rawDoc, requirementText, projectRoot, projectName, sandboxName, promptsFile } = {}) {
     const docPath = this.resolveDocPath({ docPath: rawDoc, requirementText });
     const prompts = loadPrompts(promptsFile || PROMPT_FILE);   // 缺段就在这里硬失败
     const req = previewRequirement(docPath);
-    const name = assertSandboxName(sandboxName
-      || (requirementText && !rawDoc ? deriveName(requirementText) : deriveSandboxName(docPath)));
-    const root = path.join(sandboxBase(), name);
-    const exists = existsSync(root) && statSync(root).isDirectory();
+    const root = this._projectRoot({ docPath: rawDoc, requirementText, projectRoot, projectName, sandboxName }, docPath);
+    const state = projectDirState(root);
     const dirs = extraDirsOf(req);
     return {
       docPath,
-      sandboxName: name,
-      sandboxRoot: root,
-      sandboxExists: exists,
-      resumable: exists && memoryFiles(root).length > 0,
-      prior: exists ? priorState(root) : null,
+      projectRoot: root,
+      projectName: path.basename(root),
+      dirState: state,
+      suggestedMode: state === 'project' ? 'takeover' : state === 'longrun' ? 'resume' : 'start',
+      resumable: state === 'longrun' && memoryFiles(root).length > 0,
+      prior: state === 'missing' ? null : priorState(root),
       runningTaskId: this._runningOn(root)?.id || null,
-      sandboxes: listSandboxes(),
+      projects: listLongRunProjects(),
+      // 旧字段名，界面改完前保留
+      sandboxName: path.basename(root), sandboxRoot: root, sandboxExists: state !== 'missing',
       requirementChars: req.text.length,
       refs: req.refs.map((r) => ({ path: r.path, isDir: r.isDir })),
       urls: req.urls,
@@ -255,8 +264,11 @@ export class LongRunService {
   }
 
   /**
-   * 启动一次运行。mode=start 对应 start.py（发初始化提示词），mode=resume 对应 resume.py（跳过初始化，
-   * 需求按"新增"包装）。能在动沙箱之前查出的问题全部先查：参数、文档、提示词、监督者提示词、参考路径。
+   * 启动一次运行。
+   *   start    新项目（start.py）：发初始化提示词 + 需求全文
+   *   takeover 接管已有传统项目：发初始化提示词建记忆库，需求按"在已有进度上继续"包装；不删不覆盖，原有 Claude 记忆复制进 .memory
+   *   resume   续跑（resume.py）：跳过初始化，需求按"新增"包装
+   * 能在动目录之前查出的问题全部先查：参数、文档、提示词、监督者提示词、参考路径。
    * 原版有几项放在建沙箱之后才查，带 --fresh 时等于先删了旧成果才报错 —— 这里前移。
    * @returns {object} 任务快照（异步跑，事件推 socket 房间 longrun:<id>）
    */
@@ -268,34 +280,36 @@ export class LongRunService {
     if (!o.noSupervisor) loadSystemPrompt(o.supervisorPrompt || null);          // 读不到硬失败
     checkRejectedRefs(previewRequirement(docPath), o);
 
-    const name = assertSandboxName(o.sandboxName
-      || (opts.requirementText && !opts.docPath ? deriveName(opts.requirementText) : deriveSandboxName(docPath)));
-    const root = path.join(sandboxBase(), name);
+    const root = this._projectRoot(opts, docPath);
     const busy = this._runningOn(root);
-    if (busy) throw new LaunchError(`沙箱 ${name} 上已有任务在跑（${busy.id}）。同一沙箱同时只能跑一个。`);
-    if (o.mode === 'resume') checkResumableSandbox(name);
-    else prepareFreshSandbox(name, { fresh: o.fresh });
+    if (busy) throw new LaunchError(`项目 ${path.basename(root)} 上已有长程任务在跑（${busy.id}）。同一项目同时只能跑一个。`);
+    prepareProject(root, { mode: o.mode, fresh: o.fresh });
 
-    return this._launch({ o, docPath, prompts, sandbox: LongRunSandbox.create(name) });
+    let sandbox;
+    try {
+      sandbox = LongRunSandbox.open(root, { importMemory: o.mode === 'takeover' });
+    } catch (e) { throw new LaunchError(e.message); }
+    return this._launch({ o, docPath, prompts, sandbox });
   }
 
   /** 建好沙箱之后：登记参考路径、收集自检清单、组装监督者与循环、异步开跑。 */
   _launch({ o, docPath, prompts, sandbox }) {
     const resume = o.mode === 'resume';
+    const continuing = resume || o.mode === 'takeover';    // 在已有进度上继续：需求按"新增"包装
     // 带 spec 再解析一次：外部参考这次才真正登记进沙箱（--add-dir）。与预检同一套规则
     const req = loadRequirement(docPath, sandbox);
     checkRejectedRefs(req, o);
 
     const sc = new SelfCheck();
     reportPrompts(sc, prompts);
-    sc.info('沙箱', `沙箱: ${sandbox.root}${resume ? '（续跑）' : ''}`);
+    sc.info('项目', `项目: ${sandbox.root}（${MODE_TEXT[o.mode]}）`);
     reportClaudeTemplate(sc, sandbox);
     reportJobguard(sc);
     reportInject(sc, sandbox);
-    if (resume) reportPriorState(sc, priorState(sandbox.root));
+    if (continuing) reportPriorState(sc, priorState(sandbox.root));
     reportRequirement(sc, req, o);
 
-    const input = requirementInput(req, { resume });
+    const input = requirementInput(req, { resume: continuing });
     let task = null;
     const { supervisor, info } = this._makeSupervisor(o, input, () => task);
     reportSupervisor(sc, info);
@@ -386,14 +400,18 @@ export class LongRunService {
    * 事后回放（view.py）。内存里有这个沙箱最近的任务就直接给它的看板 —— 那份比落盘文件多了实时状态；
    * 否则读 .run/orchestrator.jsonl（服务重启后、或原版 Python 跑出来的轮次）。
    */
-  replay({ sandboxName, file } = {}) {
-    if (sandboxName && !file) {
-      const root = path.join(sandboxBase(), assertSandboxName(sandboxName));
+  replay({ sandboxName, projectRoot, file } = {}) {
+    if ((sandboxName || projectRoot) && !file) {
+      let root;
+      try {
+        root = projectRoot ? resolveProjectRoot({ projectRoot })
+          : (listLongRunProjects().find((p) => p.name === sandboxName)?.root || resolveProjectRoot({ projectName: sandboxName }));
+      } catch (e) { return { ok: false, error: e.message }; }
       const live = [...this.tasks.values()].filter((t) => t.sandbox.root === root).sort((a, b) => b.startedAt - a.startedAt)[0];
       if (live) return { ok: true, live: true, taskId: live.id, file: path.join(root, '.run', EVENTS_FILE), sandboxRoot: root,
         notices: [], snapshot: live.board.snapshot() };
     }
-    return replayRun({ sandboxName, file });
+    return replayRun({ sandboxName, projectRoot, file });
   }
 
   /** 会话记录（transcript.py）：列出某工作目录的会话，缺省为沙箱根。 */
@@ -406,11 +424,10 @@ export class LongRunService {
     return [...this.tasks.values()].map((t) => t.toJSON());
   }
 
-  /** 已有沙箱清单与各自上次运行痕迹（续跑时挑沙箱用，resume.py list_sandboxes + show_prior_state）。 */
+  /** 跑过长程的项目与各自上次运行痕迹（续跑与回放挑项目用，resume.py list_sandboxes + show_prior_state）。 */
   sandboxes() {
-    return listSandboxes().map((name) => {
-      const root = path.join(sandboxBase(), name);
-      return { name, root, resumable: memoryFiles(root).length > 0, prior: priorState(root),
+    return listLongRunProjects().map(({ name, root, legacy }) => {
+      return { name, root, legacy, resumable: memoryFiles(root).length > 0, prior: priorState(root),
         hasEvents: existsSync(path.join(root, '.run', EVENTS_FILE)),
         runningTaskId: this._runningOn(root)?.id || null };
     });

@@ -16,11 +16,11 @@ import { loadRequirement, refDisplay, extraDirsOf, renderRefsSection } from './L
 /** 启动前的硬失败（原版 exit 2）。message 是给人看的完整说明。 */
 export class LaunchError extends Error {}
 
-/** 沙箱根目录。复用隔离层那份，不另写 —— 两处各写一份迟早走偏。 */
+/** 新项目的默认根（~/Documents/ClaudeCode）。复用隔离层那份，不另写 —— 两处各写一份迟早走偏。 */
 export const sandboxBase = () => sandboxRoots()[0];
 
 /**
- * 从文档名派生沙箱名（start.py derive_name）：非法字符换下划线，去首尾下划线，截 40 字。
+ * 从文档名派生项目名（start.py derive_name）：非法字符换下划线，去首尾下划线，截 40 字。
  * Python 的 \w 带 re.U 认 Unicode 字母数字，JS 要显式写 \p{L}\p{N}。
  */
 export function deriveSandboxName(docPath) {
@@ -29,26 +29,63 @@ export function deriveSandboxName(docPath) {
   return name.slice(0, 40) || 'project';
 }
 
-/** 沙箱名校验：不能含路径分隔符，也不能是 . / ..（会逃出沙箱根）。 */
+/** 项目名校验：不能含路径分隔符，也不能是 . / ..（会逃出项目根）。 */
 export function assertSandboxName(name) {
   const n = String(name || '');
   if (!n || /[\\/]/.test(n) || n === '.' || n === '..') {
-    throw new LaunchError(`沙箱名不合法: ${JSON.stringify(n)}（不能为空、不能含路径分隔符）`);
+    throw new LaunchError(`项目名不合法: ${JSON.stringify(n)}（不能为空、不能含路径分隔符）`);
   }
   return n;
+}
+
+/**
+ * 解析要用的项目目录：给了绝对路径就用它（必须在允许的根下），否则按名字放在项目根下。
+ * 返回规范化后的绝对路径。
+ */
+export function resolveProjectRoot({ projectRoot, projectName } = {}) {
+  let root;
+  if (projectRoot) {
+    if (!path.isAbsolute(String(projectRoot))) throw new LaunchError(`项目目录必须是绝对路径: ${projectRoot}`);
+    root = String(projectRoot);
+  } else {
+    root = path.join(sandboxBase(), assertSandboxName(projectName));
+  }
+  try { return assertSandboxed(root, '项目目录'); } catch (e) { throw new LaunchError(e.message); }
 }
 
 const nonEmptyDir = (p) => {
   try { return statSync(p).isDirectory() && readdirSync(p).length > 0; } catch { return false; }
 };
 
-/** 已有沙箱清单（resume.py list_sandboxes）。 */
-export function listSandboxes() {
-  const base = sandboxBase();
-  try {
-    return readdirSync(base, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort();
-  } catch { return []; }
+/** 有长程运行记录（跑过长程）的判据。删除保护与续跑列表都认它。 */
+export const hasLongRunRecord = (root) => existsSync(path.join(root, '.run', 'session_state.json'))
+  || existsSync(path.join(root, '.run', 'orchestrator.jsonl'));
+
+/**
+ * 目录现状：missing 不存在 | empty 空目录 | longrun 跑过长程 | project 已有内容但没跑过长程（传统项目）
+ */
+export function projectDirState(root) {
+  if (!existsSync(root)) return 'missing';
+  if (!nonEmptyDir(root)) return 'empty';
+  return hasLongRunRecord(root) ? 'longrun' : 'project';
 }
+
+/** 跑过长程的项目（项目根下一层 + 旧沙箱根下一层），供续跑与回放列表用。 */
+export function listLongRunProjects() {
+  const out = [];
+  for (const [i, base] of sandboxRoots().entries()) {
+    let names = [];
+    try { names = readdirSync(base, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort(); } catch { continue; }
+    for (const name of names) {
+      const root = path.join(base, name);
+      if (hasLongRunRecord(root)) out.push({ name, root, legacy: i > 0 });
+    }
+  }
+  return out;
+}
+
+/** 兼容旧调用：跑过长程的项目名。 */
+export const listSandboxes = () => listLongRunProjects().map((p) => p.name);
 
 /** 记忆文件（.memory/*.md）。续跑的前提是有东西可续。 */
 export function memoryFiles(root) {
@@ -57,49 +94,48 @@ export function memoryFiles(root) {
 }
 
 /**
- * start.py prepare_sandbox 的检查部分：同名沙箱已存在且非空时，不带 fresh 就拒绝 ——
- * 里面可能是上一次跑出来的成果，不静默覆盖。带 fresh 则删掉重建。
- * 返回沙箱根目录；真正的创建交给 LongRunSandbox.create。
+ * 按启动方式检查目录（start.py prepare_sandbox / resume.py open_sandbox 的检查部分）：
+ *   start    新项目：目录不存在或为空。跑过长程的要么续跑、要么明确勾「删掉重建」；
+ *            **已有传统项目一律拒绝**并指向「接管」—— 名字撞上已有项目时绝不能动它
+ *   takeover 接管已有传统项目：不删、不覆盖，记忆从 Claude 默认位置复制进来
+ *   resume   续跑：必须跑过长程且有记忆文件
  */
-export function prepareFreshSandbox(name, { fresh = false } = {}) {
-  assertSandboxName(name);
-  const root = path.join(sandboxBase(), name);
-  if (!nonEmptyDir(root)) return root;
-  if (!fresh) {
-    throw new LaunchError(`沙箱 ${root} 已存在且非空。\n`
-      + '  想在它基础上继续开发，改用「续跑」并选这个沙箱。\n'
-      + '  想重新开始，勾选「删掉重建」，或换一个沙箱名字。');
+export function prepareProject(root, { mode = 'start', fresh = false } = {}) {
+  const state = projectDirState(root);
+  if (mode === 'resume') {
+    if (state === 'missing') throw new LaunchError(`项目不存在: ${root}\n  新项目请用「新建」。`);
+    if (!memoryFiles(root).length) {
+      throw new LaunchError(`项目 ${path.basename(root)} 里没有记忆文件（${path.join(root, '.memory')}）。\n`
+        + '  它可能从未成功跑过初始化。新目录用「新建」，已有代码的项目用「接管」。');
+    }
+    return state;
   }
-  // 删之前再过一道隔离校验：名字经过了清洗，但删目录是不可逆操作，宁可多挡一次
-  assertSandboxed(root, '待删除的沙箱');
+  if (mode === 'takeover') {
+    if (state === 'longrun') throw new LaunchError(`${root} 已经跑过长程，请用「续跑」接着做。`);
+    if (state !== 'project') throw new LaunchError(`${root} 还没有内容，不需要接管，用「新建」即可。`);
+    return state;
+  }
+  if (state === 'missing' || state === 'empty') return state;
+  if (state === 'project') {
+    throw new LaunchError(`${root} 是已有项目（没跑过长程）。\n`
+      + '  要在它上面做长程开发，请选「接管已有项目」；想新开一个项目，换个名字。');
+  }
+  if (!fresh) {
+    throw new LaunchError(`${root} 已有长程运行记录。\n`
+      + '  想在它基础上继续开发，改用「续跑」。\n'
+      + '  想重新开始，勾选「删掉重建」，或换一个名字。');
+  }
+  // 只删跑过长程的目录；删之前再过一道隔离校验：删目录是不可逆操作，宁可多挡一次
+  assertSandboxed(root, '待删除的项目');
   try {
     rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
   } catch (e) {
-    throw new LaunchError(`删除已有沙箱失败：\n  ${root}\n  ${e.message}\n`
+    throw new LaunchError(`删除已有项目失败：\n  ${root}\n  ${e.message}\n`
       + '  可能有进程还在用这个目录（例如上一轮执行者起的 dev server）。只结束指名的进程，\n'
       + '  不要按进程名批量杀 node —— 那会连带杀掉 WebTmux 和你其它会话。\n'
-      + '  也可以换一个沙箱名字绕开。');
+      + '  也可以换一个名字绕开。');
   }
-  return root;
-}
-
-/**
- * resume.py open_sandbox 的检查部分：沙箱必须存在，且有记忆文件 ——
- * 没有记忆说明它可能从未成功跑过初始化，用「新建」重新开始更合适。
- */
-export function checkResumableSandbox(name) {
-  assertSandboxName(name);
-  const root = path.join(sandboxBase(), name);
-  if (!existsSync(root) || !statSync(root).isDirectory()) {
-    const all = listSandboxes();
-    throw new LaunchError(`沙箱不存在: ${root}\n  新项目请用「新建」。\n`
-      + `  已有沙箱: ${all.length ? all.join(', ') : '(无)'}`);
-  }
-  if (!memoryFiles(root).length) {
-    throw new LaunchError(`沙箱 ${name} 里没有记忆文件（${path.join(root, '.memory')}）。\n`
-      + '  它可能从未成功跑过初始化。用「新建」重新开始更合适。');
-  }
-  return root;
+  return 'missing';
 }
 
 /**

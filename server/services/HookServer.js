@@ -17,6 +17,16 @@ import { randomBytes } from 'crypto';
 const isWindows = platform() === 'win32';
 
 
+/**
+ * 这条 hook 是不是长程执行者触发的。执行者（claude -p）同样会跑用户级 hooks，而服务端按 tmux pane 或
+ * 工作目录把事件归到会话上 —— 长程项目与终端会话同目录，不丢弃就会把执行者的模型、状态、会话 id
+ * 算到那个终端会话头上。执行者由 LongRunSandbox.childEnv 带上 WEBTMUX_LONGRUN=1，hook 脚本透传成请求头。
+ * 长程有自己的事件流，这里整条丢弃不影响任何功能。
+ */
+export function isLongRunHookRequest(headers = {}) {
+  return String(headers['x-webtmux-longrun'] || '').trim() === '1';
+}
+
 class HookServer {
   constructor(serverPort = 3928) {
     this.serverPort = serverPort;
@@ -145,6 +155,7 @@ curl -s --max-time 2 -X POST "http://127.0.0.1:${this.serverPort}/hooks" \\
   -H "X-WebtmuxToken: ${this.token}" \\
   -H "X-Webtmux-Effective-Env: url=\${ANTHROPIC_BASE_URL};model=\${ANTHROPIC_MODEL};tok=\${ANTHROPIC_AUTH_TOKEN:0:12};key=\${ANTHROPIC_API_KEY:0:12}" \\
   -H "X-Webtmux-Tmux-Pane: \${TMUX_PANE}" \\
+  -H "X-Webtmux-Longrun: \${WEBTMUX_LONGRUN}" \\
   -d "$INPUT" &
 exit 0
 `;
@@ -163,6 +174,7 @@ try {
   $key = if ($env:ANTHROPIC_API_KEY) { $env:ANTHROPIC_API_KEY.Substring(0, [Math]::Min(12, $env:ANTHROPIC_API_KEY.Length)) } else { "" }
   $req.Headers.Add("X-Webtmux-Effective-Env", "url=$($env:ANTHROPIC_BASE_URL);model=$($env:ANTHROPIC_MODEL);tok=$tok;key=$key")
   $req.Headers.Add("X-Webtmux-Tmux-Pane", "$($env:TMUX_PANE)")
+  $req.Headers.Add("X-Webtmux-Longrun", "$($env:WEBTMUX_LONGRUN)")
   $req.Timeout = 2000
   $stream = $req.GetRequestStream()
   $stream.Write($body, 0, $body.Length)

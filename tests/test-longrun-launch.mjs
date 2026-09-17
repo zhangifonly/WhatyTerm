@@ -15,6 +15,8 @@ import { spawnSync } from 'child_process';
 // macOS 的临时目录是符号链接（/var → /private/var），沙箱根会被规范化，这里先取真实路径
 const BASE = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'longrun_launch_')));
 process.env.LONGRUN_SANDBOX_BASE = BASE;
+// 新项目默认建在项目根（真实 ~/Documents/ClaudeCode），测试必须同样指到临时目录
+process.env.LONGRUN_PROJECTS_ROOT = process.env.LONGRUN_SANDBOX_BASE;
 const L = await import('../server/services/LongRunLaunch.js');
 const { orchestratorRoot } = await import('../server/services/LongRunSandbox.js');
 const { renderRefsSection } = await import('../server/services/LongRunPrompts.js');
@@ -57,30 +59,58 @@ await test('沙箱名不合法时拒绝（路径分隔符、. 与 ..）', () => 
   assert(L.assertSandboxName('ok_名字') === 'ok_名字');
 });
 
-await test('新建：同名沙箱非空且未勾删掉重建 → 拒绝，里面的东西原样还在', () => {
-  const root = path.join(BASE, 'keepme');
+const mkProject = (name, { longrun = false, memory = false } = {}) => {
+  const root = path.join(BASE, name);
   fs.mkdirSync(root, { recursive: true });
-  fs.writeFileSync(path.join(root, '成果.txt'), '上一轮的产出');
-  throwsLaunch(() => L.prepareFreshSandbox('keepme'), /续跑/);
-  assert(fs.readFileSync(path.join(root, '成果.txt'), 'utf8') === '上一轮的产出', '拒绝时不能动已有成果');
+  fs.writeFileSync(path.join(root, '成果.txt'), '已有内容');
+  if (longrun) { fs.mkdirSync(path.join(root, '.run'), { recursive: true }); fs.writeFileSync(path.join(root, '.run', 'session_state.json'), '{}'); }
+  if (memory) { fs.mkdirSync(path.join(root, '.memory'), { recursive: true }); fs.writeFileSync(path.join(root, '.memory', 'MEMORY.md'), '- a'); }
+  return root;
+};
+
+await test('目录现状四种：不存在 / 空 / 跑过长程 / 已有传统项目', () => {
+  assert(L.projectDirState(path.join(BASE, 'nope')) === 'missing');
+  fs.mkdirSync(path.join(BASE, 'emptydir'), { recursive: true });
+  assert(L.projectDirState(path.join(BASE, 'emptydir')) === 'empty');
+  assert(L.projectDirState(mkProject('lr1', { longrun: true })) === 'longrun');
+  assert(L.projectDirState(mkProject('trad1')) === 'project');
 });
 
-await test('新建：勾了删掉重建才删；空目录或不存在直接放行', () => {
-  const root = path.join(BASE, 'wipe');
-  fs.mkdirSync(path.join(root, '.git'), { recursive: true });
-  fs.writeFileSync(path.join(root, '.git', 'HEAD'), 'x');
-  assert(L.prepareFreshSandbox('wipe', { fresh: true }) === root && !fs.existsSync(root), '应删掉重建');
-  fs.mkdirSync(path.join(BASE, 'empty'), { recursive: true });
-  assert(L.prepareFreshSandbox('empty') === path.join(BASE, 'empty'), '空目录不算已存在');
-  assert(L.prepareFreshSandbox('never') === path.join(BASE, 'never'), '不存在直接放行');
+await test('新建撞上已有传统项目 → 拒绝并指向接管；勾了删掉重建也绝不删', () => {
+  const root = mkProject('HGame');
+  throwsLaunch(() => L.prepareProject(root, { mode: 'start' }), /接管已有项目/);
+  throwsLaunch(() => L.prepareProject(root, { mode: 'start', fresh: true }), /接管已有项目/);
+  assert(fs.readFileSync(path.join(root, '成果.txt'), 'utf8') === '已有内容', '传统项目被动了');
 });
 
-await test('续跑：沙箱不存在 → 拒绝并列出已有沙箱；没有记忆文件 → 拒绝', () => {
-  throwsLaunch(() => L.checkResumableSandbox('ghost'), /已有沙箱: .*keepme/);
-  fs.mkdirSync(path.join(BASE, 'nomem', '.memory'), { recursive: true });
-  throwsLaunch(() => L.checkResumableSandbox('nomem'), /没有记忆文件/);
-  fs.writeFileSync(path.join(BASE, 'nomem', '.memory', 'MEMORY.md'), '- a');
-  assert(L.checkResumableSandbox('nomem') === path.join(BASE, 'nomem'));
+await test('新建撞上跑过长程的目录：没勾删掉重建拒绝并指向续跑；勾了才删', () => {
+  const root = mkProject('lr_wipe', { longrun: true });
+  throwsLaunch(() => L.prepareProject(root, { mode: 'start' }), /续跑/);
+  assert(fs.existsSync(path.join(root, '成果.txt')), '拒绝时不能动');
+  assert(L.prepareProject(root, { mode: 'start', fresh: true }) === 'missing' && !fs.existsSync(root), '勾了删掉重建应删除');
+  assert(L.prepareProject(path.join(BASE, 'brand_new'), { mode: 'start' }) === 'missing');
+});
+
+await test('接管：只接管有内容且没跑过长程的目录；续跑：必须有记忆文件', () => {
+  assert(L.prepareProject(mkProject('trad2'), { mode: 'takeover' }) === 'project');
+  throwsLaunch(() => L.prepareProject(mkProject('lr2', { longrun: true }), { mode: 'takeover' }), /续跑/);
+  throwsLaunch(() => L.prepareProject(path.join(BASE, 'nothing'), { mode: 'takeover' }), /新建/);
+  throwsLaunch(() => L.prepareProject(path.join(BASE, 'ghost'), { mode: 'resume' }), /不存在/);
+  throwsLaunch(() => L.prepareProject(mkProject('lr3', { longrun: true }), { mode: 'resume' }), /没有记忆文件/);
+  assert(L.prepareProject(mkProject('lr4', { longrun: true, memory: true }), { mode: 'resume' }) === 'longrun');
+});
+
+await test('项目路径解析：名字放在项目根下；绝对路径必须在允许的根内且不能是根本身', () => {
+  assert(L.resolveProjectRoot({ projectName: 'abc' }) === path.join(BASE, 'abc'));
+  throwsLaunch(() => L.resolveProjectRoot({ projectRoot: '/etc/passwd' }), /白名单/);
+  throwsLaunch(() => L.resolveProjectRoot({ projectRoot: BASE }), /项目根目录本身/);
+  throwsLaunch(() => L.resolveProjectRoot({ projectRoot: 'relative/dir' }), /绝对路径/);
+  throwsLaunch(() => L.resolveProjectRoot({ projectName: '../x' }), /不合法/);
+});
+
+await test('跑过长程的项目清单：只列有运行记录的目录', () => {
+  const names = L.listLongRunProjects().map((p) => p.name);
+  assert(names.includes('lr4') && !names.includes('trad2') && !names.includes('emptydir'), names.join(','));
 });
 
 await test('上次运行痕迹：调用/交接/花费 + 记忆索引前 8 条与剩余条数', () => {

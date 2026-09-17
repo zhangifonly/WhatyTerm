@@ -210,6 +210,44 @@ await test('无改动时不误报快照失败（中文 git 环境下原版会误
   assert(bad.length === 0, `误报了: ${bad.map((e) => e.message).join(' | ')}`);
 });
 
+await test('项目在外层 git 仓库里（如 ClaudeCode 工作区）：必须建自有仓库，快照绝不进外层仓库', async () => {
+  // 造一个"外层工作区"仓库，里面有别的项目的未提交改动；长程项目是它的子目录、自己没有 .git
+  const outer = fs.mkdtempSync(path.join(os.tmpdir(), 'outer_ws_'));
+  const g = (args, cwd = outer) => execFileSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' } }).trim();
+  g(['init', '-q']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
+  fs.writeFileSync(path.join(outer, 'README.md'), 'ws'); g(['add', '-A']); g(['commit', '-qm', 'ws']);
+  fs.mkdirSync(path.join(outer, 'OtherClient'));
+  fs.writeFileSync(path.join(outer, 'OtherClient', 'secret.txt'), '别的客户的资料');
+  const loop = makeLoop();
+  const project = path.join(outer, 'NewProject');
+  fs.renameSync(loop._root, project);
+  loop.spec.root = project; loop.spec.runDir = path.join(project, '.run'); loop.spec.memoryDir = path.join(project, '.memory');
+  loop.logPath = path.join(project, '.run', 'loop.log'); loop.statePath = path.join(project, '.run', 'session_state.json');
+  loop.eventsPath = path.join(project, '.run', 'orchestrator.jsonl');
+  fs.writeFileSync(path.join(project, 'app.py'), 'print(1)');
+  loop.ensureRepo();
+  assert(fs.realpathSync(g(['rev-parse', '--show-toplevel'], project)) === fs.realpathSync(project), '项目应成为自有仓库');
+  fs.writeFileSync(path.join(project, 'app.py'), 'print(2)');
+  loop.snapshotCommit('handoff #1');
+  assert(g(['log', '--oneline']).split('\n').length === 1, `外层仓库不该多出提交: ${g(['log', '--oneline'])}`);
+  assert(!g(['diff', '--cached', '--name-only']), `外层仓库不该有暂存: ${g(['diff', '--cached', '--name-only'])}`);
+  assert(/orchestrator snapshot: handoff #1/.test(g(['log', '--oneline'], project)), '快照应提交在项目自己的仓库里');
+  fs.rmSync(outer, { recursive: true, force: true });
+});
+
+await test('接管已有 git 项目：不重建仓库、不动原有 .gitignore 内容，只追加 .run/', async () => {
+  const loop = makeLoop();
+  const g = (args) => execFileSync('git', args, { cwd: loop._root, encoding: 'utf8' }).trim();
+  g(['init', '-q']); g(['config', 'user.email', 't@t']); g(['config', 'user.name', 't']);
+  fs.writeFileSync(path.join(loop._root, '.gitignore'), 'node_modules/');
+  fs.writeFileSync(path.join(loop._root, 'a.txt'), '1'); g(['add', '-A']); g(['commit', '-qm', '用户自己的提交']);
+  loop.ensureRepo();
+  assert(g(['log', '--oneline']).includes('用户自己的提交') && !g(['log', '--oneline']).includes('init sandbox'), '已有仓库不该重建');
+  assert(fs.readFileSync(path.join(loop._root, '.gitignore'), 'utf8') === 'node_modules/\n.run/\n', JSON.stringify(fs.readFileSync(path.join(loop._root, '.gitignore'), 'utf8')));
+  loop.ensureRepo();
+  assert(fs.readFileSync(path.join(loop._root, '.gitignore'), 'utf8') === 'node_modules/\n.run/\n', '已忽略就不再追加');
+});
+
 await test('只剩 objects 的 .git 残壳会被清掉重建', async () => {
   const loop = makeLoop();
   fs.mkdirSync(path.join(loop._root, '.git', 'objects'), { recursive: true });

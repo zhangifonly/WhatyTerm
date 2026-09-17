@@ -29,28 +29,46 @@ export function reportPrompts(sc, prompts) {
   }
 }
 
-/** report_claude_template：模板、skills 授权与项目信任、MCP 放行/屏蔽、记忆目录实际取值。 */
+/**
+ * report_claude_template 的对应项（配置已拆分）：执行者专用配置、skills 授权与项目信任、MCP 放行/屏蔽、
+ * 项目配置只写记忆目录（备份、relay 移走）、接管时导入的记忆、两处记忆目录实际取值。
+ */
 export function reportClaudeTemplate(sc, spec) {
-  const g = '沙箱配置';
-  if (spec.claudeCopied?.length) {
-    sc.info(g, `.claude 模板: 已复制 ${[...spec.claudeCopied].sort().join(', ')}`);
-    if (spec.skillsGranted?.length) {
-      // Skill(*) 通配实测不生效，必须具名授权，且要打出来
-      sc.info(g, `  skills（已具名授权）: ${spec.skillsGranted.join(', ')}`);
-      if (spec.trustGranted) sc.info(g, '  项目信任: 已标记（settings.local.json 才会被加载）');
-      else sc.warn(g, '  项目未标记信任：沙箱 settings.local.json 不会被加载，上面的 skill 授权与 Bash 白名单全部无效');
-    }
-  } else {
-    sc.info(g, '.claude 模板: 无模板目录，跳过');
+  const g = '项目配置';
+  let exec = null;
+  try { exec = JSON.parse(readFileSync(spec.executorSettingsPath, 'utf8')); } catch (e) {
+    sc.warn(g, `读不出执行者配置 ${spec.executorSettingsPath}: ${e.message}`);
   }
+  if (exec) {
+    const p = exec.permissions || {};
+    sc.info(g, `执行者配置: ${spec.executorSettingsPath}（放行 ${(p.allow || []).length} 条、禁止 ${(p.deny || []).length} 条，`
+      + '经 --settings 只交给执行者，同目录的终端会话不受影响）');
+  }
+  if (spec.skillsGranted?.length) {
+    // Skill(*) 通配实测不生效，必须具名授权，且要打出来
+    sc.info(g, `  skills（已具名授权）: ${spec.skillsGranted.join(', ')}`);
+  }
+  // 项目配置（记忆目录）要生效，前提是项目被信任
+  if (spec.trustGranted) sc.info(g, '  项目信任: 已标记（项目 settings.local.json 才会被加载）');
+  else sc.warn(g, '  项目未标记信任：项目 settings.local.json 不会被加载，终端会话读不到共用的记忆目录');
   // 用户级 mcpServers 是继承来的，其中有能在别的进程里跑任意代码的，不该静默生效
   if (spec.mcpAllowed?.length) sc.info(g, `  MCP（已放行）: ${spec.mcpAllowed.join(', ')}`);
   if (spec.mcpDenied?.length) sc.info(g, `  MCP（已屏蔽）: ${spec.mcpDenied.join(', ')}`);
-  try {
-    const actual = JSON.parse(readFileSync(path.join(spec.root, '.claude', 'settings.local.json'), 'utf8'));
-    sc.info(g, `  记忆目录（已覆盖）: ${actual.autoMemoryDirectory}`);
-  } catch (e) {
-    sc.warn(g, `  读不出沙箱 settings: ${e.message}`);
+
+  let project = null;
+  try { project = JSON.parse(readFileSync(path.join(spec.root, '.claude', 'settings.local.json'), 'utf8')); } catch { /* 没有或读不动 */ }
+  sc.info(g, `  记忆目录（执行者）: ${exec?.autoMemoryDirectory || '(未写入)'}`);
+  if (project?.autoMemoryDirectory === spec.memoryDir) {
+    sc.info(g, `  记忆目录（项目配置，终端会话共用）: ${project.autoMemoryDirectory}`);
+  } else {
+    sc.warn(g, '  项目配置没有写上记忆目录（文件读不动时不覆盖），终端会话暂时不会共用 .memory');
+  }
+  if (spec.projectSettingsBackup) sc.info(g, `  项目原配置已备份: ${spec.projectSettingsBackup}`);
+  if (spec.relayStripped) {
+    sc.warn(g, '  项目配置里的会话级 relay 地址已移走（执行者不能走别的会话的 relay）；转为终端时会重新应用该会话的供应商');
+  }
+  if (spec.memoryImported?.length) {
+    sc.info(g, `  已从 Claude 默认记忆位置导入 ${spec.memoryImported.length} 个记忆文件（原处保留）: ${spec.memoryImported.join(', ')}`);
   }
 }
 

@@ -183,6 +183,7 @@ import { DEFAULT_MODEL, CLAUDE_MODEL_FALLBACK_LIST } from './config/constants.js
 import cloudflareTunnel from './services/CloudflareTunnel.js';
 import frpTunnel from './services/FrpTunnel.js';
 import { createProcessSnapshot, createLimiter, paneProcesses } from './services/processTable.js';
+import { isPathWithin, argsMentionDir } from './services/pathBoundary.js';
 import projectTaskReader from './services/ProjectTaskReader.js';
 import RecentProjectsService from './services/RecentProjectsService.js';
 import processDetector from './services/ProcessDetector.js';
@@ -190,7 +191,7 @@ import { getTerminalRecorder } from './services/TerminalRecorder.js';
 import subscriptionService from './services/SubscriptionService.js';
 import { getProjectRecordingService } from './services/ProjectRecordingService.js';
 import cliRegistry from './services/CliRegistry.js';
-import HookServer from './services/HookServer.js';
+import HookServer, { isLongRunHookRequest } from './services/HookServer.js';
 import cliLearner from './services/CliLearner.js';
 import { readContextWaterline, decideWaterlinePhase, isMemoryWritten, HANDOFF_PROMPT, COMPACT_COMMAND, RESUME_PROMPT } from './services/contextWaterline.js';
 import tokenStatsService from './services/TokenStatsService.js';
@@ -486,7 +487,8 @@ function cleanupOrphanProcesses(workDir, sessionName = '') {
       if (!isCleanableType) continue;
 
       // 检查进程是否与项目目录相关
-      const isRelatedToProject = info.args.includes(workDir);
+      // 按路径边界判断：前缀匹配会让关掉 Foo 时误杀 FooBar 的进程（见 pathBoundary.js）
+      const isRelatedToProject = argsMentionDir(info.args, workDir);
 
       // 如果命令行参数不包含项目路径，尝试检查工作目录
       let cwdRelated = false;
@@ -496,7 +498,7 @@ function cleanupOrphanProcesses(workDir, sessionName = '') {
             `lsof -p ${pid} -d cwd -Fn 2>/dev/null | grep "^n" | cut -c2-`,
             { encoding: 'utf-8', timeout: 1000 }
           ).trim();
-          cwdRelated = cwdOutput && cwdOutput.startsWith(workDir);
+          cwdRelated = !!cwdOutput && isPathWithin(cwdOutput, workDir);
         } catch {}
       }
 
@@ -822,6 +824,8 @@ app.post('/hooks', (req, res) => {
   if (!hookServer?.validateToken(req.headers['x-webtmuxtoken'])) {
     return res.status(403).end();
   }
+  // 长程执行者触发的 hook 不归到任何会话（见 isLongRunHookRequest）
+  if (isLongRunHookRequest(req.headers)) return res.status(200).end();
   try {
     const event = req.body || {};
     // 解析 hook 子进程带来的 CLI 有效环境变量快照（实测供应商/模型的最可靠来源）

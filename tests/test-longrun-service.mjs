@@ -20,6 +20,9 @@ import { fileURLToPath } from 'url';
 
 const TMP = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'longrun_service_')));
 process.env.LONGRUN_SANDBOX_BASE = path.join(TMP, 'sandboxes');
+// 新项目默认建在项目根（真实 ~/Documents/ClaudeCode），测试必须同样指到临时目录
+process.env.LONGRUN_PROJECTS_ROOT = process.env.LONGRUN_SANDBOX_BASE;
+process.env.LONGRUN_CLAUDE_PROJECTS = path.join(TMP, 'claude_projects');
 process.env.LONGRUN_CLAUDE_JSON = path.join(TMP, 'claude.json');
 fs.mkdirSync(process.env.LONGRUN_SANDBOX_BASE, { recursive: true });
 fs.writeFileSync(process.env.LONGRUN_CLAUDE_JSON, JSON.stringify({ projects: {} }));
@@ -160,13 +163,15 @@ await test('预检如实报告：沙箱已存在、可续跑、上次运行痕�
   fs.writeFileSync(path.join(root, '.run', 'session_state.json'), JSON.stringify({ legs: 9, handoffs: 1, spent_usd: 2 }));
   const p = svc().plan({ docPath: writeDoc('x'), sandboxName: 'planned' });
   assert(p.sandboxExists && p.resumable && p.prior.legs === 9 && p.prior.memoryIndex[0].includes('第三步'), JSON.stringify(p.prior));
-  assert(p.sandboxes.includes('planned'));
+  assert(p.projects.some((x) => x.name === 'planned') && p.dirState === 'longrun' && p.suggestedMode === 'resume', JSON.stringify(p.projects));
 });
 
 // ── 动沙箱之前的拒绝：旧成果必须原样还在 ─────────────────────
+/** 上一轮长程留下的目录（带运行记录，才允许「删掉重建」） */
 function oldSandbox(name) {
   const root = path.join(process.env.LONGRUN_SANDBOX_BASE, name);
-  fs.mkdirSync(root, { recursive: true });
+  fs.mkdirSync(path.join(root, '.run'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.run', 'session_state.json'), '{}');
   fs.writeFileSync(path.join(root, '成果.txt'), '上一轮');
   return () => fs.existsSync(path.join(root, '成果.txt'));
 }
@@ -199,6 +204,35 @@ await test('勾了删掉重建，但参考路径指向受保护项目 → 删之
   const t = s.start({ docPath: doc, sandboxName: 'badref', fresh: true, allowMissingRefs: true });
   await finished(s, t.id);
   assert(!intact() && t.selfCheck.some((i) => /已按「忽略无法使用的参考路径」继续/.test(i.text)), '放行后要在自检里说出来');
+});
+
+await test('新建撞上已有传统项目 → 拒绝并指向接管，勾删掉重建也不删', async () => {
+  const root = path.join(process.env.LONGRUN_SANDBOX_BASE, 'TradApp');
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(path.join(root, 'main.py'), 'print(1)');
+  await refused(svc(), { docPath: writeDoc('# 需求'), sandboxName: 'TradApp', fresh: true }, /接管已有项目/);
+  assert(fs.readFileSync(path.join(root, 'main.py'), 'utf8') === 'print(1)', '传统项目被动了');
+});
+
+await test('接管已有传统项目：发初始化 + "在已有进度上继续"包装；项目配置与代码不动，自有 git 仓库，旧记忆导入', async () => {
+  const root = path.join(process.env.LONGRUN_SANDBOX_BASE, 'TakeMe');
+  fs.mkdirSync(path.join(root, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'main.py'), 'print(1)');
+  fs.writeFileSync(path.join(root, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: ['Bash(make:*)'] } }));
+  const mem = path.join(process.env.LONGRUN_CLAUDE_PROJECTS, fs.realpathSync(root).replace(/[^a-zA-Z0-9]/g, '-'), 'memory');
+  fs.mkdirSync(mem, { recursive: true });
+  fs.writeFileSync(path.join(mem, 'MEMORY.md'), '- 旧记忆');
+  const s = svc();
+  const t = s.start({ docPath: writeDoc('再加一个导出功能'), projectRoot: root, mode: 'takeover' });
+  await finished(s, t.id);
+  const { sent } = s.runners;
+  assert(sent[0].prompt === PROMPTS.init && sent[1].prompt.startsWith('以下是新增的需求。这不是重新开始'), sent.map((x) => x.prompt.slice(0, 12)).join(' | '));
+  assert(fs.readFileSync(path.join(root, 'main.py'), 'utf8') === 'print(1)', '代码被动了');
+  const settings = JSON.parse(fs.readFileSync(path.join(root, '.claude', 'settings.local.json'), 'utf8'));
+  assert(JSON.stringify(settings.permissions) === '{"allow":["Bash(make:*)"]}' && settings.autoMemoryDirectory === path.join(t.sandboxRoot, '.memory'), JSON.stringify(settings));
+  assert(fs.readFileSync(path.join(root, '.memory', 'MEMORY.md'), 'utf8') === '- 旧记忆', '旧记忆应导入');
+  assert(s.runners.opts[0].settingsFile === path.join(t.sandboxRoot, '.run', 'executor-settings.json'), '执行者配置要经 --settings 传入');
+  assert(t.selfCheck.some((i) => /接管已有项目/.test(i.text)) && t.selfCheck.some((i) => /导入 1 个记忆文件/.test(i.text)));
 });
 
 await test('需求文档不存在、续跑的沙箱没有记忆 → 拒绝', async () => {
@@ -267,7 +301,7 @@ await test('启动自检：第一条事件就是自检，含连坐、投件、�
   const ev = evs(s, t.id);
   assert(ev[0].kind === 'selfcheck' && ev[0].seq === 1 && ev[0].items.length === t.selfCheck.length, ev[0].kind);
   const text = t.selfCheck.map((i) => i.text).join('\n');
-  for (const need of ['子进程连坐', 'inject!.txt', '暂停不是终止', '代答权', '判定提示词', '记忆目录（已覆盖）', 'maintain_2']) {
+  for (const need of ['子进程连坐', 'inject!.txt', '暂停不是终止', '代答权', '判定提示词', '记忆目录（执行者）', '记忆目录（项目配置，终端会话共用）', 'maintain_2']) {
     assert(text.includes(need), `自检缺: ${need}`);
   }
   assert(!/与内置默认不一致/.test(text), '默认提示词不该喊"被改动"');
@@ -375,7 +409,7 @@ await test('同一沙箱同时只能跑一个；撞上时连删掉重建也不�
   await waitFor(() => runners.sent.length === 2, '第二发开跑');
   let e = null;
   try { s.start({ docPath: writeDoc('# 抢'), sandboxName: 'busy', fresh: true }); } catch (x) { e = x; }
-  assert(e && /已有任务在跑/.test(e.message) && fs.existsSync(path.join(t.sandboxRoot, '.run')), e?.message);
+  assert(e && /已有长程任务在跑/.test(e.message) && fs.existsSync(path.join(t.sandboxRoot, '.run')), e?.message);
   assert(s.plan({ docPath: writeDoc('x'), sandboxName: 'busy' }).runningTaskId === t.id, '预检要报出占用它的任务');
   s.terminate(t.id);
   await finished(s, t.id);

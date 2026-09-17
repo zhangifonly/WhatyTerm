@@ -21,13 +21,17 @@ import path from 'path';
 import {
   LongRunSandbox, assertSandboxed, sandboxRoots, protectedRoots,
   userClaudeJson, templateClaudeDir, IsolationViolation,
-  WEBTMUX_ROOT, orchestratorRoot, realResolve,
+  WEBTMUX_ROOT, orchestratorRoot, realResolve, legacySandboxRoot,
 } from '../server/services/LongRunSandbox.js';
 
 // 测试沙箱根指到临时目录：不在用户真实的 _sandbox_longrun（原版产出都在那）里建测试沙箱
 const TEST_BASE = path.join(os.tmpdir(), 'longrun_sandbox_base_test');
 fs.mkdirSync(TEST_BASE, { recursive: true });
 process.env.LONGRUN_SANDBOX_BASE = TEST_BASE;
+// 新项目默认建在项目根（真实 ~/Documents/ClaudeCode），测试必须同样指到临时目录
+process.env.LONGRUN_PROJECTS_ROOT = process.env.LONGRUN_SANDBOX_BASE;
+// 接管时导入的 Claude 默认记忆位置：指到临时目录，不读真实 ~/.claude/projects
+process.env.LONGRUN_CLAUDE_PROJECTS = path.join(TEST_BASE, '_claude_projects');
 
 const results = { passed: 0, failed: 0, errors: [] };
 const pending = [];
@@ -57,6 +61,10 @@ function readJson(p) {
 }
 function settingsOf(spec) {
   return readJson(path.join(spec.root, '.claude', 'settings.local.json'));
+}
+/** 执行者专用配置（经 --settings 传入） */
+function execOf(spec) {
+  return readJson(spec.executorSettingsPath);
 }
 
 /** 清理：删沙箱目录，并把测试留在 ~/.claude.json 里的那条信任记录抹掉 */
@@ -154,50 +162,99 @@ test('已信任时不重复写盘（幂等）', () => {
 // ── 对译 case_claude_template_copied_memory_overridden ────────
 // 隔离的头号情形：模板里 autoMemoryDirectory 指向真实记忆库，照抄会让子进程
 // 直接写进去。复制与覆盖的顺序反了就静默失效 —— 没有报错，只有真实记忆被污染。
-test('记忆目录被强制覆盖成沙箱路径（顺序反了会静默污染）', () => {
+test('记忆目录：执行者配置与项目配置都指向项目内 .memory（终端会话共用），且不指向受保护项目', () => {
   const spec = freshSandbox();
-  const payload = settingsOf(spec);
-  assert(payload.autoMemoryDirectory === spec.memoryDir,
-    `记忆目录未覆盖: ${payload.autoMemoryDirectory}`);
-  // 再过一遍隔离断言：它必须落在沙箱内
-  assertSandboxed(payload.autoMemoryDirectory, '写入后的记忆目录');
-  // 不能残留指向真实记忆库的痕迹
-  for (const guarded of protectedRoots()) {
-    assert(!String(payload.autoMemoryDirectory).startsWith(guarded),
-      `记忆目录仍指向受保护项目: ${payload.autoMemoryDirectory}`);
+  for (const [what, payload] of [['执行者配置', execOf(spec)], ['项目配置', settingsOf(spec)]]) {
+    assert(payload.autoMemoryDirectory === spec.memoryDir, `${what}记忆目录未写对: ${payload.autoMemoryDirectory}`);
+    assertSandboxed(payload.autoMemoryDirectory, `${what}里的记忆目录`);
+    for (const guarded of protectedRoots()) {
+      assert(!String(payload.autoMemoryDirectory).startsWith(guarded), `${what}记忆目录指向受保护项目`);
+    }
   }
 });
 
-test('模板被复制进沙箱，且写坏 settings 也能自愈', () => {
-  const spec = freshSandbox();
-  const tpl = templateClaudeDir();
-  if (fs.existsSync(path.join(tpl, 'skills'))) {
-    assert(fs.existsSync(path.join(spec.root, '.claude', 'skills')), 'skills 未复制');
-  }
-  // settings 被写成非法 JSON 时，重建应重写一份干净的而不是崩掉
-  const sf = path.join(spec.root, '.claude', 'settings.local.json');
+test('项目配置只合并记忆目录：原有权限与非 relay 配置原样保留、首次改动前备份、读不动时不覆盖', () => {
+  const root = path.join(sandboxRoots()[0], SANDBOX_NAME);
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.mkdirSync(path.join(root, '.claude'), { recursive: true });
+  const original = { permissions: { allow: ['Bash(make:*)'], defaultMode: 'default' }, env: { FOO: 'bar' }, model: 'opus' };
+  const sf = path.join(root, '.claude', 'settings.local.json');
+  fs.writeFileSync(sf, JSON.stringify(original, null, 2));
+  const spec = LongRunSandbox.create(SANDBOX_NAME);
+  const now = settingsOf(spec);
+  const { autoMemoryDirectory, ...rest } = now;
+  assert(JSON.stringify(rest) === JSON.stringify(original), `原有配置被改动: ${JSON.stringify(rest)}`);
+  assert(!now.permissions.allow.some((r) => /^Bash\(git/.test(r)), '执行者白名单不该写进项目配置（终端会话会继承）');
+  assert(JSON.stringify(readJson(spec.projectSettingsBackup)) === JSON.stringify(original), '备份内容应是改动前的原文件');
+  // 第二次打开不能用已改过的文件覆盖备份
+  LongRunSandbox.create(SANDBOX_NAME);
+  assert(JSON.stringify(readJson(spec.projectSettingsBackup)) === JSON.stringify(original), '备份被覆盖');
   fs.writeFileSync(sf, '{ 这不是 JSON', 'utf8');
-  const spec2 = LongRunSandbox.create(SANDBOX_NAME);
-  assert(settingsOf(spec2).autoMemoryDirectory === spec2.memoryDir,
-    '非法 JSON 时未重写出干净配置');
+  const spec3 = LongRunSandbox.create(SANDBOX_NAME);
+  assert(fs.readFileSync(sf, 'utf8') === '{ 这不是 JSON', '读不动的项目配置不能被覆盖');
+  assert(execOf(spec3).autoMemoryDirectory === spec3.memoryDir, '记忆目录由执行者配置兜底');
 });
 
-test('每个 skill 都有具名 allow 规则（Skill(*) 通配不放行）', () => {
+test('会话级 relay 地址从项目配置移走并备份，非 relay 的供应商配置不动', () => {
+  const root = path.join(sandboxRoots()[0], SANDBOX_NAME);
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.mkdirSync(path.join(root, '.claude'), { recursive: true });
+  const sf = path.join(root, '.claude', 'settings.local.json');
+  fs.writeFileSync(sf, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:3928/relay/abc', ANTHROPIC_AUTH_TOKEN: 'webtmux-relay-abc', OTHER: '1' },
+    _localProvider: 'relay-proxy', _localProviderId: 'p1' }));
+  const spec = LongRunSandbox.create(SANDBOX_NAME);
+  const now = settingsOf(spec);
+  assert(spec.relayStripped && !now._localProvider && !now.env.ANTHROPIC_BASE_URL && now.env.OTHER === '1', JSON.stringify(now));
+  const saved = readJson(path.join(spec.runDir, 'provider-env.backup.json'));
+  assert(saved.env.ANTHROPIC_BASE_URL.includes('/relay/abc') && saved._localProviderId === 'p1', '移走的 relay 要备份');
+  fs.writeFileSync(sf, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://api.example.com', ANTHROPIC_AUTH_TOKEN: 'x' } }));
+  const spec2 = LongRunSandbox.create(SANDBOX_NAME);
+  assert(!spec2.relayStripped && settingsOf(spec2).env.ANTHROPIC_BASE_URL === 'https://api.example.com', '非 relay 供应商不该动');
+});
+
+test('执行者配置禁止改项目外的 CLAUDE.md（祖先目录逐级 + 用户级）', () => {
   const spec = freshSandbox();
-  const skillsDir = path.join(spec.root, '.claude', 'skills');
-  if (!fs.existsSync(skillsDir)) { skip('skill 授权', '模板里没有 skills'); return; }
-  const payload = settingsOf(spec);
-  // permissions 要保留：--permission-prompts none 下没有 allow 名单，
-  // 执行者的每个 Bash 都会被自动拒绝
-  assert(payload.permissions, '模板里的 permissions 应保留');
-  const allow = payload.permissions.allow || [];
-  assert(spec.skillsGranted.length > 0, '沙箱有 skills 却没写授权规则');
-  for (const name of spec.skillsGranted) {
-    assert(allow.includes(`Skill(${name})`), `缺 Skill(${name}) 规则`);
+  const deny = execOf(spec).permissions.deny;
+  const parent = path.dirname(spec.root);
+  for (const rule of [`Edit(/${parent}/CLAUDE.md)`, `Write(/${parent}/CLAUDE.md)`, 'Edit(//CLAUDE.md)',
+    `Edit(/${path.join(os.homedir(), '.claude', 'CLAUDE.md')})`]) {
+    assert(deny.includes(rule), `缺 deny: ${rule}`);
   }
-  // 名字取自 SKILL.md 的 name: 字段，可以与目录名不同
-  assert(!allow.includes('Skill(*)'),
-    'Skill(*) 通配实测不放行 skill 执行，不该依赖它');
+  assert(!deny.some((r) => r.includes(path.join(spec.root, 'CLAUDE.md'))), '项目自己的 CLAUDE.md 要能改（维护提示词需要）');
+});
+
+test('接管已有项目时把 Claude 默认位置的记忆复制进 .memory：不覆盖同名、原处不删', () => {
+  const root = path.join(sandboxRoots()[0], SANDBOX_NAME);
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.mkdirSync(path.join(root, '.memory'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.memory', 'MEMORY.md'), '项目里已有的索引');
+  const src = path.join(process.env.LONGRUN_CLAUDE_PROJECTS, realResolve(root).replace(/[^a-zA-Z0-9]/g, '-'), 'memory');
+  fs.mkdirSync(src, { recursive: true });
+  fs.writeFileSync(path.join(src, 'MEMORY.md'), '默认位置的索引');
+  fs.writeFileSync(path.join(src, 'decisions.md'), '决定');
+  const spec = LongRunSandbox.open(root, { importMemory: true });
+  assert(JSON.stringify(spec.memoryImported) === '["decisions.md"]', JSON.stringify(spec.memoryImported));
+  assert(fs.readFileSync(path.join(root, '.memory', 'MEMORY.md'), 'utf8') === '项目里已有的索引', '同名不能覆盖');
+  assert(fs.existsSync(path.join(src, 'decisions.md')), '原处不删');
+});
+
+test('项目根本身不能当项目；项目根下的目录与旧沙箱根下的目录都放行', () => {
+  let e = null;
+  try { LongRunSandbox.open(sandboxRoots()[0]); } catch (x) { e = x; }
+  assert(e instanceof IsolationViolation && /项目根目录本身/.test(e.message), e?.message);
+  assert(sandboxRoots().length >= 1 && sandboxRoots().includes(legacySandboxRoot()), '旧沙箱根仍在允许列表里');
+});
+
+test('每个 skill 都有具名 allow 规则（名字取自 SKILL.md，Skill(*) 通配不放行）', () => {
+  const root = path.join(sandboxRoots()[0], SANDBOX_NAME);
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.mkdirSync(path.join(root, '.claude', 'skills', 'agent-browser-skill'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.claude', 'skills', 'agent-browser-skill', 'SKILL.md'), '---\nname: agent-browser\n---\n');
+  const spec = LongRunSandbox.create(SANDBOX_NAME);
+  const allow = execOf(spec).permissions.allow;
+  assert(allow.includes('Skill(agent-browser)') && !allow.includes('Skill(agent-browser-skill)'), '名字要取 SKILL.md 的 name:');
+  // 模板里原版就带着 Skill(*)（实测不放行，但也无害）；要保证的是具名规则一定写上，不能指望通配
+  assert(!(settingsOf(spec).permissions), 'skill 授权只写执行者配置');
 });
 
 // ── 对译 case_mcp_whitelist_only ─────────────────────────────
@@ -206,7 +263,7 @@ test('每个 skill 都有具名 allow 规则（Skill(*) 通配不放行）', () 
 // 被拒后转向自造替代方案（qingming 自造了无头 Chrome），还把"这条路走不通"写进记忆。
 test('MCP 白名单外的服务器必须显式 deny（不是"不 allow 就行"）', () => {
   const spec = freshSandbox();
-  const payload = settingsOf(spec);
+  const payload = execOf(spec);
   const allow = payload.permissions?.allow || [];
   const deny = payload.permissions?.deny || [];
 
@@ -226,13 +283,12 @@ test('MCP 白名单外的服务器必须显式 deny（不是"不 allow 就行"�
 
 test('重建时先清掉旧 mcp__ 规则（防服务器改名后留过期规则）', () => {
   const spec = freshSandbox();
-  const sf = path.join(spec.root, '.claude', 'settings.local.json');
-  const payload = settingsOf(spec);
+  const payload = execOf(spec);
   (payload.permissions.deny ||= []).push('mcp__已改名的老服务器');
-  fs.writeFileSync(sf, JSON.stringify(payload, null, 2), 'utf8');
+  fs.writeFileSync(spec.executorSettingsPath, JSON.stringify(payload, null, 2), 'utf8');
 
   const spec2 = LongRunSandbox.create(SANDBOX_NAME);
-  const deny2 = settingsOf(spec2).permissions?.deny || [];
+  const deny2 = execOf(spec2).permissions?.deny || [];
   assert(!deny2.includes('mcp__已改名的老服务器'), '旧 mcp__ 规则未被清掉');
 });
 
@@ -245,8 +301,11 @@ test('监督者凭据与记忆目录变量都不传给执行者', () => {
     SUPERVISOR_API_KEY: 'sk-should-not-leak',
     SUPERVISOR_BASE_URL: 'https://should-not-leak',
     CLAUDE_AUTO_MEMORY_DIR: '/real/memory',
+    TMUX: '/tmp/tmux-501/default,1,0', TMUX_PANE: '%25',
     PATH: process.env.PATH,
   });
+  // 不去掉的话执行者触发的全局 hook 会被算到同目录的终端会话头上
+  assert(!('TMUX' in env) && !('TMUX_PANE' in env) && env.WEBTMUX_LONGRUN === '1', 'TMUX 要去掉、长程标记要带上');
   const leakedSup = Object.keys(env).filter((k) => k.toUpperCase().startsWith('SUPERVISOR_'));
   assert(leakedSup.length === 0, `监督者凭据泄漏给执行者: ${leakedSup}`);
   const leakedMem = Object.keys(env).filter(
@@ -296,13 +355,13 @@ test('模板不是 ~/.claude，沙箱里不出现任何凭据类文件', () => {
       else if (/^(config\.json|history\.jsonl|\.credentials.*|settings\.json(\.bak.*)?)$/.test(n)) found.push(p);
     }
   };
-  walk(path.join(spec.root, '.claude'));
-  assert(found.length === 0, `沙箱 .claude 里出现凭据类文件: ${found.join(', ')}`);
+  walk(spec.root);
+  assert(found.length === 0, `项目目录里出现凭据类文件: ${found.join(', ')}`);
 });
 
 test('模板带原版护栏：危险 git 操作 deny、git push 走 ask、放行 puppeteer', () => {
   const spec = freshSandbox();
-  const p = settingsOf(spec).permissions;
+  const p = execOf(spec).permissions;
   for (const rule of ['Bash(git reset --hard:*)', 'Bash(git push --force:*)', 'Bash(git clean -f:*)']) {
     assert(p.deny.includes(rule), `缺 deny: ${rule}`);
   }
