@@ -82,7 +82,8 @@ export function sandboxRoots() {
 
 /** 用户级 CLI 配置。项目的「已信任」状态与用户级 MCP 服务器都在这里。 */
 export function userClaudeJson() {
-  return path.join(os.homedir(), '.claude.json');
+  // 覆盖仅供测试：服务层测试要建很多沙箱，不能往真实配置里留信任条目
+  return process.env.LONGRUN_CLAUDE_JSON || path.join(os.homedir(), '.claude.json');
 }
 
 /**

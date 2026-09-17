@@ -41,7 +41,7 @@ const runnerKinds = [
   // _emit 前是下划线、没有词边界，\bemit 会漏抽（inject.waiting / inject.sent 就这样漏过）
   ...kindsIn(read('LongRunRunner.js'), /(?:\b|_)emit\('([a-z_.]+)'/g),
 ].map((k) => `exec.${k}`);
-const serviceKinds = kindsIn(read('LongRunService.js'), /this\._push\(task, '([a-z_.]+)'/g);
+const serviceKinds = kindsIn(read('LongRunService.js'), /this\._emit\(task, '([a-z_.]+)'/g);
 
 /** 兜底样式的特征：标题就是类型名本身 */
 const isFallback = (ev, desc) => desc.icon === '•' && desc.title === ev.kind;
@@ -49,7 +49,7 @@ const isFallback = (ev, desc) => desc.icon === '•' && desc.title === ev.kind;
 test('源码里确实抽到了事件（否则下面的守卫是空转）', () => {
   assert(loopKinds.length >= 12, `loop 事件太少，正则可能失配: ${loopKinds}`);
   assert(runnerKinds.length >= 8, `runner 事件太少，正则可能失配: ${runnerKinds}`);
-  assert(serviceKinds.includes('state'), `service 事件抽取失配: ${serviceKinds}`);
+  assert(['state', 'error', 'selfcheck'].every((k) => serviceKinds.includes(k)), `service 事件抽取失配: ${serviceKinds}`);
 });
 
 test('服务端发出的每种事件，前端都有专门的显示规则（不走兜底）', () => {
@@ -165,7 +165,7 @@ const prefixed = (obj, p) => Object.fromEntries(Object.entries(obj).map(([k, v])
 const sourceFields = {
   ...fieldsIn(read('LongRunLoop.js'), /this\.emit\('([a-z_.]+)',/g),
   ...prefixed(fieldsIn(read('LongRunRunner.js'), /(?:\b|_)emit\('([a-z_.]+)',/g), 'exec.'),
-  ...fieldsIn(read('LongRunService.js'), /this\._push\(task, '([a-z_.]+)',/g),
+  ...fieldsIn(read('LongRunService.js'), /this\._emit\(task, '([a-z_.]+)',/g),
 };
 
 test('前端读的每个事件字段，源码里真的发了（改名一边忘改另一边会满屏 undefined 却照样绿）', () => {

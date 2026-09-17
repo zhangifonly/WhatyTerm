@@ -7225,11 +7225,11 @@ io.on('connection', (socket) => {
   // 人工干预走**文件约定**（.run/inject.txt / inject!.txt / pause），
   // 面板上的按钮也是写这些文件，与从终端投件是同一条路。
 
-  /** 预检：解析需求文档，给出沙箱建议与外部参考清单。不启动任何进程。 */
-  socket.on('longrun:plan', ({ docPath, sandboxName }, cb) => {
+  /** 预检：解析需求，给出沙箱现状与外部参考清单。不建沙箱、不起进程、不删任何东西。 */
+  socket.on('longrun:plan', ({ docPath, requirementText, sandboxName, promptsFile } = {}, cb) => {
     const reply = (d) => { socket.emit('longrun:planned', d); if (typeof cb === 'function') cb(d); };
     try {
-      reply({ ok: true, ...longRunService.plan({ docPath, sandboxName }) });
+      reply({ ok: true, ...longRunService.plan({ docPath, requirementText, sandboxName, promptsFile }) });
     } catch (e) {
       reply({ ok: false, error: e.message });
     }
@@ -7254,6 +7254,15 @@ io.on('connection', (socket) => {
     // 带上最近事件：刷新页面后时间线不是空的
     const d = { ok: true, task: longRunService.status(taskId), events: longRunService.history(taskId) };
     if (typeof cb === 'function') cb(d);
+  });
+
+  /** 已有沙箱与上次运行痕迹（续跑时挑沙箱用）。 */
+  socket.on('longrun:sandboxes', (_ = {}, cb) => {
+    try {
+      if (typeof cb === 'function') cb({ ok: true, sandboxes: longRunService.sandboxes() });
+    } catch (e) {
+      if (typeof cb === 'function') cb({ ok: false, error: e.message });
+    }
   });
 
   socket.on('longrun:status', ({ taskId } = {}, cb) => {
@@ -7282,15 +7291,20 @@ io.on('connection', (socket) => {
 
   /** 优雅停止：先立即打断当前发次，再挂暂停闸（顺序不能反）。 */
   socket.on('longrun:stop', ({ taskId, reason }, cb) => {
-    const d = longRunService.stop(taskId, reason || '用户请求停止');
+    const d = longRunService.stop(taskId, reason);
     if (typeof cb === 'function') cb(d);
   });
 
-  /** 回答 needs_human。空回答等于让它停机等人。 */
+  /** 回答执行者的提问。原样发给执行者；空回答 = 停机。 */
   socket.on('longrun:answer', ({ taskId, text }, cb) => {
-    const task = longRunService.tasks.get(taskId);
-    const ok = task ? task.answerHuman(text) : false;
-    if (typeof cb === 'function') cb({ ok, error: ok ? '' : '任务不存在或当前不在等人' });
+    const d = longRunService.answer(taskId, text);
+    if (typeof cb === 'function') cb(d);
+  });
+
+  /** 终止：杀执行者进程组，本轮以「人工终止」收工并打快照。与「停下」不同，之后不会再动。 */
+  socket.on('longrun:terminate', ({ taskId, reason }, cb) => {
+    const d = longRunService.terminate(taskId, reason || undefined);
+    if (typeof cb === 'function') cb(d);
   });
 
   socket.on('ralph:plan', async ({ sessionId, goal }) => {

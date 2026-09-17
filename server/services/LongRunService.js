@@ -1,158 +1,200 @@
 /**
  * 长程编排：服务层
  *
- * 把五个模块（Prompts / Sandbox / Runner / Supervisor / Loop）组装成可被 socket
- * 调用的运行实例，并管理它们的生命周期。
+ * 把 Launch（入口语义）/ Sandbox / Supervisor / Loop 组装成可被 socket 调用的运行实例，
+ * 并管理生命周期。对应原版 start.py + resume.py + cli_common.build_loop；看板换成 WebTmux 面板。
  *
- * 凭据从 **CC Switch** 取（经 AIEngine），不引入编排器原来的 .env 机制 ——
- * 项目规矩是禁止硬编码 Key。
+ * 凭据从 **CC Switch** 取（经 AIEngine），不引入原版的 SUPERVISOR_* 环境变量 ——
+ * 项目规矩是禁止硬编码 Key。这是与原版唯一的凭据来源差异。
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
+import { existsSync, writeFileSync, mkdirSync, unlinkSync, statSync } from 'fs';
 import path from 'path';
 import os from 'os';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
-import { loadPrompts, loadRequirement, renderRefsSection, extraDirsOf } from './LongRunPrompts.js';
-import { LongRunSandbox, sandboxRoots, assertSandboxed } from './LongRunSandbox.js';
-import { LongRunRunner } from './LongRunRunner.js';
+import { loadPrompts, loadRequirement, extraDirsOf, PROMPT_SLOTS } from './LongRunPrompts.js';
+import { LongRunSandbox } from './LongRunSandbox.js';
 import { Supervisor, loadSystemPrompt } from './LongRunSupervisor.js';
-import { LongRunLoop, Stop, HANDOFF_FLOOR, HANDOFF_CEILING, HARD_KILL } from './LongRunLoop.js';
+import { LongRunLoop, Stop, assertThresholds, HANDOFF_FLOOR, HANDOFF_CEILING, HARD_KILL,
+  MAINTENANCE_EVERY, TOTAL_BUDGET_USD, MAX_LEGS } from './LongRunLoop.js';
+import { TASK_WAIT } from './LongRunRunner.js';
+import {
+  LaunchError, sandboxBase, deriveSandboxName, assertSandboxName, listSandboxes, memoryFiles,
+  prepareFreshSandbox, checkResumableSandbox, priorState, checkRejectedRefs, requirementInput,
+  previewRequirement,
+} from './LongRunLaunch.js';
+import {
+  SelfCheck, reportPrompts, reportClaudeTemplate, reportJobguard, reportInject, reportPriorState,
+  reportRequirement, reportSupervisor,
+} from './LongRunSelfCheck.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const PROMPT_FILE = path.join(HERE, '..', 'prompts', 'longrun', '提示词.txt');
-/**
- * 面板粘贴的需求文本落盘处。网页拿不到本机文件的绝对路径，所以粘贴的文本要先
- * 变成文件再走原流程（编排器全程只认文档路径）。**不放沙箱根里**：沙箱名可能撞上。
- */
+export const PROMPT_FILE = path.join(HERE, '..', 'prompts', 'longrun', '提示词.txt');
+
 /** 每个任务在内存里留多少条事件供回放。一轮实测过程事件与对话约 30:1，给宽 */
 export const EVENT_BUFFER = 1000;
 
-export const REQUIREMENT_DIR = path.join(os.homedir(), '.webtmux', 'longrun-requirements');
-
-/** 从需求正文取名：首个 Markdown 标题，其次首个非空行。 */
-export function deriveName(text) {
-  const lines = String(text || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  const head = lines.find((l) => /^#{1,3}\s+\S/.test(l)) || lines[0] || '';
-  return head.replace(/^#+\s*/, '').replace(/[^\w\u4e00-\u9fa5-]/g, '-')
-    .replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'longrun';
-}
+/**
+ * 「停下」时发给执行者的默认打断语（与面板的安全措辞模板一致）。
+ * ⚠ 暂停不是终止：之后发的是「继续完成项目」。写成"停下别干了"会留在会话历史里与继续指令矛盾，
+ *   还可能被执行者当结论写进记忆库，那条记忆比这次暂停活得久得多。
+ */
+export const STOP_REASON = '先停一下，把当前在做的这一步收个尾、记下进度。我看完就让你接着做，不要写"任务终止"之类的结论。';
 
 /**
- * 一次运行的实例。
- * 事件既推给 socket 房间，也落盘到 <沙箱>/.run/orchestrator.jsonl。
+ * 面板粘贴的需求文本落盘处。网页拿不到本机文件的绝对路径，粘贴的文本要先变成文件再走原流程
+ * （编排器全程只认文档路径）。**不放沙箱根里**：沙箱名可能撞上。
  */
+export const REQUIREMENT_DIR = path.join(os.homedir(), '.webtmux', 'longrun-requirements');
+
+/** 粘贴需求的名字：首个 Markdown 标题，其次首个非空行；再按 start.py 规则清洗成沙箱名。 */
+export function deriveName(text) {
+  const lines = String(text || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const head = (lines.find((l) => /^#{1,3}\s+\S/.test(l)) || lines[0] || '').replace(/^#+\s*/, '');
+  return deriveSandboxName(`${head}.md`);
+}
+
+/** 一次运行的实例。事件落盘由 loop 负责（.run/orchestrator.jsonl），这里只推 socket 与留回放缓冲。 */
 class LongRunTask {
-  constructor({ id, sandbox, loop, requirement, io }) {
-    this.id = id;
-    this.sandbox = sandbox;
-    this.loop = loop;
-    this.requirement = requirement;
-    this.io = io;
+  constructor({ id, mode, sandbox, docPath, requirementText, options, selfCheck, supervisorInfo }) {
+    Object.assign(this, { id, mode, sandbox, docPath, requirementText, options, selfCheck, supervisorInfo });
+    this.loop = null;
     this.startedAt = Date.now();
     this.state = 'running';      // running | done | failed
     this.report = null;
-    /** 最近的运行态快照，供 longrun:status 查询 */
-    this.snapshot = { legs: 0, handoffs: 0, costUsd: 0, contextPeak: 0, occupied: 0, lastLabel: '' };
-    /**
-     * 事件自增序号。前端折叠状态必须按它做键 —— 用数组下标的话，条目被挤出缓冲时
-     * 下标整体错位，展开状态会跳到别的条目上（原编排器看板踩过）。
-     */
+    this.snapshot = { legs: 0, handoffs: 0, maintenances: 0, decisions: 0, costUsd: 0,
+      contextPeak: 0, occupied: 0, lastLabel: '' };
+    /** 事件自增序号。前端折叠状态按它做键 —— 用下标的话条目被挤出缓冲时整体错位 */
     this.seq = 0;
-    /** 最近事件的环形缓冲，刷新页面后 longrun:subscribe 靠它回放 */
     this.events = [];
+    /** 等人回答的挂起点（need_human 时由 loop 经 humanChannel 挂上） */
+    this._humanWaiter = null;
   }
 
   get room() { return `longrun:${this.id}`; }
 
-  /** 人工回答的等待队列（needs_human 时用） */
-  _humanWaiter = null;
-
-  answerHuman(text) {
-    if (!this._humanWaiter) return false;
-    const resolve = this._humanWaiter;
-    this._humanWaiter = null;
-    resolve(String(text || ''));
-    return true;
-  }
-
   toJSON() {
+    const loop = this.loop;
     return {
       id: this.id,
+      mode: this.mode,
+      sandboxName: path.basename(this.sandbox.root),
       sandboxRoot: this.sandbox.root,
+      docPath: this.docPath,
+      requirementChars: this.requirementText.length,
       state: this.state,
       startedAt: this.startedAt,
-      requirementSource: this.requirement?.source || '',
-      thresholds: {
-        handoffFloor: this.loop.handoffFloor,
-        handoffCeiling: this.loop.handoffCeiling,
-        hardKill: this.loop.hardKill,
-      },
-      totalBudgetUsd: this.loop.totalBudgetUsd,
+      options: this.options,
+      thresholds: { handoffFloor: loop.handoffFloor, handoffCeiling: loop.handoffCeiling, hardKill: loop.hardKill },
+      totalBudgetUsd: loop.totalBudgetUsd,
+      maxLegs: loop.maxLegs,
+      supervisor: this.supervisorInfo,
+      selfCheck: this.selfCheck,
       ...this.snapshot,
       report: this.report,
-      // 人工干预入口（文件约定，看板保持只读）
-      injectPath: this.loop.injectPath,
-      pausePath: this.loop.pausePath,
-      paused: existsSync(this.loop.pausePath),
+      injectPath: loop.injectPath,
+      injectNowPath: loop.injectNowPath,
+      pausePath: loop.pausePath,
+      // 两个状态分开：闸已挂上（pause 文件在）≠ 真停在派发口（当前这发会照常跑完）
+      pauseArmed: existsSync(loop.pausePath),
+      halted: !!loop.halted,
       awaitingHuman: !!this._humanWaiter,
+      aborted: loop.aborted || '',
     };
   }
+}
+
+/** 数值参数：缺省取默认，给了就必须合法（原版 argparse 按类型拒绝）。 */
+function num(v, def, name, { min = 0, int = false } = {}) {
+  if (v === undefined || v === null || v === '') return def;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < min || (int && !Number.isInteger(n))) {
+    throw new LaunchError(`${name} 必须是 ≥ ${min} 的${int ? '整数' : '数'}，收到 ${JSON.stringify(v)}`);
+  }
+  return n;
+}
+
+/**
+ * 启动参数（对应原版 start.py / resume.py 的全部命令行参数；--web/--port 由面板取代）。
+ * 返回规整后的副本，也原样挂在任务快照上供面板复述"这次是按什么参数跑的"。
+ */
+export function normalizeOptions(o = {}) {
+  const mode = o.mode === 'resume' ? 'resume' : 'start';
+  const out = {
+    mode,
+    sandboxName: o.sandboxName ? String(o.sandboxName).trim() : '',
+    fresh: mode === 'start' && !!o.fresh,
+    model: o.model ? String(o.model).trim() : '',
+    promptsFile: o.promptsFile ? String(o.promptsFile).trim() : '',
+    supervisorPrompt: o.supervisorPrompt ? String(o.supervisorPrompt).trim() : '',
+    totalBudgetUsd: num(o.totalBudgetUsd, TOTAL_BUDGET_USD, '总预算'),
+    maxLegs: num(o.maxLegs, MAX_LEGS, '调用次数上限', { min: 1, int: true }),
+    handoffFloor: num(o.handoffFloor, HANDOFF_FLOOR, '交接下限', { min: 1, int: true }),
+    handoffCeiling: num(o.handoffCeiling, HANDOFF_CEILING, '主动打断线', { min: 1, int: true }),
+    hardKill: num(o.hardKill, HARD_KILL, '硬上限', { min: 1, int: true }),
+    maintenanceEvery: num(o.maintenanceEvery, MAINTENANCE_EVERY, '记忆维护间隔', { int: true }),
+    taskWait: num(o.taskWait, TASK_WAIT, '后台任务等待上限'),
+    noAsk: !!o.noAsk,
+    noSupervisor: !!o.noSupervisor,
+    allowMissingRefs: !!o.allowMissingRefs,
+    providerId: o.providerId || null,
+  };
+  try { assertThresholds(out); } catch (e) { throw new LaunchError(e.message); }
+  return out;
 }
 
 export class LongRunService {
   /**
    * @param {object} o
    * @param {object} o.io        socket.io 实例（推事件用）
-   * @param {object} o.aiEngine  取凭据 + 调 LLM（监督者走它，从而走 CC Switch）
+   * @param {object} o.aiEngine  取 CC Switch 凭据 + 调监督者 LLM
+   * @param {function} [o.runnerFactory]  执行者工厂（仅测试注入；缺省起真 claude 进程）
    */
-  constructor({ io, aiEngine } = {}) {
+  constructor({ io, aiEngine, runnerFactory = null } = {}) {
     this.io = io;
     this.aiEngine = aiEngine;
+    this.runnerFactory = runnerFactory;
     /** id → LongRunTask */
     this.tasks = new Map();
   }
 
-  /**
-   * 监督者的 LLM 调用。走 AIEngine → CC Switch 凭据 + Claude Relay 伪装头。
-   *
-   * ⚠ 这是我们与原编排器的**唯一实现差异**：它从 .env 读 SUPERVISOR_API_KEY，
-   *   我们禁止硬编码 Key，一律从 CC Switch 取。行为等价，凭据来源不同。
-   */
-  _makeComplete(providerId = null) {
+  /** 监督者凭据：指定了供应商用会话级解析，否则取全局 Claude 配置。 */
+  _supervisorConfig(providerId) {
     const engine = this.aiEngine;
     if (!engine) return null;
-    return async (systemPrompt, userText) => {
-      const config = providerId
-        ? engine.resolveSessionSettings('claude', providerId)
-        : engine.getSettings()?.claude;
-      if (!config?.apiUrl || !config?.apiKey) {
-        throw new Error('监督者供应商未配置：请在 CC Switch 里选一个 Claude 供应商');
-      }
-      // 把 system 与 user 拼给现成的调用口。它内部处理伪装头、模型降级、结构化输出。
-      const r = await engine._callClaudeApi(
-        `${systemPrompt}\n\n---\n\n${userText}`, config, {});
-      return {
-        text: r?.text || '',
-        inputTokens: r?.usage?.input_tokens || 0,
-        outputTokens: r?.usage?.output_tokens || 0,
-        stopReason: r?.stopReason || r?.stop_reason || 'end_turn',
-      };
-    };
+    return providerId ? engine.resolveSessionSettings('claude', providerId) : engine.getSettings()?.claude;
   }
 
   /**
-   * 预检：解析需求文档，给出沙箱建议与外部参考清单。**不启动任何进程。**
-   * 对应编排器的 --plan-only。
+   * cli_common.make_supervisor。需求文档同时给执行者和监督者，必须是同一份文本。
+   * 提示词读不到硬失败（以为换了规则而实际跑的是默认那份，最难察觉）；
+   * 凭据缺失则不启用并警告（原版 LLMError 分支），执行者每次结束都停机等人。
    */
-  /**
-   * 粘贴的文本 → 文件路径。按内容哈希命名，**幂等**：plan 与 start 各调一次
-   * 只会落同一个文件，不会攒出两份。
-   */
+  _makeSupervisor(o, requirementText) {
+    if (o.noSupervisor) return { supervisor: null, info: { status: 'off' } };
+    const { text, source } = loadSystemPrompt(o.supervisorPrompt || null);
+    const builtinText = o.supervisorPrompt ? loadSystemPrompt().text : text;
+    const config = this._supervisorConfig(o.providerId);
+    if (!config?.apiUrl || !config?.apiKey) {
+      return { supervisor: null,
+        info: { status: 'unavailable', error: '没有可用的 Claude 供应商（CC Switch 未配置或缺少地址/密钥）' } };
+    }
+    const engine = this.aiEngine;
+    const supervisor = new Supervisor({
+      requirementText, systemPrompt: text, promptSource: source, maxTokens: 4000,
+      complete: (system, user) => engine.callClaudeMessages({ config, system, user, maxTokens: 4000 }),
+    });
+    return { supervisor,
+      info: { status: 'on', model: config.model || '', baseUrl: config.apiUrl, promptSource: source,
+        promptText: text, builtinText } };
+  }
+
+  /** 粘贴的文本 → 文件路径。按内容哈希命名，幂等：plan 与 start 各调一次只落同一个文件。 */
   resolveDocPath({ docPath, requirementText }) {
-    if (docPath) return docPath;
+    if (docPath) return String(docPath);
     const text = String(requirementText || '').trim();
-    if (!text) throw new Error('需求为空：请粘贴需求文本，或填写本机需求文档的绝对路径');
+    if (!text) throw new LaunchError('需求为空：请粘贴需求文本，或填写本机需求文档的绝对路径');
     const hash = createHash('sha256').update(text).digest('hex').slice(0, 12);
     const file = path.join(REQUIREMENT_DIR, `${deriveName(text)}-${hash}.md`);
     mkdirSync(REQUIREMENT_DIR, { recursive: true });
@@ -160,120 +202,156 @@ export class LongRunService {
     return file;
   }
 
-  plan({ docPath: rawDoc, requirementText, sandboxName }) {
+  /** 该沙箱上正在跑的任务（同一沙箱同时只允许一个：两个执行者抢同一个 git 仓库与记忆库）。 */
+  _runningOn(root) {
+    return [...this.tasks.values()].find((t) => t.state === 'running' && t.sandbox.root === root) || null;
+  }
+
+  /**
+   * 预检：解析需求、给出沙箱现状与参考清单。**不建沙箱、不起进程、不删任何东西。**
+   * 面板据此决定是提示"已存在，续跑还是删掉重建"，还是直接新建。
+   */
+  plan({ docPath: rawDoc, requirementText, sandboxName, promptsFile } = {}) {
     const docPath = this.resolveDocPath({ docPath: rawDoc, requirementText });
-    const prompts = loadPrompts(PROMPT_FILE);          // 缺段就在这里硬失败
-    const req = loadRequirement(docPath, null);         // spec=null：只解析不登记
-    const baseName = requirementText && !rawDoc
-      ? deriveName(requirementText) : path.basename(docPath);
-    const name = sandboxName || baseName.replace(/\.[^.]+$/, '')
-      .replace(/[^\w一-龥-]/g, '-').slice(0, 40) || 'longrun';
+    const prompts = loadPrompts(promptsFile || PROMPT_FILE);   // 缺段就在这里硬失败
+    const req = previewRequirement(docPath);
+    const name = assertSandboxName(sandboxName
+      || (requirementText && !rawDoc ? deriveName(requirementText) : deriveSandboxName(docPath)));
+    const root = path.join(sandboxBase(), name);
+    const exists = existsSync(root) && statSync(root).isDirectory();
+    const dirs = extraDirsOf(req);
     return {
       docPath,
       sandboxName: name,
-      sandboxRoot: path.join(sandboxRoots()[0], name),
+      sandboxRoot: root,
+      sandboxExists: exists,
+      resumable: exists && memoryFiles(root).length > 0,
+      prior: exists ? priorState(root) : null,
+      runningTaskId: this._runningOn(root)?.id || null,
+      sandboxes: listSandboxes(),
       requirementChars: req.text.length,
       refs: req.refs.map((r) => ({ path: r.path, isDir: r.isDir })),
       urls: req.urls,
       rejected: req.rejected,
-      extraDirs: extraDirsOf(req),
-      promptSlots: Object.keys(prompts).filter((k) => k !== 'source'),
-      // ⚠ --add-dir 给的是**读写**权限。启动时要让用户看见这一点
-      writableWarning: extraDirsOf(req).length
-        ? `这 ${extraDirsOf(req).length} 个外部目录对执行者是**可写**的（--add-dir 非只读）`
-        : '',
+      extraDirs: dirs,
+      promptSource: prompts.source,
+      promptSlots: Object.keys(PROMPT_SLOTS),
+      writableWarning: dirs.length ? `这 ${dirs.length} 个外部目录对执行者是可写的（--add-dir 非只读）` : '',
     };
   }
 
   /**
-   * 启动一次长程运行。
-   * @returns {object} 任务快照（异步跑，通过 socket 房间推事件）
+   * 启动一次运行。mode=start 对应 start.py（发初始化提示词），mode=resume 对应 resume.py（跳过初始化，
+   * 需求按"新增"包装）。能在动沙箱之前查出的问题全部先查：参数、文档、提示词、监督者提示词、参考路径。
+   * 原版有几项放在建沙箱之后才查，带 --fresh 时等于先删了旧成果才报错 —— 这里前移。
+   * @returns {object} 任务快照（异步跑，事件推 socket 房间 longrun:<id>）
    */
-  start({ docPath: rawDoc, requirementText, sandboxName, providerId = null, thresholds = {}, totalBudgetUsd,
-          maxLegs = 0, skipInit = false, costCeiling = 0 } = {}) {
-    const prompts = loadPrompts(PROMPT_FILE);
-    const docPath = this.resolveDocPath({ docPath: rawDoc, requirementText });
-    const plan = this.plan({ docPath, sandboxName });
-    const sandbox = LongRunSandbox.create(plan.sandboxName);
-    // 需求文档要在沙箱建好之后再解析一次：这次带 spec，外部参考才会被登记 + 校验
+  start(opts = {}) {
+    const o = normalizeOptions(opts);
+    const docPath = this.resolveDocPath(opts);
+    if (!existsSync(docPath) || !statSync(docPath).isFile()) throw new LaunchError(`需求文档不存在: ${path.resolve(docPath)}`);
+    const prompts = loadPrompts(o.promptsFile || PROMPT_FILE);
+    if (!o.noSupervisor) loadSystemPrompt(o.supervisorPrompt || null);          // 读不到硬失败
+    checkRejectedRefs(previewRequirement(docPath), o);
+
+    const name = assertSandboxName(o.sandboxName
+      || (opts.requirementText && !opts.docPath ? deriveName(opts.requirementText) : deriveSandboxName(docPath)));
+    const root = path.join(sandboxBase(), name);
+    const busy = this._runningOn(root);
+    if (busy) throw new LaunchError(`沙箱 ${name} 上已有任务在跑（${busy.id}）。同一沙箱同时只能跑一个。`);
+    if (o.mode === 'resume') checkResumableSandbox(name);
+    else prepareFreshSandbox(name, { fresh: o.fresh });
+
+    return this._launch({ o, docPath, prompts, sandbox: LongRunSandbox.create(name) });
+  }
+
+  /** 建好沙箱之后：登记参考路径、收集自检清单、组装监督者与循环、异步开跑。 */
+  _launch({ o, docPath, prompts, sandbox }) {
+    const resume = o.mode === 'resume';
+    // 带 spec 再解析一次：外部参考这次才真正登记进沙箱（--add-dir）。与预检同一套规则
     const req = loadRequirement(docPath, sandbox);
-    sandbox.verifyClean();                            // 运行前复核
+    checkRejectedRefs(req, o);
 
-    // 发给执行者的正文 = 需求原文 + 参考清单（与编排器一致）
-    const fullRequirement = req.text + (req.refs.length || req.urls.length
-      ? '\n\n' + renderRefsSection(req) : '');
+    const sc = new SelfCheck();
+    reportPrompts(sc, prompts);
+    sc.info('沙箱', `沙箱: ${sandbox.root}${resume ? '（续跑）' : ''}`);
+    reportClaudeTemplate(sc, sandbox);
+    reportJobguard(sc);
+    reportInject(sc, sandbox);
+    if (resume) reportPriorState(sc, priorState(sandbox.root));
+    reportRequirement(sc, req, o);
 
-    const complete = this._makeComplete(providerId);
-    const supervisor = complete
-      ? new Supervisor({ complete, systemPrompt: loadSystemPrompt().text, maxTokens: 4000 })
-      : null;
+    const input = requirementInput(req, { resume });
+    const { supervisor, info } = this._makeSupervisor(o, input);
+    reportSupervisor(sc, info);
+    const { promptText, builtinText, ...supervisorInfo } = info;   // 全文不进快照
 
-    const id = `${plan.sandboxName}-${Date.now().toString(36)}`;
-    const task = new LongRunTask({ id, sandbox, loop: null, requirement: req, io: this.io });
-
-    const loop = new LongRunLoop({
-      sandbox, prompts, requirementText: fullRequirement, supervisor,
-      handoffFloor: thresholds.handoffFloor ?? HANDOFF_FLOOR,
-      handoffCeiling: thresholds.handoffCeiling ?? HANDOFF_CEILING,
-      hardKill: thresholds.hardKill ?? HARD_KILL,
-      totalBudgetUsd, maxLegs, skipInit, costCeiling,
-      makeRunner: (killAt) => new LongRunRunner({
-        cwd: sandbox.root,
-        env: sandbox.childEnv(),                      // 已清掉监督者凭据与记忆变量
-        eventsPath: path.join(sandbox.runDir, 'orchestrator.jsonl'),
-        contextLimit: killAt || 0,
-        costCeiling,
-        extraDirs: sandbox.extraDirs,
-        wallTimeout: 7200,
-        checkInject: () => loop.takeInject(),
-        // 执行层事件加 exec. 前缀：runner 与 loop 都有 send，不区分前端会一发显示两条
-        emit: (k, d) => this._push(task, `exec.${k}`, d),
-      }),
-      // 不再推 need_human.waiting：loop.askHumanFor 调这里之前已带着原因推过一次。
-      // Promise 执行器同步运行，waiter 在同一 tick 挂好，不存在答复先到的竞态。
-      askHuman: () => new Promise((resolve) => { task._humanWaiter = resolve; }),
-      emit: (k, d) => this._push(task, k, d),
+    const id = `${path.basename(sandbox.root)}-${Date.now().toString(36)}`;
+    const task = new LongRunTask({ id, mode: o.mode, sandbox, docPath, requirementText: input,
+      options: { ...o }, selfCheck: sc.toJSON(), supervisorInfo });
+    task.loop = new LongRunLoop({
+      sandbox, prompts, requirementText: input, supervisor,
+      model: o.model, handoffFloor: o.handoffFloor, handoffCeiling: o.handoffCeiling, hardKill: o.hardKill,
+      maintenanceEvery: o.maintenanceEvery, totalBudgetUsd: o.totalBudgetUsd, maxLegs: o.maxLegs,
+      taskWait: o.taskWait, askHuman: !o.noAsk, skipInit: resume,
+      onEvent: (ev) => this._push(task, ev),
+      // Promise 执行器同步运行，waiter 在同一 tick 挂好，不存在回答先到的竞态
+      humanChannel: () => new Promise((resolve) => { task._humanWaiter = resolve; }),
+      ...(this.runnerFactory ? { runnerFactory: this.runnerFactory } : {}),
     });
-    task.loop = loop;
     this.tasks.set(id, task);
+    this._emit(task, 'selfcheck', { items: task.selfCheck });
 
-    // 异步跑，不阻塞 socket 回调
-    loop.run().then((report) => {
+    task.loop.run().then((report) => {
       task.report = report;
       task.state = report.stop === Stop.PROJECT_DONE ? 'done' : 'failed';
-      // finished 事件 loop.run 已推过；这里只补一条状态，供面板切换徽标
-      this._push(task, 'state', { state: task.state, stop: report.stop });
+      task._humanWaiter = null;
+      this._emit(task, 'state', { state: task.state, stop: report.stop });   // finished 已由 loop 发过
     }).catch((e) => {
       task.state = 'failed';
-      task.report = { stop: Stop.ERROR, needsFromHuman: e.message };
-      this._push(task, 'error', { message: e.message });
+      task.report = { stop: Stop.ERROR, needs_from_human: e.message };
+      this._emit(task, 'error', { message: e.message });
     });
-
     return task.toJSON();
   }
 
-  /** 把事件推给 socket 房间，并顺带更新快照。 */
-  _push(task, kind, data) {
-    if (kind === 'result') {
-      task.snapshot.legs = data.leg ?? task.snapshot.legs;
-      task.snapshot.costUsd = Math.round((task.loop?.spentUsd || 0) * 1e4) / 1e4;
-      task.snapshot.contextPeak = Math.max(task.snapshot.contextPeak, data.contextPeak || 0);
-      task.snapshot.lastLabel = data.label || '';
-    } else if (kind === 'handoff.done') {
-      task.snapshot.handoffs = data.count ?? task.snapshot.handoffs;
-    } else if (kind === 'exec.context') {
-      task.snapshot.contextPeak = Math.max(task.snapshot.contextPeak, data.peak || 0);
-      task.snapshot.occupied = data.occupied || 0;
-    } else if (kind === 'exec.send') {
-      task.snapshot.occupied = 0;                    // 新的一发，水位从头算
+  /** 服务层自己的事件，形状与 loop 一致（kind + at 秒）。 */
+  _emit(task, kind, data = {}) {
+    this._push(task, { ...data, kind, at: Date.now() / 1000 });
+  }
+
+  /** 推 socket 房间、进回放缓冲，并顺带更新快照。 */
+  _push(task, ev) {
+    const s = task.snapshot;
+    switch (ev.kind) {
+      case 'send': s.occupied = 0; s.lastLabel = ev.label || ''; break;     // 新一发，水位从头算
+      case 'exec.context':
+        s.occupied = ev.occupied || 0;
+        s.contextPeak = Math.max(s.contextPeak, ev.peak || 0);
+        break;
+      case 'result':
+        s.legs = ev.leg ?? s.legs;
+        s.costUsd = Math.round((task.loop?.spentUsd || 0) * 1e4) / 1e4;  // loop 实账（被杀的发次按估算记）
+        s.contextPeak = Math.max(s.contextPeak, ev.context_peak || 0);
+        break;
+      case 'handoff.done': s.handoffs = ev.count ?? s.handoffs; break;
+      case 'maintenance.done': s.maintenances = ev.count ?? s.maintenances; break;
+      case 'supervisor.decided': s.decisions = task.loop?.decisions ?? s.decisions + 1; break;
+      case 'finished':
+        Object.assign(s, { legs: ev.legs, handoffs: ev.handoffs, maintenances: ev.maintenances,
+          decisions: ev.decisions, costUsd: ev.cost_usd });
+        break;
+      default: break;
     }
     task.seq += 1;
-    // ⚠ kind 放在展开之后：data 里若也带 kind 字段会把事件类型覆盖掉
-    const ev = { ...data, taskId: task.id, seq: task.seq, ts: Date.now(), kind };
-    task.events.push(ev);
+    // ⚠ kind 放在展开之后：数据里若也带 kind 字段不能覆盖事件类型
+    const out = { ...ev, taskId: task.id, seq: task.seq, kind: ev.kind };
+    task.events.push(out);
     if (task.events.length > EVENT_BUFFER) task.events.splice(0, task.events.length - EVENT_BUFFER);
-    this.io?.to(task.room).emit('longrun:event', ev);
+    this.io?.to(task.room).emit('longrun:event', out);
   }
+
+  // ── 查询 ───────────────────────────────────────────────────
 
   /** 某任务最近的事件（刷新页面后回放用）。 */
   history(taskId) {
@@ -285,44 +363,90 @@ export class LongRunService {
     return [...this.tasks.values()].map((t) => t.toJSON());
   }
 
-  /**
-   * 人工注入。写文件而非直接调 —— 与编排器的文件约定一致，
-   * 这样从终端/编辑器投件与从面板投件走同一条路。
-   */
-  inject(taskId, text, immediate = false) {
-    const task = this.tasks.get(taskId);
-    if (!task) return { ok: false, error: '任务不存在' };
-    const file = immediate ? task.loop.injectNowPath : task.loop.injectPath;
-    mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(file, String(text || ''), 'utf8');
-    return { ok: true, path: file, immediate };
+  /** 已有沙箱清单与各自上次运行痕迹（续跑时挑沙箱用，resume.py list_sandboxes + show_prior_state）。 */
+  sandboxes() {
+    return listSandboxes().map((name) => {
+      const root = path.join(sandboxBase(), name);
+      return { name, root, resumable: memoryFiles(root).length > 0, prior: priorState(root),
+        runningTaskId: this._runningOn(root)?.id || null };
+    });
   }
 
-  /** 暂停/继续：建或删 .run/pause 空文件。 */
-  pause(taskId, on = true) {
+  // ── 人工干预 ───────────────────────────────────────────────
+
+  /** 取运行中的任务；不在跑时拒绝 —— 投件/暂停文件留在沙箱里，会在下一次续跑时突然生效。 */
+  _running(taskId) {
     const task = this.tasks.get(taskId);
-    if (!task) return { ok: false, error: '任务不存在' };
+    if (!task) return [null, { ok: false, error: '任务不存在（服务重启后内存里的任务会丢失）' }];
+    if (task.state !== 'running') return [null, { ok: false, error: '任务已结束' }];
+    return [task, null];
+  }
+
+  /**
+   * 人工注入。写文件而非直接调 —— 与原版文件约定一致，终端投件与面板投件走同一条路。
+   * immediate 写 inject!.txt（立即打断），否则 inject.txt（下一个工具间隙）。
+   */
+  inject(taskId, text, immediate = false) {
+    const [task, err] = this._running(taskId);
+    if (err) return err;
+    const t = String(text || '').trim();
+    if (!t) return { ok: false, error: '注入内容为空' };
+    const file = immediate ? task.loop.injectNowPath : task.loop.injectPath;
+    mkdirSync(path.dirname(file), { recursive: true });
+    writeFileSync(file, t, 'utf8');
+    return { ok: true, path: file, immediate: !!immediate };
+  }
+
+  /** 暂停/继续：建或删 .run/pause 空文件。暂停闸在派发口，当前这发照常跑完。 */
+  pause(taskId, on = true) {
+    const [task, err] = this._running(taskId);
+    if (err) return err;
     const f = task.loop.pausePath;
     if (on) {
       mkdirSync(path.dirname(f), { recursive: true });
       writeFileSync(f, '', 'utf8');
     } else if (existsSync(f)) {
-      try { unlinkSync(f); } catch {}
+      try { unlinkSync(f); } catch (e) { return { ok: false, error: `删除暂停文件失败: ${e.message}` }; }
     }
-    return { ok: true, paused: on };
+    return { ok: true, pauseArmed: !!on };
   }
 
   /**
-   * 优雅停止：先立即打断当前这发，再挂上暂停闸。
-   *
-   * ⚠ 顺序要紧：反过来先建 pause 的话，当前这发会照常跑完（暂停闸在派发口，
-   *   不在运行中），而那可能还有一两个小时。
+   * 停下（不是终止）：先立即打断当前这发，再挂暂停闸。
+   * ⚠ 顺序要紧：反过来当前这发会照常跑完（暂停闸只在派发口），那可能还要一两个小时。
    */
-  stop(taskId, reason = '用户请求停止') {
-    const task = this.tasks.get(taskId);
-    if (!task) return { ok: false, error: '任务不存在' };
-    this.inject(taskId, `!!${reason}`, true);
-    this.pause(taskId, true);
-    return { ok: true, note: '已打断当前发次并挂上暂停闸；删掉 pause 会继续，不是终止' };
+  stop(taskId, reason) {
+    const r = this.inject(taskId, reason || STOP_REASON, true);
+    if (!r.ok) return r;
+    const p = this.pause(taskId, true);
+    if (!p.ok) return p;
+    return { ok: true, note: '已打断当前发次并挂上暂停闸；点「继续」会接着干，不是终止' };
+  }
+
+  /** 回答执行者的提问。原样发给执行者；空回答 = 停机（与原版终端直接回车一致）。 */
+  answer(taskId, text) {
+    const [task, err] = this._running(taskId);
+    if (err) return err;
+    if (!task._humanWaiter) return { ok: false, error: '执行者当前没有在等回答' };
+    const resolve = task._humanWaiter;
+    task._humanWaiter = null;
+    resolve(String(text || ''));
+    return { ok: true, answered: !!String(text || '').trim() };
+  }
+
+  /**
+   * 终止：杀执行者整个进程组，唤醒暂停与等人，本轮以「人工终止」收工并打快照。
+   * 与「停下」不同，终止后这个任务不会再动；沙箱与记忆都在，可以随时续跑。
+   */
+  terminate(taskId, reason = '用户在面板上终止') {
+    const [task, err] = this._running(taskId);
+    if (err) return err;
+    task.loop.abort(reason);
+    if (task._humanWaiter) {
+      const resolve = task._humanWaiter;
+      task._humanWaiter = null;
+      resolve('');
+    }
+    return { ok: true, note: '已终止：执行者已被结束，本轮收工并打快照。沙箱与记忆都保留，可以续跑。' };
   }
 }

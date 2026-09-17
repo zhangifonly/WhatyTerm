@@ -108,6 +108,12 @@ export function describeEvent(ev) {
         + ` · ${Math.round((ev.elapsed_s || 0) / 60)} 分钟 · $${Number(ev.cost_usd || 0).toFixed(2)}`,
       ev.stop === 'project_done' ? 'ok' : 'warn', ev.needs_from_human ? `需要人：${ev.needs_from_human}` : '');
     case 'error': return d('✖', '服务异常', clip(ev.message), 'err', ev.message);
+    case 'selfcheck': {
+      const items = ev.items || [];
+      const warns = items.filter((i) => i.level === 'warn').length;
+      return d('☑', `启动自检：${items.length} 项${warns ? `，${warns} 条提醒` : ''}`, '展开查看沙箱、权限、监督者与干预方式',
+        warns ? 'warn' : 'info', items.map((i) => `${i.level === 'warn' ? '⚠ ' : ''}${i.text}`).join('\n'));
+    }
     case 'log': return d('·', clip(ev.message, 240), '', 'muted', ev.message);
     default: return describeExec(ev, d);
   }
@@ -160,7 +166,7 @@ export function liveFromTask(task) {
     paused: !!task.halted,
     awaiting: task.awaitingHuman ? { reason: '', needs: '', question: '' } : null,
     stop: task.report?.stop || '',
-    needsFromHuman: task.report?.needsFromHuman || '',
+    needsFromHuman: task.report?.needs_from_human || '',
     hardKill: task.thresholds?.hardKill || 0,
   };
 }
