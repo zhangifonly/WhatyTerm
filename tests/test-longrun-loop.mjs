@@ -1,13 +1,13 @@
 /**
- * 长程编排：会话循环 —— 回归测试
+ * 长程编排：会话循环 —— WebTmux 独有部分与落盘细节
  *
- * 逐条对译 test_session_loop.py 的 54 条 case_*（监督者那 10 条已在
- * test-longrun-supervisor.mjs，沙箱那 4 条在 test-longrun-sandbox.mjs）。
- *
- * ⚠ 最要紧的三组：
- *   提示词逐字原文（编排器"顺手补一句"会改变执行者行为，且很难察觉）
- *   交接时机与顺序（维护必须在收尾之前，否则新会话不知道刚发生了什么）
- *   预算闸挡在派发口（唯一能保证"超支后不再花钱"的位置）
+ * 原版 _main_phase / _open / _handoff 的全部行为分支由 test-longrun-parity.mjs 与原版 Python
+ * 逐场景对拍（38 个场景）。这里测对拍覆盖不到的：
+ *   · WebTmux 独有：面板等人回答（humanChannel）、终止（abort → Stop.INTERRUPTED）、
+ *     暂停状态标志（halted）、水位三档校验、非预算异常兜底
+ *   · 落盘格式与参数传递：.gitignore、git 残壳清理、中文 git 下不误报快照失败、
+ *     传给 runner 的参数（工具白名单、模型、原始事件目录、墙钟、exec. 前缀）
+ * 不依赖 Python，任何机器都能跑。
  *
  * 运行: node tests/test-longrun-loop.mjs
  */
@@ -15,579 +15,224 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { LongRunLoop, Stop, BudgetExceeded, assertThresholds } from '../server/services/LongRunLoop.js';
-import { ExitReason } from '../server/services/LongRunRunner.js';
-import { Verdict, Judgement } from '../server/services/LongRunSupervisor.js';
-import { CONTINUE_PROMPT } from '../server/services/LongRunPrompts.js';
+import { execFileSync } from 'child_process';
+import { fileURLToPath } from 'url';
+import { LongRunLoop, Stop, assertThresholds, LOOP_WALL_TIMEOUT, MAX_LEGS, TOTAL_BUDGET_USD } from '../server/services/LongRunLoop.js';
+import { ExitReason, DEFAULT_TOOLS, TASK_WAIT } from '../server/services/LongRunRunner.js';
+import { Supervisor } from '../server/services/LongRunSupervisor.js';
+import { loadPrompts } from '../server/services/LongRunPrompts.js';
 
 const results = { passed: 0, failed: 0, errors: [] };
-const pending = [];
-
-function test(name, fn) {
-  const p = (async () => {
-    try { await fn(); results.passed++; console.log(`✅ ${name}`); }
-    catch (err) { results.failed++; results.errors.push({ name, error: err.message }); console.log(`❌ ${name}`); }
-  })();
-  pending.push(p);
-  return p;
-}
 function assert(cond, msg) { if (!cond) throw new Error(msg || '断言失败'); }
-
-const TMP = path.join(os.tmpdir(), 'longrun_loop_test');
-
-/** 假沙箱：只提供 loop 需要的那几个字段。 */
-function fakeSandbox() {
-  const root = path.join(TMP, 'sandbox');
-  fs.rmSync(TMP, { recursive: true, force: true });
-  const runDir = path.join(root, '.run');
-  fs.mkdirSync(runDir, { recursive: true });
-  return {
-    root, runDir, memoryDir: path.join(root, '.memory'),
-    extraDirs: [], childEnv: () => ({ ...process.env }),
-  };
+async function test(name, fn) {
+  try { await fn(); results.passed++; console.log(`✅ ${name}`); }
+  catch (err) { results.failed++; results.errors.push({ name, error: err.message }); console.log(`❌ ${name}`); }
 }
 
-/** 五段可辨认的提示词，便于断言"发出去的是哪一段、有没有被改"。 */
-const PROMPTS = {
-  init: 'INIT-初始化提示词-原文',
-  wrapup: 'WRAP-旧对话收尾提示词-原文',
-  resume: 'RESUME-新对话开始提示词-原文',
-  maintain_1: 'M1-定期维护提示词1-原文',
-  maintain_2: 'M2-定期维护提示词2-原文',
-  source: '/fake/提示词.txt',
-};
+const PROMPTS = loadPrompts(fileURLToPath(new URL('../server/prompts/longrun/提示词.txt', import.meta.url)));
 
-/**
- * 造 loop。runnerScript 是每一发的返回值序列；judgeScript 是监督者判定序列。
- * 两者都用完就抛，避免测试无声地跑飞。
- */
-function makeLoop({ runnerScript = [], judgeScript = [], ...over } = {}) {
-  const sent = [];         // [{prompt, label, resume, killAt}]
-  let ri = 0, ji = 0;
+function fakeSpec() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'loop_node_'));
+  const spec = { root, memoryDir: path.join(root, '.memory'), runDir: path.join(root, '.run'), extraDirs: ['/参考/资料'],
+    verifyClean() {}, childEnv: () => ({ ...process.env }) };
+  for (const d of [spec.memoryDir, spec.runDir]) fs.mkdirSync(d, { recursive: true });
+  return spec;
+}
+
+/** script: [[退出原因, 水位, 文本]]；verdicts: 监督者判定序列（用完重复最后一个） */
+function makeLoop({ script = [], verdicts = null, onRun = null, ...over } = {}) {
+  const spec = fakeSpec();
+  const sent = [];
+  const runnerOpts = [];
+  const vs = verdicts ? [...verdicts] : null;
   const loop = new LongRunLoop({
-    sandbox: fakeSandbox(),
-    prompts: PROMPTS,
-    requirementText: 'REQ-需求文档-原文',
-    supervisor: judgeScript.length ? {
-      judge: async () => {
-        if (ji >= judgeScript.length) throw new Error('judgeScript 用完了');
-        const spec = judgeScript[ji++];
-        return new Judgement(spec);
-      },
-    } : null,
-    makeRunner: (killAt) => ({
-      run: async (prompt, sessionId, resume) => {
-        if (ri >= runnerScript.length) throw new Error('runnerScript 用完了');
-        const spec = runnerScript[ri++];
-        sent.push({ prompt, resume, killAt, sessionId });
-        return {
-          sessionId: spec.sessionId || sessionId,
-          exitReason: spec.exitReason || ExitReason.COMPLETED,
-          contextPeak: spec.peak ?? 100,
-          costUsd: spec.costUsd ?? 0.1,
-          costEstimate: spec.costEstimate ?? 0.1,
-          numTurns: 2, finalText: spec.text || '干了活',
-          error: spec.error || '', injectText: spec.injectText || '',
-          pendingTasks: [], permissionDenials: [],
-        };
-      },
-    }),
+    sandbox: spec, prompts: PROMPTS, requirementText: '做个待办应用', askHuman: false,
+    supervisor: vs ? new Supervisor({ systemPrompt: 'x', complete: async () => {
+      const v = vs.length === 1 ? vs[0] : vs.shift();
+      return { text: `{"verdict":"${v}","confidence":0.95,"reason":"stub","reply":"${v === 'decide' ? '代答内容' : ''}","needs_from_human":"请定方案"}`,
+        stopReason: 'end_turn', inputTokens: 1, outputTokens: 1 };
+    } }) : null,
+    runnerFactory: (ro) => {
+      runnerOpts.push(ro);
+      const runner = {
+        abort() { runner.aborted = true; },
+        run: async (prompt, sessionId, resume) => {
+          sent.push({ prompt, resume });
+          if (onRun) await onRun(loop, sent.length, runner);
+          const [reason, peak, text] = script.shift() || ['completed', 10, 'x'];
+          return { sessionId: sessionId || `sid-${sent.length}`, exitReason: reason, contextPeak: peak, finalText: text,
+            stopReason: 'end_turn', costUsd: 0.1, costEstimate: 0, injectText: '', pendingTasks: [], numTurns: 1,
+            error: '', durationS: 0, permissionDenials: [] };
+        },
+      };
+      return runner;
+    },
     ...over,
   });
-  loop._sent = sent;
+  Object.assign(loop, { _sent: sent, _runnerOpts: runnerOpts, _root: spec.root });
   return loop;
 }
-/** 发出去的 label 序列。 */
-const labels = (loop) => loop._sentLabels;
-/** 发出去的 prompt 序列。 */
-const prompts = (loop) => loop._sent.map((s) => s.prompt);
+const events = (loop) => fs.readFileSync(loop.eventsPath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
-// ── 提示词逐字原文（编排器不得添加任何内容）────────────────────
-test('五段提示词逐字原文发出，编排器不加料', async () => {
+// ── WebTmux 独有：面板等人回答 ──────────────────────────────
+await test('面板回答原样发给执行者（不加包装），续同一会话', async () => {
+  let asked = null;
   const loop = makeLoop({
-    runnerScript: [{}, {}, {}],
-    judgeScript: [{ verdict: Verdict.PROJECT_DONE, confidence: 0.95 }],
+    script: [['completed', 10, 'i'], ['completed', 10, '要动生产库吗？'], ['completed', 10, 'done']],
+    verdicts: ['needs_human', 'project_done'], askHuman: true,
+    humanChannel: async (run, j) => { asked = { question: run.finalText, needs: j.needsFromHuman }; return '  可以，先备份  '; },
   });
-  await loop.run();
-  const ps = prompts(loop);
-  assert(ps[0] === PROMPTS.init, `初始化提示词被改动: ${JSON.stringify(ps[0])}`);
-  assert(ps[1] === 'REQ-需求文档-原文', `需求文档被改动: ${JSON.stringify(ps[1])}`);
+  const rep = await loop.run();
+  assert(asked?.question === '要动生产库吗？' && asked.needs === '请定方案', `等人时要带执行者原话与需要什么: ${JSON.stringify(asked)}`);
+  assert(loop._sent[2].prompt === '可以，先备份' && loop._sent[2].resume === true, `应原样发出并续会话: ${JSON.stringify(loop._sent[2])}`);
+  assert(rep.stop === Stop.PROJECT_DONE, rep.stop);
+  const ev = events(loop);
+  const need = ev.find((e) => e.kind === 'need_human');
+  assert(need && need.question === '要动生产库吗？' && need.needs === '请定方案', `need_human 事件字段: ${JSON.stringify(need)}`);
+  assert(ev.some((e) => e.kind === 'need_human.done' && e.answered && e.text === '可以，先备份'), 'need_human.done 要带回答原文');
 });
 
-test('收尾与新对话开始提示词同样原文', async () => {
-  const loop = makeLoop({
-    handoffFloor: 50, handoffCeiling: 100, hardKill: 200,
-    runnerScript: [{}, { peak: 500 }, {}, {}, {}],   // 第二发水位过下限 → 交接
-    judgeScript: [{ verdict: Verdict.CONTINUE, confidence: 0.9 },
-      { verdict: Verdict.PROJECT_DONE, confidence: 0.95 }],
-  });
-  await loop.run();
-  const ps = prompts(loop);
-  const iWrap = labels(loop).indexOf('旧对话收尾提示词');
-  const iRes = labels(loop).indexOf('新对话开始提示词');
-  assert(iWrap >= 0 && ps[iWrap] === PROMPTS.wrapup, '收尾提示词被改动');
-  assert(iRes >= 0 && ps[iRes] === PROMPTS.resume, '新对话开始提示词被改动');
+await test('askHuman=false（原版 --no-ask）或没有等人通道时立即停机，不挂死', async () => {
+  const a = await makeLoop({ script: [['completed', 10, 'i'], ['completed', 10, 'q']], verdicts: ['needs_human'] }).run();
+  assert(a.stop === Stop.NEEDS_HUMAN, a.stop);
+  const b = await makeLoop({ script: [['completed', 10, 'i'], ['completed', 10, 'q']], verdicts: ['needs_human'], askHuman: true }).run();
+  assert(b.stop === Stop.NEEDS_HUMAN, `没有通道时应停机: ${b.stop}`);
 });
 
-test('催继续恰好是「继续完成项目」，无附加内容', async () => {
+// ── WebTmux 独有：终止 ──────────────────────────────────────
+await test('终止：杀当前执行者、以 interrupted 停机并打快照，不再派发', async () => {
   const loop = makeLoop({
-    runnerScript: [{}, {}, { peak: 10 }, {}],
-    judgeScript: [{ verdict: Verdict.CONTINUE, confidence: 0.9 },
-      { verdict: Verdict.PROJECT_DONE, confidence: 0.95 }],
+    script: [['completed', 10, 'i'], ['error', 0, '']], verdicts: ['continue'],
+    onRun: async (lp, n, runner) => {
+      if (n !== 2) return;
+      // 执行者干了一半活（有未提交改动），这时人点了终止 —— 快照要把这半截活保住
+      fs.writeFileSync(path.join(lp.spec.root, 'half.txt'), '干了一半', 'utf8');
+      lp.abort('先停下看看');
+      assert(runner.aborted, '应调用当前 runner 的 abort 杀进程组');
+    },
   });
+  const rep = await loop.run();
+  assert(rep.stop === Stop.INTERRUPTED && rep.needs_from_human === '先停下看看', JSON.stringify(rep));
+  assert(loop._sent.length === 2, `终止后不该再派发，实际 ${loop._sent.length} 发`);
+  const log = execFileSync('git', ['log', '--oneline'], { cwd: loop._root, encoding: 'utf8' });
+  assert(log.includes('orchestrator snapshot: interrupted'), `应打终止快照:\n${log}`);
+});
+
+await test('终止能唤醒暂停与等人', async () => {
+  const paused = makeLoop({ script: [['completed', 10, 'i']] });
+  fs.writeFileSync(paused.pausePath, '', 'utf8');
+  paused.pauseSleep = () => new Promise((r) => setTimeout(r, 20));
+  setTimeout(() => paused.abort('暂停中终止'), 100);
+  const r1 = await paused.run();
+  assert(r1.stop === Stop.INTERRUPTED && paused._sent.length === 0, `暂停中终止应直接停机: ${r1.stop} 发了 ${paused._sent.length}`);
+
+  const waiting = makeLoop({
+    script: [['completed', 10, 'i'], ['completed', 10, 'q']], verdicts: ['needs_human'], askHuman: true,
+    humanChannel: (run, j) => new Promise((resolve) => setTimeout(() => { waiting.abort('等人时终止'); resolve(''); }, 50)),
+  });
+  const r2 = await waiting.run();
+  assert(r2.stop === Stop.INTERRUPTED, `等人时终止应归为 interrupted 而非 needs_human: ${r2.stop}`);
+});
+
+// ── WebTmux 独有：暂停状态标志 ───────────────────────────────
+await test('暂停：停在派发口时 halted 为真，删掉 pause 后记暂停时长', async () => {
+  const loop = makeLoop({ script: [['completed', 10, 'i'], ['completed', 10, 'r']], verdicts: ['project_done'] });
+  fs.writeFileSync(loop.pausePath, '', 'utf8');
+  let sawHalted = false;
+  loop.pauseSleep = async () => { sawHalted = sawHalted || loop.halted; fs.rmSync(loop.pausePath, { force: true }); };
+  const rep = await loop.run();
+  assert(sawHalted && !loop.halted, '暂停期间 halted 为真、恢复后为假（面板靠它区分"闸已挂"与"已停住"）');
+  const resumed = events(loop).find((e) => e.kind === 'resumed');
+  assert(rep.stop === Stop.PROJECT_DONE && resumed && typeof resumed.paused_s === 'number', `resumed 要带暂停时长: ${JSON.stringify(resumed)}`);
+  assert(events(loop).find((e) => e.kind === 'paused')?.path === loop.pausePath, 'paused 要带文件路径');
+});
+
+await test('水位三档写反时拒绝构造，并说清后果', async () => {
+  let e = null;
+  try { assertThresholds({ handoffFloor: 300, handoffCeiling: 200, hardKill: 400 }); } catch (x) { e = x; }
+  assert(e && e.message.includes('刚开跑就被打断'), e?.message);
+  e = null;
+  try { makeLoop({ handoffFloor: 100, handoffCeiling: 400, hardKill: 200 }); } catch (x) { e = x; }
+  assert(e, 'ceiling 高于 hardKill 应拒绝');
+});
+
+await test('非预算异常兜底为 error 停机并写 report.json（原版会直接崩、不写报告）', async () => {
+  const loop = makeLoop({ onRun: async () => { throw new Error('runner 炸了'); } });
+  const rep = await loop.run();
+  assert(rep.stop === Stop.ERROR && rep.needs_from_human === 'runner 炸了', JSON.stringify(rep));
+  assert(fs.existsSync(path.join(loop.spec.runDir, 'report.json')), '也要写报告');
+});
+
+// ── 落盘格式（python view.py 回放依赖）────────────────────────
+await test('事件字段与原版一致：时间字段 at、下划线命名、send 带提示词原文', async () => {
+  const loop = makeLoop({ script: [['completed', 10, 'i'], ['completed', 10, 'r']], verdicts: ['project_done'] });
   await loop.run();
-  const conts = prompts(loop).filter((p) => p.includes(CONTINUE_PROMPT));
-  assert(conts.length > 0, '没发出催继续的输入');
-  for (const c of conts) {
-    assert(c === CONTINUE_PROMPT, `催继续的话被加料了: ${JSON.stringify(c)}`);
+  const ev = events(loop);
+  assert(ev.every((e) => typeof e.at === 'number' && !('ts' in e)), '时间字段应是 at（view.py 按 ev["at"] 读）');
+  assert(ev.find((e) => e.kind === 'log')?.message, 'log 事件字段是 message');
+  const send = ev.find((e) => e.kind === 'send');
+  assert(send.text === PROMPTS.init && send.leg === 1 && send.resume === false, `send 要带原文: ${JSON.stringify(send).slice(0, 120)}`);
+  const result = ev.find((e) => e.kind === 'result');
+  for (const k of ['exit_reason', 'context_peak', 'duration_s', 'cost_usd', 'cost_is_estimate', 'session_id', 'pending_tasks']) {
+    assert(k in result, `result 缺字段 ${k}`);
   }
+  const fin = ev.find((e) => e.kind === 'finished');
+  assert('elapsed_s' in fin && 'needs_from_human' in fin && 'cost_usd' in fin, `finished 字段: ${JSON.stringify(fin)}`);
+  // supervisor 每次判定都发；supervisor.decided 只在真代答时发
+  assert(ev.some((e) => e.kind === 'supervisor') && !ev.some((e) => e.kind === 'supervisor.decided'), '未代答不该出现 supervisor.decided');
 });
 
-// ── 开场序列 ────────────────────────────────────────────────
-test('新项目开场：初始化 → 需求文档', async () => {
-  const loop = makeLoop({
-    runnerScript: [{}, {}, {}],
-    judgeScript: [{ verdict: Verdict.PROJECT_DONE, confidence: 0.95 }],
-  });
+await test('session_state.json 与 report.json 字段照原版', async () => {
+  const loop = makeLoop({ script: [['completed', 10, 'i'], ['completed', 10, 'r']], verdicts: ['project_done'] });
   await loop.run();
-  assert(labels(loop)[0] === '初始化提示词', `首发应是初始化: ${labels(loop)[0]}`);
-  assert(labels(loop)[1] === '需求文档', `次发应是需求: ${labels(loop)[1]}`);
+  const st = JSON.parse(fs.readFileSync(loop.statePath, 'utf8'));
+  assert(JSON.stringify(Object.keys(st).sort()) === JSON.stringify(['decisions', 'handoffs', 'legs', 'maintenances', 'session_id', 'spent_usd', 'updated_at']), Object.keys(st).join());
+  assert(st.session_id === 'sid-1', `要记住会话 id（手工 claude --resume 靠它）: ${st.session_id}`);
+  const rp = JSON.parse(fs.readFileSync(path.join(loop.spec.runDir, 'report.json'), 'utf8'));
+  assert(JSON.stringify(Object.keys(rp).sort()) === JSON.stringify(['cost_usd', 'decisions', 'elapsed_s', 'handoffs', 'legs', 'maintenances', 'needs_from_human', 'stop']), Object.keys(rp).join());
 });
 
-test('断点续跑跳过初始化：新对话开始 → 新需求', async () => {
-  const loop = makeLoop({
-    skipInit: true,
-    runnerScript: [{}, {}, {}],
-    judgeScript: [{ verdict: Verdict.PROJECT_DONE, confidence: 0.95 }],
-  });
+// ── git 快照 ────────────────────────────────────────────────
+await test('.gitignore 只忽略 .run/，记忆进快照（回滚时记忆与代码才一致）', async () => {
+  const loop = makeLoop({ script: [['completed', 10, 'i'], ['completed', 10, 'r']], verdicts: ['project_done'] });
+  fs.writeFileSync(path.join(loop.spec.memoryDir, 'MEMORY.md'), '- 进度', 'utf8');
   await loop.run();
-  assert(!labels(loop).includes('初始化提示词'), '续跑不该发初始化');
-  assert(labels(loop)[0] === '新对话开始提示词', `实际 ${labels(loop)[0]}`);
-  assert(labels(loop)[1] === '新需求文档', `实际 ${labels(loop)[1]}`);
+  const gi = fs.readFileSync(path.join(loop._root, '.gitignore'), 'utf8');
+  assert(gi.includes('.run/') && !gi.includes('.memory'), `不该忽略 .memory: ${JSON.stringify(gi)}`);
+  const tracked = execFileSync('git', ['ls-files'], { cwd: loop._root, encoding: 'utf8' });
+  assert(tracked.includes('.memory/MEMORY.md'), `记忆应进快照:\n${tracked}`);
 });
 
-test('开场第一发用新会话，需求文档续同一会话', async () => {
-  const loop = makeLoop({
-    runnerScript: [{}, {}, {}],
-    judgeScript: [{ verdict: Verdict.PROJECT_DONE, confidence: 0.95 }],
-  });
+await test('无改动时不误报快照失败（中文 git 环境下原版会误报）', async () => {
+  const loop = makeLoop({ script: [['completed', 10, 'i'], ['completed', 10, 'r']], verdicts: ['project_done'] });
   await loop.run();
-  assert(loop._sent[0].resume === false, '初始化应开新会话');
-  assert(loop._sent[1].resume === true, '需求文档应续同一会话');
+  const bad = events(loop).filter((e) => e.kind === 'log' && e.message.includes('快照 commit 失败'));
+  assert(bad.length === 0, `误报了: ${bad.map((e) => e.message).join(' | ')}`);
 });
 
-// ── 水位与交接 ──────────────────────────────────────────────
-test('水位过下限才交接，未过则直接催继续', async () => {
-  const loop = makeLoop({
-    handoffFloor: 1000, handoffCeiling: 2000, hardKill: 3000,
-    runnerScript: [{}, {}, { peak: 10 }, {}],       // 水位远低于下限
-    judgeScript: [{ verdict: Verdict.CONTINUE, confidence: 0.9 },
-      { verdict: Verdict.PROJECT_DONE, confidence: 0.95 }],
-  });
+await test('只剩 objects 的 .git 残壳会被清掉重建', async () => {
+  const loop = makeLoop();
+  fs.mkdirSync(path.join(loop._root, '.git', 'objects'), { recursive: true });
+  loop.ensureRepo();
+  const out = execFileSync('git', ['rev-parse', '--git-dir'], { cwd: loop._root, encoding: 'utf8' }).trim();
+  assert(out === '.git', `残壳应被重建为可用仓库: ${out}`);
+});
+
+// ── 传给 runner 的参数 ──────────────────────────────────────
+await test('runner 参数：默认工具白名单、模型、原始事件目录、墙钟 7200、外部目录合并、exec. 前缀', async () => {
+  const loop = makeLoop({ script: [['completed', 10, 'i'], ['completed', 10, 'r']], verdicts: ['project_done'],
+    model: 'claude-opus-5', extraDirs: ['/额外'] });
   await loop.run();
-  assert(loop.handoffs === 0, `水位未过下限不该交接，实际 ${loop.handoffs} 次`);
-  assert(labels(loop).includes('催继续'), '应直接催继续');
+  const ro = loop._runnerOpts[0];
+  assert(ro.allowedTools === DEFAULT_TOOLS && ro.model === 'claude-opus-5', `工具与模型: ${ro.allowedTools} ${ro.model}`);
+  assert(ro.eventsDir === path.join(loop.spec.runDir, 'events') && ro.handoffLimit === 0, '原始事件目录与 handoffLimit');
+  assert(ro.wallTimeout === LOOP_WALL_TIMEOUT && LOOP_WALL_TIMEOUT === 7200 && ro.taskWait === TASK_WAIT, '墙钟与等待上限');
+  assert(JSON.stringify(ro.extraDirs) === JSON.stringify(['/额外', '/参考/资料']), `外部目录应合并参数与沙箱登记的: ${ro.extraDirs}`);
+  assert(MAX_LEGS === 200 && TOTAL_BUDGET_USD === 1_000_000, '默认上限与原版一致');
+  ro.onStream({ kind: 'tool', names: ['bash'] });
+  assert(events(loop).some((e) => e.kind === 'exec.tool' && e.names[0] === 'bash'), '执行层事件应加 exec. 前缀落盘');
 });
 
-test('正常结束但水位过下限 → 交接', async () => {
-  const loop = makeLoop({
-    handoffFloor: 50, handoffCeiling: 100, hardKill: 200,
-    runnerScript: [{}, { peak: 500 }, {}, {}, {}],
-    judgeScript: [{ verdict: Verdict.CONTINUE, confidence: 0.9 },
-      { verdict: Verdict.PROJECT_DONE, confidence: 0.95 }],
-  });
-  await loop.run();
-  assert(loop.handoffs === 1, `应交接 1 次，实际 ${loop.handoffs}`);
-});
-
-test('运行中水位触顶被打断 → 直接交接，不问监督者', async () => {
-  let judged = 0;
-  const loop = makeLoop({
-    handoffFloor: 50, handoffCeiling: 100, hardKill: 200,
-    runnerScript: [{}, { exitReason: ExitReason.BUDGET_KILLED, peak: 150 }, {}, {}, {}],
-    judgeScript: [{ verdict: Verdict.PROJECT_DONE, confidence: 0.95 }],
-  });
-  const origJudge = loop.supervisor.judge;
-  loop.supervisor.judge = async (...a) => { judged += 1; return origJudge(...a); };
-  await loop.run();
-  assert(loop.handoffs === 1, '水位触顶应交接');
-  // 它没说完话，问了也只能得到 continue —— 省一次判定的钱
-  assert(judged <= 1, `被打断那发不该问监督者，实际问了 ${judged} 次`);
-});
-
-test('催继续用 ceiling 当打断线，收尾不设打断线', async () => {
-  // 水位全程低于下限 → 只会催继续、不交接；单独造一发过下限的来看收尾的 killAt
-  const loop = makeLoop({
-    handoffFloor: 100, handoffCeiling: 111, hardKill: 200,
-    runnerScript: [{ peak: 10 }, { peak: 10 }, { peak: 10 }, { peak: 10 }],
-    judgeScript: [{ verdict: Verdict.CONTINUE, confidence: 0.9 },
-      { verdict: Verdict.PROJECT_DONE, confidence: 0.95 }],
-  });
-  await loop.run();
-  const iCont = labels(loop).indexOf('催继续');
-  assert(iCont >= 0, `应发出催继续，实际序列: ${labels(loop)}`);
-  assert(loop._sent[iCont].killAt === 111,
-    `催继续应用 ceiling 当打断线，实际 ${loop._sent[iCont].killAt}`);
-});
-
-test('收尾与维护不设打断线（高水位下跑完才有意义）', async () => {
-  const loop = makeLoop({
-    handoffFloor: 50, handoffCeiling: 111, hardKill: 200,
-    runnerScript: [{ peak: 500 }, { peak: 500 }, {}, {}, {}],
-    judgeScript: [{ verdict: Verdict.CONTINUE, confidence: 0.9 },
-      { verdict: Verdict.PROJECT_DONE, confidence: 0.95 }],
-  });
-  await loop.run();
-  const iWrap = labels(loop).indexOf('旧对话收尾提示词');
-  assert(iWrap >= 0, `应发出收尾，实际序列: ${labels(loop)}`);
-  // 收尾本来就要在高水位下跑完，中途 kill 等于白发
-  assert(loop._sent[iWrap].killAt == null,
-    `收尾不该设打断线，实际 ${loop._sent[iWrap].killAt}`);
-  // 开场与 resume 用 hardKill
-  assert(loop._sent[0].killAt === 200, '开场应用 hardKill');
-});
-
-// ── 维护：每第 N 次交接，且必须在收尾之前 ────────────────────
-test('每第 3 次交接跑两轮维护，且维护在收尾之前', async () => {
-  // 造三次交接：每发都过下限
-  const loop = makeLoop({
-    handoffFloor: 50, handoffCeiling: 100, hardKill: 200, maintenanceEvery: 3,
-    runnerScript: Array(20).fill({ peak: 500 }),
-    judgeScript: Array(10).fill({ verdict: Verdict.CONTINUE, confidence: 0.9 }),
-    maxLegs: 14,
-  });
-  await loop.run();
-  const seq = labels(loop);
-  assert(loop.handoffs >= 3, `应至少交接 3 次，实际 ${loop.handoffs}`);
-  assert(loop.maintenances === 1, `第 3 次交接才跑维护，应 1 次，实际 ${loop.maintenances}`);
-  const iM1 = seq.indexOf('定期维护提示词1');
-  const iM2 = seq.indexOf('定期维护提示词2');
-  assert(iM1 >= 0 && iM2 === iM1 + 1, `两个维护应连续发出: ${seq}`);
-  // ⚠ 整理记忆需要"当前会话还记得来龙去脉"，放收尾之后新会话就不知道刚发生了什么
-  const iWrapAfter = seq.indexOf('旧对话收尾提示词', iM2);
-  assert(iWrapAfter === iM2 + 1, `维护必须紧接在收尾之前: ${seq.slice(iM1 - 1, iM2 + 3)}`);
-});
-
-test('maintenanceEvery=0 关掉维护', async () => {
-  const loop = makeLoop({
-    handoffFloor: 50, handoffCeiling: 100, hardKill: 200, maintenanceEvery: 0,
-    runnerScript: Array(20).fill({ peak: 500 }),
-    judgeScript: Array(10).fill({ verdict: Verdict.CONTINUE, confidence: 0.9 }),
-    maxLegs: 12,
-  });
-  await loop.run();
-  assert(loop.maintenances === 0, '应完全不跑维护');
-  assert(!labels(loop).includes('定期维护提示词1'), '不该发维护提示词');
-});
-
-// ── 预算：挡在派发口 ────────────────────────────────────────
-test('预算耗尽时停机，且不再派发', async () => {
-  const loop = makeLoop({
-    totalBudgetUsd: 0.25,               // 两发就超
-    runnerScript: Array(10).fill({ costUsd: 0.15, peak: 10 }),
-    judgeScript: Array(5).fill({ verdict: Verdict.CONTINUE, confidence: 0.9 }),
-  });
-  const r = await loop.run();
-  assert(r.stop === Stop.BUDGET, `应因预算停机，实际 ${r.stop}`);
-  assert(loop.legs === 2, `第 3 发应被拦住，实际发了 ${loop.legs} 次`);
-  assert(r.needsFromHuman.includes('上限'), `停机说明要给出上限: ${r.needsFromHuman}`);
-});
-
-test('预算闸挡在派发口 —— 开场那两发也算数', async () => {
-  const loop = makeLoop({
-    totalBudgetUsd: 0.05,               // 第一发就超
-    runnerScript: Array(5).fill({ costUsd: 0.1 }),
-    judgeScript: [{ verdict: Verdict.CONTINUE, confidence: 0.9 }],
-  });
-  const r = await loop.run();
-  assert(r.stop === Stop.BUDGET, `实际 ${r.stop}`);
-  assert(loop.legs === 1, `开场第二发就该被拦，实际 ${loop.legs}`);
-});
-
-test('被 kill 的发次用估算值记账（否则预算失真）', async () => {
-  const loop = makeLoop({
-    handoffFloor: 1e9, handoffCeiling: 1e9 + 1, hardKill: 1e9 + 2,
-    runnerScript: [
-      { costUsd: 0.1 }, { costUsd: 0.1 },
-      // 被 kill：costUsd=0 但估算有值 —— 这笔钱确实花了，必须记账
-      { exitReason: ExitReason.HANG_KILLED, costUsd: 0, costEstimate: 0.77 },
-      ...Array(8).fill({ costUsd: 0.01 }),
-    ],
-    // 先 continue 一次，才会跑到第 3 发（hang）；否则开场后立刻判完成就停了
-    judgeScript: [{ verdict: Verdict.CONTINUE, confidence: 0.9 },
-      ...Array(6).fill({ verdict: Verdict.PROJECT_DONE, confidence: 0.95 })],
-  });
-  await loop.run();
-  assert(loop.spentUsd >= 0.77,
-    `被 kill 那发的估算必须记账（sekiro 白记了 240 秒算力），实际 ${loop.spentUsd}`);
-});
-
-test('默认预算实际不限（只有显式设小才生效）', async () => {
-  const loop = makeLoop({
-    runnerScript: Array(6).fill({ costUsd: 100, peak: 10 }),
-    judgeScript: [{ verdict: Verdict.CONTINUE, confidence: 0.9 },
-      { verdict: Verdict.PROJECT_DONE, confidence: 0.95 }],
-  });
-  const r = await loop.run();
-  assert(r.stop !== Stop.BUDGET, `默认不该被预算拦，实际 ${r.stop}`);
-});
-
-// ── 阈值校验（原实现缺这道）────────────────────────────────
-test('水位三档写反时拒绝启动，并说清后果', () => {
-  let threw = null;
-  try { assertThresholds({ handoffFloor: 300, handoffCeiling: 200, hardKill: 400 }); }
-  catch (e) { threw = e; }
-  assert(threw, 'ceiling 低于 floor 应被拒');
-  assert(threw.message.includes('刚开跑就被打断'), `报错要说清后果: ${threw.message}`);
-
-  threw = null;
-  try { assertThresholds({ handoffFloor: 100, handoffCeiling: 400, hardKill: 200 }); }
-  catch (e) { threw = e; }
-  assert(threw, 'ceiling 高于 hardKill 应被拒');
-});
-
-// ── 人工注入 ────────────────────────────────────────────────
-test('注入文件被读到后立刻删除（宁可丢一次也不重复注入）', () => {
-  const loop = makeLoop({ runnerScript: [{}], judgeScript: [{ verdict: Verdict.CONTINUE }] });
-  fs.writeFileSync(loop.injectPath, '改用 Vue', 'utf8');
-  const got = loop.takeInject();
-  assert(got && got[0] === '改用 Vue', `应取到注入内容: ${JSON.stringify(got)}`);
-  assert(got[1] === false, 'inject.txt 是等间隙模式');
-  assert(!fs.existsSync(loop.injectPath), '读到后必须删掉');
-  assert(loop.takeInject() === null, '删掉后不该再取到');
-});
-
-test('inject!.txt 与正文 !! 都是立即打断', () => {
-  const loop = makeLoop({ runnerScript: [{}], judgeScript: [{ verdict: Verdict.CONTINUE }] });
-  fs.writeFileSync(loop.injectNowPath, '马上停', 'utf8');
-  let got = loop.takeInject();
-  assert(got[1] === true, 'inject!.txt 应是立即模式');
-
-  fs.writeFileSync(loop.injectPath, '!!死循环了', 'utf8');
-  got = loop.takeInject();
-  assert(got[1] === true, '正文 !! 应转成立即模式');
-  assert(got[0] === '死循环了', `!! 前缀应被剥掉: ${JSON.stringify(got[0])}`);
-});
-
-test('空的注入文件被忽略（不发空提示词）', () => {
-  const loop = makeLoop({ runnerScript: [{}], judgeScript: [{ verdict: Verdict.CONTINUE }] });
-  fs.writeFileSync(loop.injectPath, '   \n  ', 'utf8');
-  assert(loop.takeInject() === null, '空内容应忽略');
-  assert(!fs.existsSync(loop.injectPath), '空文件也要删掉，否则每轮都读一次');
-});
-
-test('被打断后把注入的话原样发出（不加包装）', async () => {
-  // 脚本给足，靠断言序列而不是精确计数
-  const loop = makeLoop({
-    handoffFloor: 1e9, handoffCeiling: 1e9 + 1, hardKill: 1e9 + 2,
-    runnerScript: [
-      {}, {},                                                    // 开场两发
-      { exitReason: ExitReason.INTERRUPTED_BY_HUMAN, injectText: '改成用 Vue' },
-      ...Array(8).fill({}),
-    ],
-    judgeScript: [
-      { verdict: Verdict.CONTINUE, confidence: 0.9 },             // 第一轮催继续
-      ...Array(6).fill({ verdict: Verdict.PROJECT_DONE, confidence: 0.95 }),
-    ],
-  });
-  await loop.run();
-  const seq = labels(loop);
-  const i = seq.indexOf('人工注入');
-  assert(i >= 0, `应发出人工注入: ${seq}`);
-  assert(prompts(loop)[i] === '改成用 Vue',
-    `注入内容必须原样发出，实际 ${JSON.stringify(prompts(loop)[i])}`);
-});
-
-test('打断了但没取到注入内容 → 停机叫人', async () => {
-  const loop = makeLoop({
-    handoffFloor: 1e9, handoffCeiling: 1e9 + 1, hardKill: 1e9 + 2,
-    runnerScript: [{}, {},
-      { exitReason: ExitReason.INTERRUPTED_BY_HUMAN, injectText: '' },
-      ...Array(5).fill({})],
-    judgeScript: [{ verdict: Verdict.CONTINUE, confidence: 0.9 },
-      ...Array(5).fill({ verdict: Verdict.PROJECT_DONE, confidence: 0.95 })],
-  });
-  const r = await loop.run();
-  assert(r.stop === Stop.NEEDS_HUMAN, `应停机叫人，实际 ${r.stop}`);
-  assert(r.needsFromHuman.includes('注入'),
-    `说明要点明原因: ${r.needsFromHuman}`);
-});
-
-// ── 异常处置 ────────────────────────────────────────────────
-test('hang/墙钟被杀 → 交接，不问监督者', async () => {
-  const loop = makeLoop({
-    handoffFloor: 1e9, handoffCeiling: 1e9 + 1, hardKill: 1e9 + 2,
-    runnerScript: [{}, {},
-      { exitReason: ExitReason.HANG_KILLED },
-      ...Array(8).fill({})],
-    judgeScript: [{ verdict: Verdict.CONTINUE, confidence: 0.9 },
-      ...Array(6).fill({ verdict: Verdict.PROJECT_DONE, confidence: 0.95 })],
-  });
-  await loop.run();
-  assert(loop.handoffs >= 1, `hang_killed 应触发交接，实际 ${loop.handoffs}`);
-  const seq = labels(loop);
-  const iWrap = seq.indexOf('旧对话收尾提示词');
-  assert(iWrap >= 0, `应发出收尾: ${seq}`);
-  assert(seq[iWrap + 1] === '新对话开始提示词', '交接后应发新对话开始');
-});
-
-test('空 result → 换新会话重来，不当成做完了', async () => {
-  const loop = makeLoop({
-    handoffFloor: 1e9, handoffCeiling: 1e9 + 1, hardKill: 1e9 + 2,
-    runnerScript: [{}, {},
-      { exitReason: ExitReason.EMPTY_RESULT },
-      ...Array(6).fill({})],
-    judgeScript: [{ verdict: Verdict.CONTINUE, confidence: 0.9 },
-      ...Array(5).fill({ verdict: Verdict.PROJECT_DONE, confidence: 0.95 })],
-  });
-  await loop.run();
-  const seq = labels(loop);
-  // 空 result 之后应直接开新会话（不交接、不当成完成）
-  const iRes = seq.indexOf('新对话开始提示词');
-  assert(iRes >= 0, `应换新会话: ${seq}`);
-  const iResSend = loop._sent[iRes];
-  assert(iResSend.resume === false, '必须是新会话而非续跑');
-});
-
-test('连续三次进程异常才停机（不无限重试烧钱）', async () => {
-  const loop = makeLoop({
-    handoffFloor: 1e9, handoffCeiling: 1e9 + 1, hardKill: 1e9 + 2,
-    runnerScript: [{}, {},
-      ...Array(12).fill({ exitReason: ExitReason.ERROR, error: '进程崩了' })],
-    judgeScript: [{ verdict: Verdict.CONTINUE, confidence: 0.9 },
-      ...Array(5).fill({ verdict: Verdict.CONTINUE, confidence: 0.9 })],
-  });
-  const r = await loop.run();
-  assert(r.stop === Stop.ERROR, `连累异常应停机，实际 ${r.stop}`);
-  assert(r.needsFromHuman.includes('连续'), `说明要给出次数: ${r.needsFromHuman}`);
-});
-
-test('费用刹车触发 → 停机等人，不是交接', async () => {
-  const loop = makeLoop({
-    handoffFloor: 1e9, handoffCeiling: 1e9 + 1, hardKill: 1e9 + 2,
-    runnerScript: [{}, {},
-      { exitReason: ExitReason.COST_KILLED, error: '估算已花 $5.00 超过刹车线' },
-      ...Array(5).fill({})],
-    judgeScript: [{ verdict: Verdict.CONTINUE, confidence: 0.9 },
-      ...Array(5).fill({ verdict: Verdict.PROJECT_DONE, confidence: 0.95 })],
-  });
-  const r = await loop.run();
-  // 水位触顶要交接换窗口，钱花超了应当直接停机等人 —— 处置不同
-  assert(r.stop === Stop.BUDGET, `钱花超了该停机，实际 ${r.stop}`);
-  assert(loop.handoffs === 0, '费用刹车不该走交接');
-});
-
-// ── 监督者分支 ──────────────────────────────────────────────
-test('project_done 停机', async () => {
-  const loop = makeLoop({
-    runnerScript: [{}, {}, {}],
-    judgeScript: [{ verdict: Verdict.PROJECT_DONE, confidence: 0.95 }],
-  });
-  const r = await loop.run();
-  assert(r.stop === Stop.PROJECT_DONE, `实际 ${r.stop}`);
-});
-
-test('代答原样发给执行者，并计入 decisions', async () => {
-  const loop = makeLoop({
-    handoffFloor: 1e9, handoffCeiling: 1e9 + 1, hardKill: 1e9 + 2,
-    runnerScript: [{}, {}, {}, ...Array(4).fill({})],
-    judgeScript: [
-      { verdict: Verdict.DECIDE, confidence: 0.9, reply: '用 SQLite 就行' },
-      ...Array(4).fill({ verdict: Verdict.PROJECT_DONE, confidence: 0.95 }),
-    ],
-  });
-  await loop.run();
-  const seq = labels(loop);
-  const i = seq.indexOf('监督者代答');
-  assert(i >= 0, `应发出代答: ${seq}`);
-  assert(prompts(loop)[i] === '用 SQLite 就行',
-    `代答必须原样发出: ${JSON.stringify(prompts(loop)[i])}`);
-  assert(loop.decisions === 1, `应计入 decisions，实际 ${loop.decisions}`);
-});
-
-test('needs_human 且人不回 → 停机', async () => {
-  const loop = makeLoop({
-    runnerScript: [{}, {}, {}],
-    judgeScript: [{ verdict: Verdict.NEEDS_HUMAN, confidence: 1.0,
-      needsFromHuman: '要用哪个数据库？' }],
-    askHuman: async () => '',            // 人不在
-  });
-  const r = await loop.run();
-  assert(r.stop === Stop.NEEDS_HUMAN, `实际 ${r.stop}`);
-  assert(r.needsFromHuman.includes('数据库'), `应带出需要人做什么: ${r.needsFromHuman}`);
-});
-
-test('人回了就原样发出并继续', async () => {
-  const loop = makeLoop({
-    handoffFloor: 1e9, handoffCeiling: 1e9 + 1, hardKill: 1e9 + 2,
-    runnerScript: [{}, {}, {}, ...Array(4).fill({})],
-    judgeScript: [
-      { verdict: Verdict.NEEDS_HUMAN, confidence: 1.0, needsFromHuman: '用哪个库？' },
-      ...Array(4).fill({ verdict: Verdict.PROJECT_DONE, confidence: 0.95 }),
-    ],
-    askHuman: async () => '用 SQLite',
-  });
-  await loop.run();
-  const seq = labels(loop);
-  const i = seq.indexOf('人类回复');
-  assert(i >= 0, `应发出人类回复: ${seq}`);
-  assert(prompts(loop)[i] === '用 SQLite', '人类回复必须原样发出，不加包装');
-});
-
-test('未配监督者时明确说出来（早先这里静默 return）', async () => {
-  const loop = makeLoop({ runnerScript: [{}, {}, {}] });   // 不给 judgeScript
-  const r = await loop.run();
-  assert(r.stop === Stop.NEEDS_HUMAN, `实际 ${r.stop}`);
-  assert(r.needsFromHuman.includes('监督者'),
-    `要说清是没配监督者: ${r.needsFromHuman}`);
-});
-
-// ── maxLegs 与报告 ──────────────────────────────────────────
-test('maxLegs 到顶停机', async () => {
-  const loop = makeLoop({
-    handoffFloor: 1e9, handoffCeiling: 1e9 + 1, hardKill: 1e9 + 2,
-    maxLegs: 4,
-    runnerScript: Array(10).fill({}),
-    judgeScript: Array(6).fill({ verdict: Verdict.CONTINUE, confidence: 0.9 }),
-  });
-  const r = await loop.run();
-  assert(r.stop === Stop.MAX_LEGS, `实际 ${r.stop}`);
-  assert(loop.legs <= 5, `不该超出太多，实际 ${loop.legs}`);
-});
-
-test('report.json 落盘且字段齐全', async () => {
-  const loop = makeLoop({
-    runnerScript: [{}, {}, {}],
-    judgeScript: [{ verdict: Verdict.PROJECT_DONE, confidence: 0.95 }],
-  });
-  const r = await loop.run();
-  const f = path.join(loop.spec.runDir, 'report.json');
-  assert(fs.existsSync(f), 'report.json 应落盘');
-  const saved = JSON.parse(fs.readFileSync(f, 'utf8'));
-  for (const k of ['stop', 'legs', 'handoffs', 'maintenances', 'decisions',
-    'elapsedS', 'costUsd']) {
-    assert(k in saved, `report 缺字段 ${k}`);
-  }
-  assert(saved.stop === r.stop, 'report 与返回值要一致');
-});
-
-test('事件落盘为 jsonl，每行合法', async () => {
-  const loop = makeLoop({
-    runnerScript: [{}, {}, {}],
-    judgeScript: [{ verdict: Verdict.PROJECT_DONE, confidence: 0.95 }],
-  });
-  await loop.run();
-  const f = path.join(loop.spec.runDir, 'orchestrator.jsonl');
-  assert(fs.existsSync(f), '事件文件应落盘');
-  const lines = fs.readFileSync(f, 'utf8').trim().split('\n').filter(Boolean);
-  for (const l of lines) JSON.parse(l);
-  const kinds = lines.map((l) => JSON.parse(l).kind);
-  assert(kinds.includes('send') && kinds.includes('result'), '应记录 send 与 result');
-  assert(kinds.includes('finished'), '应记录 finished');
-});
-
-await Promise.all(pending);
-fs.rmSync(TMP, { recursive: true, force: true });
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
-if (results.failed) for (const e of results.errors) console.log(`  • ${e.name}\n    ${e.error}`);
+if (results.failed) for (const x of results.errors) console.log(`  • ${x.name}\n    ${x.error}`);
 process.exitCode = results.failed ? 1 : 0;

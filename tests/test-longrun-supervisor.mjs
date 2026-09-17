@@ -15,6 +15,9 @@
  * 运行: node tests/test-longrun-supervisor.mjs
  */
 
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import {
   Supervisor, Verdict, Judgement, extractJson, loadSystemPrompt,
   SupervisorPromptError, REQUIRED_MARKERS,
@@ -41,6 +44,7 @@ function stubSupervisor(payload, over = {}) {
   const sup = new Supervisor({
     systemPrompt: 'verdict continue project_done decide needs_human',   // 满足契约校验
     maxTokens: 4000,
+    requirementText: over.requirement || '',
     complete: async (sys, user) => {
       seen.push({ sys, user });
       if (over.throwError) throw new Error(over.throwError);
@@ -144,18 +148,13 @@ test('needs_human：原样传出需要人做什么', async () => {
 });
 
 // ── 容错：拿不准就停机，绝不猜判定 ──────────────────────────
-test('未配监督者时明确说出来（不能静默什么都不提示）', async () => {
-  const sup = new Supervisor({ complete: null, systemPrompt: 'x' });
-  const j = await sup.judge(runOk());
-  assert(j.needsHuman, '应叫人');
-  assert(j.reason.includes('未配置监督者'), `理由要点明未配置: ${j.reason}`);
-});
-
 test('LLM 不可用时叫人，不猜判定', async () => {
   const sup = stubSupervisor({}, { throwError: '连接超时' });
   const j = await sup.judge(runOk());
   assert(j.needsHuman, '应叫人');
   assert(j.reason.includes('监督者不可用'), `理由要点明: ${j.reason}`);
+  // 拿不到判断 ≠ 判断为继续；降级判定的置信度是 0（原版 _fallback），不是 1
+  assert(j.confidence === 0, `降级判定置信度应为 0，实际 ${j.confidence}`);
 });
 
 test('回复被 max_tokens 截断时给出可操作的提示', async () => {
@@ -213,37 +212,44 @@ test('破损 JSON 走抢救后仍能正常判定', async () => {
 });
 
 // ── 输入组装 ────────────────────────────────────────────────
-test('需求文档全文送到监督者（代答能力的前提）', async () => {
-  const sup = stubSupervisor({ verdict: 'continue', confidence: 0.9 });
-  await sup.judge(runOk(), { requirement: '必须用 Postgres 而非 SQLite' });
+test('需求文档送到监督者，标题写明只供代答、不许拿来核对完成度', async () => {
+  const sup = stubSupervisor({ verdict: 'continue', confidence: 0.9 }, { requirement: '必须用 Postgres 而非 SQLite' });
+  await sup.judge(runOk(), '开发中');
   const user = sup._seen[0].user;
-  assert(user.includes('必须用 Postgres'), '需求文档必须进输入');
-  assert(user.includes('需求文档'), '要有标题让监督者知道那是委托人的意图');
+  assert(user.includes('必须用 Postgres'), '需求文档必须进输入（代答能力的前提）');
+  // tafang 实测：没写用途边界时，监督者拿需求逐项比对，把已完成的项目判成 continue
+  assert(user.includes('不要用它核对项目是否做完'), '标题要写明用途边界');
+  assert(user.includes('当前所处阶段: 开发中'), '阶段要送到');
 });
 
-test('需求文档超长时截断但保留开头（约束写在前面）', async () => {
+test('没给需求文档时显式告知无代答依据', async () => {
+  const sup = stubSupervisor({ verdict: 'continue', confidence: 0.9 });
+  await sup.judge(runOk());
+  assert(sup._seen[0].user.includes('本次未提供需求文档'), '要说出来而不是静默');
+});
+
+test('需求文档超长时截断但保留开头；执行者输出只送末尾 6000 字', async () => {
   const head = '开头有验收标准';
-  const doc = head + 'x'.repeat(REQUIREMENT_BUDGET + 5000);
-  const sup = stubSupervisor({ verdict: 'continue', confidence: 0.9 });
-  await sup.judge(runOk(), { requirement: doc });
+  const sup = stubSupervisor({ verdict: 'continue', confidence: 0.9 },
+    { requirement: head + 'x'.repeat(REQUIREMENT_BUDGET + 5000) });
+  await sup.judge(runOk({ finalText: '旧'.repeat(7000) + '最新一句' }));
   const user = sup._seen[0].user;
-  assert(user.includes(head), '开头必须保留');
-  assert(user.includes('已截断'), '要标明截断了');
-  assert(user.length < doc.length, '确实截断了');
+  assert(user.includes(head) && user.includes('后续截断'), '开头保留且标明截断');
+  assert(user.includes('最新一句') && !user.includes('旧'.repeat(6001)), '输出只送末尾 6000 字（尾部是最新一轮）');
 });
 
-test('现场包含退出原因与执行者原话，不注入记忆全文', async () => {
+test('现场含退出原因、stop_reason、遗留 agent 名字与两段指引，不注入记忆全文', async () => {
   const sup = stubSupervisor({ verdict: 'continue', confidence: 0.9 });
   await sup.judge(runOk({
-    exitReason: ExitReason.HANG_KILLED, error: '静默 300s',
-    finalText: '我正在写 parser', pendingTasks: [{ task_id: 'a1' }],
+    exitReason: ExitReason.HANG_KILLED, stopReason: 'tool_use', error: '静默 300s',
+    finalText: '我正在写 parser', pendingTasks: [{ task_id: 'a1', description: '子系统A' }],
   }));
   const user = sup._seen[0].user;
-  assert(user.includes(ExitReason.HANG_KILLED), '退出原因要进现场');
-  assert(user.includes('静默 300s'), '异常说明要进现场');
-  assert(user.includes('我正在写 parser'), '执行者原话要进现场');
-  assert(user.includes('后台任务'), '遗留任务要告知');
-  // 记忆是执行者的工作记录，不是委托人的意图来源
+  for (const k of [ExitReason.HANG_KILLED, 'stop_reason: tool_use', '静默 300s', '我正在写 parser', '子系统A']) {
+    assert(user.includes(k), `现场缺: ${k}`);
+  }
+  // diablo 实测：不告诉监督者遗留 agent，它只看到正常汇报；但也不许拿这条否决「完成」
+  assert(user.includes('不要用这条去否决它说的「完成」'), '遗留任务的使用边界要写明');
   assert(!user.includes('MEMORY.md'), '不该注入记忆全文');
 });
 
@@ -253,6 +259,29 @@ test('token 用量被累计（供预算核算）', async () => {
   await sup.judge(runOk());
   assert(sup.calls === 2, `调用数应为 2，实际 ${sup.calls}`);
   assert(sup.spentTokens === 2 * 1050, `token 应累计，实际 ${sup.spentTokens}`);
+});
+
+test('decided 要求 reply 非空（空 reply 的 decide 是没答上来）', () => {
+  assert(!new Judgement({ verdict: Verdict.DECIDE, reply: '' }).decided, '空 reply 不算代答成立');
+  assert(new Judgement({ verdict: Verdict.DECIDE, reply: '用 SQLite' }).decided);
+  const r = new Judgement({ verdict: Verdict.DECIDE, confidence: 0.9, reason: '文档写了', reply: '用 SQLite' }).render();
+  assert(r.startsWith('判定: decide（置信度 0.90）') && r.includes('依据: 文档写了') && r.includes('代委托人答复: 用 SQLite'), r);
+});
+
+test('提示词：显式路径读不到硬失败；空文件与缺契约都报错；默认来源标"内置默认"', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sup-prompt-'));
+  const expectThrow = (fn, kw) => {
+    let e = null; try { fn(); } catch (x) { e = x; }
+    assert(e instanceof SupervisorPromptError && e.message.includes(kw), `应抛含「${kw}」的错: ${e?.message}`);
+  };
+  // 人以为换了提示词而实际跑的是默认那份，是最难察觉的一类错 —— 不能静默回落
+  expectThrow(() => loadSystemPrompt(path.join(dir, '不存在.txt')), '不存在');
+  fs.writeFileSync(path.join(dir, 'empty.txt'), '  \n', 'utf8');
+  expectThrow(() => loadSystemPrompt(path.join(dir, 'empty.txt')), '空的');
+  fs.writeFileSync(path.join(dir, 'bad.txt'), '随便判断一下', 'utf8');
+  expectThrow(() => loadSystemPrompt(path.join(dir, 'bad.txt')), 'verdict');
+  assert(loadSystemPrompt().source === '内置默认', '默认来源文案');
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 await Promise.all(pending);

@@ -1,10 +1,10 @@
 /**
  * 长程任务面板：事件 → 显示条目 / 运行态（纯逻辑，可单测）
  *
- * 事件类型两类：
- *   编排层（loop）：send / result / handoff.* / maintenance.* / supervisor.decided /
- *                  need_human.* / inject.applied / paused / resumed / wrapup.empty /
- *                  finished / log / state / error
+ * 事件协议与原版编排器一致（字段 snake_case，loop 落盘到 .run/orchestrator.jsonl）：
+ *   编排层（loop）：send / result / handoff.* / maintenance.* / wrapup.empty / supervisor /
+ *                  supervisor.decided / need_human / need_human.done / inject.applied /
+ *                  paused / resumed / finished / log；服务层另有 state / error
  *   执行层（runner 发出、loop 加 exec. 前缀后落盘，与原版一致）：exec.context / exec.text /
  *                  exec.thinking / exec.tool / exec.tool_result / exec.tasks.waiting /
  *                  exec.tasks.timeout / exec.inject.waiting / exec.inject.sent
@@ -27,6 +27,15 @@ export const STOP_TEXT = {
   budget: '预算耗尽',
   max_legs: '达到发次上限',
   error: '异常停机',
+  interrupted: '人工终止',
+};
+
+/** 监督者判定的人话 */
+export const VERDICT_TEXT = {
+  continue: '继续',
+  project_done: '项目完成',
+  decide: '代答',
+  needs_human: '需要人',
 };
 
 /** 退出原因的人话（runner 的 ExitReason） */
@@ -65,34 +74,41 @@ export function describeEvent(ev) {
     ({ lane, icon, title, detail, tone, full: full || detail });
 
   switch (k) {
-    case 'send': return d('➤', `发送「${ev.label}」`, ev.resume ? '续同一会话' : '新会话');
-    case 'result': return d(ev.exitReason === 'completed' ? '✓' : '⚠',
-      `${ev.label}：${EXIT_TEXT[ev.exitReason] || ev.exitReason}`,
-      `水位 ${fmtTokens(ev.contextPeak)} · ${Math.round(ev.durationS || 0)}s · $${Number(ev.costUsd || 0).toFixed(4)}`
-        + (ev.costIsEstimate ? '（估算）' : ''),
-      ev.exitReason === 'completed' ? 'ok' : 'warn',
+    case 'send': return d('➤', `发送「${ev.label}」`, `第 ${ev.leg} 发 · ${ev.resume ? '续同一会话' : '新会话'}`,
+      'info', ev.text ? `发给执行者的原文：\n${ev.text}` : '');
+    case 'result': return d(ev.exit_reason === 'completed' ? '✓' : '⚠',
+      `${ev.label}：${EXIT_TEXT[ev.exit_reason] || ev.exit_reason}`,
+      `水位 ${fmtTokens(ev.context_peak)} · ${Math.round(ev.duration_s || 0)}s · $${Number(ev.cost_usd || 0).toFixed(4)}`
+        + (ev.cost_is_estimate ? '（估算）' : ''),
+      ev.exit_reason === 'completed' ? 'ok' : 'warn',
       [ev.text ? `执行者说：\n${ev.text}` : '',
-        ev.pendingTasks?.length ? `\n⚠ ${ev.pendingTasks.length} 个后台任务仍在飞` : '']
+        ev.pending_tasks?.length ? `\n⚠ ${ev.pending_tasks.length} 个后台任务仍在飞` : '']
         .join('') || '');
     case 'handoff.start': return d('⇄', `第 ${ev.count} 次上下文交接`, ev.reason || '', 'warn');
-    case 'handoff.done': return d('⇄', `交接完成`, ev.commit ? `快照 ${ev.commit}` : '未打快照', 'ok');
+    case 'handoff.done': return d('⇄', `第 ${ev.count} 次交接完成`, ev.commit ? `快照 ${ev.commit}` : '没有改动，未打快照', 'ok');
     case 'maintenance.start': return d('🧹', `记忆维护开始（第 ${ev.count} 轮）`);
-    case 'maintenance.done': return d('🧹', '记忆维护完成', '', 'ok');
-    case 'wrapup.empty': return d('⚠', '收尾返回空，改在新会话补做', '', 'warn');
-    case 'supervisor.decided': return d('⚖', `监督者：${ev.verdict}（${Number(ev.confidence || 0).toFixed(2)}）`,
-      clip(ev.reason || ev.needsFromHuman), ev.verdict === 'needs_human' ? 'warn' : 'info',
-      [ev.reason, ev.needsFromHuman && `需要人：${ev.needsFromHuman}`].filter(Boolean).join('\n'));
-    case 'need_human.waiting': return d('✋', '等你回答', clip(ev.needsFromHuman || ev.reason), 'err');
-    case 'need_human.done': return d('✋', ev.answered ? '已收到回答' : '无人回答，停机', '', ev.answered ? 'ok' : 'warn');
-    case 'inject.applied': return d('✎', ev.immediate ? '注入（立即打断）已读到' : '注入已读到', `${ev.chars} 字`);
-    case 'paused': return d('⏸', '已暂停', `待发：${ev.label}`, 'warn');
-    case 'resumed': return d('▶', '已继续', '', 'ok');
+    case 'maintenance.done': return d('🧹', `记忆维护完成（第 ${ev.count} 轮）`, '', 'ok');
+    case 'wrapup.empty': return d('⚠', `第 ${ev.count} 次交接的收尾返回空，改在新会话补做`, '', 'warn');
+    case 'supervisor': return d('⚖',
+      `监督者${ev.phase === 'init' ? '（初始化）' : ''}：${VERDICT_TEXT[ev.verdict] || ev.verdict}（${Number(ev.confidence || 0).toFixed(2)}）`,
+      clip(ev.reason), ev.verdict === 'needs_human' ? 'warn' : ev.verdict === 'project_done' ? 'ok' : 'info',
+      [ev.reason, ev.needs_from_human && `需要人：${ev.needs_from_human}`].filter(Boolean).join('\n'));
+    case 'supervisor.decided': return d('⚖', `监督者代答（${Number(ev.confidence || 0).toFixed(2)}）`, clip(ev.text), 'warn',
+      [`代答原文：\n${ev.text}`, ev.reason && `依据：${ev.reason}`].filter(Boolean).join('\n\n'));
+    case 'need_human': return d('✋', '需要你介入', clip(ev.needs || ev.reason), 'err',
+      [ev.needs && `需要人：${ev.needs}`, ev.reason && `依据：${ev.reason}`, ev.question && `执行者原话：\n${ev.question}`]
+        .filter(Boolean).join('\n\n'));
+    case 'need_human.done': return d('✋', ev.answered ? '已收到回答' : '无人回答，停机', clip(ev.text),
+      ev.answered ? 'ok' : 'warn', ev.text);
+    case 'inject.applied': return d('✎', '人工注入已发给执行者', clip(ev.text), 'warn', ev.text);
+    case 'paused': return d('⏸', '已暂停，停在派发口', `待发：${ev.label}`, 'warn');
+    case 'resumed': return d('▶', '已继续', `停了 ${Math.round(ev.paused_s || 0)}s · 接着发「${ev.label}」`, 'ok');
     case 'finished': return d('■', `收工：${STOP_TEXT[ev.stop] || ev.stop}`,
-      `${ev.legs} 发 · 交接 ${ev.handoffs} · $${Number(ev.costUsd || 0).toFixed(2)}`
-        + (ev.needsFromHuman ? ` · ${clip(ev.needsFromHuman)}` : ''),
-      ev.stop === 'project_done' ? 'ok' : 'warn');
-    case 'error': return d('✖', '服务异常', clip(ev.message), 'err');
-    case 'log': return d('·', clip(ev.msg, 240), '', 'muted');
+      `${ev.legs} 发 · 交接 ${ev.handoffs} · 维护 ${ev.maintenances} · 代答 ${ev.decisions}`
+        + ` · ${Math.round((ev.elapsed_s || 0) / 60)} 分钟 · $${Number(ev.cost_usd || 0).toFixed(2)}`,
+      ev.stop === 'project_done' ? 'ok' : 'warn', ev.needs_from_human ? `需要人：${ev.needs_from_human}` : '');
+    case 'error': return d('✖', '服务异常', clip(ev.message), 'err', ev.message);
+    case 'log': return d('·', clip(ev.message, 240), '', 'muted', ev.message);
     default: return describeExec(ev, d);
   }
 }
@@ -102,12 +118,19 @@ function describeExec(ev, d) {
   switch (ev.kind) {
     case 'exec.thinking': return d('💭', clip(ev.text, 120), '', 'muted', ev.text);
     case 'exec.text': return d('💬', clip(ev.text, 200), '', 'info', ev.text);
-    case 'exec.tool': return d('🔧', (ev.names || []).join(', '), '', 'muted');
-    case 'exec.tool_result': return d('↩', ev.name || '工具返回', clip(ev.text, 120), 'muted', ev.text);
-    case 'exec.tasks.waiting': return d('⏳', `等 ${ev.count} 个后台 agent 收尾`, `上限 ${Math.round(ev.limit)}s`, 'warn');
-    case 'exec.tasks.timeout': return d('⏳', `后台 agent 等待超时（${ev.count} 个没收尾）`, `已等 ${ev.waited}s`, 'warn');
+    case 'exec.tool': {
+      const calls = ev.calls || [];
+      return d('🔧', (ev.names || []).join(', '), clip(calls.map((c) => c.brief).filter(Boolean).join(' · '), 160), 'muted',
+        calls.map((c) => `${c.name}${c.detail ? `\n${c.detail}` : ''}`).join('\n\n'));
+    }
+    case 'exec.tool_result': return d('↩', ev.name || '工具返回', clip(ev.text, 120), ev.is_error ? 'warn' : 'muted', ev.text);
+    case 'exec.tasks.waiting': return d('⏳', `等 ${ev.count} 个后台 agent 收尾`,
+      `${(ev.names || []).join('、')} · 上限 ${Math.round(ev.limit || 0)}s`, 'warn');
+    case 'exec.tasks.timeout': return d('⏳', `后台 agent 等待超时（${ev.count} 个没收尾）`,
+      `已等 ${ev.waited}s / 上限 ${Math.round(ev.limit || 0)}s`, 'warn');
     case 'exec.inject.waiting': return d('⏳', '注入已取到，等工具间隙再打断', clip(ev.text, 120), 'warn', ev.text);
-    case 'exec.inject.sent': return d('✎', ev.immediate ? '已立即打断执行者' : '已在工具间隙打断执行者', '', 'warn');
+    case 'exec.inject.sent': return d('✎', ev.immediate ? '已立即打断执行者' : '已在工具间隙打断执行者',
+      clip(ev.text, 120), 'warn', ev.text);
     default:
       // 兜底：未知类型照样显示，绝不静默丢弃
       return d('•', ev.kind || '(无类型事件)', clip(JSON.stringify(stripMeta(ev)), 160), 'muted');
@@ -129,12 +152,13 @@ export function liveFromTask(task) {
     costUsd: task.costUsd || 0,
     legs: task.legs || 0,
     handoffs: task.handoffs || 0,
+    decisions: task.decisions || 0,
     lastLabel: task.lastLabel || '',
     // 两个状态要分开：pauseArmed = 闸已挂上（pause 文件在）；paused = 真停在派发口。
     // 闸挂上时当前这发照常跑完才停，这段时间只有 pauseArmed，没有 paused
     pauseArmed: !!(task.pauseArmed ?? task.paused),
     paused: !!task.halted,
-    awaiting: task.awaitingHuman ? { reason: '', needs: '' } : null,
+    awaiting: task.awaitingHuman ? { reason: '', needs: '', question: '' } : null,
     stop: task.report?.stop || '',
     needsFromHuman: task.report?.needsFromHuman || '',
     hardKill: task.thresholds?.hardKill || 0,
@@ -157,22 +181,26 @@ export function reduceLive(live, ev) {
     case 'send': n.lastLabel = ev.label || n.lastLabel; n.occupied = 0; break;
     case 'result':
       n.legs = ev.leg ?? n.legs;
-      n.costUsd = Math.round((n.costUsd + Number(ev.costUsd || 0)) * 1e4) / 1e4;
-      n.peak = Math.max(n.peak, ev.contextPeak || 0);
+      n.costUsd = Math.round((n.costUsd + Number(ev.cost_usd || 0)) * 1e4) / 1e4;
+      n.peak = Math.max(n.peak, ev.context_peak || 0);
       break;
+    case 'supervisor.decided': n.decisions = (n.decisions || 0) + 1; break;
     case 'handoff.done': n.handoffs = ev.count ?? n.handoffs; break;
     case 'paused': n.paused = true; n.pauseArmed = true; break;
     case 'resumed': n.paused = false; n.pauseArmed = false; break;
-    case 'need_human.waiting':
-      n.awaiting = { reason: ev.reason || '', needs: ev.needsFromHuman || '' };
+    case 'need_human':
+      n.awaiting = { reason: ev.reason || '', needs: ev.needs || '', question: ev.question || '' };
       break;
     case 'need_human.done': n.awaiting = null; break;
     case 'finished':
       n.stop = ev.stop || '';
-      n.needsFromHuman = ev.needsFromHuman || '';
+      n.needsFromHuman = ev.needs_from_human || '';
+      n.legs = ev.legs ?? n.legs;
+      n.handoffs = ev.handoffs ?? n.handoffs;
+      n.decisions = ev.decisions ?? n.decisions;
       n.state = ev.stop === 'project_done' ? 'done' : 'failed';
       n.awaiting = null;
-      n.costUsd = ev.costUsd ?? n.costUsd;       // 收工报告是权威实账
+      n.costUsd = ev.cost_usd ?? n.costUsd;      // 收工报告是权威实账
       break;
     case 'state': n.state = ev.state || n.state; break;
     case 'error': n.state = 'failed'; break;

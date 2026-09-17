@@ -97,17 +97,17 @@ test('暂停/继续驱动横幅（停着和挂死在看板上都表现为不动�
 });
 
 test('等人回答：带原因进入，回答后清掉', () => {
-  let l = reduceLive(base(), { kind: 'need_human.waiting', reason: 'r', needsFromHuman: '选哪个库' });
-  assert(l.awaiting?.needs === '选哪个库', '要带出需要人做什么');
+  let l = reduceLive(base(), { kind: 'need_human', reason: 'r', needs: '选哪个库', question: '用 A 还是 B？' });
+  assert(l.awaiting?.needs === '选哪个库' && l.awaiting.question.includes('A 还是 B'), '要带出需要人做什么与执行者原话');
   l = reduceLive(l, { kind: 'need_human.done', answered: true });
   assert(l.awaiting === null, '回答后应清掉');
 });
 
 test('收工报告的费用是权威实账，覆盖前端累加', () => {
-  let l = reduceLive(base(), { kind: 'result', leg: 1, costUsd: 1.1, contextPeak: 1 });
-  l = reduceLive(l, { kind: 'result', leg: 2, costUsd: 2.2, contextPeak: 1 });
+  let l = reduceLive(base(), { kind: 'result', leg: 1, cost_usd: 1.1, context_peak: 1 });
+  l = reduceLive(l, { kind: 'result', leg: 2, cost_usd: 2.2, context_peak: 1 });
   assert(Math.abs(l.costUsd - 3.3) < 1e-9, `运行中应累加，实际 ${l.costUsd}`);
-  l = reduceLive(l, { kind: 'finished', stop: 'project_done', costUsd: 3.47 });
+  l = reduceLive(l, { kind: 'finished', stop: 'project_done', cost_usd: 3.47, legs: 2, handoffs: 0, decisions: 0 });
   assert(l.costUsd === 3.47 && l.state === 'done', '收工后以报告为准');
 });
 
@@ -131,6 +131,57 @@ test('快照恢复：刷新后从服务端快照重建（含暂停与等人）',
   assert(liveFromTask(null) === null, '无任务返回 null');
 });
 
+/**
+ * 从源码抽每种事件的字段名：找到 emit('kind', { … }) 的对象字面量，按括号/字符串深度切出顶层键。
+ * 同一类型多处发出时取并集。
+ */
+function fieldsIn(src, pattern) {
+  const out = {};
+  for (const m of src.matchAll(pattern)) {
+    let i = m.index + m[0].length;
+    while (src[i] === ' ') i++;
+    if (src[i] !== '{') continue;
+    const keys = out[m[1]] || (out[m[1]] = new Set());
+    let depth = 0, seg = '', quote = null;
+    for (; i < src.length; i++) {
+      const c = src[i];
+      if (quote) { if (c === quote && src[i - 1] !== '\\') quote = null; if (depth === 1) seg += c; continue; }
+      if (c === "'" || c === '"' || c === '`') { quote = c; if (depth === 1) seg += c; continue; }
+      if ('{(['.includes(c)) { depth++; if (depth === 1) continue; }
+      if ('})]'.includes(c)) { depth--; if (depth === 0) { addKey(keys, seg); break; } }
+      if (depth === 1 && c === ',') { addKey(keys, seg); seg = ''; continue; }
+      if (depth === 1) seg += c;
+    }
+  }
+  return out;
+}
+function addKey(keys, seg) {
+  const t = seg.trim();
+  const m = t.match(/^([A-Za-z_$][\w$]*)\s*(?::|$)/);
+  if (m) keys.add(m[1]);
+}
+const META = new Set(['kind', 'at', 'seq', 'taskId']);
+const prefixed = (obj, p) => Object.fromEntries(Object.entries(obj).map(([k, v]) => [p + k, v]));
+const sourceFields = {
+  ...fieldsIn(read('LongRunLoop.js'), /this\.emit\('([a-z_.]+)',/g),
+  ...prefixed(fieldsIn(read('LongRunRunner.js'), /(?:\b|_)emit\('([a-z_.]+)',/g), 'exec.'),
+  ...fieldsIn(read('LongRunService.js'), /this\._push\(task, '([a-z_.]+)',/g),
+};
+
+test('前端读的每个事件字段，源码里真的发了（改名一边忘改另一边会满屏 undefined 却照样绿）', () => {
+  assert(sourceFields.result?.has('exit_reason') && sourceFields['exec.tool']?.has('calls'),
+    `字段抽取失配: ${JSON.stringify(Object.fromEntries(Object.entries(sourceFields).map(([k, v]) => [k, [...v]])))}`);
+  const wrong = [];
+  for (const [kind, fields] of Object.entries(sourceFields)) {
+    const read = new Set();
+    const ev = new Proxy({ kind }, { get: (t, p) => { if (typeof p === 'string') read.add(p); return t[p]; } });
+    describeEvent(ev);
+    reduceLive(base(), ev);
+    for (const f of read) if (!META.has(f) && !fields.has(f)) wrong.push(`${kind}.${f}`);
+  }
+  assert(wrong.length === 0, `前端读了源码没发的字段: ${wrong.join(', ')}`);
+});
+
 // ── 阈值 ────────────────────────────────────────────────────
 test('两个预设本身满足有序（否则一选就报错）', () => {
   for (const [k, p] of Object.entries(THRESHOLD_PRESETS)) {
@@ -144,8 +195,8 @@ test('阈值写反或缺值时给出说清后果的报错', () => {
 });
 
 test("展开 result 能看到执行者这一发的原话与遗留任务", () => {
-  const d = describeEvent({ kind: "result", label: "催继续", exitReason: "completed",
-    contextPeak: 1, durationS: 1, costUsd: 0.1, text: "我实现了 add 命令", pendingTasks: [{}] });
+  const d = describeEvent({ kind: "result", label: "继续完成项目", exit_reason: "completed",
+    context_peak: 1, duration_s: 1, cost_usd: 0.1, text: "我实现了 add 命令", pending_tasks: [{}] });
   assert(d.full.includes("我实现了 add 命令"), "展开内容缺执行者原话");
   assert(d.full.includes("后台任务仍在飞"), "展开内容要提示遗留任务");
   assert(!d.detail.includes("我实现了"), "折叠摘要不该塞整段原话");

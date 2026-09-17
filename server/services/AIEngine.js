@@ -1534,6 +1534,75 @@ export class AIEngine {
     };
   }
 
+  /**
+   * 通用 Claude Messages 调用（长程编排监督者用，对应原版 llm_client.LLMClient.complete）。
+   *
+   * 与 _callClaudeApiWithModel 分开：那条为状态分析定制（固定 system、max_tokens 下限 1024、
+   * 只取第一个文本块、无重试），承载不了监督者的调用约定：
+   *   · 判定提示词要放在 system 位置 —— 第一块仍是 Claude Code 身份（Relay 伪装要求），第二块是它
+   *   · temperature 0：判断任务要可复现
+   *   · max_tokens 4000：实测 2000 不够，reason/reply 长了 JSON 被截断，白降级成叫人
+   *   · 回传真实 stop_reason：上层据此区分"被 max_tokens 截断"与"格式错"
+   *   · 网络错误、5xx、429 重试（默认 2 次，退避 2s×n）；其它 4xx 不重试，重试不会有不同结果
+   *   · 单次超时 120 秒
+   * @returns {Promise<{text:string, stopReason:string|null, inputTokens:number, outputTokens:number}>}
+   */
+  async callClaudeMessages({ config, system, user, maxTokens = 4000, temperature = 0,
+    timeoutMs = 120000, maxRetries = 2, backoffMs = 2000 } = {}) {
+    if (!config?.apiUrl || !config?.apiKey) {
+      throw new Error('Claude API 未配置，请先在 CC Switch 中选择供应商');
+    }
+    const body = JSON.stringify({
+      model: config.model || this._getModelsToTry(config.model)[0],
+      max_tokens: maxTokens,
+      temperature,
+      system: [
+        { type: 'text', text: CLAUDE_CODE_FAKE.systemPrompt },
+        { type: 'text', text: String(system || '') },
+      ],
+      messages: [{ role: 'user', content: String(user || '') }],
+      metadata: { user_id: generateClaudeCodeUserId() },
+      stream: false,
+    });
+    const headers = {
+      'Content-Type': 'application/json',
+      'User-Agent': CLAUDE_CODE_FAKE.userAgent,
+      'x-app': CLAUDE_CODE_FAKE.headers['x-app'],
+      'anthropic-beta': CLAUDE_CODE_FAKE.headers['anthropic-beta'],
+      'anthropic-version': CLAUDE_CODE_FAKE.headers['anthropic-version'],
+      'Authorization': `Bearer ${config.apiKey}`,
+    };
+
+    let lastErr = '';
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const resp = await fetch(config.apiUrl, {
+          method: 'POST', headers, body, signal: ctrl.signal, dispatcher: proxyAgent || insecureAgent,
+        });
+        if (resp.status === 200) {
+          const data = await resp.json();
+          const blocks = Array.isArray(data.content) ? data.content : [];
+          return {
+            text: blocks.filter((b) => b?.type === 'text').map((b) => b.text || '').join('\n').trim(),
+            stopReason: data.stop_reason ?? null,
+            inputTokens: Number(data.usage?.input_tokens) || 0,
+            outputTokens: Number(data.usage?.output_tokens) || 0,
+          };
+        }
+        lastErr = `HTTP ${resp.status}: ${(await resp.text()).slice(0, 400)}`;
+        if (resp.status >= 400 && resp.status < 500 && resp.status !== 429) break;
+      } catch (e) {
+        lastErr = e.name === 'AbortError' ? `超时（${timeoutMs / 1000}s）` : `网络错误: ${e.message}`;
+      } finally {
+        clearTimeout(timer);
+      }
+      if (attempt < maxRetries) await new Promise((r) => setTimeout(r, backoffMs * (attempt + 1)));
+    }
+    throw new Error(`监督者调用失败（${maxRetries + 1} 次尝试）: ${lastErr}`);
+  }
+
   // Codex API 调用（带 Codex CLI 伪装，使用 OpenAI Responses API 格式）
   async _callCodexApi(prompt, config) {
     if (!config.apiUrl || !config.apiKey) {

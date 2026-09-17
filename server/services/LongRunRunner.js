@@ -553,6 +553,7 @@ export class LongRunRunner {
     // ⚠ stdin 管道已关时写入会异步抛 'error'，不接住会变成未捕获异常把整个 WebTmux 弄崩（审计 G10）
     proc.stdin.on('error', () => {});
     adoptProcessGroup(proc);
+    this._proc = proc;
 
     let stderr = '';
     proc.stderr.on('data', (b) => { stderr = (stderr + b).slice(-20000); });
@@ -622,6 +623,17 @@ export class LongRunRunner {
     if (eventsFd != null) { try { closeSync(eventsFd); } catch { /* 忽略 */ } }
 
     return this._assemble(sid, proc, state, meter, started, eventsPath, stderr);
+  }
+
+  /**
+   * 面板「终止」：立刻整组杀掉当前执行者（原版靠终端 Ctrl+C + 进程连坐）。
+   * 不走 SIGTERM 宽容：人已明确要停，run() 随进程退出自然返回，由 loop 判定为人工终止。
+   */
+  abort() {
+    const proc = this._proc;
+    if (!proc || proc.exitCode !== null || proc.signalCode) return;
+    killProcessGroup(proc, SIGTERM);
+    setTimeout(() => { if (proc.exitCode === null && !proc.signalCode) killProcessGroup(proc, SIGKILL); }, 3000).unref();
   }
 
   /** 组装结果（原版 _assemble），判定顺序逐条一致。 */
