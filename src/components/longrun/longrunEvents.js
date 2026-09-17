@@ -5,9 +5,9 @@
  *   编排层（loop）：send / result / handoff.* / maintenance.* / supervisor.decided /
  *                  need_human.* / inject.applied / paused / resumed / wrapup.empty /
  *                  finished / log / state / error
- *   执行层（runner，服务端加了 exec. 前缀）：exec.send / exec.context / exec.text /
- *                  exec.thinking / exec.tool / exec.tool_result / exec.init /
- *                  exec.tasks.waiting / exec.tasks.timeout / exec.inject.sent
+ *   执行层（runner 发出、loop 加 exec. 前缀后落盘，与原版一致）：exec.context / exec.text /
+ *                  exec.thinking / exec.tool / exec.tool_result / exec.tasks.waiting /
+ *                  exec.tasks.timeout / exec.inject.waiting / exec.inject.sent
  *
  * ⚠ **不认识的类型不能静默丢弃**。原编排器看板有过 exec.text 一直在发却从未上屏，
  *   丢了 139 条执行者旁白才被发现 —— 表现为"执行者只有最终答案、没有过程"。
@@ -40,6 +40,7 @@ export const EXIT_TEXT = {
   wall_timeout: '墙钟超时',
   max_turns: '撞轮数上限',
   empty_result: '空返回（一个 turn 都没跑）',
+  asked_human: '停下来提问',
   error: '进程异常',
 };
 
@@ -47,19 +48,21 @@ export const EXIT_TEXT = {
 const HIDDEN = new Set(['exec.context', 'state']);
 
 /** 过程明细：默认折成单行，可整体隐藏 */
-const TRACE = new Set(['exec.thinking', 'exec.tool', 'exec.tool_result', 'exec.text', 'exec.send', 'exec.init']);
+const TRACE = new Set(['exec.thinking', 'exec.tool', 'exec.tool_result', 'exec.text']);
 
 const fmtTokens = (n) => (n >= 1000 ? `${Math.round(n / 1000)}k` : String(n || 0));
 const clip = (s, n = 160) => { const t = String(s ?? ''); return t.length > n ? t.slice(0, n) + '…' : t; };
 
 /**
- * @returns {{lane:'timeline'|'trace'|'hidden', icon:string, title:string, detail:string, tone:string}}
+ * @returns {{lane:'timeline'|'trace'|'hidden', icon:string, title:string, detail:string, tone:string, full:string}}
+ *   detail 是折叠时的一行摘要；full 是展开后的完整内容（执行者原话等），缺省同 detail
  */
 export function describeEvent(ev) {
   const k = ev?.kind || '';
-  if (HIDDEN.has(k)) return { lane: 'hidden', icon: '', title: '', detail: '', tone: 'muted' };
+  if (HIDDEN.has(k)) return { lane: 'hidden', icon: '', title: '', detail: '', tone: 'muted', full: '' };
   const lane = TRACE.has(k) ? 'trace' : 'timeline';
-  const d = (icon, title, detail = '', tone = 'info') => ({ lane, icon, title, detail, tone });
+  const d = (icon, title, detail = '', tone = 'info', full = '') =>
+    ({ lane, icon, title, detail, tone, full: full || detail });
 
   switch (k) {
     case 'send': return d('➤', `发送「${ev.label}」`, ev.resume ? '续同一会话' : '新会话');
@@ -67,14 +70,18 @@ export function describeEvent(ev) {
       `${ev.label}：${EXIT_TEXT[ev.exitReason] || ev.exitReason}`,
       `水位 ${fmtTokens(ev.contextPeak)} · ${Math.round(ev.durationS || 0)}s · $${Number(ev.costUsd || 0).toFixed(4)}`
         + (ev.costIsEstimate ? '（估算）' : ''),
-      ev.exitReason === 'completed' ? 'ok' : 'warn');
+      ev.exitReason === 'completed' ? 'ok' : 'warn',
+      [ev.text ? `执行者说：\n${ev.text}` : '',
+        ev.pendingTasks?.length ? `\n⚠ ${ev.pendingTasks.length} 个后台任务仍在飞` : '']
+        .join('') || '');
     case 'handoff.start': return d('⇄', `第 ${ev.count} 次上下文交接`, ev.reason || '', 'warn');
     case 'handoff.done': return d('⇄', `交接完成`, ev.commit ? `快照 ${ev.commit}` : '未打快照', 'ok');
     case 'maintenance.start': return d('🧹', `记忆维护开始（第 ${ev.count} 轮）`);
     case 'maintenance.done': return d('🧹', '记忆维护完成', '', 'ok');
     case 'wrapup.empty': return d('⚠', '收尾返回空，改在新会话补做', '', 'warn');
     case 'supervisor.decided': return d('⚖', `监督者：${ev.verdict}（${Number(ev.confidence || 0).toFixed(2)}）`,
-      clip(ev.reason || ev.needsFromHuman), ev.verdict === 'needs_human' ? 'warn' : 'info');
+      clip(ev.reason || ev.needsFromHuman), ev.verdict === 'needs_human' ? 'warn' : 'info',
+      [ev.reason, ev.needsFromHuman && `需要人：${ev.needsFromHuman}`].filter(Boolean).join('\n'));
     case 'need_human.waiting': return d('✋', '等你回答', clip(ev.needsFromHuman || ev.reason), 'err');
     case 'need_human.done': return d('✋', ev.answered ? '已收到回答' : '无人回答，停机', '', ev.answered ? 'ok' : 'warn');
     case 'inject.applied': return d('✎', ev.immediate ? '注入（立即打断）已读到' : '注入已读到', `${ev.chars} 字`);
@@ -93,14 +100,13 @@ export function describeEvent(ev) {
 /** 执行层事件（exec.*）与兜底。 */
 function describeExec(ev, d) {
   switch (ev.kind) {
-    case 'exec.send': return d('↗', '起执行进程', ev.sessionId ? `会话 ${String(ev.sessionId).slice(0, 8)}` : '', 'muted');
-    case 'exec.init': return d('◎', `执行者就绪${ev.model ? `（${ev.model}）` : ''}`, '', 'muted');
-    case 'exec.thinking': return d('💭', clip(ev.text, 120), '', 'muted');
-    case 'exec.text': return d('💬', clip(ev.text, 200), '', 'info');
+    case 'exec.thinking': return d('💭', clip(ev.text, 120), '', 'muted', ev.text);
+    case 'exec.text': return d('💬', clip(ev.text, 200), '', 'info', ev.text);
     case 'exec.tool': return d('🔧', (ev.names || []).join(', '), '', 'muted');
-    case 'exec.tool_result': return d('↩', ev.name || '工具返回', clip(ev.text, 120), 'muted');
+    case 'exec.tool_result': return d('↩', ev.name || '工具返回', clip(ev.text, 120), 'muted', ev.text);
     case 'exec.tasks.waiting': return d('⏳', `等 ${ev.count} 个后台 agent 收尾`, `上限 ${Math.round(ev.limit)}s`, 'warn');
     case 'exec.tasks.timeout': return d('⏳', `后台 agent 等待超时（${ev.count} 个没收尾）`, `已等 ${ev.waited}s`, 'warn');
+    case 'exec.inject.waiting': return d('⏳', '注入已取到，等工具间隙再打断', clip(ev.text, 120), 'warn', ev.text);
     case 'exec.inject.sent': return d('✎', ev.immediate ? '已立即打断执行者' : '已在工具间隙打断执行者', '', 'warn');
     default:
       // 兜底：未知类型照样显示，绝不静默丢弃
@@ -124,7 +130,10 @@ export function liveFromTask(task) {
     legs: task.legs || 0,
     handoffs: task.handoffs || 0,
     lastLabel: task.lastLabel || '',
-    paused: !!task.paused,
+    // 两个状态要分开：pauseArmed = 闸已挂上（pause 文件在）；paused = 真停在派发口。
+    // 闸挂上时当前这发照常跑完才停，这段时间只有 pauseArmed，没有 paused
+    pauseArmed: !!(task.pauseArmed ?? task.paused),
+    paused: !!task.halted,
     awaiting: task.awaitingHuman ? { reason: '', needs: '' } : null,
     stop: task.report?.stop || '',
     needsFromHuman: task.report?.needsFromHuman || '',
@@ -144,16 +153,16 @@ export function reduceLive(live, ev) {
       n.occupied = ev.occupied || 0;
       n.peak = Math.max(n.peak, ev.peak || 0);
       break;
-    case 'exec.send': n.occupied = 0; break;
-    case 'send': n.lastLabel = ev.label || n.lastLabel; break;
+    // 每发由 loop 的 send 开始：新进程的水位从头算
+    case 'send': n.lastLabel = ev.label || n.lastLabel; n.occupied = 0; break;
     case 'result':
       n.legs = ev.leg ?? n.legs;
       n.costUsd = Math.round((n.costUsd + Number(ev.costUsd || 0)) * 1e4) / 1e4;
       n.peak = Math.max(n.peak, ev.contextPeak || 0);
       break;
     case 'handoff.done': n.handoffs = ev.count ?? n.handoffs; break;
-    case 'paused': n.paused = true; break;
-    case 'resumed': n.paused = false; break;
+    case 'paused': n.paused = true; n.pauseArmed = true; break;
+    case 'resumed': n.paused = false; n.pauseArmed = false; break;
     case 'need_human.waiting':
       n.awaiting = { reason: ev.reason || '', needs: ev.needsFromHuman || '' };
       break;

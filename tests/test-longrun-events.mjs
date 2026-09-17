@@ -38,7 +38,8 @@ function kindsIn(src, pattern) {
 const loopKinds = kindsIn(read('LongRunLoop.js'), /this\.emit\('([a-z_.]+)'/g);
 const runnerKinds = [
   ...kindsIn(read('LongRunRunner.js'), /this\._writeEvent\('([a-z_.]+)'/g),
-  ...kindsIn(read('LongRunRunner.js'), /\bemit\('([a-z_.]+)'/g),
+  // _emit 前是下划线、没有词边界，\bemit 会漏抽（inject.waiting / inject.sent 就这样漏过）
+  ...kindsIn(read('LongRunRunner.js'), /(?:\b|_)emit\('([a-z_.]+)'/g),
 ].map((k) => `exec.${k}`);
 const serviceKinds = kindsIn(read('LongRunService.js'), /this\._push\(task, '([a-z_.]+)'/g);
 
@@ -84,7 +85,7 @@ test('水位跟 exec.context 走，新一发归零，峰值保留', () => {
   let l = reduceLive(base(), { kind: 'exec.context', occupied: 200000, peak: 210000 });
   assert(l.occupied === 200000 && l.peak === 210000, '水位未更新');
   assert(waterlinePercent(l) === 50, `分母应是 hardKill，实际 ${waterlinePercent(l)}%`);
-  l = reduceLive(l, { kind: 'exec.send' });
+  l = reduceLive(l, { kind: 'send', label: '催继续' });
   assert(l.occupied === 0 && l.peak === 210000, '新一发应归零但保留峰值');
 });
 
@@ -125,7 +126,8 @@ test('归约是纯函数：不改原对象', () => {
 test('快照恢复：刷新后从服务端快照重建（含暂停与等人）', () => {
   const l = liveFromTask({ state: 'running', occupied: 5, contextPeak: 9, costUsd: 1.2,
     legs: 4, handoffs: 1, paused: true, awaitingHuman: true, thresholds: { hardKill: 100 } });
-  assert(l.paused && l.awaiting && l.legs === 4 && l.hardKill === 100, '快照字段没接全');
+  // paused 文件在只代表闸已挂上，不代表已停住（见下一条用例）
+  assert(l.pauseArmed && !l.paused && l.awaiting && l.legs === 4 && l.hardKill === 100, '快照字段没接全');
   assert(liveFromTask(null) === null, '无任务返回 null');
 });
 
@@ -139,6 +141,23 @@ test('两个预设本身满足有序（否则一选就报错）', () => {
 test('阈值写反或缺值时给出说清后果的报错', () => {
   assert(thresholdError({ handoffFloor: 300, handoffCeiling: 200, hardKill: 400 }).includes('刚开跑'));
   assert(thresholdError({ handoffFloor: '', handoffCeiling: 200, hardKill: 400 }).includes('正整数'));
+});
+
+test("展开 result 能看到执行者这一发的原话与遗留任务", () => {
+  const d = describeEvent({ kind: "result", label: "催继续", exitReason: "completed",
+    contextPeak: 1, durationS: 1, costUsd: 0.1, text: "我实现了 add 命令", pendingTasks: [{}] });
+  assert(d.full.includes("我实现了 add 命令"), "展开内容缺执行者原话");
+  assert(d.full.includes("后台任务仍在飞"), "展开内容要提示遗留任务");
+  assert(!d.detail.includes("我实现了"), "折叠摘要不该塞整段原话");
+});
+
+test("暂停闸已挂 ≠ 已停住：闸挂上时当前这发照常跑完", () => {
+  const l = liveFromTask({ state: "running", paused: true, thresholds: { hardKill: 1 } });
+  assert(l.pauseArmed === true && l.paused === false, "快照只知道 pause 文件在，不能当成已停住");
+  const h = liveFromTask({ state: "running", pauseArmed: true, halted: true, thresholds: { hardKill: 1 } });
+  assert(h.paused === true, "服务端明确 halted 才算已停住");
+  const r = reduceLive(reduceLive(l, { kind: "paused" }), { kind: "resumed" });
+  assert(r.paused === false && r.pauseArmed === false, "继续后两个状态都清掉");
 });
 
 await Promise.all(pending);
