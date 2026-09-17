@@ -7300,10 +7300,10 @@ io.on('connection', (socket) => {
   // 面板上的按钮也是写这些文件，与从终端投件是同一条路。
 
   /** 预检：解析需求，给出沙箱现状与外部参考清单。不建沙箱、不起进程、不删任何东西。 */
-  socket.on('longrun:plan', ({ docPath, requirementText, sandboxName, promptsFile } = {}, cb) => {
+  socket.on('longrun:plan', ({ docPath, requirementText, projectRoot, projectName, sandboxName, promptsFile } = {}, cb) => {
     const reply = (d) => { socket.emit('longrun:planned', d); if (typeof cb === 'function') cb(d); };
     try {
-      reply({ ok: true, ...longRunService.plan({ docPath, requirementText, sandboxName, promptsFile }) });
+      reply({ ok: true, ...longRunService.plan({ docPath, requirementText, projectRoot, projectName, sandboxName, promptsFile }) });
     } catch (e) {
       reply({ ok: false, error: e.message });
     }
@@ -7420,9 +7420,9 @@ io.on('connection', (socket) => {
   });
 
   /** 事后回放（原版 view.py）：按沙箱名读 .run/orchestrator.jsonl。只读。 */
-  socket.on('longrun:replay', ({ sandboxName, file } = {}, cb) => {
+  socket.on('longrun:replay', ({ sandboxName, projectRoot, file } = {}, cb) => {
     let d;
-    try { d = longRunService.replay({ sandboxName, file }); } catch (e) { d = { ok: false, error: e.message }; }
+    try { d = longRunService.replay({ sandboxName, projectRoot, file }); } catch (e) { d = { ok: false, error: e.message }; }
     if (typeof cb === 'function') cb(d);
   });
 

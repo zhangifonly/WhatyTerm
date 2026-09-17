@@ -117,6 +117,13 @@ await test('绑定器：同目录 claude 在跑先拒绝再动条目；切模式
   assert(early > 0 && flip > early && open.slice(0, flip).includes('this._create('), '打开项目：已有条目要在改模式之前直接返回');
 });
 
+await test('socket 处理器把项目参数转给服务层（按字段挑选时漏掉 projectRoot 会让预检看错目录）', () => {
+  const idx = src('index.js');
+  const plan = between(idx, "socket.on('longrun:plan',", 400), replay = between(idx, "socket.on('longrun:replay',", 300);
+  assert(/longRunService\.plan\(\{[^}]*projectRoot, projectName[^}]*\}\)/.test(plan), '预检没转发 projectRoot/projectName');
+  assert(/longRunService\.replay\(\{[^}]*projectRoot[^}]*\}\)/.test(replay), '回放没转发 projectRoot');
+});
+
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
 if (results.failed) for (const e of results.errors) console.log(`  • ${e.name}\n    ${e.error}`);
 process.exitCode = results.failed ? 1 : 0;
