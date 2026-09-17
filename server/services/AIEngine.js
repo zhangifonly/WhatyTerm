@@ -401,7 +401,7 @@ export class AIEngine {
     // null 表示该供应商无法用于 HTTP 调用（如官方 OAuth 登录，无 URL/key）
     this._sessionProviderCache = new Map();
     // 各 CLI 的纯文本客户端工厂：claude -p 兜底 + 按 aiType 的专属通道（测试覆盖它们，绝不起真 CLI）
-    this.cliTextFactory = (model) => new ClaudeCliTextClient({ model, timeoutMs: STATUS_CLI_TIMEOUT_MS });
+    this.cliTextFactory = (model) => new ClaudeCliTextClient({ model, effort: 'low', timeoutMs: STATUS_CLI_TIMEOUT_MS });
     this.cliChannels = {
       codex: { source: 'codex_exec', factory: () => new CodexExecTextClient({ timeoutMs: STATUS_CLI_TIMEOUT_MS }) },
       grok: { source: 'grok_cli', factory: () => new GrokSingleTextClient({ timeoutMs: STATUS_CLI_TIMEOUT_MS }) },
@@ -3466,15 +3466,24 @@ ${historyText || '(空)'}
    * 进程数受 AI 并发上限约束。测试覆盖 this.cliTextFactory / this.cliChannels，绝不起真 CLI。
    */
   async _analyzeStatusViaCurrentConfig(prompt, aiType = 'claude') {
-    const run = (client) => this._withConcurrencyLimit(() => client.complete(STATUS_SYSTEM_PROMPT, prompt, { jsonSchema: STATUS_TOOL.input_schema }));
+    // 成功也要留一行：否则日志里分不清「没触发 AI」与「触发了、悄悄成功」，出问题时无从排查
+    // 排队与调用分开记：AI 并发上限 3，实测并发 7 路时排队能占到 60 秒，混在一起会误判成通道慢
+    const run = async (client, name) => {
+      const queuedAt = Date.now();
+      let startedAt = queuedAt;
+      const res = await this._withConcurrencyLimit(() => { startedAt = Date.now(); return client.complete(STATUS_SYSTEM_PROMPT, prompt, { jsonSchema: STATUS_TOOL.input_schema }); });
+      const sec = (ms) => (ms / 1000).toFixed(1);
+      console.log(`[AIEngine] 状态分析（${name}）调用 ${sec(Date.now() - startedAt)}s${startedAt - queuedAt > 1000 ? ` 排队 ${sec(startedAt - queuedAt)}s` : ''} 输入 ${res.inputTokens || 0} 输出 ${res.outputTokens || 0}${res.costUsd ? ` $${res.costUsd.toFixed(4)}` : ''}`);
+      return res;
+    };
     let r = null, source = 'claude_cli';
     const own = this.cliChannels[aiType];
     if (own) {
-      try { r = await run(own.factory()); source = own.source; } catch (err) {
+      try { r = await run(own.factory(), own.source); source = own.source; } catch (err) {
         console.error(`[AIEngine] ${own.source} 状态分析失败，改用 claude -p:`, err.message);
       }
     }
-    if (!r) r = await run(this.cliTextFactory(getModelsConfig()?.claude?.default || DEFAULT_MODEL));
+    if (!r) r = await run(this.cliTextFactory(getModelsConfig()?.claude?.default || DEFAULT_MODEL), 'claude_cli');
     const parsed = this._parseStatusResponse(r.text);
     if (!parsed) return null;
     parsed._source = source;

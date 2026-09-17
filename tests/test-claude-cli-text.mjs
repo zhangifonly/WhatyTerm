@@ -70,7 +70,9 @@ await test('失败都要抛出（交给监督者按调用失败叫人）：is_er
 
 await test('解析与参数纯函数：subtype 不是 success 也算失败；结构化输出取 structured_output', () => {
   assert(/调用失败/.test((() => { try { parseCliResult('{"subtype":"error_max_turns","is_error":false}'); } catch (e) { return e.message; } return ''; })()));
-  assert(buildCliTextArgs({ model: 'x', system: 'y' }).length === 12, '不要求结构化时不带 --json-schema');
+  assert(buildCliTextArgs({ model: 'x', system: 'y' }).length === 12, '不要求结构化、不指定强度时不带多余参数');
+  const eff = buildCliTextArgs({ model: 'x', system: 'y', effort: 'low' });
+  assert(eff[eff.indexOf('--effort') + 1] === 'low', '指定推理强度要传下去');
   const a = buildCliTextArgs({ model: 'x', system: 'y', jsonSchema: { type: 'object' } });
   assert(a[a.indexOf('--json-schema') + 1] === '{"type":"object"}', a.join(' '));
   const r = parseCliResult(JSON.stringify({ subtype: 'success', result: '说明文字', structured_output: { ok: 1 } }));

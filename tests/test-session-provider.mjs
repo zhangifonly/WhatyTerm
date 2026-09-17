@@ -175,6 +175,8 @@ await testAsync('没有会话级供应商：经 claude -p 用 CC Switch 当前�
   const r = await e.analyzeStatus('some screen', 'claude', 's1', null, { goal: 'x' });
   assert(r && r._source === 'claude_cli' && r.currentState === '空闲，等待输入', JSON.stringify(r));
   assert(e.cli.length === 1 && e.cli[0].model && e.cli[0].user.includes('some screen') && e.cli[0].system.length > 0, JSON.stringify(e.cli));
+  const real = new AIEngine().cliTextFactory('m');
+  assert(real.effort === 'low' && real.model === 'm', '监控读屏用低推理强度（实测快 2.5 秒、判定不变），不继承用户全局 high');
   const props = e.cli[0].schema?.properties || {};
   assert(props.confidence && props.actionType?.enum?.includes('select'), '要带与 HTTP 路径同一份 schema（含 confidence，非对称降级靠它）');
 });

@@ -21,8 +21,10 @@ export const CLI_TEXT_TIMEOUT_MS = 300_000;
 /** 专用空工作目录：CLI 会自动读取工作目录里的 CLAUDE.md，判案不该带着任何项目的规矩 */
 export const cliTextCwd = () => path.join(os.tmpdir(), 'webtmux-claude-text');
 
-export function buildCliTextArgs({ model, system, jsonSchema = null }) {
+export function buildCliTextArgs({ model, system, jsonSchema = null, effort = null }) {
   return ['-p', '--model', model, '--system-prompt', system, '--tools', '', '--strict-mcp-config',
+    // 不指定就继承用户全局 effortLevel（常为 high）；读屏判状态用 low 实测快 2.5 秒、判定不变
+    ...(effort ? ['--effort', effort] : []),
     '--disable-slash-commands', '--no-session-persistence', '--output-format', 'json',
     // 结构化输出：CLI 按 schema 校验，结果另放 structured_output（与 HTTP 路径的 tool_use 强制 schema 等价）
     ...(jsonSchema ? ['--json-schema', JSON.stringify(jsonSchema)] : [])];
@@ -50,10 +52,11 @@ export class ClaudeCliTextClient {
    * @param {string} o.model
    * @param {string} [o.claudeBin]  测试钩子
    * @param {string[]} [o.binPrefixArgs]  测试钩子（node 假 CLI）
+   * @param {string} [o.effort]  推理强度（low/medium/high）；不给就继承用户全局设置
    * @param {number} [o.timeoutMs]
    */
-  constructor({ model, claudeBin = 'claude', binPrefixArgs = [], timeoutMs = CLI_TEXT_TIMEOUT_MS, env = process.env } = {}) {
-    Object.assign(this, { model, claudeBin, binPrefixArgs, timeoutMs, env });
+  constructor({ model, effort = null, claudeBin = 'claude', binPrefixArgs = [], timeoutMs = CLI_TEXT_TIMEOUT_MS, env = process.env } = {}) {
+    Object.assign(this, { model, effort, claudeBin, binPrefixArgs, timeoutMs, env });
   }
 
   childEnv() {
@@ -73,7 +76,7 @@ export class ClaudeCliTextClient {
     mkdirSync(cwd, { recursive: true });
     // 用户消息走标准输入：执行者一整发的输出可能很长，不放进命令行参数
     const { code, out, err } = await runCli({ label: 'claude CLI', bin: this.claudeBin, cwd, env: this.childEnv(), stdin: user,
-      args: [...this.binPrefixArgs, ...buildCliTextArgs({ model: this.model, system, jsonSchema })], timeoutMs: this.timeoutMs });
+      args: [...this.binPrefixArgs, ...buildCliTextArgs({ model: this.model, system, jsonSchema, effort: this.effort })], timeoutMs: this.timeoutMs });
     try { return parseCliResult(out); } catch (e) {
       throw code ? new Error(`claude CLI 退出码 ${code}: ${(err || out).trim().slice(0, 300)}`) : e;
     }
