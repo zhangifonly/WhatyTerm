@@ -1,126 +1,114 @@
 /**
- * 长程编排：单次 `claude -p` 调用的启动与监管
+ * 长程编排：执行层 —— 单次 `claude -p` 调用的生命周期管理
  *
- * 移植自长程编排器 orchestrator/runner.py（969 行）。**这是整套里最难的一块**：
- * 不只是解析 stream-json，还有双计时器 hang 检测、费用刹车、subagent 追踪与等待、
- * 工具间隙打断。每个常量都带实测案例，照抄数值同时必须照抄判据。
+ * 逐函数移植自长程编排器 orchestrator/runner.py。职责边界与原版一致，只做确定性的事：
+ *   · 实时累计上下文水位，达阈值后在安全缝隙 kill
+ *   · 双计时器 hang 检测（区分"工具在飞"与"真静默"）
+ *   · 结构化解析 stream-json，落盘原始事件（.run/events/）供事后复盘
+ * 语义判断属于监督者，不在这里。
+ *
+ * 与原版的差异（均有意为之）：
+ *   · 判定逻辑抽成纯函数（watchdogDecide / handleEvent / trackTasks / waitTasks），可离线单测
+ *   · 进程连坐：原版靠 Windows Job Object，macOS/Linux 上原版不可用；这里用进程组 + 看门进程补上
+ *   · 修原版一处缺陷：非立即注入在工具在飞时会被取走后丢掉，这里暂存到下个间隙再发
  */
 
 import { spawn } from 'child_process';
-import { appendFileSync, mkdirSync } from 'fs';
+import { mkdirSync, openSync, writeSync, closeSync } from 'fs';
+import { randomUUID } from 'crypto';
 import path from 'path';
+import { adoptProcessGroup, killProcessGroup } from './LongRunJobGuard.js';
 
-/**
- * `-p` + stream-json 的必需组合。缺 `--verbose` 会直接报错退出（实测）。
- */
+/** `-p` + stream-json 的必需组合。缺 `--verbose` 会直接报错退出（实测）。 */
 export const BASE_FLAGS = [
   '--output-format', 'stream-json',
   '--verbose',
   '--permission-prompts', 'none',   // 会触发提示的操作自动拒绝，不挂起
-  // 流级活性信号。生成长输出期间 delta 持续到达，据此把"正在生成"与"真挂死"
-  // 分开 —— 少了它，两者在事件流上完全一样（都是没有新的 assistant 事件）。
+  // 流级活性信号：生成长输出期间 delta 持续到达，据此把"正在生成"与"真挂死"分开
   '--include-partial-messages',
-  // 人工打断的前提。协议：往 stdin 写
-  //   {"type":"control_request","request_id":"r1","request":{"subtype":"interrupt"}}
-  // CLI 回 control_response·success 后当前进程以 error_during_execution 退出，
-  // 之后 --resume 同一 session id 可注入新指令。
+  // 人工打断的前提：往 stdin 写 control_request，CLI 回 control_response 后以
+  // error_during_execution 收尾；之后 --resume 同一 session id 可注入新指令。
+  // ⚠ 带上它后 `-p <文本>` 会被完全忽略 —— 提示词必须经 stdin 送（见 run）
   '--input-format', 'stream-json',
 ];
 
-/** stream_event 里代表"模型还在吐字"的子类型。 */
-// ⚠ 只认这些，不认 message_start 之类一次性事件 —— 那些即使卡死也可能已经到过。
+/** 执行者默认可用的工具（原版 session_loop.DEFAULT_TOOLS） */
+export const DEFAULT_TOOLS = 'Read,Write,Edit,Glob,Grep,Bash,WebFetch,TodoWrite';
+
+/** stream_event 里代表"模型还在吐字"的子类型。不认 message_start 之类一次性事件 */
 const LIVE_DELTAS = new Set(['content_block_delta', 'message_delta']);
 
-// ── 静默容忍：取决于当前有没有工具在飞 ─────────────────────────
 /** Bash 在飞（测试/构建可能很久） */
 export const SILENCE_TOOL_BASH = 900.0;
 /** 其它工具在飞 */
 export const SILENCE_TOOL_OTHER = 120.0;
 /**
- * 无工具在飞。**这一档不等于"什么都不做"** —— 它同时覆盖"模型正在生成下一段
- * 输出"，而写一个上千行的文件本来就要几分钟，端点繁忙或并行跑时更久。
- * 实测误杀（qingming，2026-09-06）：写完 palette.js 后静默 92 秒被当时的 90s
- * 阈值杀掉，那 240 秒的算力钱花了却连 result 事件都没拿到（费用记成 $0.0000）。
- * 配合 --include-partial-messages 后，生成期间有 delta 持续刷新计时器，
- * 这个值只在**连流都停了**时才会真正走到，所以给得宽。
+ * 无工具在飞。这一档同时覆盖"模型正在生成下一段输出"。实测误杀（qingming，
+ * 2026-09-06）：写完 palette.js 后静默 92 秒被当时的 90s 阈值杀掉，240 秒算力钱花了
+ * 却连 result 都没拿到（费用记成 $0.0000）。配合 partial delta 后只在连流都停了才走到。
  */
 export const SILENCE_IDLE = 300.0;
 /**
- * 送出 interrupt 后等它收尾的宽容期。收尾只是把已生成的文本落盘 + 吐 result，
- * 实测几秒内完成，给 120s 是为了容忍它正好在写一个大文件。
- * **这个上限必须存在**：早先 watchdog 见 interrupt_sent 就无条件放行，与读取
- * 循环那个 `not interrupt_sent` 一起把逃生口全堵死，收尾卡住即永久挂死
- * （tafang 2026-09-08 实测卡了 10 分钟以上才被人发现）。
+ * 送出 interrupt 后等它收尾的宽容期。**这个上限必须存在**：早先见 interrupt_sent
+ * 就无条件放行，与读取循环一起把逃生口全堵死，收尾卡住即永久挂死（tafang 2026-09-08）。
  */
 export const SETTLE_GRACE = 120.0;
 /**
- * 主线说完之后，最多再等多久让后台 subagent 收尾。
- * 给得宽是刻意的：并行开发正是要靠 subagent，而一个 agent 建模/跑构建十几分钟
- * 很正常。等待期间事件流一直有 task_progress 到达，watchdog 的静默检测不会误杀；
- * 兜底仍是 wall_timeout。设 0 关掉这个行为。
+ * 主线说完之后最多再等多久让后台 subagent 收尾。0 = 不等。
+ * 实测 30 分钟偏紧（diablo 六个子系统级 agent 等满后仍有 4 个没收尾），子系统级并行建议 5400。
  */
 export const TASK_WAIT = 1800.0;
-/** 看门狗采样间隔。提成常量是为了让 hang 路径可以被快速测到。 */
+/** 看门狗采样间隔。提成常量是为了让 hang 路径可以被快速测到 */
 export const WATCHDOG_INTERVAL = 5.0;
+/** 默认墙钟上限（原版 ClaudeRunner.wall_timeout） */
+export const WALL_TIMEOUT = 3600.0;
 
 /**
- * 只等这类后台任务。实测 task_type 干净地分开了两件事：
- *   local_agent —— 并行开发的 subagent，会干完并交付，**必须等**；
- *   local_bash  —— 绝大多数是 dev server/静态服务器这类**长驻服务**，
- *                  永远不会"完成"，等它们等于每发白挂到上限。
+ * 只等这类后台任务：local_agent 会干完并交付，必须等；local_bash 多是
+ * dev server 这类长驻服务，永远不会"完成"，等它们等于每发白挂到上限。
  */
-const WAITED_TASK_TYPE = 'local_agent';
+const WAITED_TASK_TYPES = new Set(['local_agent']);
+
+/** 推给监控的过程明细上限。Write 的 content、Read 的返回都可能上万字 */
+export const DETAIL_CHARS = 2000;
+/** 一次 tool_use 里最能说明问题的入参，按此顺序取一个做单行摘要 */
+const SALIENT_KEYS = ['file_path', 'command', 'path', 'pattern', 'url', 'notebook_path',
+  'prompt', 'description', 'query'];
 
 // ── 运行中费用估算 ────────────────────────────────────────────
-// result 里的 total_cost_usd 是网关算好的权威值，但它只在一发结束时才到。
-// 一发能跑一两个小时，期间"已花多少"必须能估，否则预算只能在下一次派发前才拦。
-//
-// 单价由已结算的 18 个发次反推（2026-09-06，跨 6 个沙箱最小二乘）。
-// **不抄公开价目表**：这是中转网关，计费口径未知，且实测它只上报 input_tokens
-// —— output_tokens 与两个 cache 字段恒为 0，照价目表算会严重偏低。
-// 两参数而非单一费率：实测误差有结构（调用少约 $8-9/Mtok、调用多约 $3.7-4.7），
-// 单一费率最大偏差 66%，两参数后中位 8.8%。
+// 单价由已结算的 18 个发次反推（2026-09-06，跨 6 个沙箱最小二乘）。**不抄公开价目表**：
+// 中转网关只上报 input_tokens。两参数而非单一费率：单一费率最大偏差 66%，两参数中位 8.8%。
 export const COST_PER_CALL = 0.2351;
 export const COST_PER_INPUT_TOKEN = 2.70e-6;
 
-/** 单次调用的退出原因。 */
+/** 单次调用的退出原因（与原版 ExitReason 取值逐一对应） */
 export const ExitReason = {
   COMPLETED: 'completed',                       // 正常结束，水位也不高
-  /**
-   * 自然结束但水位已过交接阈值。此时不该急着继续对话 —— 上下文已经很长，
-   * 继续追问只会在质量衰减的窗口里干活。按交接处理，与被 kill 同路。
-   */
+  /** 自然结束但水位已过交接阈值：按交接处理，与被 kill 同路 */
   COMPLETED_HIGH_CONTEXT: 'completed_high_context',
   BUDGET_KILLED: 'budget_killed',               // 触及水位阈值被主动终止
-  /**
-   * 运行中估算花费触及刹车线被终止。与 BUDGET_KILLED 分开命名，因为处置不同：
-   * 水位触顶要交接换窗口，钱花超了应当直接停机等人。
-   */
+  /** 运行中估算花费触及刹车线。与水位分开：水位触顶要交接，钱花超了该停机等人 */
   COST_KILLED: 'cost_killed',
   /**
    * 人主动打断。**必须与 ERROR 分开**：CLI 收到 interrupt 后 result 是
-   * error_during_execution + is_error:true（实测），照原样归类会让每次人工打断
-   * 都往"连续异常"计数器里加一，三次就误判成故障停机。
+   * error_during_execution + is_error:true（实测），照原样归类三次就误判故障停机。
    */
   INTERRUPTED_BY_HUMAN: 'interrupted_by_human',
   HANG_KILLED: 'hang_killed',                   // 静默超时被终止
   WALL_TIMEOUT: 'wall_timeout',                 // 总时长超限被终止
   MAX_TURNS: 'max_turns',                       // 撞 --max-turns 上限
   /**
-   * CLI 回了 success，但一个 turn 都没跑：num_turns=0 + 空 result + 零费用。
-   * **必须与 COMPLETED 分开**：这一发发出去的提示词等于进了黑洞，而调用方会把它
-   * 当成"做完了"继续往下走。实测只在续一个被 wall_timeout 杀掉的会话时出现。
+   * CLI 回了 success 但一个 turn 都没跑。**必须与 COMPLETED 分开**：提示词进了黑洞。
+   * 实测（tiantan）：跑满墙钟被 kill 后续那个会话，CLI 209ms 回空 success。
    */
   EMPTY_RESULT: 'empty_result',
   ERROR: 'error',                               // 进程异常
+  ASKED_HUMAN: 'asked_human',                   // 疑似停下来等人（由监督者复核）
 };
 
 /**
  * 上下文水位计，兼运行中费用估算。
- *
- * 实测：每个 assistant 事件的 message.usage 都带 input_tokens 与
- * cache_read_input_tokens，两者之和约等于当前上下文占用（cache_read 也占窗口）。
- * 因此运行中即可实时监控，无需等 result。
+ * 当前占用 ≈ input + cache_read + cache_creation（cache 也占窗口），每个 assistant 事件都更新。
  */
 export class ContextMeter {
   constructor() {
@@ -128,15 +116,15 @@ export class ContextMeter {
     this.latest = 0;
     this.outputTotal = 0;
     /**
-     * message id → input_tokens。**必须按 id 去重**：同一条 assistant 消息会按
-     * content block 多次上报同一个 usage（实测连续三条都是 75977），累加等于把
-     * 一次 API 调用算成两三次，费用估算会成倍偏高。
+     * message id → input_tokens。**必须按 id 去重**：同一条 assistant 消息按 content
+     * block 多次上报同一个 usage（实测连续三条都是 75977），累加会让费用成倍偏高。
      */
     this._calls = new Map();
   }
 
   observe(usage, messageId = null) {
-    if (!usage) return this.latest;
+    // 空 usage 保持上一次的水位（原版 `if not usage`）—— 不能把水位清成 0
+    if (!usage || (typeof usage === 'object' && Object.keys(usage).length === 0)) return this.latest;
     const inp = Number(usage.input_tokens) || 0;
     const occupied = inp
       + (Number(usage.cache_read_input_tokens) || 0)
@@ -158,530 +146,541 @@ export class ContextMeter {
   }
 }
 
-/** 截断长文本，避免事件流里塞进整个文件内容。 */
-const DETAIL_CHARS = 2000;
-function clip(text, limit = DETAIL_CHARS) {
+/** 裁剪推给监控的副本。全文在 .run/events/ 里。 */
+export function clip(text, limit = DETAIL_CHARS) {
   const s = String(text ?? '');
-  return s.length <= limit ? s : s.slice(0, limit) + `…（省略 ${s.length - limit} 字）`;
+  return s.length <= limit ? s : `${s.slice(0, limit)}…（共 ${s.length.toLocaleString('en-US')} 字，全文见 .run/events/）`;
+}
+
+/** 把工具入参渲染成可读多行文本。 */
+export function fmtToolInput(inp) {
+  if (!inp || typeof inp !== 'object' || Array.isArray(inp)) return clip(inp);
+  return Object.entries(inp)
+    .map(([k, v]) => `${k}: ${clip(typeof v === 'string' ? v : JSON.stringify(v))}`)
+    .join('\n');
+}
+
+/** 单行摘要用的关键入参值。取不到就空着，不硬凑。 */
+export function toolBrief(inp) {
+  if (!inp || typeof inp !== 'object' || Array.isArray(inp)) return '';
+  for (const key of SALIENT_KEYS) {
+    const v = inp[key];
+    if (typeof v === 'string' && v.trim()) {
+      const one = v.split(/\s+/).filter(Boolean).join(' ');
+      return one.slice(0, 80) + (one.length > 80 ? '…' : '');
+    }
+  }
+  return '';
 }
 
 /** tool_result 的 content 可能是字符串，也可能是块数组。 */
 function resultText(content) {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
-    return content.map((b) => {
-      if (b && typeof b === 'object') return b.text || `[${b.type}]`;
-      return String(b);
-    }).join('\n');
+    return content.map((b) => (b && typeof b === 'object' ? (b.text || `[${b.type}]`) : String(b))).join('\n');
   }
   return content == null ? '' : String(content);
 }
 
-/**
- * 从任务表里挑出**需要等**的后台任务。
- * 只等 local_agent —— local_bash 多是长驻服务，永远不会完成。
- */
+/** 从在飞任务里挑出值得等的（subagent），忽略长驻服务。 */
 export function agentTasks(tasks) {
-  const out = [];
-  for (const t of Object.values(tasks || {})) {
-    if (t && t.task_type === WAITED_TASK_TYPE) out.push(t);
-  }
-  return out;
-}
-
-/** 是否"一个 turn 都没跑"的空 result（发出去的提示词进了黑洞）。 */
-export function isEmptyResult(resultEv, meter) {
-  if (!resultEv) return false;
-  if (resultEv.is_error) return false;
-  const turns = Number(resultEv.num_turns) || 0;
-  const cost = Number(resultEv.total_cost_usd) || 0;
-  const text = String(resultEv.result ?? '').trim();
-  // 三个条件同时成立才算：没跑 turn、没花钱、没产出文本，且水位计没观察到任何调用
-  return turns === 0 && cost === 0 && !text && (!meter || meter.calls === 0);
+  return Object.values(tasks || {}).filter((t) => WAITED_TASK_TYPES.has(t?.task_type || ''));
 }
 
 /**
- * 构造 `claude -p` 的参数数组。
- *
- * ⚠ **提示词不作为 `-p` 的参数**，而是开跑后经 stdin 送。
- *   实测：带 `--input-format stream-json` 时 `-p <文本>` 会被完全忽略，CLI 转而
- *   等 stdin 上的 user 消息 —— 照旧写法会静默挂到超时（301 秒零输出、水位 0、
- *   费用 0，看起来像挂死而非配置错）。
+ * 这一发是不是"一个 turn 都没跑"。四条同时成立才算，缺一不可 —— 判宽了会误伤
+ * 正常短发次（比漏判更糟：正常收尾被当故障，白扔一次交接）。
+ * 实测：正常发次 num_turns 3–139、费用 $0.7 起；86 个发次里只有 tiantan 那次命中。
  */
+export function isEmptyResult(resultEv, meter) {
+  return (Number(resultEv?.num_turns) || 0) === 0
+    && !String(resultEv?.result ?? '').trim()
+    && (Number(resultEv?.total_cost_usd) || 0) === 0
+    && (meter?.calls ?? 0) === 0;
+}
+
+/** 构造 `claude -p` 的参数。⚠ 提示词不作为参数传（见 BASE_FLAGS 注释）。 */
 export function buildArgs({
-  sessionId, resume = false, allowedTools = '', extraDirs = [],
+  sessionId, resume = false, allowedTools = DEFAULT_TOOLS, extraDirs = [],
   model = '', maxTurns = 0, extraFlags = [],
 } = {}) {
   const args = ['-p', ...BASE_FLAGS];
-  if (resume) args.push('--resume', sessionId);
-  else args.push('--session-id', sessionId);
+  args.push(resume ? '--resume' : '--session-id', sessionId);
   if (allowedTools) args.push('--allowedTools', allowedTools);
-  for (const d of extraDirs) {
-    // ⚠ --add-dir 是读写权限，不是只读
-    args.push('--add-dir', String(d));
-  }
+  for (const d of extraDirs) args.push('--add-dir', String(d));   // ⚠ --add-dir 是读写权限
   if (model) args.push('--model', model);
   if (maxTurns) args.push('--max-turns', String(maxTurns));
   args.push(...extraFlags);
   return args;
 }
 
-/**
- * 当前该用哪档静默容忍度（秒）。
- *
- * @param {object} state 运行态：{ toolInFlight, taskWaitStarted, tasks }
- */
+/** 当前该用哪档静默容忍度（秒）。over 仅供测试把档位调小。 */
 export function silenceTolerance(state, over = {}) {
   const bash = over.bash ?? SILENCE_TOOL_BASH;
   const other = over.other ?? SILENCE_TOOL_OTHER;
   const idle = over.idle ?? SILENCE_IDLE;
-  const inFlight = state.toolInFlight;
-  let tolerance = inFlight === 'bash' ? bash
-    : inFlight ? other
-    : idle;
-  // 正在等后台 subagent：容忍度放到 Bash 档。等待期间事件流通常是活的
-  // （实测 task_progress 每个工具调用一条，间隔 5-30 秒），但 agent 自己在跑一个
-  // 长 Bash（建模、构建）时可以几分钟不发进度，那不是挂死。
-  // 整体上限由 taskWait 管，这里只是别让 idle 档误杀。
-  if (state.taskWaitStarted != null && agentTasks(state.tasks).length > 0) {
-    tolerance = Math.max(tolerance, bash);
-  }
+  let tolerance = state.toolInFlight === 'bash' ? bash : state.toolInFlight ? other : idle;
+  // 正在等后台 subagent：放到 Bash 档。agent 自己跑长 Bash 时可以几分钟不发进度，
+  // 那不是挂死；整体上限由 taskWait 管
+  if (state.taskWaitStarted != null && agentTasks(state.tasks).length) tolerance = Math.max(tolerance, bash);
   return tolerance;
 }
 
 /**
- * 看门狗的一次判定（纯函数，便于离线测 26 条 hang 用例）。
- *
- * @returns {{action:'continue'|'kill', reason?:string, detail?:string, taskTimeout?:boolean}}
+ * 看门狗的一次判定（纯函数）。对应原版 _watchdog 循环体，判定顺序完全一致。
+ * @returns {{action:'continue'} | {action:'kill', reason?:string, hangDetail?:string,
+ *           taskTimeout?:boolean, waited?:number, count?:number}}
  */
 export function watchdogDecide(state, now, cfg) {
-  const { wallTimeout, taskWait } = cfg;
+  const { wallTimeout = WALL_TIMEOUT, taskWait = TASK_WAIT, silence } = cfg;
+  // 墙钟到点**无条件** terminate，不看工具是否在飞 —— 代价是会话留在脏状态，恢复即空返回
+  if (now - state.started > wallTimeout) return { action: 'kill', reason: ExitReason.WALL_TIMEOUT };
 
-  if (now - state.started > wallTimeout) {
-    // 墙钟到点是**无条件** terminate，不看工具是否在飞。代价是会话被留在工具
-    // 执行中途的脏状态，恢复即空返回（EMPTY_RESULT 的唯一已知来源）。
-    return { action: 'kill', reason: ExitReason.WALL_TIMEOUT,
-      detail: `总时长超过 ${wallTimeout.toFixed(0)}s` };
-  }
-
-  // 等后台 subagent 的上限。**必须由看门狗执行**：读取循环只在有新事件时才跑，
-  // 而 agent 卡死的表现就是没有新事件，那时它自己判不了超时。
+  // 等 subagent 的上限**必须由看门狗执行**：读取循环只在有新事件时才跑，
+  // 而 agent 卡死的表现正是没有新事件。到点 terminate 让读取循环解开。
+  // 不设退出原因：主线已正常给过 result，这一发算正常完成
   const still = agentTasks(state.tasks);
-  if (taskWait && state.taskWaitStarted != null && still.length
-      && now - state.taskWaitStarted > taskWait) {
-    // 不设 kill_reason：主线已经正常给过 result，这一发该记成正常完成，
-    // 只是有任务没收尾（靠 pendingTasks 带出去）。
-    return { action: 'kill', taskTimeout: true, waited: now - state.taskWaitStarted,
-      count: still.length };
+  if (state.taskWaitStarted != null && still.length && now - state.taskWaitStarted > taskWait) {
+    return { action: 'kill', taskTimeout: true, waited: now - state.taskWaitStarted, count: still.length };
   }
 
-  // 中断已送出，正在等它收尾 —— 这段静默是预期的，不是挂死，此时硬 kill 会丢掉
-  // CLI 落盘"我被打断了"的记录。⚠ 但宽容期必须**有限**（见 SETTLE_GRACE 注释）。
+  const tolerance = silenceTolerance(state, silence);
+  // 中断已送出、正在等它收尾：静默是预期的，硬 kill 会丢掉"我被打断了"的落盘记录。
+  // ⚠ 但宽容期必须**有限**
   if (state.interruptSent) {
-    const waited = now - (state.interruptAt ?? now);
+    const waited = now - (state.interruptAt || now);
     if (waited <= SETTLE_GRACE) return { action: 'continue' };
     return {
-      action: 'kill',
-      // 归类成"被人打断"而非 HANG_KILLED：人确实按了打断，注入内容也已存进 state，
-      // 上层照样能在下一发送出去。
-      reason: ExitReason.INTERRUPTED_BY_HUMAN,
-      detail: `已送出中断但 ${waited.toFixed(0)}s 内未收到 result（宽容期 ${SETTLE_GRACE.toFixed(0)}s）`,
+      action: 'kill', reason: ExitReason.INTERRUPTED_BY_HUMAN,
+      hangDetail: `已送出中断但 ${waited.toFixed(0)}s 内未收到 result（宽容期 ${SETTLE_GRACE.toFixed(0)}s）`,
     };
   }
 
-  const tolerance = silenceTolerance(state, cfg.silence);
   const silent = now - state.lastEvent;
   if (silent > tolerance) {
-    // 把判据本身记下来。上一次误杀之所以要翻事件文件才查清，就是因为日志只说了
-    // hang_killed，没说静默多久、哪一档、当时是不是在生成 —— 这三样才是全部依据。
+    // 判据三样都记下：静默多久、哪一档、当时是否在生成 —— 上次误杀就因为日志只有三个字
     const who = state.toolInFlight ? `工具 ${state.toolInFlight} 在飞` : '无工具在飞';
-    const flow = state.sawDelta ? '流已断' : '本轮未见过流';
     return {
       action: 'kill', reason: ExitReason.HANG_KILLED,
-      detail: `静默 ${silent.toFixed(0)}s 超过 ${tolerance.toFixed(0)}s（${who}，${flow}）`,
+      hangDetail: `静默 ${silent.toFixed(0)}s 超过 ${tolerance.toFixed(0)}s（${who}，${state.sawDelta ? '流已断' : '本轮未见过流'}）`,
     };
   }
   return { action: 'continue' };
 }
 
 /**
- * 追踪后台任务。
- *
- * ⚠ `background_tasks_changed` 直接给**当前完整列表**，是权威来源；
- *   而 task_started/task_progress 是增量。两者混用时以完整列表为准。
- *   那些没进 background_tasks_changed 的（is_backgrounded:false）是前台任务，
- *   不该计入"要等的后台任务"。
+ * 跟踪后台任务（原版 _track_tasks）。字段都在事件顶层。
+ *   task_started：只认 is_backgrounded 为真 —— 前台工具调用也发它，算进来会让每一发都"有任务在飞"
+ *   task_notification：终局（completed / stopped 都算不在飞）。**不是** task_completed
+ *   background_tasks_changed：当前完整列表，权威
  */
 export function trackTasks(event, state) {
   const sub = event?.subtype;
-  if (sub === 'background_tasks_changed') {
-    // 权威快照：整表替换
-    const list = event.background_tasks || event.tasks || [];
-    state.tasks = {};
-    for (const t of list) {
-      if (t && t.task_id) state.tasks[t.task_id] = t;
-    }
-    return;
-  }
-  const t = event?.task || event;
-  const id = t?.task_id;
-  if (!id) return;
+  const pick = (t) => ({ task_id: t.task_id, task_type: t.task_type || '', description: t.description || '' });
   if (sub === 'task_started') {
-    // 前台任务不计入：它们在本轮内就会结束，不需要跨会话等待
-    if (t.is_backgrounded === false) return;
-    state.tasks[id] = { ...t };
-  } else if (sub === 'task_progress') {
-    if (state.tasks[id]) Object.assign(state.tasks[id], t);
-  } else if (sub === 'task_completed' || sub === 'task_stopped') {
-    delete state.tasks[id];
+    if (event.is_backgrounded) state.tasks[event.task_id] = pick(event);
+  } else if (sub === 'task_notification') {
+    delete state.tasks[event.task_id];
+  } else if (sub === 'background_tasks_changed') {
+    state.tasks = {};
+    for (const t of event.tasks || []) {
+      if (t && typeof t === 'object') state.tasks[t.task_id] = pick(t);
+    }
   }
 }
 
 /**
- * 处理一条 stream-json 事件，更新运行态。
+ * result 已到，还该不该继续读流等后台任务？返回 true 表示继续等（原版 _wait_tasks）。
  *
- * @returns {{kill?:string, detail?:string}} 需要终止时返回原因
+ * **每个事件后都要调**：任务收完就返回 false、正常收尾。只在 result 那一刻判一次的话，
+ * 进入等待后任务全部完成也不会结束，300 秒后被判 hang_killed 走交接 —— qingming 那次
+ * "连续 6 发被误判，白烧 $50+" 的回归（审计 G7）。
+ * ⚠ 超时不在这里判（见 watchdogDecide）。
+ */
+export function waitTasks(state, taskWait, emit, now) {
+  const waited = agentTasks(state.tasks);
+  if (!waited.length || !taskWait) return false;
+  if (state.taskWaitTimeout) return false;          // 看门狗已判超时，别再等
+  if (state.taskWaitStarted == null) {
+    state.taskWaitStarted = now;
+    const names = waited.slice(0, 4).map((t) => t.description || t.task_id || '?').join('、');
+    emit('tasks.waiting', { count: waited.length, names, limit: taskWait });
+  }
+  return true;
+}
+
+/**
+ * 处理一条已解析的事件（stream_event 已在读取循环里处理掉）。对应原版 _handle_event。
+ * 通过设置 state.killReason / state.costDetail 表达"该终止"，与原版一致。
  */
 export function handleEvent(event, state, meter, cfg, emit = () => {}) {
   const etype = event?.type;
-  state.lastEvent = cfg.now();
-
-  // ── 流级活性信号：把"正在生成"与"真挂死"分开 ──
-  if (etype === 'stream_event') {
-    const sub = event.event?.type;
-    if (LIVE_DELTAS.has(sub)) state.sawDelta = true;
-    // ⚠ delta 只用于刷新计时器，**不落盘**：一发能有几十万条，写进事件文件会
-    //   让它涨到几百 MB，而回放时没人看逐字增量。
-    return {};
-  }
-
-  if (etype === 'system') {
-    if (event.subtype === 'init') {
-      state.sessionId = event.session_id || state.sessionId;
-      // memory_paths 可用于启动时校验记忆目录是否真指向沙箱（隔离层的运行期复核点）
-      if (event.memory_paths) state.memoryPaths = event.memory_paths;
-      emit('init', { sessionId: state.sessionId, model: event.model, cwd: event.cwd });
-    } else {
-      trackTasks(event, state);
-    }
-    return {};
-  }
 
   if (etype === 'assistant') {
     const msg = event.message || {};
     const occupied = meter.observe(msg.usage || {}, msg.id);
     emit('context', {
-      occupied, peak: meter.peak,
-      costEstimate: Math.round(meter.costEstimate * 1e4) / 1e4,
-      calls: meter.calls,
+      occupied, peak: meter.peak, limit: cfg.contextLimit,
+      cost_estimate: Math.round(meter.costEstimate * 1e4) / 1e4, calls: meter.calls,
     });
-
     const blocks = Array.isArray(msg.content) ? msg.content : [];
+    // 思考块与 tool_use 可以同轮出现，独立处理（放 else 里会丢掉带工具那轮的思考）
     for (const b of blocks) {
-      if (b?.type === 'thinking' && String(b.thinking || '').trim()) {
-        emit('thinking', { text: clip(b.thinking) });
+      if (b?.type === 'thinking') {
+        const thought = b.thinking || b.text || '';
+        if (String(thought).trim()) emit('thinking', { text: clip(thought) });
       }
     }
     const toolUses = blocks.filter((b) => b?.type === 'tool_use');
     if (toolUses.length) {
-      const names = toolUses.map((b) => String(b.name || '').toLowerCase());
-      // Bash 在飞时容忍度放到 900s —— 测试/构建可能很久
+      const names = [...new Set(toolUses.map((b) => String(b.name || '').toLowerCase()))];
       state.toolInFlight = names.some((n) => n.includes('bash')) ? 'bash' : 'other';
-      for (const b of toolUses) {
-        if (b.id) state.toolNames[b.id] = b.name;
-      }
-      emit('tool', { names: [...new Set(names)].sort() });
+      const calls = toolUses.map((b) => {
+        const call = { id: b.id || '', name: String(b.name || ''), brief: toolBrief(b.input), detail: fmtToolInput(b.input) };
+        state.toolNames[call.id] = call.name;
+        return call;
+      });
+      emit('tool', { names: names.sort(), calls });
     } else {
       state.toolInFlight = null;
       const texts = blocks.filter((b) => b?.type === 'text').map((b) => b.text || '');
       if (texts.length) {
         state.finalText = texts.join('\n');
+        // 裁剪只作用于推给监控的副本；finalText 保持完整，监督者要靠它判断
         emit('text', { text: clip(state.finalText, 8000) });
       }
     }
-
-    // ── 水位与费用刹车：都**只在工具间隙**动手 ──
-    // 工具在飞时 kill 会把会话留在脏状态，恢复即空返回（EMPTY_RESULT）。
-    if (!state.toolInFlight) {
-      if (cfg.contextLimit && occupied >= cfg.contextLimit) {
-        return { kill: ExitReason.BUDGET_KILLED,
-          detail: `水位 ${occupied.toLocaleString()} 触及上限 ${cfg.contextLimit.toLocaleString()}` };
-      }
-      if (cfg.costCeiling && meter.costEstimate >= cfg.costCeiling) {
-        return { kill: ExitReason.COST_KILLED,
-          detail: `估算已花 $${meter.costEstimate.toFixed(2)}（${meter.calls} 次调用）`
-            + `超过刹车线 $${cfg.costCeiling.toFixed(2)}` };
-      }
+    // 水位交接与费用刹车：都只在工具间隙动手，保证磁盘状态自洽
+    if (occupied >= cfg.contextLimit && !state.toolInFlight) {
+      state.killReason = ExitReason.BUDGET_KILLED;
+    } else if (cfg.costCeiling && meter.costEstimate >= cfg.costCeiling && !state.toolInFlight) {
+      state.costDetail = `估算已花 $${meter.costEstimate.toFixed(2)}（${meter.calls} 次调用）`
+        + `超过刹车线 $${cfg.costCeiling.toFixed(2)}`;
+      state.killReason = ExitReason.COST_KILLED;
     }
-    return {};
-  }
-
-  if (etype === 'user') {
-    // 工具返回：工具不再在飞
-    state.toolInFlight = null;
-    const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
-    for (const b of blocks) {
+  } else if (etype === 'user') {
+    state.toolInFlight = null;                       // tool_result 回来了
+    for (const b of event.message?.content || []) {
       if (b?.type !== 'tool_result') continue;
+      const tid = b.tool_use_id || '';
       emit('tool_result', {
-        name: state.toolNames[b.tool_use_id] || '',
-        text: clip(resultText(b.content)),
+        id: tid, name: state.toolNames[tid] || '', is_error: !!b.is_error, text: clip(resultText(b.content)),
       });
     }
-    return {};
+  } else if (etype === 'system') {
+    trackTasks(event, state);
+  } else if (etype === 'result') {
+    state.result = event;
+    if (event.result) state.finalText = String(event.result);
   }
-
-  if (etype === 'result') {
-    state.resultEvent = event;
-    return {};
-  }
-
-  return {};
 }
 
 /**
- * 一次 `claude -p` 调用的完整生命周期。
- *
- * 与 Python 版的差异：判定逻辑已抽成上面那些纯函数，这个类只管进程、按行解析、
- * 定时器、stdin 控制消息、组装结果。
+ * 读取循环里的逐行摄入（纯函数，run() 与测试共用）。
+ * 任何非空行都刷新活性计时器 —— 含 partial delta，这就是流级活性检测的全部。
+ * @returns {object|null} 需要继续处理的事件；空行、非 JSON、stream_event 返回 null
  */
-export class LongRunRunner {
-  /**
-   * @param {object} o
-   * @param {string} o.cwd            工作目录（必须是已校验的沙箱根）
-   * @param {object} o.env            子进程环境变量（走 sandbox.childEnv()）
-   * @param {string} o.eventsPath     事件落盘路径（.run/orchestrator.jsonl）
-   * @param {number} o.contextLimit   水位刹车线，0 关闭
-   * @param {number} o.costCeiling    费用刹车线，0 关闭
-   * @param {number} o.wallTimeout    墙钟上限（秒）
-   * @param {number} o.taskWait       等后台 subagent 上限（秒），0 关闭
-   * @param {function} o.checkInject  返回 [文本, 是否立即] 或 null
-   * @param {function} o.emit         事件回调 (kind, data) => void
-   * @param {string}  o.claudeBin     可执行文件，测试可换成假 CLI
-   * @param {string[]} o.binPrefixArgs  插在 claude 参数**之前**的参数。
-   *                                    测试用 node 跑假 CLI 时放脚本路径。
-   */
-  constructor(o = {}) {
-    this.cwd = o.cwd;
-    this.env = o.env || process.env;
-    this.eventsPath = o.eventsPath || null;
-    this.contextLimit = o.contextLimit || 0;
-    this.costCeiling = o.costCeiling || 0;
-    this.wallTimeout = o.wallTimeout ?? 7200;
-    this.taskWait = o.taskWait ?? TASK_WAIT;
-    this.allowedTools = o.allowedTools || '';
-    this.extraDirs = o.extraDirs || [];
-    this.model = o.model || '';
-    this.maxTurns = o.maxTurns || 0;
-    this.extraFlags = o.extraFlags || [];
-    this.checkInject = o.checkInject || (() => null);
-    this.emit = o.emit || (() => {});
-    this.claudeBin = o.claudeBin || 'claude';
-    this.binPrefixArgs = o.binPrefixArgs || [];
-    this.watchdogInterval = o.watchdogInterval ?? WATCHDOG_INTERVAL;
-    /** 静默档位覆盖 { bash, other, idle }，仅测试用（生产别传） */
-    this.silence = o.silence || undefined;
-    /** 注入到 stdin 的原始内容，供测试核对 */
-    this.sentToStdin = [];
+export function ingestLine(raw, state, now) {
+  const line = String(raw ?? '').trim();
+  if (!line) return null;
+  state.lastEvent = now;
+  let ev;
+  try { ev = JSON.parse(line); } catch { return null; }
+  if (ev?.type === 'stream_event') {
+    // delta 只用于刷新活性，不落盘也不转发：一次长输出有成百上千个 delta
+    if (LIVE_DELTAS.has(ev.event?.type)) state.sawDelta = true;
+    return null;
   }
-
-  _writeEvent(kind, data) {
-    this.emit(kind, data);
-    if (!this.eventsPath) return;
-    try {
-      mkdirSync(path.dirname(this.eventsPath), { recursive: true });
-      appendFileSync(this.eventsPath,
-        JSON.stringify({ ts: Date.now() / 1000, kind, ...data }) + '\n', 'utf8');
-    } catch { /* 落盘失败不该拖垮运行 */ }
-  }
-
-  /**
-   * 跑一发。
-   * @param {string} prompt      提示词原文（经 stdin 送，**不作为 -p 的参数**）
-   * @param {string} sessionId   会话 id（新建时由调用方生成 uuid）
-   * @param {boolean} resume     续会话还是新建
-   * @returns {Promise<object>}  RunResult
-   */
-  async run(prompt, sessionId, resume = false) {
-    const args = [...this.binPrefixArgs, ...buildArgs({
-      sessionId, resume,
-      allowedTools: this.allowedTools, extraDirs: this.extraDirs,
-      model: this.model, maxTurns: this.maxTurns, extraFlags: this.extraFlags,
-    })];
-    const t0 = Date.now() / 1000;
-    const now = () => Date.now() / 1000;
-    const state = {
-      started: t0, lastEvent: t0, sawDelta: false, toolInFlight: null,
-      interruptSent: false, interruptAt: null, injectText: '',
-      tasks: {}, taskWaitStarted: null, toolNames: {},
-      finalText: '', resultEvent: null, sessionId,
-      killReason: null, killDetail: '', taskWaitTimeout: false,
-    };
-    const meter = new ContextMeter();
-    const cfg = {
-      contextLimit: this.contextLimit, costCeiling: this.costCeiling, now,
-    };
-
-    this._writeEvent('send', {
-      label: resume ? 'resume' : 'new', sessionId,
-      promptChars: prompt.length, cmd: [this.claudeBin, ...args].join(' '),
-    });
-
-    const proc = spawn(this.claudeBin, args, {
-      cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    // ⚠ 提示词经 stdin 送，格式是 stream-json 的 user 消息
-    try {
-      proc.stdin.write(JSON.stringify({
-        type: 'user',
-        message: { role: 'user', content: [{ type: 'text', text: prompt }] },
-      }) + '\n');
-    } catch { /* 进程已死，下面的 close 会收尾 */ }
-
-    let stderr = '';
-    proc.stderr.on('data', (b) => { stderr += b.toString(); });
-
-    const terminate = () => {
-      try { proc.kill('SIGTERM'); } catch {}
-      // 给 2 秒收尾，不走就 SIGKILL（照 Python 的 _terminate）
-      setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 2000);
-    };
-
-    /** 送出 interrupt 控制消息。协议见 BASE_FLAGS 注释。 */
-    const sendInterrupt = () => {
-      const msg = JSON.stringify({
-        type: 'control_request', request_id: `r${Date.now()}`,
-        request: { subtype: 'interrupt' },
-      }) + '\n';
-      try {
-        proc.stdin.write(msg);
-        this.sentToStdin.push(msg);
-        state.interruptSent = true;
-        state.interruptAt = now();
-        return true;
-      } catch { return false; }
-    };
-
-    // ── 看门狗 ──
-    const watchdog = setInterval(() => {
-      if (proc.exitCode !== null || proc.signalCode) return;
-      const d = watchdogDecide(state, now(), {
-        wallTimeout: this.wallTimeout, taskWait: this.taskWait, silence: this.silence,
-      });
-      if (d.action !== 'kill') {
-        // 顺带看有没有人工注入要处理
-        this._maybeInterrupt(state, sendInterrupt);
-        return;
-      }
-      if (d.taskTimeout) {
-        state.taskWaitTimeout = true;
-        this._writeEvent('tasks.timeout', {
-          count: d.count, waited: Math.round(d.waited * 10) / 10, limit: this.taskWait,
-        });
-      } else {
-        state.killReason = d.reason;
-        state.killDetail = d.detail || '';
-      }
-      terminate();
-    }, this.watchdogInterval * 1000);
-
-    // ── 按行读 stdout ──
-    await new Promise((resolve) => {
-      let buf = '';
-      proc.stdout.on('data', (chunk) => {
-        buf += chunk.toString();
-        let nl;
-        while ((nl = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, nl).trim();
-          buf = buf.slice(nl + 1);
-          if (!line) continue;
-          let ev = null;
-          try { ev = JSON.parse(line); } catch { continue; }  // 非 JSON 行忽略
-          const r = handleEvent(ev, state, meter, cfg, (k, d) => this._writeEvent(k, d));
-          if (r.kill) {
-            state.killReason = r.kill;
-            state.killDetail = r.detail || '';
-            terminate();
-          }
-          // 主线给了 result：开始等后台 subagent（若有）
-          if (ev.type === 'result' && state.taskWaitStarted == null) {
-            if (this.taskWait && agentTasks(state.tasks).length) {
-              state.taskWaitStarted = now();
-              this._writeEvent('tasks.waiting', {
-                count: agentTasks(state.tasks).length, limit: this.taskWait,
-              });
-            } else {
-              terminate();   // 没有要等的，收工
-            }
-          }
-        }
-      });
-      proc.on('close', resolve);
-      proc.on('error', (e) => { stderr += String(e.message); resolve(); });
-    });
-    clearInterval(watchdog);
-
-    return this._assemble(state, meter, proc, t0, stderr);
-  }
-
-  /** 看有没有人工注入；立即模式不等工具间隙。 */
-  _maybeInterrupt(state, sendInterrupt) {
-    if (state.interruptSent) return;
-    const got = this.checkInject();
-    if (!got) return;
-    const [text, immediate] = got;
-    // 非立即模式要等工具间隙：工具在飞时打断会留下脏会话
-    if (!immediate && state.toolInFlight) {
-      state.pendingInject = [text, immediate];
-      return;
-    }
-    state.injectText = text;
-    if (sendInterrupt()) {
-      this._writeEvent('inject.sent', { immediate, chars: text.length });
-    }
-  }
-
-  /** 组装 RunResult。 */
-  _assemble(state, meter, proc, t0, stderr) {
-    const ev = state.resultEvent;
-    let reason = state.killReason;
-    if (!reason) {
-      if (ev && isEmptyResult(ev, meter)) reason = ExitReason.EMPTY_RESULT;
-      else if (ev?.is_error) reason = ExitReason.ERROR;
-      else if (ev && Number(ev.num_turns) && this.maxTurns
-               && Number(ev.num_turns) >= this.maxTurns) reason = ExitReason.MAX_TURNS;
-      else if (ev) reason = ExitReason.COMPLETED;
-      else reason = ExitReason.ERROR;    // 没拿到 result 就是异常
-    }
-    return {
-      sessionId: state.sessionId,
-      exitReason: reason,
-      exitCode: proc.exitCode,
-      contextPeak: meter.peak,
-      totalTokens: meter.outputTotal,
-      costUsd: Number(ev?.total_cost_usd) || 0,
-      costEstimate: Math.round(meter.costEstimate * 1e4) / 1e4,
-      numTurns: Number(ev?.num_turns) || 0,
-      stopReason: ev?.stop_reason ?? null,
-      terminalReason: ev?.terminal_reason ?? null,
-      permissionDenials: ev?.permission_denials || [],
-      injectText: state.injectText || '',
-      finalText: state.finalText || String(ev?.result ?? ''),
-      durationS: Math.round((Date.now() / 1000 - t0) * 10) / 10,
-      error: state.killDetail || (reason === ExitReason.ERROR ? stderr.slice(0, 500) : ''),
-      pendingTasks: agentTasks(state.tasks),
-      taskWaitTimeout: state.taskWaitTimeout,
-    };
-  }
+  return ev;
 }
 
 /**
- * 粗判是否停下来等人。仅作信号，最终由 supervisor 判定。
- * 提问退出时 stop_reason 的确切取值尚未确认，因此用组合信号而非单一字段。
+ * 粗判是否停下来等人。仅作信号，最终由监督者判定。
+ * 提问退出时 stop_reason 的确切取值未确认，用组合信号。
  */
 export function looksLikeQuestion(result) {
   if (result.exitReason !== ExitReason.COMPLETED) return false;
   const tail = String(result.finalText || '').trimEnd().slice(-200);
-  if (/[?？]$/.test(tail)) return true;
-  return ['请确认', '是否', '要我', '需要我', '请问', '怎么处理'].some((k) => tail.includes(k));
+  return tail.endsWith('?') || tail.endsWith('？')
+    || ['请确认', '是否', '要我', '需要我', '请问', '怎么处理'].some((k) => tail.includes(k));
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** 启动并监管一次 claude -p 调用（原版 ClaudeRunner）。 */
+export class LongRunRunner {
+  /**
+   * @param {object} o 参数与原版 ClaudeRunner.__init__ 一一对应（驼峰）：
+   *   cwd env allowedTools model contextLimit handoffLimit costCeiling extraDirs
+   *   wallTimeout maxTurns taskWait eventsDir extraFlags onStream checkInject
+   *   测试钩子：claudeBin binPrefixArgs watchdogInterval silence
+   */
+  constructor(o = {}) {
+    this.cwd = o.cwd;
+    this.env = o.env || process.env;
+    this.allowedTools = o.allowedTools ?? DEFAULT_TOOLS;
+    this.model = o.model || '';
+    this.contextLimit = o.contextLimit ?? 300000;      // 达此水位在工具间隙 kill
+    this.handoffLimit = o.handoffLimit ?? 200000;      // 自然结束时若已过此水位，也走交接
+    this.costCeiling = o.costCeiling ?? null;          // null = 不刹车；由 loop 按剩余预算算
+    this.extraDirs = o.extraDirs || [];
+    this.wallTimeout = o.wallTimeout ?? WALL_TIMEOUT;
+    this.maxTurns = o.maxTurns || 0;
+    this.taskWait = o.taskWait ?? TASK_WAIT;
+    this.eventsDir = o.eventsDir || null;
+    this.extraFlags = o.extraFlags || [];
+    this.onStream = o.onStream || null;
+    this.checkInject = o.checkInject || null;
+    this.claudeBin = o.claudeBin || 'claude';
+    this.binPrefixArgs = o.binPrefixArgs || [];
+    this.watchdogInterval = o.watchdogInterval ?? WATCHDOG_INTERVAL;
+    this.silence = o.silence || undefined;
+    /** 写进 stdin 的控制消息，供测试核对 */
+    this.sentToStdin = [];
+  }
+
+  /** 流式观察者。异常必须吞掉 —— 监控挂了不该影响任务执行。 */
+  _emit(kind, data = {}) {
+    if (!this.onStream) return;
+    try { this.onStream({ kind, ...data }); } catch { /* 忽略 */ }
+  }
+
+  /**
+   * 先 SIGTERM 给落盘机会，等 10 秒，再 SIGKILL。对整个进程组下手：
+   * 执行者起的 vite、subagent 的 Bash 都在组里，只杀 claude 会留下孤儿。
+   */
+  async _terminate(proc) {
+    if (proc.exitCode !== null || proc.signalCode) return;
+    killProcessGroup(proc, 'SIGTERM');
+    for (let i = 0; i < 100 && proc.exitCode === null && !proc.signalCode; i++) await sleep(100);
+    if (proc.exitCode === null && !proc.signalCode) killProcessGroup(proc, 'SIGKILL');
+  }
+
+  /**
+   * 往 stdin 送 interrupt 控制请求。成功发出返回 true。
+   * 只发请求不 kill —— 硬 kill 会丢掉 CLI 对"我被打断了"的落盘记录，
+   * 而那条记录让注入后的续跑能接上。
+   */
+  _sendInterrupt(proc, state) {
+    const stdin = proc.stdin;
+    if (proc.exitCode !== null || proc.signalCode || !stdin || stdin.destroyed || !stdin.writable) return false;
+    const req = JSON.stringify({
+      type: 'control_request', request_id: `intr-${Math.floor(Date.now() / 1000)}`,
+      request: { subtype: 'interrupt' },
+    }) + '\n';
+    try { stdin.write(req); } catch { return false; }
+    this.sentToStdin.push(req);
+    // ⚠ 刻意**不设** killReason：让它自己走完 control_response → result 的收尾
+    state.interruptSent = true;
+    state.interruptAt = Date.now() / 1000;
+    return true;
+  }
+
+  /**
+   * 有人要打断就在**工具间隙**发中断请求；立即模式不等间隙（死循环里永远等不到）。
+   *
+   * 修正原版一处缺陷：原版取件即删文件，工具在飞时只发 inject.waiting 后返回，
+   * 下个事件再取件已是空的 —— 这次投件实际丢了。这里暂存到 state.injectPending，
+   * 到下一个工具间隙照发。
+   */
+  _maybeInterrupt(proc, state) {
+    if (!this.checkInject || state.injectText) return;
+    let pending = state.injectPending;
+    if (!pending) {
+      try { pending = this.checkInject(); } catch { return; }   // 取件通道坏了不该影响任务
+    }
+    if (!pending) return;
+    const [text, immediate] = pending;
+    if (state.toolInFlight && !immediate) {
+      if (!state.injectWaiting) {
+        state.injectWaiting = true;
+        this._emit('inject.waiting', { text: clip(text, 500) });
+      }
+      state.injectPending = pending;
+      return;
+    }
+    state.injectPending = null;
+    // 文本先存下来再发中断：进程可能下一瞬就退出，之后 state 里必须已经有它
+    state.injectText = text;
+    state.injectImmediate = !!immediate;
+    if (this._sendInterrupt(proc, state)) {
+      this._emit('inject.sent', { text: clip(text, 500), immediate: !!immediate });
+    } else {
+      // stdin 送不进去，退回硬 kill —— 注入内容仍在 state 里，上层照样能下一发送出去
+      state.killReason = ExitReason.INTERRUPTED_BY_HUMAN;
+      this._terminate(proc);
+    }
+  }
+
+  /**
+   * 跑一发。
+   * @param {string} prompt    提示词原文（经 stdin 送，**不作为 -p 的参数**）
+   * @param {string|null} sessionId  续会话时必填；新建时缺省生成 uuid
+   * @param {boolean} resume
+   */
+  async run(prompt, sessionId = null, resume = false) {
+    const sid = sessionId || randomUUID();
+    const args = [...this.binPrefixArgs, ...buildArgs({
+      sessionId: sid, resume, allowedTools: this.allowedTools, extraDirs: this.extraDirs,
+      model: this.model, maxTurns: this.maxTurns, extraFlags: this.extraFlags,
+    })];
+    const now = () => Date.now() / 1000;
+
+    // 原始 CLI 事件落盘（stream_event 除外）：事后取证全靠它，transcript 里没有编排层视角
+    let eventsPath = null, eventsFd = null;
+    if (this.eventsDir) {
+      mkdirSync(this.eventsDir, { recursive: true });
+      eventsPath = path.join(this.eventsDir, `${sid}-${Math.floor(now())}.jsonl`);
+      eventsFd = openSync(eventsPath, 'w');
+    }
+
+    const meter = new ContextMeter();
+    const started = now();
+    const state = {
+      started, lastEvent: started, toolInFlight: null, killReason: null,
+      finalText: '', result: null, toolNames: {}, sawDelta: false,
+      injectText: '', injectImmediate: false, injectWaiting: false, injectPending: null,
+      interruptSent: false, interruptAt: 0,
+      tasks: {}, taskWaitStarted: null, taskWaitTimeout: false,
+      hangDetail: '', costDetail: '',
+    };
+
+    // detached = 独立进程组，连坐时整组杀（Windows 不支持负 pid，由 JobGuard 报不可用）
+    const proc = spawn(this.claudeBin, args, {
+      cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'],
+      detached: process.platform !== 'win32',
+    });
+    // ⚠ stdin 管道已关时写入会异步抛 'error'，不接住会变成未捕获异常把整个 WebTmux 弄崩（审计 G10）
+    proc.stdin.on('error', () => {});
+    adoptProcessGroup(proc);
+
+    let stderr = '';
+    proc.stderr.on('data', (b) => { stderr = (stderr + b).slice(-20000); });
+
+    // 送提示词。stdin 保持打开 —— 关掉就没法再送 control_request
+    const payload = JSON.stringify({ type: 'user', message: { role: 'user', content: prompt } }) + '\n';
+    if (!proc.stdin.writable) {
+      await this._terminate(proc);
+      throw new Error('提示词送不进子进程 stdin: 管道不可写');
+    }
+    proc.stdin.write(payload);
+
+    const emit = (k, d) => this._emit(k, d);
+    const cfg = { contextLimit: this.contextLimit, costCeiling: this.costCeiling };
+
+    await new Promise((resolve) => {
+      let buf = '', stop = false;
+      const finish = () => { if (!stop) { stop = true; } clearInterval(dog); resolve(); };
+      const onLine = (raw) => {
+        if (stop) return;
+        const ev = ingestLine(raw, state, now());
+        if (!ev) return;
+        if (eventsFd != null) { try { writeSync(eventsFd, String(raw).trim() + '\n'); } catch { /* 落盘失败不影响任务 */ } }
+        handleEvent(ev, state, meter, cfg, emit);
+        this._maybeInterrupt(proc, state);
+        if (state.killReason) { finish(); return; }
+        // ⚠ 收到 result 必须主动收尾，中断与否都一样（流输入模式下 CLI 吐完 result 不退出）。
+        // 例外：后台 subagent 还在飞时继续读流等它们（每个事件后都重判）
+        if (state.result && !waitTasks(state, this.taskWait, emit, now())) finish();
+      };
+      proc.stdout.on('data', (chunk) => {
+        buf += chunk;
+        let nl;
+        while (!stop && (nl = buf.indexOf('\n')) >= 0) {
+          const l = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          onLine(l);
+        }
+      });
+      proc.stdout.on('end', () => { if (buf) onLine(buf); finish(); });
+      proc.on('error', (e) => { stderr += `\n${e.message}`; finish(); });
+
+      const dog = setInterval(() => {
+        if (proc.exitCode !== null || proc.signalCode) return;
+        const d = watchdogDecide(state, now(), { wallTimeout: this.wallTimeout, taskWait: this.taskWait, silence: this.silence });
+        if (d.action !== 'kill') return;
+        if (d.taskTimeout) {
+          state.taskWaitTimeout = true;
+          emit('tasks.timeout', { count: d.count, waited: Math.round(d.waited * 10) / 10, limit: this.taskWait });
+        } else {
+          state.killReason = d.reason;
+          if (d.hangDetail) state.hangDetail = d.hangDetail;
+        }
+        clearInterval(dog);
+        this._terminate(proc);                       // 进程退出 → stdout end → 读取循环解开
+      }, this.watchdogInterval * 1000);
+    });
+
+    // ── 收尾（原版 finally）──
+    if (state.killReason) await this._terminate(proc);
+    // stdin 必须显式关闭：不关则 CLI 一直等输入不退出。关掉后让它自己正常收尾 ——
+    // 被信号杀掉的发次末尾几条 assistant 可能没落进 transcript（CLI 正常收尾才 flush），
+    // 会影响下一发 --resume（审计 G9）
+    try { proc.stdin.end(); } catch { /* 忽略 */ }
+    for (let i = 0; i < 300 && proc.exitCode === null && !proc.signalCode; i++) await sleep(100);
+    if (proc.exitCode === null && !proc.signalCode) killProcessGroup(proc, 'SIGKILL');
+    if (eventsFd != null) { try { closeSync(eventsFd); } catch { /* 忽略 */ } }
+
+    return this._assemble(sid, proc, state, meter, started, eventsPath, stderr);
+  }
+
+  /** 组装结果（原版 _assemble），判定顺序逐条一致。 */
+  _assemble(sid, proc, state, meter, started, eventsPath, stderr) {
+    const ev = state.result;
+    const usage = ev?.usage || {};
+    let reason = state.killReason;
+
+    // 人工打断优先于一切分类，**包括已设好的 killReason**：
+    // ① CLI 收到 interrupt 后 result 是 error_during_execution + is_error（实测），不特判会归成 ERROR；
+    // ② 中断收尾期间事件流会停，看门狗可能先设了 HANG_KILLED —— 人的明确动作不该被推测盖掉，
+    //    否则注入内容连带丢掉（审计 G6）
+    if (state.interruptSent) reason = ExitReason.INTERRUPTED_BY_HUMAN;
+
+    if (reason == null) {
+      if (ev) {
+        if (ev.is_error) reason = ExitReason.ERROR;
+        // 放在 terminal=="completed" 之前：这种空返回带的正是 completed + success
+        else if (isEmptyResult(ev, meter)) reason = ExitReason.EMPTY_RESULT;
+        // 以 terminal_reason 为主：stop_reason 实测有 end_turn / tool_use 两种正常取值
+        else if (ev.terminal_reason === 'completed') reason = ExitReason.COMPLETED;
+        else if (this.maxTurns && (Number(ev.num_turns) || 0) >= this.maxTurns) reason = ExitReason.MAX_TURNS;
+        else reason = ExitReason.COMPLETED;
+      } else {
+        reason = ExitReason.ERROR;
+      }
+    }
+
+    const out = {
+      sessionId: ev?.session_id || sid,
+      exitReason: reason,
+      exitCode: proc.exitCode,
+      contextPeak: meter.peak,
+      totalTokens: ((Number(usage.input_tokens) || 0) + (Number(usage.output_tokens) || 0))
+        || (meter.peak + meter.outputTotal),
+      costUsd: Number(ev?.total_cost_usd) || 0,
+      // 被 kill 的发次拿不到 result，costUsd 是 0 —— 那笔钱确实花了，靠这个记账
+      costEstimate: Math.round(meter.costEstimate * 1e4) / 1e4,
+      injectText: state.injectText || '',
+      // 本发结束时仍在飞的后台任务。**后台任务活不过会话边界**：这份清单是
+      // "能不能续这个会话"的判据（diablo 实测四个 local_agent 连坐全灭）
+      pendingTasks: agentTasks(state.tasks),
+      numTurns: Number(ev?.num_turns) || 0,
+      stopReason: ev?.stop_reason ?? null,
+      terminalReason: ev?.terminal_reason ?? null,
+      permissionDenials: ev?.permission_denials || [],
+      finalText: state.finalText,
+      eventsPath,
+      durationS: Date.now() / 1000 - started,
+      // 判据跟着结果走，否则日志上只剩 hang_killed 三个字
+      error: reason === ExitReason.ERROR ? stderr.slice(-2000)
+        : (reason === ExitReason.HANG_KILLED || reason === ExitReason.INTERRUPTED_BY_HUMAN) ? state.hangDetail
+          : reason === ExitReason.COST_KILLED ? state.costDetail : '',
+    };
+    if (out.exitReason === ExitReason.COMPLETED && looksLikeQuestion(out)) out.exitReason = ExitReason.ASKED_HUMAN;
+    // 自然结束但水位已过交接阈值。放在提问判定之后：执行者在等业务决策时要先拿到答案
+    if (out.exitReason === ExitReason.COMPLETED && this.handoffLimit && out.contextPeak >= this.handoffLimit) {
+      out.exitReason = ExitReason.COMPLETED_HIGH_CONTEXT;
+    }
+    return out;
+  }
 }
