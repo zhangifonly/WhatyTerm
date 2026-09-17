@@ -146,10 +146,16 @@ test('AIEngine 不再借用、轮换、拉黑第三方供应商，也不再走 4
 });
 
 /** 让 analyzeStatus 必走 AI 分支，并把 claude -p 换成假客户端（绝不起真 claude） */
-function aiOnlyEngine({ cliText = '{"needsAction":false,"currentState":"空闲，等待输入"}', cliError = null } = {}) {
+function aiOnlyEngine({ cliText = '{"needsAction":false,"currentState":"空闲，等待输入"}', cliError = null, codexText = null, codexError = null } = {}) {
   const e = new AIEngine();
   e.preAnalyzeStatus = () => null;
   e.cli = [];
+  e.codex = [];
+  e.codexTextFactory = () => ({ complete: async (system, user, opts = {}) => {
+    e.codex.push({ system, user, schema: opts.jsonSchema });
+    if (codexError || codexText == null) throw new Error(codexError || '未配置 codex 桩');
+    return { text: codexText };
+  } });
   e.cliTextFactory = (model) => ({ complete: async (system, user, opts = {}) => {
     e.cli.push({ model, system, user, schema: opts.jsonSchema });
     if (cliError) throw new Error(cliError);
@@ -188,6 +194,28 @@ await testAsync('会话明确选了带凭证的供应商：先用它；它调不
   bad._callApiWithFailover = async () => { throw new Error('fetch failed'); };
   const r2 = await bad.analyzeStatus('screen', 'claude', 's1', null, { sessionProviderId: 'claude:p' });
   assert(r2._source === 'claude_cli' && bad.cli.length === 1, JSON.stringify(r2));
+});
+
+await testAsync('codex 会话走 codex exec（~/.codex 的当前配置）；claude 会话不碰 codex', async () => {
+  const e = aiOnlyEngine({ codexText: '{"needsAction":false,"actionType":"none","currentState":"codex 判定"}' });
+  const r = await e.analyzeStatus('codex screen', 'codex', 's1', null, {});
+  assert(r._source === 'codex_exec' && r.currentState === 'codex 判定' && e.cli.length === 0, JSON.stringify(r));
+  assert(e.codex[0].user.includes('codex screen') && e.codex[0].schema?.properties?.confidence, '要带同一份状态 schema');
+  const c = aiOnlyEngine({ codexText: '{"needsAction":false}' });
+  await c.analyzeStatus('screen', 'claude', 's1', null, {});
+  assert(c.codex.length === 0 && c.cli.length === 1, 'claude 会话不该起 codex');
+});
+
+await testAsync('codex exec 调不通：退到 claude -p，监控不停摆', async () => {
+  const e = aiOnlyEngine({ codexError: 'codex exec 调用失败: 401' });
+  const r = await e.analyzeStatus('screen', 'codex', 's1', null, {});
+  assert(r._source === 'claude_cli' && e.codex.length === 1 && e.cli.length === 1, JSON.stringify(r));
+});
+
+await testAsync('codex exec 报上来的 workingDir 若是它的专用空目录，同样按"未显示"处理', async () => {
+  const { codexTextCwd } = await import('../server/services/CodexExecText.js');
+  const e = aiOnlyEngine({ codexText: JSON.stringify({ needsAction: false, actionType: 'none', currentState: '空闲', workingDir: codexTextCwd() }) });
+  assert((await e.analyzeStatus('screen', 'codex', 's1', null, {})).workingDir === '未显示');
 });
 
 await testAsync('claude -p 失败要抛出（监控循环据此计失败），不静默返回空', async () => {

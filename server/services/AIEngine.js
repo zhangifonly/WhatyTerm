@@ -13,6 +13,7 @@ import tokenStatsService from './TokenStatsService.js';
 import pluginManager from './MonitorPlugins/index.js';
 import { isTaskDone } from './taskDonePattern.js';
 import { ClaudeCliTextClient, cliTextCwd } from './ClaudeCliText.js';
+import { CodexExecTextClient, codexTextCwd } from './CodexExecText.js';
 import { hasPendingQuestion } from './pendingQuestion.js';
 import { promptPendingText, isOwnPendingInput } from './promptState.js';
 import { isLiveConfirmMenu, hasNearbyConfirmMenu, isCodexLiveConfirm } from './liveMenu.js';
@@ -398,8 +399,9 @@ export class AIEngine {
     // 会话级供应商配置缓存：providerKey('appType:id') -> settings | null
     // null 表示该供应商无法用于 HTTP 调用（如官方 OAuth 登录，无 URL/key）
     this._sessionProviderCache = new Map();
-    // claude -p 纯文本客户端工厂（测试覆盖它，绝不起真 claude）
+    // claude -p / codex exec 纯文本客户端工厂（测试覆盖它们，绝不起真 CLI）
     this.cliTextFactory = (model) => new ClaudeCliTextClient({ model, timeoutMs: STATUS_CLI_TIMEOUT_MS });
+    this.codexTextFactory = () => new CodexExecTextClient({ timeoutMs: STATUS_CLI_TIMEOUT_MS });
 
     // 初始化插件管理器
     this._initPluginManager();
@@ -3383,7 +3385,7 @@ ${historyText || '(空)'}
 
     // 供应商选择（2026-09-17 起）：
     //   1. 会话明确选了带 HTTP 凭证的供应商 → 用它（凭证归属最清晰）
-    //   2. 否则 → claude -p 纯文本调用，跟随 CC Switch 当前配置（OAuth 也能用，遵守代理）
+    //   2. 否则 → CLI 纯文本调用，跟随 CC Switch 当前配置（codex 会话用 codex exec，其余用 claude -p；OAuth 也能用，遵守代理）
     // 不再借用第三方供应商：实测借来的 5 家全部 fetch failed（域名 DNS 被污染，AIEngine 直连不走代理）。
     // 纯文本模式不加载 MCP/skill/CLAUDE.md，老 CLI 兜底单次 4.3 万 tokens 的成本已不存在，所以不再节流。
     const sessionSettings = projectContext?.sessionProviderId
@@ -3407,11 +3409,11 @@ ${historyText || '(空)'}
 
     let lastErr = null;
     try {
-      const parsed = await this._analyzeStatusViaCurrentConfig(prompt);
+      const parsed = await this._analyzeStatusViaCurrentConfig(prompt, aiType);
       if (parsed) return parsed;
     } catch (err) {
       lastErr = err;
-      console.error('AI 状态分析错误（claude -p）:', err.message);
+      console.error('AI 状态分析错误（CLI 通道）:', err.message);
     }
     const pending = this._pendingQuestionStatus(escalatedQuestion, aiType);
     if (pending) return pending;
@@ -3450,20 +3452,27 @@ ${historyText || '(空)'}
   }
 
   /**
-   * 用 CC Switch 当前的 Claude 配置做状态分析：claude -p 纯文本调用（与长程监督者同一个客户端）。
-   * 模型用 models.json 的监控默认模型；进程数受 AI 并发上限约束。
-   * 测试可覆盖 this.cliTextFactory，绝不在测试里起真 claude。
+   * 用 CC Switch 当前配置做状态分析，按被监控 CLI 选通道（与会话里的 CLI 同一套供应商、登录与代理）：
+   *   codex 会话 → codex exec（~/.codex/config.toml 的当前配置）；调不通再退到 claude -p，监控不能因此停摆
+   *   其余会话   → claude -p（模型用 models.json 的监控默认模型）
+   * 两条通道都带与 HTTP 路径同一份 schema：带上 confidence，非对称降级才有依据；actionType 受 enum 约束。
+   * 进程数受 AI 并发上限约束。测试覆盖 this.cliTextFactory / this.codexTextFactory，绝不起真 CLI。
    */
-  async _analyzeStatusViaCurrentConfig(prompt) {
-    const model = getModelsConfig()?.claude?.default || DEFAULT_MODEL;
-    const client = this.cliTextFactory(model);
-    // 与 HTTP 路径同一份 schema：带上 confidence，非对称降级才有依据；actionType 受 enum 约束
-    const r = await this._withConcurrencyLimit(() => client.complete(STATUS_SYSTEM_PROMPT, prompt, { jsonSchema: STATUS_TOOL.input_schema }));
+  async _analyzeStatusViaCurrentConfig(prompt, aiType = 'claude') {
+    const run = (client) => this._withConcurrencyLimit(() => client.complete(STATUS_SYSTEM_PROMPT, prompt, { jsonSchema: STATUS_TOOL.input_schema }));
+    let r = null, source = 'claude_cli';
+    if (aiType === 'codex') {
+      try { r = await run(this.codexTextFactory()); source = 'codex_exec'; } catch (err) {
+        console.error('[AIEngine] codex exec 状态分析失败，改用 claude -p:', err.message);
+      }
+    }
+    if (!r) r = await run(this.cliTextFactory(getModelsConfig()?.claude?.default || DEFAULT_MODEL));
     const parsed = this._parseStatusResponse(r.text);
     if (!parsed) return null;
-    parsed._source = 'claude_cli';
-    // CLI 会把自己的工作目录作为环境信息告诉模型，实测模型会把它当成终端的 workingDir 报上来
-    if (String(parsed.workingDir || '').includes(basename(cliTextCwd()))) parsed.workingDir = '未显示';
+    parsed._source = source;
+    // CLI 会把自己的工作目录告诉模型，实测模型会把它当成终端的 workingDir 报上来
+    const wd = String(parsed.workingDir || '');
+    if ([cliTextCwd(), codexTextCwd()].some((d) => wd.includes(basename(d)))) parsed.workingDir = '未显示';
     return parsed;
   }
 
