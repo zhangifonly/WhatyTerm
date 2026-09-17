@@ -54,24 +54,37 @@ function writeDoc(text) {
 }
 
 /**
- * 假 AIEngine：verdicts 为监督者判定序列（用完重复最后一个）。
- * 记录每次调用收到的 config / system / user。
+ * 假 AIEngine：verdicts 为监督者判定序列（用完重复最后一个）。记录每次调用收到的 config / system / user。
+ * ⚠ 返回结构必须与真实 AIEngine 一致（凭据在 .claude 下一层）—— 早先这里返回扁平结构，测试全绿，
+ *   真实运行时监督者却一直"不可用"（2026-09-17 首次真实运行）。
+ *
+ * @param {object} o
+ * @param {boolean} o.global    全局 Claude 是否带密钥（false = OAuth 登录）
+ * @param {string[]} o.proxies  可借用的代理供应商名，按挑选顺序；dead 里的调用会失败
  */
-function fakeEngine({ verdicts = ['project_done'], global = true } = {}) {
+function fakeEngine({ verdicts = ['project_done'], global = true, proxies = [], dead = [] } = {}) {
   const calls = [];
   const vs = [...verdicts];
-  const cfg = (url) => ({ apiUrl: url, apiKey: SECRET, model: 'claude-opus-5' });
-  return {
-    calls,
-    resolveSessionSettings: (app, id) => ({ ...cfg(`https://session-${id}.example.com`) }),
-    getSettings: () => ({ claude: global ? cfg('https://global.example.com') : {} }),
+  const blacklist = new Set();
+  const st = (url, id, name) => ({ claude: { apiUrl: url, apiKey: SECRET, model: 'monitor-model' }, _providerId: id, _providerName: name });
+  const engine = {
+    calls, blacklist, _proxyLastGood: null,
+    resolveSessionSettings: (app, id) => (id === 'oauth' ? { claude: {} } : st(`https://session-${id}.example.com`, `claude:${id}`, `会话供应商${id} (claude)`)),
+    getSettings: () => (global ? st('https://global.example.com', null, null) : { claude: {} }),
+    getProxyMonitorSettings: () => {
+      const name = proxies.find((n) => !blacklist.has(`claude:${n}`));
+      return name ? st(`https://${name}.example.com`, `claude:${name}`, `${name} (代理监控)`) : null;
+    },
+    blacklistProxyProvider: (key) => blacklist.add(key),
     callClaudeMessages: async (o) => {
       calls.push(o);
+      if (dead.some((n) => o.config.apiUrl.includes(n))) throw new Error('监督者调用失败（1 次尝试）: 网络错误: fetch failed');
       const v = vs.length > 1 ? vs.shift() : vs[0];
       return { text: JSON.stringify({ verdict: v, confidence: 0.95, reason: '桩', reply: '', needs_from_human: '请定数据库' }),
         stopReason: 'end_turn', inputTokens: 10, outputTokens: 5 };
     },
   };
+  return engine;
 }
 
 /** 假执行者。block=true 的发次一直挂着，直到 abort()（模拟长跑中被终止）。 */
@@ -259,6 +272,39 @@ await test('启动自检：第一条事件就是自检，含连坐、投件、�
   }
   assert(!/与内置默认不一致/.test(text), '默认提示词不该喊"被改动"');
   assert(s.runners.opts[0].model === 'claude-sonnet-5' && s.runners.opts[0].taskWait === 60, '模型与后台等待要传到执行者');
+});
+
+await test('全局是 OAuth（无密钥）时借用带凭据的供应商，模型用原版默认的 Opus，自检说明是借用', async () => {
+  const s = svc(fakeEngine({ global: false, proxies: ['duojie'] }));
+  const t = s.start({ docPath: writeDoc('# 借用'), sandboxName: 'borrow' });
+  await finished(s, t.id);
+  const c = s.engine.calls[0];
+  assert(c.config.apiUrl === 'https://duojie.example.com' && c.config.model === 'claude-opus-5', JSON.stringify(c.config));
+  assert(c.maxRetries === 0, '借来的不做内部重试，换家就是重试');
+  assert(t.supervisor.borrowed && t.supervisor.providerName === 'duojie', JSON.stringify(t.supervisor));
+  assert(t.selfCheck.some((i) => /借用带凭据的供应商/.test(i.text)), '自检要说明借用');
+  assert(s.status(t.id).report.stop === 'project_done' && s.engine._proxyLastGood === 'claude:duojie', '调通后记为上次调通，与监控共享');
+});
+
+await test('借来的调不通：拉黑换下一家、判定照常完成，编排日志里记下换了谁', async () => {
+  const s = svc(fakeEngine({ global: false, proxies: ['foxcode', 'crs', 'duojie'], dead: ['foxcode', 'crs'] }));
+  const t = s.start({ docPath: writeDoc('# 轮换'), sandboxName: 'rotate' });
+  await finished(s, t.id);
+  assert([...s.engine.blacklist].join() === 'claude:foxcode,claude:crs', [...s.engine.blacklist].join());
+  assert(s.status(t.id).report.stop === 'project_done', `应在第三家判定完成: ${s.status(t.id).report.stop}`);
+  const logs = s.board(t.id).snapshot.logs.map((l) => l.message).join('\n');
+  assert(/foxcode 调不通.*换用 crs/.test(logs) && /crs 调不通.*换用 duojie/.test(logs), logs.slice(-400));
+});
+
+await test('明确选定的供应商没有密钥时不偷偷换成别家；全部借用都调不通时降级为叫人', async () => {
+  const a = svc(fakeEngine({ global: false, proxies: ['duojie'] }));
+  const t = a.start({ docPath: writeDoc('# 选定'), sandboxName: 'chosen_oauth', providerId: 'oauth', noAsk: true });
+  await finished(a, t.id);
+  assert(t.supervisor.status === 'unavailable' && /不会被自动换掉/.test(t.supervisor.error) && a.engine.calls.length === 0, JSON.stringify(t.supervisor));
+  const b = svc(fakeEngine({ global: false, proxies: ['x1', 'x2'], dead: ['x1', 'x2'] }));
+  const t2 = b.start({ docPath: writeDoc('# 全挂'), sandboxName: 'all_dead', noAsk: true });
+  await finished(b, t2.id);
+  assert(b.status(t2.id).report.stop === 'needs_human', `全挂应降级叫人: ${b.status(t2.id).report.stop}`);
 });
 
 await test('监督者凭据缺失：不启用并在自检里警告；不启用监督者时如实说明', async () => {

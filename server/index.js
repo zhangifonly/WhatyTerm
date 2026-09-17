@@ -1200,7 +1200,8 @@ const plannerService = new PlannerService(aiEngine);
 const evaluatorService = new EvaluatorService(aiEngine);
 // 长程编排（替代旧 Ralph）：沙箱里无人值守跑长任务。
 // 凭据经 aiEngine 从 CC Switch 取，不引入编排器原来的 .env 机制。
-const longRunService = new LongRunService({ io, aiEngine });
+// 优先级名单在后面才定义并从配置文件加载，这里传取值函数，用到时再读
+const longRunService = new LongRunService({ io, aiEngine, providerPriority: () => CLAUDE_PROVIDER_PRIORITY });
 const authService = new AuthService();
 const providerService = new ProviderService(io);
 const healthCheckScheduler = new HealthCheckScheduler(io);

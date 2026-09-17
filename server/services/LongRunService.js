@@ -16,6 +16,7 @@ import { fileURLToPath } from 'url';
 import { loadPrompts, loadRequirement, extraDirsOf, PROMPT_SLOTS } from './LongRunPrompts.js';
 import { LongRunSandbox } from './LongRunSandbox.js';
 import { Supervisor, loadSystemPrompt } from './LongRunSupervisor.js';
+import { SupervisorCredentials } from './LongRunSupervisorCreds.js';
 import { LongRunLoop, Stop, assertThresholds, HANDOFF_FLOOR, HANDOFF_CEILING, HARD_KILL,
   MAINTENANCE_EVERY, TOTAL_BUDGET_USD, MAX_LEGS } from './LongRunLoop.js';
 import { TASK_WAIT } from './LongRunRunner.js';
@@ -162,44 +163,45 @@ export class LongRunService {
    * @param {object} o.io        socket.io 实例（推事件用）
    * @param {object} o.aiEngine  取 CC Switch 凭据 + 调监督者 LLM
    * @param {function} [o.runnerFactory]  执行者工厂（仅测试注入；缺省起真 claude 进程）
+   * @param {() => string[]} [o.providerPriority]  借用供应商时的名称优先级，与 AI 监控共用
    */
-  constructor({ io, aiEngine, runnerFactory = null } = {}) {
+  constructor({ io, aiEngine, runnerFactory = null, providerPriority = () => [] } = {}) {
     this.io = io;
     this.aiEngine = aiEngine;
+    this.providerPriority = providerPriority;
     this.runnerFactory = runnerFactory;
     /** id → LongRunTask */
     this.tasks = new Map();
   }
 
-  /** 监督者凭据：指定了供应商用会话级解析，否则取全局 Claude 配置。 */
-  _supervisorConfig(providerId) {
-    const engine = this.aiEngine;
-    if (!engine) return null;
-    return providerId ? engine.resolveSessionSettings('claude', providerId) : engine.getSettings()?.claude;
-  }
-
   /**
    * cli_common.make_supervisor。需求文档同时给执行者和监督者，必须是同一份文本。
    * 提示词读不到硬失败（以为换了规则而实际跑的是默认那份，最难察觉）；
-   * 凭据缺失则不启用并警告（原版 LLMError 分支），执行者每次结束都停机等人。
+   * 凭据取不到则不启用并警告（原版 LLMError 分支），执行者每次结束都停机等人。
+   * 凭据来源与轮换见 LongRunSupervisorCreds.js。
+   * @param {() => object} getTask  换供应商时往该任务的编排日志里记一笔（任务在监督者之后才建出来）
    */
-  _makeSupervisor(o, requirementText) {
+  _makeSupervisor(o, requirementText, getTask = () => null) {
     if (o.noSupervisor) return { supervisor: null, info: { status: 'off' } };
     const { text, source } = loadSystemPrompt(o.supervisorPrompt || null);
     const builtinText = o.supervisorPrompt ? loadSystemPrompt().text : text;
-    const config = this._supervisorConfig(o.providerId);
-    if (!config?.apiUrl || !config?.apiKey) {
-      return { supervisor: null,
-        info: { status: 'unavailable', error: '没有可用的 Claude 供应商（CC Switch 未配置或缺少地址/密钥）' } };
+    const creds = new SupervisorCredentials({
+      engine: this.aiEngine, providerId: o.providerId, priority: this.providerPriority,
+      onSwitch: ({ from, to, error }) => getTask()?.loop?.log(`  监督者供应商 ${from} 调不通（${String(error).slice(0, 80)}），换用 ${to}`),
+    });
+    const cred = creds.resolve();
+    if (!cred) {
+      return { supervisor: null, info: { status: 'unavailable', error: o.providerId
+        ? '所选供应商没有可用的地址与密钥（明确选定的供应商不会被自动换掉）'
+        : 'CC Switch 里没有带地址与密钥的 Claude 供应商' } };
     }
-    const engine = this.aiEngine;
     const supervisor = new Supervisor({
       requirementText, systemPrompt: text, promptSource: source, maxTokens: 4000,
-      complete: (system, user) => engine.callClaudeMessages({ config, system, user, maxTokens: 4000 }),
+      complete: (system, user) => creds.complete(system, user),
     });
     return { supervisor,
-      info: { status: 'on', model: config.model || '', baseUrl: config.apiUrl, promptSource: source,
-        promptText: text, builtinText } };
+      info: { status: 'on', model: cred.config.model, baseUrl: cred.config.apiUrl, providerName: cred.name,
+        borrowed: cred.borrowed, promptSource: source, promptText: text, builtinText } };
   }
 
   /** 粘贴的文本 → 文件路径。按内容哈希命名，幂等：plan 与 start 各调一次只落同一个文件。 */
@@ -294,12 +296,13 @@ export class LongRunService {
     reportRequirement(sc, req, o);
 
     const input = requirementInput(req, { resume });
-    const { supervisor, info } = this._makeSupervisor(o, input);
+    let task = null;
+    const { supervisor, info } = this._makeSupervisor(o, input, () => task);
     reportSupervisor(sc, info);
     const { promptText, builtinText, ...supervisorInfo } = info;   // 全文不进快照
 
     const id = `${path.basename(sandbox.root)}-${Date.now().toString(36)}`;
-    const task = new LongRunTask({ id, mode: o.mode, sandbox, docPath, requirementText: input, requirementDoc: req.text,
+    task = new LongRunTask({ id, mode: o.mode, sandbox, docPath, requirementText: input, requirementDoc: req.text,
       options: { ...o }, selfCheck: sc.toJSON(), supervisorInfo });
     task.loop = new LongRunLoop({
       sandbox, prompts, requirementText: input, supervisor,
