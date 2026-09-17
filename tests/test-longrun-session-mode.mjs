@@ -111,6 +111,8 @@ await test('绑定器：同目录 claude 在跑先拒绝再动条目；切模式
   assert(refuse > 0 && create > refuse && mode > create, '必须先检查 CLI 在跑、再建/改条目');
   assert(bind.includes("session.origin = 'longrun'") && bind.includes('session.autoActionEnabled = false') && bind.includes("io.emit('sessions:updated'"));
   assert(bind.includes('createSession({ name: projectName, workingDir: root, projectName })'), '新建条目要带工作目录');
+  const mk = between(src('index.js'), 'async _create(root, projectName) {', 400);
+  assert(/mkdirSync\(root, \{ recursive: true \}\);[\s\S]*createSession\(/.test(mk), '建条目前必须先建目录，否则 tmux -c 落到主目录');
   // 只看记录的入口：已有同目录条目原样返回，绝不能把传统会话切成长程模式
   const open = between(bind, 'async open(root, { projectName }) {', 400);
   const early = open.indexOf('if (existing.length) return existing[0].id;'), flip = open.indexOf("session.runMode = 'longrun'");

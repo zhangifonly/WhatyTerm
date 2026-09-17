@@ -1248,6 +1248,8 @@ const longRunSessionBinder = {
     return session.id;
   },
   async _create(root, projectName) {
+    // 新项目此刻目录还没建（沙箱在绑定之后才打开）：tmux -c 指向不存在的目录会静默落到主目录
+    mkdirSync(root, { recursive: true });
     const session = await sessionManager.createSession({ name: projectName, workingDir: root, projectName });
     session.aiType = 'claude';
     registerBellCallback(session);
