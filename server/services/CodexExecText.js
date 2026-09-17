@@ -12,10 +12,10 @@
  *   · -C 的目录会被模型当成终端工作目录报上来，所以用固定目录，调用方据目录名剔除
  */
 
-import { spawn } from 'child_process';
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'fs';
 import os from 'os';
 import path from 'path';
+import { runCli, internalCliEnv } from './cliProcess.js';
 
 export const CODEX_TEXT_TIMEOUT_MS = 180_000;
 export const codexTextCwd = () => path.join(os.tmpdir(), 'webtmux-codex-text');
@@ -56,43 +56,29 @@ export class CodexExecTextClient {
     Object.assign(this, { codexBin, binPrefixArgs, timeoutMs, env });
   }
 
-  childEnv() {
-    const env = { ...this.env, WEBTMUX_LONGRUN: '1' };   // 内部调用：hook 带这个头，WebTmux 一律丢弃
-    for (const k of ['TMUX', 'TMUX_PANE']) delete env[k];
-    return env;
-  }
-
   /** 返回 {text, stopReason, inputTokens, outputTokens, costUsd}，与 ClaudeCliTextClient 同形 */
-  complete(system, user, { jsonSchema = null } = {}) {
+  async complete(system, user, { jsonSchema = null } = {}) {
     const cwd = codexTextCwd();
     mkdirSync(cwd, { recursive: true });
     const work = mkdtempSync(path.join(os.tmpdir(), 'webtmux-codex-call-'));   // 每次调用各自的指令/schema/输出文件，并发互不覆盖
-    const instructionsFile = path.join(work, 'instructions.md');
-    const lastFile = path.join(work, 'last.txt');
-    writeFileSync(instructionsFile, system);
-    const schemaFile = jsonSchema ? path.join(work, 'schema.json') : null;
-    if (schemaFile) writeFileSync(schemaFile, JSON.stringify(toStrictSchema(jsonSchema)));
-    return new Promise((resolve, reject) => {
-      const proc = spawn(this.codexBin, [...this.binPrefixArgs, ...buildCodexExecArgs({ cwd, instructionsFile, schemaFile, lastFile })],
-        { cwd, env: this.childEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
-      let out = '', err = '', done = false;
-      const finish = (fn, v) => { if (done) return; done = true; clearTimeout(timer); rmSync(work, { recursive: true, force: true }); fn(v); };
-      const timer = setTimeout(() => { proc.kill('SIGKILL'); finish(reject, new Error(`codex exec 超过 ${Math.round(this.timeoutMs / 1000)} 秒没有返回`)); }, this.timeoutMs);
-      proc.stdout.on('data', (b) => { out += b; });
-      proc.stderr.on('data', (b) => { err += b; });
-      proc.on('error', (e) => finish(reject, new Error(`无法启动 codex: ${e.message}`)));
-      proc.on('close', (code) => {
-        if (done) return;
-        const ev = parseCodexEvents(out);
-        const text = existsSync(lastFile) ? readFileSync(lastFile, 'utf8').trim() : ev.lastText;
-        if (code || ev.error || !text) {
-          return finish(reject, new Error(`codex exec 调用失败${code ? `（退出码 ${code}）` : ''}: ${(ev.error || err || out).trim().slice(0, 300)}`));
-        }
-        const u = ev.usage || {};
-        finish(resolve, { text, stopReason: null, inputTokens: u.input_tokens || 0, outputTokens: u.output_tokens || 0, costUsd: 0 });
-      });
-      proc.stdin.on('error', () => {});
-      proc.stdin.end(user);   // 提示词走标准输入（参数里的 "-"），终端全文不进命令行
-    });
+    try {
+      const instructionsFile = path.join(work, 'instructions.md');
+      const lastFile = path.join(work, 'last.txt');
+      writeFileSync(instructionsFile, system);
+      const schemaFile = jsonSchema ? path.join(work, 'schema.json') : null;
+      if (schemaFile) writeFileSync(schemaFile, JSON.stringify(toStrictSchema(jsonSchema)));
+      // 提示词走标准输入（参数里的 "-"），终端全文不进命令行
+      const { code, out, err } = await runCli({ label: 'codex exec', bin: this.codexBin, cwd, env: internalCliEnv(this.env), stdin: user,
+        args: [...this.binPrefixArgs, ...buildCodexExecArgs({ cwd, instructionsFile, schemaFile, lastFile })], timeoutMs: this.timeoutMs });
+      const ev = parseCodexEvents(out);
+      const text = existsSync(lastFile) ? readFileSync(lastFile, 'utf8').trim() : ev.lastText;
+      if (code || ev.error || !text) {
+        throw new Error(`codex exec 调用失败${code ? `（退出码 ${code}）` : ''}: ${(ev.error || err || out).trim().slice(0, 300)}`);
+      }
+      const u = ev.usage || {};
+      return { text, stopReason: null, inputTokens: u.input_tokens || 0, outputTokens: u.output_tokens || 0, costUsd: 0 };
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
   }
 }

@@ -146,16 +146,21 @@ test('AIEngine 不再借用、轮换、拉黑第三方供应商，也不再走 4
 });
 
 /** 让 analyzeStatus 必走 AI 分支，并把 claude -p 换成假客户端（绝不起真 claude） */
-function aiOnlyEngine({ cliText = '{"needsAction":false,"currentState":"空闲，等待输入"}', cliError = null, codexText = null, codexError = null } = {}) {
+function aiOnlyEngine({ cliText = '{"needsAction":false,"currentState":"空闲，等待输入"}', cliError = null, codexText = null, codexError = null, grokText = null } = {}) {
   const e = new AIEngine();
   e.preAnalyzeStatus = () => null;
   e.cli = [];
   e.codex = [];
-  e.codexTextFactory = () => ({ complete: async (system, user, opts = {}) => {
-    e.codex.push({ system, user, schema: opts.jsonSchema });
-    if (codexError || codexText == null) throw new Error(codexError || '未配置 codex 桩');
-    return { text: codexText };
+  e.grok = [];
+  const fake = (log, text, error, name) => ({ complete: async (system, user, opts = {}) => {
+    log.push({ system, user, schema: opts.jsonSchema });
+    if (error || text == null) throw new Error(error || `未配置 ${name} 桩`);
+    return { text };
   } });
+  e.cliChannels = {
+    codex: { source: 'codex_exec', factory: () => fake(e.codex, codexText, codexError, 'codex') },
+    grok: { source: 'grok_cli', factory: () => fake(e.grok, grokText, null, 'grok') },
+  };
   e.cliTextFactory = (model) => ({ complete: async (system, user, opts = {}) => {
     e.cli.push({ model, system, user, schema: opts.jsonSchema });
     if (cliError) throw new Error(cliError);
@@ -204,6 +209,16 @@ await testAsync('codex 会话走 codex exec（~/.codex 的当前配置）；clau
   const c = aiOnlyEngine({ codexText: '{"needsAction":false}' });
   await c.analyzeStatus('screen', 'claude', 's1', null, {});
   assert(c.codex.length === 0 && c.cli.length === 1, 'claude 会话不该起 codex');
+});
+
+await testAsync('grok 会话走 grok -p；gemini / droid 会话直接走 claude -p', async () => {
+  const g = aiOnlyEngine({ grokText: '{"needsAction":false,"actionType":"none","currentState":"grok 判定"}' });
+  const r = await g.analyzeStatus('grok screen', 'grok', 's1', null, {});
+  assert(r._source === 'grok_cli' && g.grok.length === 1 && g.cli.length === 0 && g.grok[0].schema?.properties?.confidence, JSON.stringify(r));
+  for (const t of ['gemini', 'droid']) {
+    const x = aiOnlyEngine();
+    assert((await x.analyzeStatus('screen', t, 's1', null, {}))._source === 'claude_cli' && x.codex.length + x.grok.length === 0, t);
+  }
 });
 
 await testAsync('codex exec 调不通：退到 claude -p，监控不停摆', async () => {
