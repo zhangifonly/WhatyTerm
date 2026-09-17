@@ -63,22 +63,15 @@ function writeDoc(text) {
  *
  * @param {object} o
  * @param {boolean} o.global    全局 Claude 是否带密钥（false = OAuth 登录）
- * @param {string[]} o.proxies  可借用的代理供应商名，按挑选顺序；dead 里的调用会失败
  */
-function fakeEngine({ verdicts = ['project_done'], global = true, proxies = [], dead = [] } = {}) {
+function fakeEngine({ verdicts = ['project_done'], global = true, dead = [] } = {}) {
   const calls = [];
   const vs = [...verdicts];
-  const blacklist = new Set();
   const st = (url, id, name) => ({ claude: { apiUrl: url, apiKey: SECRET, model: 'monitor-model' }, _providerId: id, _providerName: name });
   const engine = {
-    calls, blacklist, _proxyLastGood: null,
+    calls,
     resolveSessionSettings: (app, id) => (id === 'oauth' ? { claude: {} } : st(`https://session-${id}.example.com`, `claude:${id}`, `会话供应商${id} (claude)`)),
     getSettings: () => (global ? st('https://global.example.com', null, null) : { claude: {} }),
-    getProxyMonitorSettings: () => {
-      const name = proxies.find((n) => !blacklist.has(`claude:${n}`));
-      return name ? st(`https://${name}.example.com`, `claude:${name}`, `${name} (代理监控)`) : null;
-    },
-    blacklistProxyProvider: (key) => blacklist.add(key),
     callClaudeMessages: async (o) => {
       calls.push(o);
       if (dead.some((n) => o.config.apiUrl.includes(n))) throw new Error('监督者调用失败（1 次尝试）: 网络错误: fetch failed');

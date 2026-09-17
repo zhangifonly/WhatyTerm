@@ -1,17 +1,17 @@
 /**
- * 长程监督者经 claude CLI 调用 —— 回归测试（假 CLI，绝不起真 claude）
+ * claude -p 纯文本调用（长程监督者与 AI 监控共用）—— 回归测试（假 CLI，绝不起真 claude）
  *
  * 现场（2026-09-17）：监督者借用的第三方供应商连续 5 家 fetch failed（域名 DNS 被污染、AIEngine 直连不走代理），
  * 任务两次卡在"监督者不可用，叫人"。改为经 claude CLI，跟随 CC Switch 当前配置。
  * 首次真实探针还发现：空目录挡不住用户级 CLAUDE.md，监督者会拿个人编码规矩判执行者。
  *
- * 运行: node tests/test-longrun-supervisor-cli.mjs
+ * 运行: node tests/test-claude-cli-text.mjs
  */
 
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { CliSupervisorClient, buildSupervisorArgs, parseCliResult, supervisorCwd } from '../server/services/LongRunSupervisorCli.js';
+import { ClaudeCliTextClient, buildCliTextArgs, parseCliResult, cliTextCwd } from '../server/services/ClaudeCliText.js';
 import { makeSupervisorChannel } from '../server/services/LongRunSupervisorCreds.js';
 
 const results = { passed: 0, failed: 0, errors: [] };
@@ -38,7 +38,7 @@ process.stdin.on('end', () => {
   process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: err, result: err ? 'API Error: 401' : JSON.stringify(echo),
     stop_reason: 'end_turn', total_cost_usd: 0.02, usage: { input_tokens: 2, cache_creation_input_tokens: 500, cache_read_input_tokens: 100, output_tokens: 9 } }));
 });`);
-const client = (mode, o = {}) => new CliSupervisorClient({ model: 'claude-opus-5', claudeBin: process.execPath, binPrefixArgs: [FAKE],
+const client = (mode, o = {}) => new ClaudeCliTextClient({ model: 'claude-opus-5', claudeBin: process.execPath, binPrefixArgs: [FAKE],
   env: { ...process.env, FAKE_MODE: mode, CLAUDECODE: '1', TMUX: '/tmp/tmux-1/default,1,0' }, ...o });
 const rejects = async (p) => { try { await p; } catch (e) { return e.message; } throw new Error('应当失败却成功了'); };
 
@@ -57,7 +57,7 @@ await test('子进程环境：带长程头、关掉 CLAUDE.md 与自动记忆、
   const echo = JSON.parse((await client('ok').complete('s', 'u')).text);
   assert(echo.env.L === '1' && echo.env.MDS === '1' && echo.env.AM === '1', JSON.stringify(echo.env));
   assert(echo.env.CC === null && echo.env.TMUX === null, '嵌套标记没清');
-  assert(fs.realpathSync(echo.cwd) === fs.realpathSync(supervisorCwd()), echo.cwd);
+  assert(fs.realpathSync(echo.cwd) === fs.realpathSync(cliTextCwd()), echo.cwd);
 });
 
 await test('失败都要抛出（交给监督者按调用失败叫人）：is_error、非零退出、非 JSON、超时', async () => {
@@ -65,12 +65,16 @@ await test('失败都要抛出（交给监督者按调用失败叫人）：is_er
   assert(/退出码 1.*Invalid API key/.test(await rejects(client('crash').complete('s', 'u'))));
   assert(/不是 JSON/.test(await rejects(client('garbage').complete('s', 'u'))));
   assert(/超过 1 秒/.test(await rejects(client('hang', { timeoutMs: 1000 }).complete('s', 'u'))));
-  assert(/无法启动/.test(await rejects(new CliSupervisorClient({ model: 'm', claudeBin: path.join(TMP, 'no-such-bin') }).complete('s', 'u'))));
+  assert(/无法启动/.test(await rejects(new ClaudeCliTextClient({ model: 'm', claudeBin: path.join(TMP, 'no-such-bin') }).complete('s', 'u'))));
 });
 
-await test('解析与参数纯函数：subtype 不是 success 也算失败', () => {
+await test('解析与参数纯函数：subtype 不是 success 也算失败；结构化输出取 structured_output', () => {
   assert(/调用失败/.test((() => { try { parseCliResult('{"subtype":"error_max_turns","is_error":false}'); } catch (e) { return e.message; } return ''; })()));
-  assert(buildSupervisorArgs({ model: 'x', system: 'y' }).length === 12);
+  assert(buildCliTextArgs({ model: 'x', system: 'y' }).length === 12, '不要求结构化时不带 --json-schema');
+  const a = buildCliTextArgs({ model: 'x', system: 'y', jsonSchema: { type: 'object' } });
+  assert(a[a.indexOf('--json-schema') + 1] === '{"type":"object"}', a.join(' '));
+  const r = parseCliResult(JSON.stringify({ subtype: 'success', result: '说明文字', structured_output: { ok: 1 } }));
+  assert(r.text === '{"ok":1}', '带 structured_output 时以它为准');
 });
 
 await test('通道选择：未选供应商走 CLI 并显示 CC Switch 当前配置；选了走 HTTP；选了但没密钥报不可用', async () => {

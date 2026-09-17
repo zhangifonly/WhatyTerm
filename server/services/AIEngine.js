@@ -2,7 +2,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname, join, basename } from 'path';
 import { spawn } from 'child_process';
 import { ProxyAgent, Agent } from 'undici';
 import Database from 'better-sqlite3';
@@ -12,6 +12,7 @@ import processDetector from './ProcessDetector.js';
 import tokenStatsService from './TokenStatsService.js';
 import pluginManager from './MonitorPlugins/index.js';
 import { isTaskDone } from './taskDonePattern.js';
+import { ClaudeCliTextClient, cliTextCwd } from './ClaudeCliText.js';
 import { hasPendingQuestion } from './pendingQuestion.js';
 import { promptPendingText, isOwnPendingInput } from './promptState.js';
 import { isLiveConfirmMenu, hasNearbyConfirmMenu, isCodexLiveConfirm } from './liveMenu.js';
@@ -21,14 +22,10 @@ import { DEFAULT_MODEL, CLAUDE_CODE_FAKE, CODEX_FAKE, CLAUDE_MODEL_FALLBACK_LIST
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const SETTINGS_PATH = join(__dirname, '../db/ai-settings.json');
-// CLI 回退最小间隔（同一会话）。CLI 单次约 4.3 万 input tokens，不能每轮都走
-const CLI_FALLBACK_INTERVAL = 5 * 60 * 1000;
-// 代理供应商拉黑时长。实测 32 个带凭证的 claude 供应商只有 2 个真能用（其余
-// 401/404/502/503），按名字盲挑必然挑到死的。挂了就拉黑一段时间换下一个，
-// 别再撞同一面墙，也别因为一次失败就永久放弃（网关 502 常是临时的）。
-const PROXY_BLACKLIST_TTL = 10 * 60 * 1000;
-// 代理供应商最多换几次。3 次已能覆盖"前几个恰好都挂了"，再多就不如直接走 CLI
-const PROXY_MAX_ATTEMPTS = 3;
+// claude -p 状态分析的系统提示词：真正的判定规则都在用户消息（buildStatusPrompt）里，这里只把输出收紧
+const STATUS_SYSTEM_PROMPT = '你是终端会话的状态分析器。严格按用户消息里的规则与输出格式作答，只输出要求的内容。';
+// claude -p 状态分析超时：读一屏文本判状态，两分钟还没回来就当失败，别把监控循环挂住
+const STATUS_CLI_TIMEOUT_MS = 120_000;
 // 非对称降级阈值：AI 对「发继续/重启CLI//quit」这类会打断会话的主动动作，
 // 自报把握低于此值时降级为仅建议、不自动按键。取 0.6——低于此基本是模型在
 // 「说不好但先试试」，正是最容易误打断的区间；≥0.6 视为有依据，放行照旧。
@@ -401,16 +398,8 @@ export class AIEngine {
     // 会话级供应商配置缓存：providerKey('appType:id') -> settings | null
     // null 表示该供应商无法用于 HTTP 调用（如官方 OAuth 登录，无 URL/key）
     this._sessionProviderCache = new Map();
-    // 会话级 CLI 回退节流：sessionId -> 上次 CLI 调用时间戳
-    this._cliFallbackAt = new Map();
-    // 代理供应商缓存（OAuth 会话借用的那个带凭证供应商）
-    this._proxyProviderSettings = undefined;
-    // 代理供应商黑名单：providerKey -> 拉黑到期时间戳
-    this._proxyBlacklist = new Map();
-    // 最近成功过的代理供应商 providerKey。优先级名单是给"用户切换供应商"用的，
-    // 里面排前面的未必活着（实测 88codepaid/crs/FoxCode 全挂），所以监控这边
-    // 自己记一个"真的调通过"的，下次优先用它，别把重试预算浪费在必挂的选项上。
-    this._proxyLastGood = null;
+    // claude -p 纯文本客户端工厂（测试覆盖它，绝不起真 claude）
+    this.cliTextFactory = (model) => new ClaudeCliTextClient({ model, timeoutMs: STATUS_CLI_TIMEOUT_MS });
 
     // 初始化插件管理器
     this._initPluginManager();
@@ -1004,97 +993,6 @@ export class AIEngine {
 
     this._sessionProviderCache.set(key, result);
     return result;
-  }
-
-  /**
-   * 为「无 HTTP 凭证」的会话挑一个带凭证的供应商做监控分析。
-   *
-   * 为什么这样做：实测 26 个会话里 25 个用 Claude Official（OAuth 登录，settings_config.env
-   * 为空，结构上取不到 URL/key）。若这些会话一律回退 CLI，按 5 分钟节流也是
-   * 25 × 4.3 万 ≈ 107 万 tokens / 5 分钟，不可接受。
-   *
-   * 而监控分析只是「读一屏文本判断状态」——用哪个 key 判断结果都一样，它不需要
-   * 跟被监控会话用同一个供应商。所以这里借一个便宜的第三方 key，CLI 只留给
-   * 「连一个带凭证的供应商都没有」的极端情况。
-   *
-   * @param {string[]} priority - 供应商名称优先级（外部传入，见 index.js 的 CLAUDE_PROVIDER_PRIORITY）
-   */
-  getProxyMonitorSettings(priority = []) {
-    if (this._proxyProviderSettings !== undefined) return this._proxyProviderSettings;
-
-    let picked = null;
-    try {
-      if (fs.existsSync(CC_SWITCH_DB_PATH)) {
-        const db = new Database(CC_SWITCH_DB_PATH, { readonly: true });
-        const rows = db.prepare(
-          "SELECT id, name, app_type, settings_config, website_url FROM providers WHERE app_type='claude'"
-        ).all();
-        db.close();
-
-        // 只保留能解析出 URL+key、且不在黑名单里的
-        const now = Date.now();
-        const usable = [];
-        for (const row of rows) {
-          const cfg = this._parseProviderConfig(row);
-          if (!cfg?.claude?.apiUrl || !cfg.claude.apiKey) continue;
-          const until = this._proxyBlacklist.get(`claude:${row.id}`) || 0;
-          if (until > now) continue;   // 最近刚失败过，跳过
-          usable.push({ row, cfg });
-        }
-        // 1) 上次真的调通过的那个 —— 比任何静态名单都可靠
-        if (this._proxyLastGood) {
-          picked = usable.find(u => `claude:${u.row.id}` === this._proxyLastGood) || null;
-        }
-        // 2) 按优先级名称匹配（子串匹配，和 tryAutoSwitchProvider 的口径一致）
-        if (!picked) {
-          for (const p of priority) {
-            const hit = usable.find(u => u.row.name.includes(p));
-            if (hit) { picked = hit; break; }
-          }
-        }
-        // 3) 兜底取第一个可用的
-        if (!picked && usable.length) picked = usable[0];
-      }
-    } catch (err) {
-      console.error('[AIEngine] 挑选代理监控供应商失败:', err.message);
-    }
-
-    if (picked) {
-      const r = picked.cfg;
-      r._providerId = `claude:${picked.row.id}`;
-      r._providerName = `${picked.row.name} (代理监控)`;
-      r._isProxy = true;   // 标记"借来的"：失败时可以拉黑换下一个，会话自己的供应商不行
-      const modelsConf = getModelsConfig();
-      if (r.claude) r.claude.model = modelsConf?.claude?.default || DEFAULT_MODEL;
-      r.maxTokens = this.settings.maxTokens || r.maxTokens || 500;
-      console.log(`[AIEngine] OAuth 会话借用代理监控供应商: ${picked.row.name}`);
-      this._proxyProviderSettings = r;
-    } else {
-      console.warn('[AIEngine] 无可用的代理监控供应商，OAuth 会话将回退 CLI');
-      this._proxyProviderSettings = null;
-    }
-    return this._proxyProviderSettings;
-  }
-
-  /**
-   * 把当前借用的代理供应商拉黑一段时间，并清掉缓存，让下次挑到别的。
-   *
-   * 只对**借来的**代理供应商这么做。会话自己指定的供应商不能换——那是用户的选择，
-   * 换了就等于偷偷用别人的账号。而代理供应商本来就是我们随便挑的，挑错了换一个
-   * 完全合理，比直接烧 4.3 万 tokens 走 CLI 划算得多。
-   *
-   * @param {string} providerKey - 形如 'claude:<id>'
-   * @param {string} reason - 失败原因（记日志）
-   */
-  blacklistProxyProvider(providerKey, reason = '') {
-    if (!providerKey) return;
-    this._proxyBlacklist.set(providerKey, Date.now() + PROXY_BLACKLIST_TTL);
-    if (this._proxyProviderSettings?._providerId === providerKey) {
-      this._proxyProviderSettings = undefined;   // undefined 而非 null：下次重新挑
-    }
-    // 曾经能用现在挂了，"上次成功"这条记录也失效，否则会一直挑这个死的
-    if (this._proxyLastGood === providerKey) this._proxyLastGood = null;
-    console.warn(`[AIEngine] 代理监控供应商 ${providerKey.slice(0, 20)}… 拉黑 ${PROXY_BLACKLIST_TTL / 60000} 分钟：${reason.slice(0, 80)}`);
   }
 
   /**
@@ -3483,64 +3381,38 @@ ${historyText || '(空)'}
       progressContext: this._buildProgressContext(projectContext) + this._buildHookContext(projectContext)
     });
 
-    // 供应商三级选择：
-    //   1. 会话自己的供应商有 HTTP 凭证 → 用它（凭证归属最清晰）
-    //   2. 会话是 OAuth 登录（取不到 key）→ 借一个带凭证的第三方做监控
-    //      （监控只是读屏判状态，用谁的 key 结果一样，比每次烧 4.3 万 tokens 走 CLI 划算）
-    //   3. 两者都没有 → CLI 兜底
-    let sessionSettings = projectContext?.sessionProviderId
+    // 供应商选择（2026-09-17 起）：
+    //   1. 会话明确选了带 HTTP 凭证的供应商 → 用它（凭证归属最清晰）
+    //   2. 否则 → claude -p 纯文本调用，跟随 CC Switch 当前配置（OAuth 也能用，遵守代理）
+    // 不再借用第三方供应商：实测借来的 5 家全部 fetch failed（域名 DNS 被污染，AIEngine 直连不走代理）。
+    // 纯文本模式不加载 MCP/skill/CLAUDE.md，老 CLI 兜底单次 4.3 万 tokens 的成本已不存在，所以不再节流。
+    const sessionSettings = projectContext?.sessionProviderId
       ? this.resolveSessionSettings(aiType, projectContext.sessionProviderId)
       : null;
-    if (!sessionSettings) {
-      sessionSettings = this.getProxyMonitorSettings(projectContext?.providerPriority || []);
-    }
-
-    // 会话供应商和全局配置都没有可用的 HTTP 凭证时，不必先发一次注定 401 的请求，
-    // 直接走 CLI（_noProvider 是 _loadSettings 第 5 级兜底打的标记）
-    if (!sessionSettings && this.settings._noProvider) {
-      const viaCli = await this._analyzeStatusViaCLI(prompt, sessionId, aiType, projectContext);
-      if (viaCli) return viaCli;
-      console.warn('[AIEngine] 无可用监控供应商，且 CLI 回退未产出结果');
-      return this._pendingQuestionStatus(escalatedQuestion, aiType);
-    }
-
-    // 借来的代理供应商挂了就换下一个再试（实测 32 个带凭证供应商只有 2 个真能用，
-    // 一次失败就回退 CLI 等于白扔一个便宜路径）。会话自己指定的供应商不参与轮换。
-    const isProxy = !!sessionSettings?._isProxy;
-    const maxAttempts = isProxy ? PROXY_MAX_ATTEMPTS : 1;
-    let lastErr = null;
-
-    for (let attempt = 0; attempt < maxAttempts && sessionSettings; attempt++) {
+    if (sessionSettings) {
       try {
-        // structured: 走 tool_use 强制 schema（仅 Claude 格式生效，其他供应商自动忽略）。
-        // 具体供应商是否支持由 _callClaudeApi 按 apiUrl 判断并降级，这里无条件请求即可。
+        // structured: 走 tool_use 强制 schema（仅 Claude 格式生效，其他供应商自动忽略）
         const content = await this._callApiWithFailover(prompt, {
           sessionId,
           requestType: 'analyzeStatus',
           structured: true,
           settingsOverride: sessionSettings
         });
-
-        if (!content) break;
-        const parsed = this._parseStatusResponse(content);
-        if (parsed) {
-          // 记住这个真的调通过的代理，下次直接用它，省掉前面几个必挂的
-          if (isProxy) this._proxyLastGood = sessionSettings._providerId;
-          return parsed;
-        }
-        break;   // 拿到响应但解析不出结构 → 换供应商也没用
+        const parsed = content ? this._parseStatusResponse(content) : null;
+        if (parsed) return parsed;
       } catch (err) {
-        lastErr = err;
-        console.error(`AI 状态分析错误（第 ${attempt + 1}/${maxAttempts} 次）:`, err.message);
-        if (!isProxy) break;
-        this.blacklistProxyProvider(sessionSettings._providerId, err.message);
-        sessionSettings = this.getProxyMonitorSettings(projectContext?.providerPriority || []);
+        console.error('AI 状态分析错误（会话供应商），改用 CC Switch 当前配置:', err.message);
       }
     }
 
-    // HTTP 路径彻底走不通：用 CLI 兜底——它复用 CLI 自己的登录态，OAuth 也能用。
-    const viaCli = await this._analyzeStatusViaCLI(prompt, sessionId, aiType, projectContext);
-    if (viaCli) return viaCli;
+    let lastErr = null;
+    try {
+      const parsed = await this._analyzeStatusViaCurrentConfig(prompt);
+      if (parsed) return parsed;
+    } catch (err) {
+      lastErr = err;
+      console.error('AI 状态分析错误（claude -p）:', err.message);
+    }
     const pending = this._pendingQuestionStatus(escalatedQuestion, aiType);
     if (pending) return pending;
     if (lastErr) throw lastErr;
@@ -3578,42 +3450,21 @@ ${historyText || '(空)'}
   }
 
   /**
-   * CLI 回退分析：HTTP 路径拿不到凭证时用用户自己的 CLI 二进制跑一次。
-   *
-   * 为什么需要：官方 OAuth 登录的供应商 settings_config.env 是空的，没有 URL/key 可提取，
-   * HTTP 路径结构上就用不了。CLI 则完全复用它自己的登录态（PlannerService 已用此法）。
-   *
-   * 为什么要节流：实测 CLI 单次固定开销约 4.3 万 input tokens（要加载全部 MCP/skill/plugin），
-   * 折算 $0.04~$0.22。监控循环最快 15 秒一轮，不节流会烧钱。故同一会话限 5 分钟一次，
-   * 且只在 HTTP 路径已经失败时才走到这里。
+   * 用 CC Switch 当前的 Claude 配置做状态分析：claude -p 纯文本调用（与长程监督者同一个客户端）。
+   * 模型用 models.json 的监控默认模型；进程数受 AI 并发上限约束。
+   * 测试可覆盖 this.cliTextFactory，绝不在测试里起真 claude。
    */
-  async _analyzeStatusViaCLI(prompt, sessionId, aiType, projectContext) {
-    const now = Date.now();
-    const key = sessionId || '_global';
-    const last = this._cliFallbackAt.get(key) || 0;
-    if (now - last < CLI_FALLBACK_INTERVAL) {
-      console.log(`[AIEngine] CLI 回退节流中（${Math.round((CLI_FALLBACK_INTERVAL - (now - last)) / 1000)}s 后可再试）`);
-      return null;
-    }
-    this._cliFallbackAt.set(key, now);
-
-    try {
-      console.log('[AIEngine] HTTP 路径不可用，改用 CLI 分析状态（复用 CLI 登录态）');
-      const text = await this.generateTextViaCLI(prompt, {
-        aiType: aiType || 'claude',
-        // 用临时目录：避免加载项目 CLAUDE.md 进一步放大 token 开销
-        cwd: os.tmpdir(),
-        providerEnv: projectContext?.providerEnv || {},
-        timeout: 120000
-      });
-      if (!text) return null;
-      const parsed = this._parseStatusResponse(text);
-      if (parsed) parsed._source = 'cli_fallback';
-      return parsed;
-    } catch (err) {
-      console.error('[AIEngine] CLI 回退分析失败:', err.message);
-      return null;
-    }
+  async _analyzeStatusViaCurrentConfig(prompt) {
+    const model = getModelsConfig()?.claude?.default || DEFAULT_MODEL;
+    const client = this.cliTextFactory(model);
+    // 与 HTTP 路径同一份 schema：带上 confidence，非对称降级才有依据；actionType 受 enum 约束
+    const r = await this._withConcurrencyLimit(() => client.complete(STATUS_SYSTEM_PROMPT, prompt, { jsonSchema: STATUS_TOOL.input_schema }));
+    const parsed = this._parseStatusResponse(r.text);
+    if (!parsed) return null;
+    parsed._source = 'claude_cli';
+    // CLI 会把自己的工作目录作为环境信息告诉模型，实测模型会把它当成终端的 workingDir 报上来
+    if (String(parsed.workingDir || '').includes(basename(cliTextCwd()))) parsed.workingDir = '未显示';
+    return parsed;
   }
 
   /**
