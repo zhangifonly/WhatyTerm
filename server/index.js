@@ -184,6 +184,7 @@ import cloudflareTunnel from './services/CloudflareTunnel.js';
 import frpTunnel from './services/FrpTunnel.js';
 import { createProcessSnapshot, createLimiter, paneProcesses } from './services/processTable.js';
 import { isPathWithin, argsMentionDir } from './services/pathBoundary.js';
+import { isLongRunMode, sessionsInDir } from './services/sessionMode.js';
 import projectTaskReader from './services/ProjectTaskReader.js';
 import RecentProjectsService from './services/RecentProjectsService.js';
 import processDetector from './services/ProcessDetector.js';
@@ -1205,7 +1206,40 @@ const evaluatorService = new EvaluatorService(aiEngine);
 // 长程编排（替代旧 Ralph）：沙箱里无人值守跑长任务。
 // 凭据经 aiEngine 从 CC Switch 取，不引入编排器原来的 .env 机制。
 // 优先级名单在后面才定义并从配置文件加载，这里传取值函数，用到时再读
-const longRunService = new LongRunService({ io, aiEngine, providerPriority: () => CLAUDE_PROVIDER_PRIORITY });
+/**
+ * 长程任务 ↔ 会话条目绑定：长程是条目的一种运行模式（同一门牌号、同一目录，结束后转回终端）。
+ * 依赖在调用时才读（sessionManager 异步初始化，比这里晚）。
+ */
+const longRunSessionBinder = {
+  async bind(root, { projectName }) {
+    if (!sessionManagerReady || !sessionManager) throw new Error('会话管理器尚未就绪，请稍后再试');
+    const existing = sessionsInDir(sessionManager.listSessions(), root);
+    // 同目录里 claude 正在跑就拒绝：两个执行者同时改一个目录，抢同一份 git 与记忆
+    for (const s of existing) {
+      if (s.tmuxSessionName && processDetector.isCliRunning(s.tmuxSessionName)) {
+        throw new Error(`项目「${s.projectName || s.name}」的会话里 claude 正在运行。请先在该会话里退出 CLI（/exit），再启动长程。`);
+      }
+    }
+    let session = existing.length ? sessionManager.getSession(existing[0].id) : null;
+    if (!session) {
+      session = await sessionManager.createSession({ name: projectName, workingDir: root, projectName });
+      session.aiType = 'claude';
+      registerBellCallback(session);
+      registerExitCallback(session);
+    }
+    session.runMode = 'longrun';
+    session.origin = 'longrun';
+    session.autoActionEnabled = false;       // 长程期间与之后接手时都不自动按键，由人决定何时打开
+    sessionManager.updateSession(session);
+    io.emit('sessions:updated', sessionManager.listSessions());
+    return session.id;
+  },
+  get(sessionId) {
+    return sessionManager?.getSession(sessionId)?.toJSON() || null;
+  },
+};
+const longRunService = new LongRunService({ io, aiEngine, providerPriority: () => CLAUDE_PROVIDER_PRIORITY,
+  sessionBinder: longRunSessionBinder });
 const authService = new AuthService();
 const providerService = new ProviderService(io);
 const healthCheckScheduler = new HealthCheckScheduler(io);
@@ -3972,7 +4006,8 @@ async function updateAllSessionsProjectInfo() {
     return;
   }
 
-  const sessions = sessionManager.listSessions();
+  // 长程模式的条目由长程编排驱动，工作目录与目标固定，不按 pane 当前目录刷新（见 sessionMode.js）
+  const sessions = sessionManager.listSessions().filter((s) => !isLongRunMode(s));
 
   for (const sessionData of sessions) {
     const session = sessionManager.getSession(sessionData.id);
@@ -4246,7 +4281,8 @@ async function runBackgroundAutoAction() {
     return;
   }
 
-  const sessions = sessionManager.listSessions();
+  // 长程模式的条目 tmux 里只有 shell：错误修复会发 `claude -c`、自动操作会按键，都不能碰（见 sessionMode.js）
+  const sessions = sessionManager.listSessions().filter((s) => !isLongRunMode(s));
   const now = Date.now();
 
   // === 独立的错误检测循环（不依赖自动操作开关）===
@@ -5889,7 +5925,8 @@ async function runBackgroundStatusAnalysis() {
     return;
   }
 
-  const sessions = sessionManager.listSessions();
+  // 长程模式的条目不做屏幕状态分析：屏上只有 shell，分析既浪费 API 又会给出"CLI 已退出"之类误导建议
+  const sessions = sessionManager.listSessions().filter((s) => !isLongRunMode(s));
 
   // 串行处理会话，避免并发请求导致 429 错误
   for (const sessionData of sessions) {
@@ -7252,10 +7289,10 @@ io.on('connection', (socket) => {
   });
 
   /** 启动一次长程运行。事件推到 longrun:<taskId> 房间。 */
-  socket.on('longrun:start', (opts, cb) => {
+  socket.on('longrun:start', async (opts, cb) => {
     const reply = (d) => { socket.emit('longrun:started', d); if (typeof cb === 'function') cb(d); };
     try {
-      const task = longRunService.start(opts || {});
+      const task = await longRunService.start(opts || {});
       socket.join(`longrun:${task.id}`);     // 发起方自动订阅
       reply({ ok: true, task });
     } catch (e) {
@@ -7273,6 +7310,13 @@ io.on('connection', (socket) => {
     if (board) socket.join(`longrun:${taskId}`);
     const d = board ? { ok: true, task: longRunService.status(taskId), ...board }
       : { ok: false, error: '任务不存在（服务重启后内存里的任务会丢失，可从沙箱回放）' };
+    if (typeof cb === 'function') cb(d);
+  });
+
+  /** 会话条目的长程视图：有任务给任务 id（再走 subscribe），没有就按条目工作目录回放上一轮。 */
+  socket.on('longrun:forSession', ({ sessionId } = {}, cb) => {
+    let d;
+    try { d = longRunService.forSession(sessionId); } catch (e) { d = { ok: false, error: e.message }; }
     if (typeof cb === 'function') cb(d);
   });
 
@@ -8963,6 +9007,7 @@ ${terminalContext ? terminalContext : '（无）'}
 
   // AI 分析处理
   async function handleAIAnalysis(sessionId, session, socket) {
+    if (isLongRunMode(session)) return;   // 长程模式：不对空 shell 做分析与建议（见 sessionMode.js）
     if (session.isAnalyzing || !session.goal) return;
 
     // 等待输出稳定

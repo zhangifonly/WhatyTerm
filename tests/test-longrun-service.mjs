@@ -177,7 +177,7 @@ function oldSandbox(name) {
 }
 async function refused(s, opts, re) {
   let e = null;
-  try { s.start(opts); } catch (x) { e = x; }
+  try { await s.start(opts); } catch (x) { e = x; }
   assert(e && re.test(e.message), `应以 ${re} 拒绝，实际: ${e?.message || '通过了'}`);
   assert(s.tasks.size === 0 && s.runners.opts.length === 0, '拒绝时不该建任务、不该起执行者');
 }
@@ -201,7 +201,7 @@ await test('勾了删掉重建，但参考路径指向受保护项目 → 删之
   await refused(svc(), { docPath: doc, sandboxName: 'badref', fresh: true }, /参考路径无法使用[\s\S]*受保护/);
   assert(intact(), '参考路径问题应在删沙箱前发现');
   const s = svc();
-  const t = s.start({ docPath: doc, sandboxName: 'badref', fresh: true, allowMissingRefs: true });
+  const t = await s.start({ docPath: doc, sandboxName: 'badref', fresh: true, allowMissingRefs: true });
   await finished(s, t.id);
   assert(!intact() && t.selfCheck.some((i) => /已按「忽略无法使用的参考路径」继续/.test(i.text)), '放行后要在自检里说出来');
 });
@@ -223,7 +223,7 @@ await test('接管已有传统项目：发初始化 + "在已有进度上继续"
   fs.mkdirSync(mem, { recursive: true });
   fs.writeFileSync(path.join(mem, 'MEMORY.md'), '- 旧记忆');
   const s = svc();
-  const t = s.start({ docPath: writeDoc('再加一个导出功能'), projectRoot: root, mode: 'takeover' });
+  const t = await s.start({ docPath: writeDoc('再加一个导出功能'), projectRoot: root, mode: 'takeover' });
   await finished(s, t.id);
   const { sent } = s.runners;
   assert(sent[0].prompt === PROMPTS.init && sent[1].prompt.startsWith('以下是新增的需求。这不是重新开始'), sent.map((x) => x.prompt.slice(0, 12)).join(' | '));
@@ -244,7 +244,7 @@ await test('需求文档不存在、续跑的沙箱没有记忆 → 拒绝', asy
 // ── 完整运行（假执行者） ─────────────────────────────────────
 await test('新建：先发初始化提示词，再发需求全文；监督者拿到的需求与执行者第二发逐字相同', async () => {
   const s = svc();
-  const t = s.start({ docPath: writeDoc('# 待办\n\n做个待办应用'), sandboxName: 'fresh_run' });
+  const t = await s.start({ docPath: writeDoc('# 待办\n\n做个待办应用'), sandboxName: 'fresh_run' });
   await finished(s, t.id);
   const { sent } = s.runners;
   assert(sent[0].prompt === PROMPTS.init && sent[0].resume === false, '第一发应是初始化提示词、新会话');
@@ -257,13 +257,13 @@ await test('新建：先发初始化提示词，再发需求全文；监督者�
 
 await test('续跑：不发初始化，先发新对话开始提示词，再发"新增需求"包装', async () => {
   const s0 = svc();
-  const first = s0.start({ docPath: writeDoc('# 首轮'), sandboxName: 'resume_me' });
+  const first = await s0.start({ docPath: writeDoc('# 首轮'), sandboxName: 'resume_me' });
   await finished(s0, first.id);
   const root = first.sandboxRoot;
   fs.mkdirSync(path.join(root, '.memory'), { recursive: true });
   fs.writeFileSync(path.join(root, '.memory', 'MEMORY.md'), '- [进度](p.md) — 首轮已完成');
   const s = svc();
-  const t = s.start({ docPath: writeDoc('再加一个导出功能'), sandboxName: 'resume_me', mode: 'resume' });
+  const t = await s.start({ docPath: writeDoc('再加一个导出功能'), sandboxName: 'resume_me', mode: 'resume' });
   await finished(s, t.id);
   const { sent } = s.runners;
   assert(sent[0].prompt === PROMPTS.resume && sent[0].resume === false, '续跑第一发应是新对话开始提示词');
@@ -275,11 +275,11 @@ await test('续跑：不发初始化，先发新对话开始提示词，再发"�
 
 await test('监督者凭据走 CC Switch：未指定供应商用全局，指定了用会话级；提示词走 system 位', async () => {
   const a = svc();
-  await finished(a, a.start({ docPath: writeDoc('# a'), sandboxName: 'cfg_global' }).id);
+  await finished(a, (await a.start({ docPath: writeDoc('# a'), sandboxName: 'cfg_global' })).id);
   assert(a.engine.calls[0].config.apiUrl === 'https://global.example.com', a.engine.calls[0].config.apiUrl);
   assert(a.engine.calls[0].system === loadSystemPrompt().text && a.engine.calls[0].maxTokens === 4000, '判定提示词与 max_tokens');
   const b = svc();
-  const t = b.start({ docPath: writeDoc('# b'), sandboxName: 'cfg_session', providerId: 'p42' });
+  const t = await b.start({ docPath: writeDoc('# b'), sandboxName: 'cfg_session', providerId: 'p42' });
   await finished(b, t.id);
   assert(b.engine.calls[0].config.apiUrl === 'https://session-p42.example.com', '指定供应商应走会话级解析');
   assert(t.supervisor.status === 'on' && t.supervisor.baseUrl === 'https://session-p42.example.com', JSON.stringify(t.supervisor));
@@ -287,7 +287,7 @@ await test('监督者凭据走 CC Switch：未指定供应商用全局，指定�
 
 await test('密钥不出现在任务快照、事件、执行者环境里', async () => {
   const s = svc();
-  const t = s.start({ docPath: writeDoc('# 密钥'), sandboxName: 'no_leak' });
+  const t = await s.start({ docPath: writeDoc('# 密钥'), sandboxName: 'no_leak' });
   await finished(s, t.id);
   const blob = JSON.stringify([s.status(t.id), evs(s, t.id), s.runners.opts.map((o) => o.env)]);
   assert(!blob.includes(SECRET), '监督者密钥泄漏');
@@ -296,7 +296,7 @@ await test('密钥不出现在任务快照、事件、执行者环境里', async
 
 await test('启动自检：第一条事件就是自检，含连坐、投件、代答权提醒、执行者参数', async () => {
   const s = svc();
-  const t = s.start({ docPath: writeDoc('# 自检'), sandboxName: 'selfcheck', model: 'claude-sonnet-5', taskWait: 60 });
+  const t = await s.start({ docPath: writeDoc('# 自检'), sandboxName: 'selfcheck', model: 'claude-sonnet-5', taskWait: 60 });
   await finished(s, t.id);
   const ev = evs(s, t.id);
   assert(ev[0].kind === 'selfcheck' && ev[0].seq === 1 && ev[0].items.length === t.selfCheck.length, ev[0].kind);
@@ -310,7 +310,7 @@ await test('启动自检：第一条事件就是自检，含连坐、投件、�
 
 await test('全局是 OAuth（无密钥）时借用带凭据的供应商，模型用原版默认的 Opus，自检说明是借用', async () => {
   const s = svc(fakeEngine({ global: false, proxies: ['duojie'] }));
-  const t = s.start({ docPath: writeDoc('# 借用'), sandboxName: 'borrow' });
+  const t = await s.start({ docPath: writeDoc('# 借用'), sandboxName: 'borrow' });
   await finished(s, t.id);
   const c = s.engine.calls[0];
   assert(c.config.apiUrl === 'https://duojie.example.com' && c.config.model === 'claude-opus-5', JSON.stringify(c.config));
@@ -322,7 +322,7 @@ await test('全局是 OAuth（无密钥）时借用带凭据的供应商，模�
 
 await test('借来的调不通：拉黑换下一家、判定照常完成，编排日志里记下换了谁', async () => {
   const s = svc(fakeEngine({ global: false, proxies: ['foxcode', 'crs', 'duojie'], dead: ['foxcode', 'crs'] }));
-  const t = s.start({ docPath: writeDoc('# 轮换'), sandboxName: 'rotate' });
+  const t = await s.start({ docPath: writeDoc('# 轮换'), sandboxName: 'rotate' });
   await finished(s, t.id);
   assert([...s.engine.blacklist].join() === 'claude:foxcode,claude:crs', [...s.engine.blacklist].join());
   assert(s.status(t.id).report.stop === 'project_done', `应在第三家判定完成: ${s.status(t.id).report.stop}`);
@@ -332,31 +332,79 @@ await test('借来的调不通：拉黑换下一家、判定照常完成，编�
 
 await test('明确选定的供应商没有密钥时不偷偷换成别家；全部借用都调不通时降级为叫人', async () => {
   const a = svc(fakeEngine({ global: false, proxies: ['duojie'] }));
-  const t = a.start({ docPath: writeDoc('# 选定'), sandboxName: 'chosen_oauth', providerId: 'oauth', noAsk: true });
+  const t = await a.start({ docPath: writeDoc('# 选定'), sandboxName: 'chosen_oauth', providerId: 'oauth', noAsk: true });
   await finished(a, t.id);
   assert(t.supervisor.status === 'unavailable' && /不会被自动换掉/.test(t.supervisor.error) && a.engine.calls.length === 0, JSON.stringify(t.supervisor));
   const b = svc(fakeEngine({ global: false, proxies: ['x1', 'x2'], dead: ['x1', 'x2'] }));
-  const t2 = b.start({ docPath: writeDoc('# 全挂'), sandboxName: 'all_dead', noAsk: true });
+  const t2 = await b.start({ docPath: writeDoc('# 全挂'), sandboxName: 'all_dead', noAsk: true });
   await finished(b, t2.id);
   assert(b.status(t2.id).report.stop === 'needs_human', `全挂应降级叫人: ${b.status(t2.id).report.stop}`);
 });
 
 await test('监督者凭据缺失：不启用并在自检里警告；不启用监督者时如实说明', async () => {
   const s = svc(fakeEngine({ global: false }));
-  const t = s.start({ docPath: writeDoc('# 无凭据'), sandboxName: 'no_cfg', noAsk: true });
+  const t = await s.start({ docPath: writeDoc('# 无凭据'), sandboxName: 'no_cfg', noAsk: true });
   await finished(s, t.id);
   assert(t.supervisor.status === 'unavailable' && t.selfCheck.some((i) => i.level === 'warn' && /监督者不可用/.test(i.text)));
   assert(s.status(t.id).report.stop === 'needs_human', `没有监督者且不等人应停机: ${s.status(t.id).report.stop}`);
   const off = svc();
-  const t2 = off.start({ docPath: writeDoc('# 关'), sandboxName: 'sup_off', noSupervisor: true, noAsk: true });
+  const t2 = await off.start({ docPath: writeDoc('# 关'), sandboxName: 'sup_off', noSupervisor: true, noAsk: true });
   await finished(off, t2.id);
   assert(t2.supervisor.status === 'off' && off.engine.calls.length === 0, '关了监督者不该调 LLM');
+});
+
+// ── 会话条目绑定 ────────────────────────────────────────────
+function fakeBinder({ cliRunning = false } = {}) {
+  const calls = [];
+  const sessions = new Map();
+  return {
+    calls, sessions,
+    async bind(root, { projectName }) {
+      calls.push({ root, projectName });
+      if (cliRunning) throw new Error(`项目「${projectName}」的会话里 claude 正在运行。请先退出`);
+      const id = `sess-${projectName}`;
+      sessions.set(id, { id, workingDir: root, runMode: 'longrun' });
+      return id;
+    },
+    get: (id) => sessions.get(id) || null,
+  };
+}
+
+await test('启动时把项目绑到会话条目：任务带会话 id；按会话取视图先给实时任务', async () => {
+  const binder = fakeBinder();
+  const s = Object.assign(new LongRunService({ aiEngine: fakeEngine(), runnerFactory: fakeRunners().factory, sessionBinder: binder }), {});
+  const t = await s.start({ docPath: writeDoc('# 绑定'), sandboxName: 'bound' });
+  assert(binder.calls.length === 1 && binder.calls[0].root === t.sandboxRoot && binder.calls[0].projectName === 'bound', JSON.stringify(binder.calls));
+  assert(t.sessionId === 'sess-bound', t.sessionId);
+  await finished(s, t.id);
+  const v = s.forSession('sess-bound');
+  assert(v.ok && v.taskId === t.id, JSON.stringify(v));
+});
+
+await test('服务重启后（内存无任务）按会话条目的工作目录回放上一轮', async () => {
+  const binder = fakeBinder();
+  const s1 = new LongRunService({ aiEngine: fakeEngine(), runnerFactory: fakeRunners().factory, sessionBinder: binder });
+  const t = await s1.start({ docPath: writeDoc('# 重启'), sandboxName: 'restart_me' });
+  await finished(s1, t.id);
+  const s2 = new LongRunService({ aiEngine: fakeEngine(), runnerFactory: fakeRunners().factory, sessionBinder: binder });
+  const v = s2.forSession('sess-restart_me');
+  assert(v.ok && !v.taskId && v.snapshot?.replay === true && v.projectRoot === t.sandboxRoot, JSON.stringify({ ...v, snapshot: undefined }));
+  assert(s2.forSession('nope').ok === false);
+});
+
+await test('同目录会话里 claude 正在运行 → 拒绝启动，目录什么都没动', async () => {
+  const runners = fakeRunners();
+  const s = new LongRunService({ aiEngine: fakeEngine(), runnerFactory: runners.factory, sessionBinder: fakeBinder({ cliRunning: true }) });
+  let e = null;
+  try { await s.start({ docPath: writeDoc('# 冲突'), sandboxName: 'cli_busy' }); } catch (x) { e = x; }
+  assert(e && /claude 正在运行/.test(e.message), e?.message);
+  assert(!fs.existsSync(path.join(process.env.LONGRUN_SANDBOX_BASE, 'cli_busy')) && runners.opts.length === 0 && s.tasks.size === 0, '拒绝时不该建目录、起执行者、建任务');
 });
 
 // ── 面板干预 ────────────────────────────────────────────────
 await test('监督者叫人 → 面板回答原样发给执行者（不加包装），续同一会话', async () => {
   const s = svc(fakeEngine({ verdicts: ['needs_human', 'project_done'] }));
-  const t = s.start({ docPath: writeDoc('# 叫人'), sandboxName: 'ask_me' });
+  const t = await s.start({ docPath: writeDoc('# 叫人'), sandboxName: 'ask_me' });
   await waitFor(() => s.status(t.id).awaitingHuman, '进入等人');
   assert(evs(s, t.id).some((e) => e.kind === 'need_human' && e.needs === '请定数据库'), 'need_human 事件要带需要人做什么');
   assert(broadcasts(s, t.id).some((b) => b.task.awaitingHuman), '挂起等人后要广播（need_human 事件那一刻还没挂起），否则列表与回答框出不来');
@@ -370,7 +418,7 @@ await test('监督者叫人 → 面板回答原样发给执行者（不加包装
 
 await test('空回答 = 停机（与原版终端直接回车一致）；没在等时回答被拒', async () => {
   const s = svc(fakeEngine({ verdicts: ['needs_human'] }));
-  const t = s.start({ docPath: writeDoc('# 空答'), sandboxName: 'empty_answer' });
+  const t = await s.start({ docPath: writeDoc('# 空答'), sandboxName: 'empty_answer' });
   assert(s.answer(t.id, 'x').error === '执行者当前没有在等回答', '开跑即回答应被拒');
   await waitFor(() => s.status(t.id).awaitingHuman, '进入等人');
   s.answer(t.id, '   ');
@@ -381,7 +429,7 @@ await test('空回答 = 停机（与原版终端直接回车一致）；没在�
 await test('终止长跑中的发次：执行者被结束，本轮以人工终止收工；之后投件被拒', async () => {
   const runners = fakeRunners({ blockAt: 2 });
   const s = svc(fakeEngine(), runners);
-  const t = s.start({ docPath: writeDoc('# 长跑'), sandboxName: 'kill_me' });
+  const t = await s.start({ docPath: writeDoc('# 长跑'), sandboxName: 'kill_me' });
   await waitFor(() => runners.sent.length === 2, '第二发开跑');
   const r = s.terminate(t.id, '方向错了');
   assert(r.ok, JSON.stringify(r));
@@ -395,7 +443,7 @@ await test('终止长跑中的发次：执行者被结束，本轮以人工终�
 
 await test('在等人回答时终止：挂起点被唤醒，不会永远卡住', async () => {
   const s = svc(fakeEngine({ verdicts: ['needs_human'] }));
-  const t = s.start({ docPath: writeDoc('# 等人时终止'), sandboxName: 'kill_waiting' });
+  const t = await s.start({ docPath: writeDoc('# 等人时终止'), sandboxName: 'kill_waiting' });
   await waitFor(() => s.status(t.id).awaitingHuman, '进入等人');
   s.terminate(t.id);
   await finished(s, t.id);
@@ -405,10 +453,10 @@ await test('在等人回答时终止：挂起点被唤醒，不会永远卡住',
 await test('同一沙箱同时只能跑一个；撞上时连删掉重建也不许（否则删掉正在跑的现场）', async () => {
   const runners = fakeRunners({ blockAt: 2 });
   const s = svc(fakeEngine(), runners);
-  const t = s.start({ docPath: writeDoc('# 占用'), sandboxName: 'busy' });
+  const t = await s.start({ docPath: writeDoc('# 占用'), sandboxName: 'busy' });
   await waitFor(() => runners.sent.length === 2, '第二发开跑');
   let e = null;
-  try { s.start({ docPath: writeDoc('# 抢'), sandboxName: 'busy', fresh: true }); } catch (x) { e = x; }
+  try { await s.start({ docPath: writeDoc('# 抢'), sandboxName: 'busy', fresh: true }); } catch (x) { e = x; }
   assert(e && /已有长程任务在跑/.test(e.message) && fs.existsSync(path.join(t.sandboxRoot, '.run')), e?.message);
   assert(s.plan({ docPath: writeDoc('x'), sandboxName: 'busy' }).runningTaskId === t.id, '预检要报出占用它的任务');
   s.terminate(t.id);
@@ -418,7 +466,7 @@ await test('同一沙箱同时只能跑一个；撞上时连删掉重建也不�
 await test('投件/暂停/停下写的是原版文件约定；停下 = 立即打断 + 挂暂停闸', async () => {
   const runners = fakeRunners({ blockAt: 2 });
   const s = svc(fakeEngine(), runners);
-  const t = s.start({ docPath: writeDoc('# 干预'), sandboxName: 'intervene' });
+  const t = await s.start({ docPath: writeDoc('# 干预'), sandboxName: 'intervene' });
   await waitFor(() => runners.sent.length === 2, '第二发开跑');
   const run = path.join(t.sandboxRoot, '.run');
   assert(s.inject(t.id, '  改存 SQLite  ').ok && fs.readFileSync(path.join(run, 'inject.txt'), 'utf8') === '改存 SQLite');
@@ -438,7 +486,7 @@ await test('投件/暂停/停下写的是原版文件约定；停下 = 立即打
 // ── 快照与事件 ──────────────────────────────────────────────
 await test('快照跟事件走：发次、费用取 loop 实账、水位峰值；推送带时间线条目；订阅快照与推送序号对得上', async () => {
   const s = svc();
-  const t = s.start({ docPath: writeDoc('# 快照'), sandboxName: 'snapshot' });
+  const t = await s.start({ docPath: writeDoc('# 快照'), sandboxName: 'snapshot' });
   await finished(s, t.id);
   const st = s.status(t.id);
   assert(st.legs === s.runners.sent.length && Math.abs(st.costUsd - 0.25 * st.legs) < 1e-9 && st.contextPeak === 1000, JSON.stringify(st));
@@ -465,7 +513,7 @@ await test('回放：内存里有该沙箱的任务就给实时看板，否则�
   const s = svc();
   const live = s.replay({ sandboxName: 'snapshot' });
   assert(live.ok && !live.live && live.snapshot.replay === true && live.count > 0, '新服务实例（模拟重启）应从文件回放');
-  const t = s.start({ docPath: writeDoc('# 回放'), sandboxName: 'replay_live' });
+  const t = await s.start({ docPath: writeDoc('# 回放'), sandboxName: 'replay_live' });
   await finished(s, t.id);
   const r = s.replay({ sandboxName: 'replay_live' });
   assert(r.ok && r.live && r.taskId === t.id && r.snapshot.replay === false, JSON.stringify({ ...r, snapshot: undefined }));

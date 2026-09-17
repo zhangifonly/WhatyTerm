@@ -167,6 +167,11 @@ function getCurrentApiProvider() {
 }
 
 // 验证并清理 tmux 会话名称，防止命令注入
+/** shell 单引号字面量（路径里的引号、$、反引号都原样保留） */
+function quoteSq(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
 function sanitizeTmuxSessionName(name) {
   if (!name) return null;
   // 只允许字母、数字、连字符和下划线
@@ -196,6 +201,18 @@ export class Session {
     this.monitorPluginId = options.monitorPluginId || 'auto';  // 监控策略插件 ID，默认自动选择
     this.teamId = options.teamId || null;       // 所属团队 ID
     this.teamRole = options.teamRole || null;   // 团队角色: 'lead' | 'member' | null
+    // 运行模式：terminal 终端里跑交互式 CLI；longrun 由服务端长程编排驱动（tmux 里只留 shell，主区显示时间线）。
+    // 同一个条目两种模式来回切，门牌号、置顶都不变。
+    this.runMode = options.runMode === 'longrun' ? 'longrun' : 'terminal';
+    // 条目来历：longrun = 由长程建出或接管过。决定重启 CLI 时用 claude --resume <id>（-p 会话不进 -c 的索引）
+    this.origin = options.origin || null;
+    // 当前 claude 会话 id：hook 上报后持久化（原来只在内存 effectiveEnv 里，重启就丢）
+    this.claudeSessionId = options.claudeSessionId || null;
+    // 建会话时指定的工作目录（新建 tmux 时用 -c 直接落到这里，不再事后打 cd）
+    if (options.workingDir) {
+      this.workingDir = options.workingDir;
+      this.projectName = options.projectName || path.basename(options.workingDir);
+    }
     this.status = 'running';
     this.createdAt = options.createdAt || new Date();
     this.updatedAt = new Date();
@@ -258,7 +275,9 @@ export class Session {
           defaultTerminal = 'screen-256color';
         }
         // 创建新的 tmux 会话
-        execSync(`${tmuxCmd} new-session -d -s "${this.tmuxSessionName}" -x 80 -y 24`, {
+        // 有工作目录就直接在那里建：事后打 cd 要等 shell 就绪，路径里有引号/$ 还会出错
+        const cwdArg = this.workingDir ? ` -c ${quoteSq(this.workingDir)}` : '';
+        execSync(`${tmuxCmd} new-session -d -s "${this.tmuxSessionName}" -x 80 -y 24${cwdArg}`, {
           stdio: 'ignore',
           env: { ...process.env, CLAUDECODE: undefined }
         });
@@ -989,6 +1008,9 @@ export class Session {
       monitorPluginId: this.monitorPluginId || 'auto',  // 监控策略插件 ID
       teamId: this.teamId || null,
       teamRole: this.teamRole || null,
+      runMode: this.runMode || 'terminal',
+      origin: this.origin || null,
+      claudeSessionId: this.claudeSessionId || null,
       status: this.status,
       createdAt: this.createdAt,
       updatedAt: this.updatedAt,
@@ -1223,6 +1245,12 @@ export class SessionManager {
     // 否则重启后重发收尾指令或永远丢掉最后一步 resume。
     try { this.db.exec(`ALTER TABLE sessions ADD COLUMN waterline_phase TEXT DEFAULT 'idle'`); } catch {}
     try { this.db.exec(`ALTER TABLE sessions ADD COLUMN waterline_rounds INTEGER DEFAULT 0`); } catch {}
+    // 运行模式与来历（长程/终端同一条目）、持久化的 claude 会话 id。closed_sessions 同步补，关了再恢复不丢
+    for (const table of ['sessions', 'closed_sessions']) {
+      try { this.db.exec(`ALTER TABLE ${table} ADD COLUMN run_mode TEXT DEFAULT 'terminal'`); } catch {}
+      try { this.db.exec(`ALTER TABLE ${table} ADD COLUMN origin TEXT`); } catch {}
+      try { this.db.exec(`ALTER TABLE ${table} ADD COLUMN claude_session_id TEXT`); } catch {}
+    }
   }
 
   /**
@@ -1294,8 +1322,8 @@ export class SessionManager {
         try {
           const stmt = this.db.prepare(`
             INSERT OR REPLACE INTO closed_sessions
-            (id, name, tmux_session_name, goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, ai_type, project_name, project_desc, work_dir, closed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, name, tmux_session_name, goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, ai_type, project_name, project_desc, work_dir, closed_at, run_mode, origin, claude_session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `);
           stmt.run(
             row.id,
@@ -1310,7 +1338,8 @@ export class SessionManager {
             '', // project_name
             '', // project_desc
             '', // work_dir
-            Date.now()
+            Date.now(),
+            row.run_mode || 'terminal', row.origin || null, row.claude_session_id || null
           );
         } catch (e) {
           console.error(`[SessionManager] 移动会话 ${row.name} 到已关闭列表失败:`, e.message);
@@ -1356,13 +1385,14 @@ export class SessionManager {
         try {
           const stmt = this.db.prepare(`
             INSERT OR REPLACE INTO closed_sessions
-            (id, name, tmux_session_name, goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, ai_type, project_name, project_desc, work_dir, closed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, name, tmux_session_name, goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, ai_type, project_name, project_desc, work_dir, closed_at, run_mode, origin, claude_session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `);
           stmt.run(
             row.id, row.name, row.tmux_session_name, row.goal || '', row.system_prompt || '',
             row.ai_enabled, row.auto_mode, row.auto_action_enabled, row.ai_type || 'claude',
-            row.project_name || '', row.project_desc || '', row.working_dir || '', Date.now()
+            row.project_name || '', row.project_desc || '', row.working_dir || '', Date.now(),
+            row.run_mode || 'terminal', row.origin || null, row.claude_session_id || null
           );
           // 从 sessions 表删除
           this.db.prepare('DELETE FROM sessions WHERE id = ?').run(row.id);
@@ -1427,6 +1457,9 @@ export class SessionManager {
       // 恢复团队信息
       session.teamId = row.team_id || null;
       session.teamRole = row.team_role || null;
+      session.runMode = row.run_mode === 'longrun' ? 'longrun' : 'terminal';
+      session.origin = row.origin || null;
+      session.claudeSessionId = row.claude_session_id || null;
 
       this.sessions.set(session.id, session);
       console.log(`恢复会话: ${session.name} (tmux: ${session.tmuxSessionName}, AI: ${session.aiType}, 自动操作: ${session.autoActionEnabled ? '开' : '关'}, 工作目录: ${session.workingDir || '未知'})`);
@@ -1544,6 +1577,9 @@ export class SessionManager {
           // 恢复团队信息
           session.teamId = row.team_id || null;
           session.teamRole = row.team_role || null;
+          session.runMode = row.run_mode === 'longrun' ? 'longrun' : 'terminal';
+          session.origin = row.origin || null;
+          session.claudeSessionId = row.claude_session_id || null;
 
           // 设置输出回调
           this._setupMuxSessionHandlers(session);
@@ -1568,8 +1604,8 @@ export class SessionManager {
             const stmt = this.db.prepare(`
               INSERT OR REPLACE INTO closed_sessions
               (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled,
-               ai_type, project_name, project_desc, work_dir, working_dir, closed_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ai_type, project_name, project_desc, work_dir, working_dir, closed_at, run_mode, origin, claude_session_id)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `);
             stmt.run(
               row.id, row.name, row.tmux_session_name,
@@ -1579,7 +1615,8 @@ export class SessionManager {
               row.ai_type || 'claude',
               row.project_name || '', row.project_desc || '',
               row.working_dir || '', row.working_dir || '',
-              Date.now()
+              Date.now(),
+              row.run_mode || 'terminal', row.origin || null, row.claude_session_id || null
             );
             this.db.prepare('DELETE FROM sessions WHERE id = ?').run(row.id);
           } catch (e) {
@@ -1595,8 +1632,8 @@ export class SessionManager {
           const stmt = this.db.prepare(`
             INSERT OR REPLACE INTO closed_sessions
             (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled,
-             ai_type, project_name, project_desc, work_dir, working_dir, closed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ai_type, project_name, project_desc, work_dir, working_dir, closed_at, run_mode, origin, claude_session_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `);
           stmt.run(
             row.id, row.name, row.tmux_session_name,
@@ -1606,7 +1643,8 @@ export class SessionManager {
             row.ai_type || 'claude',
             row.project_name || '', row.project_desc || '',
             row.working_dir || '', row.working_dir || '',
-            Date.now()
+            Date.now(),
+            row.run_mode || 'terminal', row.origin || null, row.claude_session_id || null
           );
           this.db.prepare('DELETE FROM sessions WHERE id = ?').run(row.id);
         } catch (e) {
@@ -1724,8 +1762,8 @@ export class SessionManager {
     const stats = session.stats || { total: 0, success: 0, failed: 0, aiAnalyzed: 0, aiFailed: 0, preAnalyzed: 0, hookFallback: 0 };
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO sessions
-      (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, status, created_at, updated_at, ai_type, claude_provider, codex_provider, gemini_provider, stats_total, stats_success, stats_failed, stats_ai_analyzed, stats_pre_analyzed, stats_ai_failed, stats_hook_fallback, working_dir, project_name, project_desc, team_id, team_role, waterline_mode, waterline_phase, waterline_rounds)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled, status, created_at, updated_at, ai_type, claude_provider, codex_provider, gemini_provider, stats_total, stats_success, stats_failed, stats_ai_analyzed, stats_pre_analyzed, stats_ai_failed, stats_hook_fallback, working_dir, project_name, project_desc, team_id, team_role, waterline_mode, waterline_phase, waterline_rounds, run_mode, origin, claude_session_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     stmt.run(
       session.id,
@@ -1758,7 +1796,10 @@ export class SessionManager {
       session.teamRole || null,
       session.waterlineMode || 'auto',
       session._waterlinePhase || 'idle',
-      session._waterlineHandoffRounds || 0
+      session._waterlineHandoffRounds || 0,
+      session.runMode || 'terminal',
+      session.origin || null,
+      session.claudeSessionId || null
     );
   }
 
@@ -2091,8 +2132,8 @@ export class SessionManager {
         (id, name, tmux_session_name, goal, original_goal, system_prompt, ai_enabled, auto_mode, auto_action_enabled,
          ai_type, project_name, project_desc, work_dir, working_dir,
          claude_provider, codex_provider, gemini_provider,
-         stats_total, stats_success, closed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         stats_total, stats_success, closed_at, run_mode, origin, claude_session_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
       stmt.run(
@@ -2115,7 +2156,10 @@ export class SessionManager {
         toProviderStr(session.geminiProvider),
         session.stats?.total || 0,
         session.stats?.success || 0,
-        Date.now()
+        Date.now(),
+        session.runMode || 'terminal',
+        session.origin || null,
+        session.claudeSessionId || null
       );
 
       // 从 sessions 表中删除
@@ -2165,6 +2209,11 @@ export class SessionManager {
           projectName: closedSession.projectName,
           projectDesc: closedSession.projectDesc,
           workDir: closedSession.workDir,
+          // 构造函数认的是 workingDir（原来只传 workDir，恢复后工作目录一直是空的）
+          workingDir: closedSession.workDir || undefined,
+          runMode: closedSession.runMode,
+          origin: closedSession.origin,
+          claudeSessionId: closedSession.claudeSessionId,
           isNew: true,  // Windows 原生模式：创建新的 PTY
           skipPty: false
         });
@@ -2208,6 +2257,11 @@ export class SessionManager {
         projectName: closedSession.projectName,
         projectDesc: closedSession.projectDesc,
         workDir: closedSession.workDir,
+        // 构造函数认的是 workingDir（原来只传 workDir，恢复后工作目录一直是空的）
+        workingDir: closedSession.workDir || undefined,
+        runMode: closedSession.runMode,
+        origin: closedSession.origin,
+        claudeSessionId: closedSession.claudeSessionId,
         isNew: false,
         skipPty: false
       });
@@ -2359,6 +2413,9 @@ export class SessionManager {
       projectName: row.project_name,
       projectDesc: row.project_desc,
       workDir: row.work_dir,
+      runMode: row.run_mode || 'terminal',
+      origin: row.origin || null,
+      claudeSessionId: row.claude_session_id || null,
       closedAt: row.closed_at
     };
   }

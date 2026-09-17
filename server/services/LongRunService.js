@@ -92,6 +92,7 @@ class LongRunTask {
     const loop = this.loop;
     return {
       id: this.id,
+      sessionId: this.sessionId || null,
       mode: this.mode,
       sandboxName: path.basename(this.sandbox.root),
       sandboxRoot: this.sandbox.root,
@@ -165,11 +166,15 @@ export class LongRunService {
    * @param {object} o.aiEngine  取 CC Switch 凭据 + 调监督者 LLM
    * @param {function} [o.runnerFactory]  执行者工厂（仅测试注入；缺省起真 claude 进程）
    * @param {() => string[]} [o.providerPriority]  借用供应商时的名称优先级，与 AI 监控共用
+   * @param {object} [o.sessionBinder]  会话条目绑定（index.js 注入）：
+   *   bind(root, {projectName}) → Promise<sessionId>  找/建该目录的会话条目并切到长程模式；claude 正在跑则抛错
+   *   get(sessionId) → 会话摘要（含 workingDir、runMode）或 null
    */
-  constructor({ io, aiEngine, runnerFactory = null, providerPriority = () => [] } = {}) {
+  constructor({ io, aiEngine, runnerFactory = null, providerPriority = () => [], sessionBinder = null } = {}) {
     this.io = io;
     this.aiEngine = aiEngine;
     this.providerPriority = providerPriority;
+    this.sessionBinder = sessionBinder;
     this.runnerFactory = runnerFactory;
     /** id → LongRunTask */
     this.tasks = new Map();
@@ -272,7 +277,7 @@ export class LongRunService {
    * 原版有几项放在建沙箱之后才查，带 --fresh 时等于先删了旧成果才报错 —— 这里前移。
    * @returns {object} 任务快照（异步跑，事件推 socket 房间 longrun:<id>）
    */
-  start(opts = {}) {
+  async start(opts = {}) {
     const o = normalizeOptions(opts);
     const docPath = this.resolveDocPath(opts);
     if (!existsSync(docPath) || !statSync(docPath).isFile()) throw new LaunchError(`需求文档不存在: ${path.resolve(docPath)}`);
@@ -284,16 +289,23 @@ export class LongRunService {
     const busy = this._runningOn(root);
     if (busy) throw new LaunchError(`项目 ${path.basename(root)} 上已有长程任务在跑（${busy.id}）。同一项目同时只能跑一个。`);
     prepareProject(root, { mode: o.mode, fresh: o.fresh });
+    // 长程是会话条目的一种运行模式：找/建这个目录的条目。里面 claude 正在跑就拒绝 ——
+    // 两个执行者同时改一个目录、抢一份 git 与记忆（绑定失败时什么都还没动）
+    let sessionId = null;
+    if (this.sessionBinder) {
+      try { sessionId = await this.sessionBinder.bind(root, { projectName: path.basename(root) }); }
+      catch (e) { throw new LaunchError(e.message); }
+    }
 
     let sandbox;
     try {
       sandbox = LongRunSandbox.open(root, { importMemory: o.mode === 'takeover' });
     } catch (e) { throw new LaunchError(e.message); }
-    return this._launch({ o, docPath, prompts, sandbox });
+    return this._launch({ o, docPath, prompts, sandbox, sessionId });
   }
 
   /** 建好沙箱之后：登记参考路径、收集自检清单、组装监督者与循环、异步开跑。 */
-  _launch({ o, docPath, prompts, sandbox }) {
+  _launch({ o, docPath, prompts, sandbox, sessionId = null }) {
     const resume = o.mode === 'resume';
     const continuing = resume || o.mode === 'takeover';    // 在已有进度上继续：需求按"新增"包装
     // 带 spec 再解析一次：外部参考这次才真正登记进沙箱（--add-dir）。与预检同一套规则
@@ -318,6 +330,7 @@ export class LongRunService {
     const id = `${path.basename(sandbox.root)}-${Date.now().toString(36)}`;
     task = new LongRunTask({ id, mode: o.mode, sandbox, docPath, requirementText: input, requirementDoc: req.text,
       options: { ...o }, selfCheck: sc.toJSON(), supervisorInfo });
+    task.sessionId = sessionId;
     task.loop = new LongRunLoop({
       sandbox, prompts, requirementText: input, supervisor,
       model: o.model, handoffFloor: o.handoffFloor, handoffCeiling: o.handoffCeiling, hardKill: o.hardKill,
@@ -412,6 +425,18 @@ export class LongRunService {
         notices: [], snapshot: live.board.snapshot() };
     }
     return replayRun({ sandboxName, projectRoot, file });
+  }
+
+  /**
+   * 某个会话条目的长程视图：该条目最近一次任务（内存里有）→ 实时看板；否则按条目工作目录从磁盘回放。
+   * 服务重启后内存里的任务丢了，条目仍是长程模式，靠这条路径看到上一轮。
+   */
+  forSession(sessionId) {
+    const task = [...this.tasks.values()].filter((t) => t.sessionId === sessionId).sort((a, b) => b.startedAt - a.startedAt)[0];
+    if (task) return { ok: true, taskId: task.id, task: task.toJSON() };
+    const s = this.sessionBinder?.get(sessionId);
+    if (!s?.workingDir) return { ok: false, error: '会话不存在或没有工作目录' };
+    return { ...this.replay({ projectRoot: s.workingDir }), projectRoot: s.workingDir };
   }
 
   /** 会话记录（transcript.py）：列出某工作目录的会话，缺省为沙箱根。 */
