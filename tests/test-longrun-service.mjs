@@ -366,6 +366,14 @@ function fakeBinder({ cliRunning = false } = {}) {
       sessions.set(id, { id, workingDir: root, runMode: 'longrun' });
       return id;
     },
+    async open(root, { projectName }) {
+      calls.push({ open: root, projectName });
+      const hit = [...sessions.values()].find((x) => x.workingDir === root);
+      if (hit) return hit.id;
+      const id = `open-${projectName}`;
+      sessions.set(id, { id, workingDir: root, runMode: 'longrun' });
+      return id;
+    },
     get: (id) => sessions.get(id) || null,
   };
 }
@@ -390,6 +398,27 @@ await test('服务重启后（内存无任务）按会话条目的工作目录�
   const v = s2.forSession('sess-restart_me');
   assert(v.ok && !v.taskId && v.snapshot?.replay === true && v.projectRoot === t.sandboxRoot, JSON.stringify({ ...v, snapshot: undefined }));
   assert(s2.forSession('nope').ok === false);
+});
+
+await test('只看记录打开项目：跑过长程的目录给条目 id 并能回放；普通项目与缺失目录拒绝，不建条目', async () => {
+  const binder = fakeBinder();
+  const s1 = new LongRunService({ aiEngine: fakeEngine(), runnerFactory: fakeRunners().factory, sessionBinder: binder });
+  const t = await s1.start({ docPath: writeDoc('# 看记录'), sandboxName: 'view_only' });
+  await finished(s1, t.id);
+  const s2 = new LongRunService({ aiEngine: fakeEngine(), runnerFactory: fakeRunners().factory, sessionBinder: binder });
+  const r = await s2.openProject({ projectRoot: t.sandboxRoot });
+  assert(r.ok && r.sessionId === 'sess-view_only', `已有条目直接用: ${JSON.stringify(r)}`);
+  assert(s2.forSession(r.sessionId).snapshot?.replay === true, '打开后按条目回放');
+  const plain = path.join(process.env.LONGRUN_PROJECTS_ROOT, 'plain_proj');
+  fs.mkdirSync(plain, { recursive: true });
+  fs.writeFileSync(path.join(plain, 'a.py'), '');
+  const before = binder.calls.length;
+  for (const projectRoot of [plain, path.join(process.env.LONGRUN_PROJECTS_ROOT, 'no_such')]) {
+    let e = null;
+    try { await s2.openProject({ projectRoot }); } catch (x) { e = x; }
+    assert(e && /没有长程记录/.test(e.message), e?.message);
+  }
+  assert(binder.calls.length === before, '拒绝时不能建条目');
 });
 
 await test('同目录会话里 claude 正在运行 → 拒绝启动，目录什么都没动', async () => {

@@ -5,7 +5,7 @@ import { ctxView, verdictClass, STOP_LABEL, VERDICT_LABEL } from './longrunBoard
 /**
  * 右侧面板（沿用 AI 面板的外壳与卡片样式）：会话进度、监督者判定、人工干预、启动自检、需求。
  */
-const LongRunSide = ({ lr, collapsed, onToggle, onResume }) => {
+const LongRunSide = ({ lr, collapsed, onToggle, onResume, onHandover }) => {
   const { board, meta, view } = lr;
   const [showCheck, setShowCheck] = useState(false);
   const task = meta.task;
@@ -13,7 +13,6 @@ const LongRunSide = ({ lr, collapsed, onToggle, onResume }) => {
   const ctx = ctxView(board?.context);
   const sup = board?.supervisor;
   const f = board?.finished;
-  const sandboxName = task?.sandboxName || view?.sandboxName;
   const warns = (task?.selfCheck || []).filter((i) => i.level === 'warn').length;
 
   return (
@@ -64,11 +63,16 @@ const LongRunSide = ({ lr, collapsed, onToggle, onResume }) => {
 
         {live && <LongRunIntervene lr={lr} task={task} />}
 
-        {!live && sandboxName && (task || board) && (
+        {!live && view?.kind !== 'pending' && (
           <div className="ai-status-section">
             <h4>接着做</h4>
-            <div className="lr-kv">沙箱与记忆都在。续跑不重跑初始化：先发「新对话开始提示词」让执行者从记忆接上，再给新需求。</div>
-            <button className="btn btn-primary btn-small lr-mt" onClick={() => onResume(sandboxName)}>续跑这个沙箱…</button>
+            <div className="lr-kv">项目与记忆（.memory）都在，两种方式任选：</div>
+            <div className="lr-kv">· <b>转为终端</b>：同一条目切回终端，用交互式 claude 接着开发（按水位自动选续同一对话或开新对话）</div>
+            <div className="lr-kv">· <b>续跑长程</b>：追加需求，执行者从记忆接上继续无人值守开发</div>
+            <div className="lr-row">
+              <button className="btn btn-primary btn-small" onClick={onHandover}>转为终端…</button>
+              <button className="btn btn-secondary btn-small" onClick={onResume}>续跑长程…</button>
+            </div>
           </div>
         )}
 

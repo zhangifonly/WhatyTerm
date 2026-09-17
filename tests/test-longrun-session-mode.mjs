@@ -107,10 +107,14 @@ await test('监控三处入口与附着分析都跳过长程模式', () => {
 
 await test('绑定器：同目录 claude 在跑先拒绝再动条目；切模式时关自动操作、记来历、广播', () => {
   const bind = between(src('index.js'), 'const longRunSessionBinder = {', 2500);
-  const refuse = bind.indexOf('processDetector.isCliRunning'), create = bind.indexOf('createSession'), mode = bind.indexOf("session.runMode = 'longrun'");
+  const refuse = bind.indexOf('processDetector.isCliRunning'), create = bind.indexOf('this._create('), mode = bind.indexOf("session.runMode = 'longrun'");
   assert(refuse > 0 && create > refuse && mode > create, '必须先检查 CLI 在跑、再建/改条目');
   assert(bind.includes("session.origin = 'longrun'") && bind.includes('session.autoActionEnabled = false') && bind.includes("io.emit('sessions:updated'"));
   assert(bind.includes('createSession({ name: projectName, workingDir: root, projectName })'), '新建条目要带工作目录');
+  // 只看记录的入口：已有同目录条目原样返回，绝不能把传统会话切成长程模式
+  const open = between(bind, 'async open(root, { projectName }) {', 400);
+  const early = open.indexOf('if (existing.length) return existing[0].id;'), flip = open.indexOf("session.runMode = 'longrun'");
+  assert(early > 0 && flip > early && open.slice(0, flip).includes('this._create('), '打开项目：已有条目要在改模式之前直接返回');
 });
 
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);

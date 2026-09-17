@@ -24,7 +24,8 @@ import SprintProgress from './components/SprintProgress';
 import RalphWizard from './components/RalphWizard';
 import { useLongRun } from './components/longrun/useLongRun';
 import { useLongRunBell } from './components/longrun/useLongRunBell';
-import LongRunSidebarGroup from './components/longrun/LongRunSidebarGroup';
+import LongRunHandoverDialog from './components/longrun/LongRunHandoverDialog';
+import { taskBadge, taskLine } from './components/longrun/longrunBoard';
 import LongRunMain from './components/longrun/LongRunMain';
 import LongRunSide from './components/longrun/LongRunSide';
 import LongRunNewTask from './components/longrun/LongRunNewTask';
@@ -160,13 +161,17 @@ export default function App() {
   const [currentSession, setCurrentSession] = useState(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showRalphWizard, setShowRalphWizard] = useState(false);
-  // 长程任务：与终端会话互斥占用主区与右侧面板（打开一个就关掉另一个）
+  // 长程是会话条目的一种运行模式：选中长程模式的条目时，主区显示时间线、右侧显示长程面板；
+  // 同一条目转为终端后换回终端与 AI 面板（门牌号、置顶都不变）
   const longRun = useLongRun(socket);
-  const longRunCloseRef = useRef(longRun.close);
-  longRunCloseRef.current = longRun.close;
-  const [longRunNew, setLongRunNew] = useState(null);   // null | {mode, sandboxName}
+  const longRunView = currentSession?.runMode === 'longrun';
+  const [longRunNew, setLongRunNew] = useState(null);         // null | {mode, projectRoot?}
+  const [longRunHandover, setLongRunHandover] = useState(null); // null | sessionId
   useLongRunBell(longRun.tasks, longRun.muted);
-  const openLongRun = useCallback((view) => { setCurrentSession(null); longRun.open(view); }, [longRun.open]);
+  useEffect(() => {
+    if (currentSession?.id && longRunView) longRun.openForSession(currentSession.id);
+    else longRun.close();
+  }, [currentSession?.id, longRunView]);   // eslint-disable-line react-hooks/exhaustive-deps
   const [suggestion, setSuggestion] = useState(null);
   const [showHistory, setShowHistory] = useState(false);
   const [playbackSessionId, setPlaybackSessionId] = useState(null); // 用于存储管理的回放
@@ -462,7 +467,6 @@ export default function App() {
       setPendingScreenContent(data.fullContent || data.screenContent || '');
       setPendingCursorPosition(data.cursorPosition);
       setCurrentSession(data.session);
-      longRunCloseRef.current?.();
       // 持久化上次活跃会话 ID，重启后自动恢复
       try { localStorage.setItem('webtmux_last_session_id', data.session.id); } catch { /* 忽略 */ }
     });
@@ -1126,16 +1130,33 @@ export default function App() {
       // 终端实例只在组件真正卸载（currentSession 变为 null）时才销毁
       setTerminalReady(false);
     };
-  }, [currentSession?.id]); // 依赖 currentSession?.id 以便在会话变化时重新设置事件监听
+  }, [currentSession?.id, longRunView]); // 会话变化时重新设置事件监听；长程模式不挂终端，切回终端时要重建
 
-  // 当 currentSession 变为 null 时，销毁终端实例
+  // 当 currentSession 变为 null、或条目进入长程模式（主区换成时间线、终端容器卸载）时，销毁终端实例
   useEffect(() => {
-    if (!currentSession && terminalInstance.current) {
-      console.log('[Terminal] 会话关闭，销毁终端实例');
+    if ((!currentSession || longRunView) && terminalInstance.current) {
+      console.log('[Terminal] 会话关闭或进入长程模式，销毁终端实例');
       terminalInstance.current.dispose();
       terminalInstance.current = null;
     }
-  }, [currentSession]);
+  }, [currentSession, longRunView]);
+
+  // 同一条目从长程转回终端：终端刚重建是空的，重新 attach 取屏幕内容（门牌号不变，不会触发会话切换）
+  const prevLongRunView = useRef(false);
+  useEffect(() => {
+    if (prevLongRunView.current && !longRunView && currentSession?.id) {
+      setTimeout(() => emitAttach(currentSession.id), 50);
+    }
+    prevLongRunView.current = longRunView;
+  }, [longRunView]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 长程视图没有终端：这期间 attach 收到的屏幕内容已过期，丢掉，转回终端时由上面的重新 attach 取最新的
+  useEffect(() => {
+    if (longRunView && pendingScreenContent !== null) {
+      setPendingScreenContent(null);
+      setPendingCursorPosition(null);
+    }
+  }, [longRunView, pendingScreenContent]);
 
   // 处理缓存的屏幕内容
   useEffect(() => {
@@ -1733,7 +1754,7 @@ export default function App() {
         <div className="sidebar-header">
           <div
             className="sidebar-brand"
-            onClick={() => { setCurrentSession(null); longRun.close(); }}
+            onClick={() => setCurrentSession(null)}
             title={t('welcome.startHint')}
           >
             <span className="sidebar-brand-mark">W</span>
@@ -1785,6 +1806,19 @@ export default function App() {
             <kbd>⌘↓</kbd>
           </button>
         )}
+        {(() => {
+          // 长程模式的条目在等人回答：与「等确认」同一种摘要条，点一下跳到下一个
+          const waiting = sessions.filter((x) => x.runMode === 'longrun'
+            && longRun.taskForSession(x.id)?.state === 'running' && longRun.taskForSession(x.id)?.awaitingHuman);
+          if (!waiting.length) return null;
+          const next = waiting.find((x) => x.id !== currentSession?.id) || waiting[0];
+          return (
+            <button className="session-pending-bar" onClick={() => attachSession(next.id)} title="长程执行者停下来等你拍板">
+              <span className="spb-dot" />
+              {waiting.length} 个长程等你回答
+            </button>
+          );
+        })()}
         {erroredIds.size > 0 && (
           <button
             className="session-pending-bar error"
@@ -1801,15 +1835,20 @@ export default function App() {
             idleWaitingIds 保留给列表红点与「待处理优先」排序使用。 */}
 
         <div className="session-list">
-          <LongRunSidebarGroup tasks={longRun.tasks} sandboxes={longRun.sandboxes} view={longRun.view} onOpen={openLongRun} />
-          {orderedSessions.map((session) => (
+          {orderedSessions.map((session) => {
+            // 长程模式的条目：徽标与进度行来自它最近一次长程任务（服务重启后没有任务时显示「长程·已结束」，点开是上一轮回放）
+            const lrMode = session.runMode === 'longrun';
+            const lrTask = lrMode ? longRun.taskForSession(session.id) : null;
+            const [lrTone, lrText] = lrTask ? taskBadge(lrTask) : ['idle', '已结束'];
+            const lrWaiting = !!(lrTask?.state === 'running' && lrTask.awaitingHuman);
+            return (
             <div
               key={session.id}
               ref={(el) => {
                 if (el) sessionItemRefs.current[session.id] = el;
                 else delete sessionItemRefs.current[session.id];
               }}
-              className={`session-item ${currentSession?.id === session.id ? 'active' : ''} ${aiStatusMap[session.id]?.needsAction && !session.autoActionEnabled ? 'needs-action' : ''}`}
+              className={`session-item ${currentSession?.id === session.id ? 'active' : ''} ${(lrMode ? lrWaiting : aiStatusMap[session.id]?.needsAction && !session.autoActionEnabled) ? 'needs-action' : ''}`}
               onClick={() => attachSession(session.id)}
               onContextMenu={(e) => {
                 e.preventDefault();
@@ -1844,8 +1883,11 @@ export default function App() {
                       ⌘{hotkeySlots[session.id]}
                     </span>
                   )}
-                  <span className={`session-status ${session.autoActionEnabled ? 'auto' : 'paused'}`} />
+                  {lrMode
+                    ? <span className={`lr-dot ${lrTone}`} title={`长程 · ${lrText}`} />
+                    : <span className={`session-status ${session.autoActionEnabled ? 'auto' : 'paused'}`} />}
                   {session.projectName || session.name}
+                  {lrMode && <span className={`lr-badge ${lrTone} lr-item-badge`}>长程·{lrText}</span>}
                   {sessionMemory[session.id]?.memory > 0 && (
                     <span className={`session-memory ${sessionMemory[session.id]?.memory > 500 ? 'high' : ''}`}>
                       {sessionMemory[session.id]?.processCount > 1 && (
@@ -1889,17 +1931,21 @@ export default function App() {
                   ×
                 </button>
               </div>
-              {session.projectDesc && (
+              {lrMode && lrTask && (
+                <div className="session-goal">{taskLine(lrTask)}{lrTask.lastLabel ? ` · ${lrTask.lastLabel}` : ''}</div>
+              )}
+              {!(lrMode && lrTask) && session.projectDesc && (
                 <div className="session-goal">{session.projectDesc.slice(0, 50)}{session.projectDesc.length > 50 ? '...' : ''}</div>
               )}
-              {!session.projectDesc && session.goal && (
+              {!(lrMode && lrTask) && !session.projectDesc && session.goal && (
                 <div className="session-goal">目标: {session.goal.split('\n')[0].slice(0, 40)}{session.goal.length > 40 ? '...' : ''}</div>
               )}
               <div className="session-ai-status">
-                {session.autoActionEnabled ? '🤖 自动' : '💡 建议'}
+                {lrMode ? '🧭 长程' : session.autoActionEnabled ? '🤖 自动' : '💡 建议'}
               </div>
             </div>
-          ))}
+            );
+          })}
 
           {sessions.length === 0 && (
             <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-secondary)' }}>
@@ -1954,7 +2000,9 @@ export default function App() {
 
       {/* 主内容区 */}
       <main className="main-content">
-        {currentSession ? (
+        {currentSession && longRunView ? (
+          <LongRunMain lr={longRun} />
+        ) : currentSession ? (
           <div className="terminal-container">
             <div
               className={`terminal-wrapper${isDragOver ? ' drag-over' : ''}`}
@@ -2192,8 +2240,6 @@ export default function App() {
             {currentSession && <SprintProgress socket={socket} sessionId={currentSession.id} goal={currentSession.goal} />}
 
           </div>
-        ) : longRun.view ? (
-          <LongRunMain lr={longRun} />
         ) : (
           <div className="empty-state welcome-page">
             {/* 顶部标题区 */}
@@ -2345,16 +2391,17 @@ export default function App() {
         )}
       </main>
 
-      {/* 右侧面板：长程任务沿用同一个外壳与折叠状态 */}
-      {!currentSession && longRun.view && (
+      {/* 右侧面板：长程模式的条目沿用同一个外壳与折叠状态 */}
+      {currentSession && longRunView && (
         <LongRunSide
           lr={longRun}
           collapsed={aiPanelCollapsed}
           onToggle={() => setAiPanelCollapsed(!aiPanelCollapsed)}
-          onResume={(sandboxName) => setLongRunNew({ mode: 'resume', sandboxName })}
+          onResume={() => setLongRunNew({ mode: 'resume', projectRoot: currentSession.workingDir })}
+          onHandover={() => setLongRunHandover(currentSession.id)}
         />
       )}
-      {currentSession && (
+      {currentSession && !longRunView && (
         <aside className={`ai-panel ${aiPanelCollapsed ? 'collapsed' : ''}`}>
           <button
             className="panel-toggle ai-panel-toggle"
@@ -3188,8 +3235,28 @@ export default function App() {
           lr={longRun}
           preset={longRunNew}
           onClose={() => setLongRunNew(null)}
-          onStarted={(task) => { setLongRunNew(null); longRun.refreshLists(); openLongRun({ kind: 'task', id: task.id }); }}
+          sessions={sessions}
+          onStarted={(task) => {
+            setLongRunNew(null);
+            longRun.refreshLists();
+            // 长程绑在会话条目上：切到那个条目（新建项目时条目是刚建的）
+            if (task.sessionId) attachSession(task.sessionId);
+          }}
+          onOpened={(sessionId) => { setLongRunNew(null); attachSession(sessionId); }}
           onOpenLegacy={() => { setLongRunNew(null); setShowRalphWizard(true); }}
+        />
+      )}
+
+      {/* 长程结束 → 同一条目转为终端 */}
+      {longRunHandover && (
+        <LongRunHandoverDialog
+          lr={longRun}
+          sessionId={longRunHandover}
+          sessionName={sessions.find((x) => x.id === longRunHandover)?.projectName}
+          onClose={(r) => {
+            setLongRunHandover(null);
+            if (r?.ok && r.note) toast.warning(r.note);
+          }}
         />
       )}
 
@@ -3287,15 +3354,59 @@ export default function App() {
             style={{ top: sessionContextMenu.y, left: sessionContextMenu.x }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div
-              className="context-menu-item"
-              onClick={() => {
-                toggleAutoAction(sessionContextMenu.session.id, !sessionContextMenu.session.autoActionEnabled);
-                setSessionContextMenu(null);
-              }}
-            >
-              {sessionContextMenu.session.autoActionEnabled ? '关闭自动操作' : '开启自动操作'}
-            </div>
+            {sessionContextMenu.session.runMode === 'longrun' ? (() => {
+              // 长程模式：自动操作不适用；结束后可以续跑或转为终端
+              const running = longRun.taskForSession(sessionContextMenu.session.id)?.state === 'running';
+              return (
+                <>
+                  <div
+                    className={`context-menu-item ${running ? 'disabled' : ''}`}
+                    title={running ? '长程还在跑，先等它结束或在面板里终止' : '同一条目切回终端，用交互式 claude 接着开发'}
+                    onClick={() => {
+                      if (running) return;
+                      setLongRunHandover(sessionContextMenu.session.id);
+                      setSessionContextMenu(null);
+                    }}
+                  >
+                    转为终端…
+                  </div>
+                  <div
+                    className={`context-menu-item ${running ? 'disabled' : ''}`}
+                    onClick={() => {
+                      if (running) return;
+                      setLongRunNew({ mode: 'resume', projectRoot: sessionContextMenu.session.workingDir });
+                      setSessionContextMenu(null);
+                    }}
+                  >
+                    续跑长程…
+                  </div>
+                </>
+              );
+            })() : (
+              <>
+                <div
+                  className="context-menu-item"
+                  onClick={() => {
+                    toggleAutoAction(sessionContextMenu.session.id, !sessionContextMenu.session.autoActionEnabled);
+                    setSessionContextMenu(null);
+                  }}
+                >
+                  {sessionContextMenu.session.autoActionEnabled ? '关闭自动操作' : '开启自动操作'}
+                </div>
+                {sessionContextMenu.session.workingDir && (
+                  <div
+                    className="context-menu-item"
+                    title="在这个项目上开长程：已跑过长程就续跑，否则接管（需先在终端里退出 claude）"
+                    onClick={() => {
+                      setLongRunNew({ projectRoot: sessionContextMenu.session.workingDir });
+                      setSessionContextMenu(null);
+                    }}
+                  >
+                    开始长程开发…
+                  </div>
+                )}
+              </>
+            )}
             <div
               className="context-menu-item"
               onClick={() => {

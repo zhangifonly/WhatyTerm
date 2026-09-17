@@ -14,7 +14,7 @@ import os from 'os';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { loadPrompts, loadRequirement, extraDirsOf, PROMPT_SLOTS } from './LongRunPrompts.js';
-import { LongRunSandbox } from './LongRunSandbox.js';
+import { LongRunSandbox, sandboxRoots } from './LongRunSandbox.js';
 import { Supervisor, loadSystemPrompt } from './LongRunSupervisor.js';
 import { SupervisorCredentials } from './LongRunSupervisorCreds.js';
 import { LongRunLoop, Stop, assertThresholds, HANDOFF_FLOOR, HANDOFF_CEILING, HARD_KILL,
@@ -23,7 +23,7 @@ import { TASK_WAIT } from './LongRunRunner.js';
 import { LongRunBoard } from './LongRunBoard.js';
 import { replay as replayRun, EVENTS_FILE } from './LongRunReplay.js';
 import { apiSessions, apiSession } from './LongRunTranscript.js';
-import { resolveClaudeSessionId, lastContextPeak, decideHandover, buildLaunchCommand } from './LongRunHandover.js';
+import { resolveClaudeSessionId, lastContextPeak, decideHandover, buildLaunchCommand, buildShellLine } from './LongRunHandover.js';
 import {
   LaunchError, deriveSandboxName, memoryFiles, priorState, checkRejectedRefs, requirementInput,
   previewRequirement, resolveProjectRoot, projectDirState, prepareProject, listLongRunProjects,
@@ -233,6 +233,32 @@ export class LongRunService {
     const projectName = opts.projectName || opts.sandboxName
       || (opts.requirementText && !opts.docPath ? deriveName(opts.requirementText) : deriveSandboxName(docPath));
     return resolveProjectRoot({ projectRoot: opts.projectRoot, projectName });
+  }
+
+  /**
+   * 项目目录现状（不需要需求文本，弹窗选项目时用）：新建 / 接管 / 续跑 该选哪个，上次运行痕迹，占用情况。
+   */
+  projectState({ projectRoot, projectName } = {}) {
+    const root = resolveProjectRoot({ projectRoot, projectName });
+    const state = projectDirState(root);
+    return {
+      ok: true, projectRoot: root, projectName: path.basename(root), projectsRoot: sandboxRoots()[0], dirState: state,
+      suggestedMode: state === 'project' ? 'takeover' : state === 'longrun' ? 'resume' : 'start',
+      resumable: state === 'longrun' && memoryFiles(root).length > 0,
+      prior: state === 'missing' ? null : priorState(root),
+      runningTaskId: this._runningOn(root)?.id || null,
+    };
+  }
+
+  /**
+   * 打开跑过长程的项目只看记录（旧沙箱没有会话条目时的入口，与打开历史项目同一种体验）。
+   * 只接受有长程记录的目录：普通项目没有可看的，打开它应走「接管」。
+   */
+  async openProject({ projectRoot } = {}) {
+    const root = resolveProjectRoot({ projectRoot });
+    if (projectDirState(root) !== 'longrun') throw new LaunchError(`这个目录没有长程记录：${root}`);
+    if (!this.sessionBinder?.open) throw new LaunchError('会话管理不可用，无法打开项目');
+    return { ok: true, projectRoot: root, sessionId: await this.sessionBinder.open(root, { projectName: path.basename(root) }) };
   }
 
   /**
@@ -454,11 +480,12 @@ export class LongRunService {
     const handoffFloor = task?.loop?.handoffFloor ?? HANDOFF_FLOOR;
     const decided = decideHandover(mode, { peak, handoffFloor, hasSessionId: !!found });
     const backup = (() => { try { return JSON.parse(readFileSync(path.join(root, '.run', 'provider-env.backup.json'), 'utf8')); } catch { return null; } })();
+    const command = buildLaunchCommand({ mode: decided.mode, claudeSessionId: found?.id,
+      extraDirs: task?.loop?.extraDirs || [], model: task?.options?.model || '' });
     return {
       ok: true, root, mode: decided.mode, reason: decided.reason, peak, handoffFloor,
       claudeSessionId: decided.mode === 'resume' ? found.id : null, idSource: found?.source || '',
-      command: buildLaunchCommand({ mode: decided.mode, claudeSessionId: found?.id,
-        extraDirs: task?.loop?.extraDirs || [], model: task?.options?.model || '' }),
+      command, shellLine: buildShellLine(root, command),
       // 开新对话时要发的第一句：与长程交接后一样，让它从记忆接上
       resumePrompt: decided.mode === 'fresh' ? loadPrompts(task?.options?.promptsFile || PROMPT_FILE).resume : '',
       // 长程期间从项目配置移走的会话级供应商：转回终端时重新应用

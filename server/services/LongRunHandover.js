@@ -84,6 +84,11 @@ export function buildLaunchCommand({ mode, claudeSessionId, extraDirs = [], mode
   return parts.join(' ');
 }
 
+/** 实际发进 tmux 的一整行：先进项目目录再启动。界面展示与发送共用这一行，保证所见即所发 */
+export function buildShellLine(root, command) {
+  return `cd ${quoteSq(root)} && ${command}`;
+}
+
 /**
  * 清掉长程留下的投件与暂停文件。不清的话，下次再跑长程时它们会在第一发突然生效。
  * @returns {string[]} 删掉的文件名

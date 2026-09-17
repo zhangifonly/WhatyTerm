@@ -16,7 +16,7 @@ const LongRunMain = ({ lr }) => {
   const [answer, setAnswer] = useState('');
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
-  const viewKey = view ? `${view.kind}:${view.id || view.sandboxName}` : '';
+  const viewKey = view ? `${view.kind}:${view.id || view.sessionId}` : '';
   useEffect(() => { setAnswer(''); setMsg(''); }, [viewKey]);
 
   if (meta.error) return <div className="lr-main"><div className="lr-err lr-pad">{meta.error}</div></div>;
@@ -38,7 +38,7 @@ const LongRunMain = ({ lr }) => {
       <div className="lr-header">
         <b>{task?.sandboxName || board.title}</b>
         {board.replay && <span className="lr-badge wait">回放</span>}
-        <span className="lr-meta lr-path" title={board.sandbox}>沙箱 <b>{board.sandbox || '—'}</b></span>
+        <span className="lr-meta lr-path" title={board.sandbox}>项目 <b>{board.sandbox || '—'}</b></span>
         <span className="lr-meta">进度 <b>第 {board.legs || 0} 次调用</b></span>
         <span className="lr-meta">费用 <b>${(board.spent_usd || 0).toFixed(4)}</b>
           {/* 已结算与进行中分开：一发能跑一两个小时，期间结算值不动，合成一个数会让人低估花费 */}

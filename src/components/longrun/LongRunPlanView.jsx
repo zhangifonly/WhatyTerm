@@ -2,7 +2,7 @@ import React from 'react';
 
 /**
  * 预检结果。只解析、不启动；把启动时会拦下或需要人知情的东西提前摆出来：
- *   · 沙箱已存在：新建不静默覆盖（里面可能是上一轮成果）—— 要么续跑，要么明确勾「删掉重建」
+ *   · 新项目名撞上已有目录：已有传统项目 → 只能改为接管（绝不删）；跑过长程 → 续跑，或明确勾「删掉重建」
  *   · 外部参考目录对执行者**可写**（--add-dir 不是只读）
  *   · 无法使用的参考路径：默认停止，勾「忽略」才放行
  */
@@ -11,24 +11,27 @@ const LongRunPlanView = ({ plan, form, set }) => {
   const p = plan.prior;
   return (
     <div className="lr-plan">
-      <div>沙箱 <code>{plan.sandboxRoot}</code></div>
-      {plan.runningTaskId && <div className="lr-err">这个沙箱上已有任务在跑（{plan.runningTaskId}），同一沙箱同时只能跑一个。</div>}
+      <div>项目目录 <code>{plan.projectRoot}</code></div>
+      {plan.runningTaskId && <div className="lr-err">这个项目上已有长程在跑（{plan.runningTaskId}），同一项目同时只能跑一个。</div>}
 
-      {!resume && plan.sandboxExists && (
+      {form.kind === 'new' && plan.dirState === 'project' && (
+        <div className="lr-note bad">
+          同名目录是已有项目（没跑过长程）。新建绝不会删它。
+          <button type="button" className="lr-link" onClick={() => set({ kind: 'existing', projectRoot: plan.projectRoot })}>改为接管这个项目</button>
+          ，或换一个项目名。
+        </div>
+      )}
+      {form.kind === 'new' && plan.dirState === 'longrun' && (
         <div className="lr-note wait">
-          沙箱已存在{plan.resumable ? '，有记忆文件' : ''}。新建不会静默覆盖（里面可能是上一轮的成果）。
-          {plan.resumable && (
-            <button type="button" className="lr-link" onClick={() => set({ mode: 'resume', sandboxName: plan.sandboxName, fresh: false })}>
-              改为续跑它
-            </button>
-          )}
+          同名目录跑过长程{plan.resumable ? '，有记忆文件' : ''}。新建不会静默覆盖（里面可能是上一轮的成果）。
+          <button type="button" className="lr-link" onClick={() => set({ kind: 'existing', projectRoot: plan.projectRoot, fresh: false })}>改为续跑它</button>
           <label className="lr-check-row">
             <input type="checkbox" checked={form.fresh} onChange={(e) => set({ fresh: e.target.checked })} />
             删掉重建（不可恢复）
           </label>
         </div>
       )}
-      {resume && !plan.resumable && <div className="lr-err">这个沙箱没有记忆文件，可能从未成功跑过初始化，用「新建」更合适。</div>}
+      {resume && !plan.resumable && <div className="lr-err">这个项目没有记忆文件，可能从未成功跑过初始化，用「接管」更合适。</div>}
 
       {p && (p.legs != null || p.memoryCount > 0) && (
         <div className="lr-kv">

@@ -70,6 +70,7 @@ await test('启动命令：resume 带会话 id；外部参考与模型单引号�
   assert(H.buildLaunchCommand({ mode: 'fresh', claudeSessionId: U(1) }) === 'claude', 'fresh 不带会话 id');
   const c = H.buildLaunchCommand({ mode: 'resume', claudeSessionId: U(1), extraDirs: ["/a/it's $HOME"], model: 'claude-opus-5' });
   assert(c === `claude --resume ${U(1)} --add-dir '/a/it'\\''s $HOME' --model 'claude-opus-5'`, c);
+  assert(H.buildShellLine("/p/it's $x", 'claude') === `cd '/p/it'\\''s $x' && claude`, '目录也要单引号转义');
 });
 
 await test('清掉残留的暂停与投件文件（否则下次长程第一发突然生效）', () => {
@@ -105,6 +106,7 @@ await test('服务层交接计划：在跑拒绝；按最后一发水位选方�
   const low = svc.handoverPlan('s1');
   assert(low.ok && low.mode === 'resume' && low.command === `claude --resume ${U(5)}` && low.claudeSessionId === U(5) && low.providerId === 'p9', JSON.stringify(low));
   assert(!low.resumePrompt, 'resume 不发开场提示词');
+  assert(low.shellLine === `cd '${root}' && claude --resume ${U(5)}`, `界面展示与实际发送是同一行：${low.shellLine}`);
   events(root, [{ kind: 'result', session_id: U(5), context_peak: 260000 }]);
   const high = svc.handoverPlan('s1');
   assert(high.mode === 'fresh' && high.command === 'claude' && high.claudeSessionId === null && high.resumePrompt.length > 50, JSON.stringify({ ...high, resumePrompt: high.resumePrompt.slice(0, 20) }));
@@ -119,7 +121,7 @@ const between = (text, from, len = 5000) => { const i = text.indexOf(from); asse
 await test('longrun:toTerminal 执行顺序：CLI 在跑拒绝 → 清残留 → 恢复供应商 → 切模式落库 → 打命令 → fresh 等就绪再粘贴', () => {
   const h = between(idx, "socket.on('longrun:toTerminal'", 4000);
   const order = ['isLongRunMode(session)', 'isCliRunning(tmux)', 'clearLeftoverInjections(plan.root)', 'applySessionProvider(session',
-    "session.runMode = 'terminal'", 'sessionManager.updateSession(session)', 'tmuxSendLiteral(tmux, `cd ${shellQuoteSq(plan.root)}', 'isClaudeInputReady(', 'bracketedPaste(plan.resumePrompt)'];
+    "session.runMode = 'terminal'", 'sessionManager.updateSession(session)', 'tmuxSendLiteral(tmux, plan.shellLine)', 'isClaudeInputReady(', 'bracketedPaste(plan.resumePrompt)'];
   let last = -1;
   for (const k of order) { const i = h.indexOf(k); assert(i > last, `顺序不对或缺失: ${k}`); last = i; }
   assert(h.includes("session.waterlineMode = 'warn'") && h.includes('session.autoActionEnabled = false') && h.includes("session.origin = 'longrun'"));

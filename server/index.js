@@ -1226,19 +1226,33 @@ const longRunSessionBinder = {
         throw new Error(`项目「${s.projectName || s.name}」的会话里 claude 正在运行。请先在该会话里退出 CLI（/exit），再启动长程。`);
       }
     }
-    let session = existing.length ? sessionManager.getSession(existing[0].id) : null;
-    if (!session) {
-      session = await sessionManager.createSession({ name: projectName, workingDir: root, projectName });
-      session.aiType = 'claude';
-      registerBellCallback(session);
-      registerExitCallback(session);
-    }
+    const session = existing.length ? sessionManager.getSession(existing[0].id) : await this._create(root, projectName);
     session.runMode = 'longrun';
     session.origin = 'longrun';
     session.autoActionEnabled = false;       // 长程期间与之后接手时都不自动按键，由人决定何时打开
     sessionManager.updateSession(session);
     io.emit('sessions:updated', sessionManager.listSessions());
     return session.id;
+  },
+  /** 只为查看上一轮记录打开：同目录已有条目就用它（不改模式、不碰 CLI），没有才建一个长程模式条目 */
+  async open(root, { projectName }) {
+    if (!sessionManagerReady || !sessionManager) throw new Error('会话管理器尚未就绪，请稍后再试');
+    const existing = sessionsInDir(sessionManager.listSessions(), root);
+    if (existing.length) return existing[0].id;
+    const session = await this._create(root, projectName);
+    session.runMode = 'longrun';
+    session.origin = 'longrun';
+    session.autoActionEnabled = false;
+    sessionManager.updateSession(session);
+    io.emit('sessions:updated', sessionManager.listSessions());
+    return session.id;
+  },
+  async _create(root, projectName) {
+    const session = await sessionManager.createSession({ name: projectName, workingDir: root, projectName });
+    session.aiType = 'claude';
+    registerBellCallback(session);
+    registerExitCallback(session);
+    return session;
   },
   get(sessionId) {
     return sessionManager?.getSession(sessionId)?.toJSON() || null;
@@ -7320,6 +7334,20 @@ io.on('connection', (socket) => {
     if (typeof cb === 'function') cb(d);
   });
 
+  /** 项目目录现状：选项目时决定新建 / 接管 / 续跑（不需要需求文本） */
+  socket.on('longrun:projectState', (payload = {}, cb) => {
+    let d;
+    try { d = longRunService.projectState(payload); } catch (e) { d = { ok: false, error: e.message }; }
+    if (typeof cb === 'function') cb(d);
+  });
+
+  /** 打开跑过长程的项目（含旧沙箱）只看记录：返回条目 id，前端 attach 后按条目回放 */
+  socket.on('longrun:openProject', async (payload = {}, cb) => {
+    let d;
+    try { d = await longRunService.openProject(payload); } catch (e) { d = { ok: false, error: e.message }; }
+    if (typeof cb === 'function') cb(d);
+  });
+
   /** 会话条目的长程视图：有任务给任务 id（再走 subscribe），没有就按条目工作目录回放上一轮。 */
   socket.on('longrun:forSession', ({ sessionId } = {}, cb) => {
     let d;
@@ -7366,7 +7394,7 @@ io.on('connection', (socket) => {
       sessionManager.updateSession(session);
       io.emit('sessions:updated', sessionManager.listSessions());
 
-      tmuxSendLiteral(tmux, `cd ${shellQuoteSq(plan.root)} && ${plan.command}`);
+      tmuxSendLiteral(tmux, plan.shellLine);
       await new Promise((r) => setTimeout(r, 100));
       execSync(`${getTmuxPrefix()} send-keys -t "${tmux}" Enter`);
 
