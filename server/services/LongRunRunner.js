@@ -72,12 +72,17 @@ const WAITED_TASK_TYPES = new Set(['local_agent']);
 /** 推给监控的过程明细上限。Write 的 content、Read 的返回都可能上万字 */
 export const DETAIL_CHARS = 2000;
 /** 一次 tool_use 里最能说明问题的入参，按此顺序取一个做单行摘要 */
+import pricingTable from './usage/PricingTable.js';
+import { priceUsage } from './usage/costMath.js';
+
 const SALIENT_KEYS = ['file_path', 'command', 'path', 'pattern', 'url', 'notebook_path',
   'prompt', 'description', 'query'];
 
 // ── 运行中费用估算 ────────────────────────────────────────────
-// 单价由已结算的 18 个发次反推（2026-09-06，跨 6 个沙箱最小二乘）。**不抄公开价目表**：
-// 中转网关只上报 input_tokens。两参数而非单一费率：单一费率最大偏差 66%，两参数中位 8.8%。
+// 首选按**模型单价 × 实际用量**折算（CC Switch 的 model_pricing）。事件流里 usage 四项俱全，
+// 折算口径与计费一致。2026-09-18 实测：固定常数在本机模型上估 $30.56 而实收 $9.81（偏高 212%），
+// 而长程的「费用刹车」正是拿这个估算值去比预算的 —— 估高了就会在没花到预算时提前停机（jsonfmt2 那次就是）。
+// 常数只作为兜底：读不到价格表、或模型不在表里时用，它由已结算的 18 个发次反推（2026-09-06 最小二乘）。
 export const COST_PER_CALL = 0.2351;
 export const COST_PER_INPUT_TOKEN = 2.70e-6;
 
@@ -111,7 +116,8 @@ export const ExitReason = {
  * 当前占用 ≈ input + cache_read + cache_creation（cache 也占窗口），每个 assistant 事件都更新。
  */
 export class ContextMeter {
-  constructor() {
+  constructor({ pricing = pricingTable } = {}) {
+    this.pricing = pricing;
     this.peak = 0;
     this.latest = 0;
     this.outputTotal = 0;
@@ -120,9 +126,16 @@ export class ContextMeter {
      * block 多次上报同一个 usage（实测连续三条都是 75977），累加会让费用成倍偏高。
      */
     this._calls = new Map();
+    /** message id → 完整用量（按模型单价折算用）。与 _calls 同一套去重 */
+    this._usage = new Map();
+    this._model = '';
   }
 
-  observe(usage, messageId = null) {
+  /** 事件流里的模型名（result/assistant 事件都带），后续调用按它查价 */
+  setModel(model) { if (model) this._model = String(model); }
+
+  observe(usage, messageId = null, model = '') {
+    if (model) this._model = String(model);
     // 空 usage 保持上一次的水位（原版 `if not usage`）—— 不能把水位清成 0
     if (!usage || (typeof usage === 'object' && Object.keys(usage).length === 0)) return this.latest;
     const inp = Number(usage.input_tokens) || 0;
@@ -132,14 +145,31 @@ export class ContextMeter {
     this.latest = occupied;
     this.peak = Math.max(this.peak, occupied);
     this.outputTotal += Number(usage.output_tokens) || 0;
-    if (messageId && !this._calls.has(messageId)) this._calls.set(messageId, inp);
+    if (messageId && !this._calls.has(messageId)) {
+      this._calls.set(messageId, inp);
+      this._usage.set(messageId, {
+        model: usage.model || this._model,
+        input: inp,
+        output: Number(usage.output_tokens) || 0,
+        cacheRead: Number(usage.cache_read_input_tokens) || 0,
+        cacheWrite: Number(usage.cache_creation_input_tokens) || 0,
+      });
+    }
     return occupied;
   }
 
   get calls() { return this._calls.size; }
 
-  /** 本发至今的估算花费（美元）。中位误差约 9%，仅供运行中参考。 */
+  /** 本发至今的估算花费（美元）：优先按模型单价折算，查不到价再回落常数 */
   get costEstimate() {
+    let priced = 0, ok = this._usage.size > 0;
+    for (const u of this._usage.values()) {
+      const { price } = this.pricing?.get?.(u.model || this._model) || {};
+      const usd = priceUsage(u, price);
+      if (usd === null) { ok = false; break; }
+      priced += usd;
+    }
+    if (ok) return priced;
     let sum = 0;
     for (const v of this._calls.values()) sum += v;
     return this._calls.size * COST_PER_CALL + sum * COST_PER_INPUT_TOKEN;
@@ -319,7 +349,7 @@ export function handleEvent(event, state, meter, cfg, emit = () => {}) {
 
   if (etype === 'assistant') {
     const msg = event.message || {};
-    const occupied = meter.observe(msg.usage || {}, msg.id);
+    const occupied = meter.observe(msg.usage || {}, msg.id, msg.model || '');
     emit('context', {
       occupied, peak: meter.peak, limit: cfg.contextLimit,
       cost_estimate: Math.round(meter.costEstimate * 1e4) / 1e4, calls: meter.calls,

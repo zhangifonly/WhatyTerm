@@ -156,7 +156,7 @@ test('估算对得上真实发次的量级（防改动把估算搞错一个数�
     let real = null;
     for (const raw of fs.readFileSync(f, 'utf8').split('\n')) {
       let d; try { d = JSON.parse(raw); } catch { continue; }
-      if (d.type === 'assistant') m.observe(d.message?.usage || {}, d.message?.id);
+      if (d.type === 'assistant') m.observe(d.message?.usage || {}, d.message?.id, d.message?.model || '');
       else if (d.type === 'result') real = d.total_cost_usd;
     }
     if (real && m.calls > 20) { picked = { f, m, real }; break; }

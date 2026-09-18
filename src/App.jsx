@@ -25,6 +25,7 @@ import RalphWizard from './components/RalphWizard';
 import { useLongRun } from './components/longrun/useLongRun';
 import { useLongRunBell } from './components/longrun/useLongRunBell';
 import ServerStaleBanner from './components/ServerStaleBanner.jsx';
+import SessionUsageCard from './components/SessionUsageCard.jsx';
 import LongRunHandoverDialog from './components/longrun/LongRunHandoverDialog';
 import { taskBadge, taskLine } from './components/longrun/longrunBoard';
 import LongRunMain from './components/longrun/LongRunMain';
@@ -228,6 +229,7 @@ export default function App() {
   // 服务端进程是否跑着旧代码（改完没重启）。修复在磁盘上、进程里还是老逻辑时，
   // 界面上完全看不出来，只会显得"修了没用" —— 这条提示就是为了避免再白排查一轮。
   const [serverStale, setServerStale] = useState(null);
+  const [usageMap, setUsageMap] = useState({});   // sessionId -> {usd, today, kind, ...}
   // 上次见到的服务端启动时刻。变了说明进程重启过，此时前端手里的 AI 判定
   // 全是上个进程留下的（服务端内存缓存已清空），必须丢弃 —— 否则面板会拿
   // 重启前的旧判定继续显示，看上去就像"修复没生效"。
@@ -815,6 +817,11 @@ export default function App() {
     // 监听会话内存更新
     socket.on('sessions:memory', (memoryMap) => {
       setSessionMemory(memoryMap);
+    });
+
+    // 会话用量（CLI 自己花的钱；60 秒一轮，值没变服务端不推）
+    socket.on('sessions:usage', (map) => {
+      setUsageMap(map || {});
     });
 
     // 监听进程详情响应
@@ -1943,6 +1950,12 @@ export default function App() {
               )}
               <div className="session-ai-status">
                 {lrMode ? '🧭 长程' : session.autoActionEnabled ? '🤖 自动' : '💡 建议'}
+                {/* 花费只在真有数时显示：拿不到就什么都不显示，绝不写 $0（会被读成"没花钱"） */}
+                {usageMap[session.id]?.kind === 'ok' && usageMap[session.id].usd > 0 && (
+                  <span className="session-usage" title={`本会话累计 $${usageMap[session.id].usd} · 今天 $${usageMap[session.id].today}`}>
+                    💰 ${usageMap[session.id].usd}
+                  </span>
+                )}
               </div>
             </div>
             );
@@ -3005,6 +3018,7 @@ export default function App() {
                     </div>
                   );
                 })()}
+                <SessionUsageCard usage={usageMap[currentSession.id]} />
                 <div className="ai-status-section">
                   <h4>{t('aiPanel.currentState')}</h4>
                   <p>{aiStatusMap[currentSession.id].currentState || t('aiPanel.waitingAnalysis')}</p>

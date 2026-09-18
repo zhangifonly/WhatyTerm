@@ -197,6 +197,9 @@ import HookServer, { isLongRunHookRequest } from './services/HookServer.js';
 import cliLearner from './services/CliLearner.js';
 import { readContextWaterline, decideWaterlinePhase, isMemoryWritten, HANDOFF_PROMPT, COMPACT_COMMAND, RESUME_PROMPT } from './services/contextWaterline.js';
 import tokenStatsService from './services/TokenStatsService.js';
+import { UsageLedger } from './services/usage/UsageLedger.js';
+import { SessionUsageService } from './services/usage/SessionUsageService.js';
+import { localDayKey } from './services/usage/costMath.js';
 import builtinProviderDB from './services/BuiltinProviderDB.js';
 import ccSwitchAudit from './services/CCSwitchAudit.js';
 import configService from './services/ConfigService.js';
@@ -3352,6 +3355,32 @@ app.post('/api/cli-tools/learn/terminal', async (req, res) => {
   }
 });
 
+// ==================== 会话用量 API（CLI 自己的消耗，与上面监控自身的用量分开） ====================
+
+/** 某会话的花费明细：至今累计、今天、各 CLI 记录的认领情况 */
+app.get('/api/usage/sessions/:sessionId', (req, res) => {
+  try {
+    const id = req.params.sessionId;
+    res.json({
+      sessionId: id, view: usageMap.get(id) || null,
+      totalUsd: usageLedger.sessionTotal(id),
+      todayUsd: usageLedger.dayTotal(localDayKey(Date.now()), id),
+      runs: usageLedger.sessionBindings(id),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+/** 按天汇总：默认最近 14 天 */
+app.get('/api/usage/daily', (req, res) => {
+  try {
+    const days = Math.min(90, Math.max(1, parseInt(req.query.days, 10) || 14));
+    const rows = usageLedger.db.prepare(`SELECT day, cli, model, SUM(cost_usd) cost_usd, SUM(input_tokens) input_tokens,
+      SUM(output_tokens) output_tokens, SUM(cache_read_tokens) cache_read_tokens
+      FROM cli_usage_daily GROUP BY day, cli, model ORDER BY day DESC LIMIT ?`).all(days * 20);
+    res.json({ days, rows, today: usageLedger.dayTotal(localDayKey(Date.now())) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ==================== Token 统计 API ====================
 
 // 获取全局 Token 统计摘要
@@ -5766,6 +5795,47 @@ function killSessionProcesses(tmuxSessionName) {
   }
 }
 
+/**
+ * 会话用量采集（每 60 秒）：读各会话自己的 CLI 记录，算出「本会话至今花了多少 / 今天花了多少」。
+ * 只统计会话里 CLI 自己的消耗；WebTmux 监控自身的调用记在 token_stats 的另一张表里，两者不混。
+ * 长程会话跳过 —— 它自己有一套账（LongRunLoop.spentUsd），一起记会重复。
+ */
+const usageLedger = new UsageLedger();
+const sessionUsageService = new SessionUsageService({ ledger: usageLedger });
+const usageMap = new Map();          // sessionId -> {usd, today, kind, ...}，供列表与面板显示
+let usageTickRunning = false;
+const round2 = (n) => Math.round((n || 0) * 100) / 100;
+
+async function runUsageTick() {
+  if (usageTickRunning || !io || !sessionManagerReady || !sessionManager) return;
+  usageTickRunning = true;
+  const started = Date.now();
+  try {
+    const all = sessionManager.listSessions();
+    const alive = all.filter((s) => !isLongRunMode(s));
+    let changed = false;
+    for (const sd of alive) {
+      try {
+        const r = sessionUsageService.collect(sd, alive);
+        const view = r.ok
+          ? { kind: r.kind, cli: r.cli, usd: round2(r.sessionUsd), today: round2(r.todayUsd), estimated: !!r.estimated, incomplete: !!r.incomplete, model: r.model || '' }
+          : { kind: r.kind, cli: r.cli, reason: r.reason || '' };
+        // 金额先 round 到 2 位再比：浮点每轮都在抖，不这么做 37 张卡每分钟全量重渲染
+        const prev = usageMap.get(sd.id);
+        if (JSON.stringify(prev) !== JSON.stringify(view)) { usageMap.set(sd.id, view); changed = true; }
+      } catch (err) {
+        console.warn(`[用量] 会话 ${sd.name || sd.id} 采集失败:`, err.message);
+      }
+      if (Date.now() - started > 3000) break;   // 单轮硬上限，剩下的下一轮续（游标保证不漏）
+    }
+    if (changed) io.emit('sessions:usage', Object.fromEntries(usageMap));
+  } finally {
+    usageTickRunning = false;
+  }
+}
+setInterval(runUsageTick, 60000);
+setTimeout(runUsageTick, 8000);      // 启动后先跑一轮，面板不至于空着
+
 // 会话内存监控：每 60 秒更新一次所有会话的内存占用（异步执行避免阻塞事件循环）
 setInterval(async () => {
   if (!io || !sessionManager) return;
@@ -6951,6 +7021,8 @@ io.on('connection', (socket) => {
   });
 
   // 获取会话列表
+  socket.emit('sessions:usage', Object.fromEntries(usageMap));   // 新连上的客户端先拿一份当前值，不用等下一轮
+
   socket.on('sessions:list', async () => {
     // 等待 SessionManager 初始化完成
     try {

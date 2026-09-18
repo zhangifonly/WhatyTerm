@@ -4553,3 +4553,14 @@ body {
   gap: 12px;
   margin-bottom: 16px;
 }
+
+/* ── 会话用量（CLI 自己花的钱） ── */
+.session-usage { margin-left: 8px; color: #d0a050; }
+.usage-row { display: flex; align-items: baseline; gap: 8px; margin-top: 4px; }
+.usage-main { font-size: 20px; font-weight: 600; color: hsl(var(--foreground)); }
+.usage-today { font-size: 14px; font-weight: 500; color: #d0a050; }
+.usage-sub { font-size: 11px; color: hsl(var(--muted-foreground)); }
+.usage-model { margin-left: auto; font-size: 10px; padding: 1px 5px; border-radius: 3px;
+  background: hsl(var(--primary) / 0.15); color: hsl(var(--primary)); }
+.usage-note { font-size: 11px; line-height: 1.6; color: #d9b945; margin-top: 6px; }
+.usage-note.dim { color: hsl(var(--muted-foreground)); }
