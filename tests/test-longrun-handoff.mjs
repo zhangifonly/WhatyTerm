@@ -98,6 +98,7 @@ test('守卫：超时分支绝不 /quit —— 没写完就退，这一段对话
   const bail = BODY.slice(BODY.indexOf('if (!written)'), BODY.indexOf('const receipt'));
   assert(bail.includes('reply(') && !bail.includes('/quit'), '超时分支里出现了 /quit：' + bail);
   assert(BODY.indexOf('/quit') > BODY.indexOf('isMemoryWritten'), '/quit 必须排在「确认写完」之后');
+  assert(BODY.includes("tmuxSendLiteral(tmux, '/quit')"), '/quit 走 tmux send-keys 主路径，session.write 只作兜底');
 });
 
 test('守卫：发指令前先看输入框有没有用户草稿，且等它闲下来', () => {

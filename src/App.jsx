@@ -3275,6 +3275,8 @@ export default function App() {
             setLongRunHandoff(null);
             setLongRunNew({ projectRoot: longRunHandoff.root });
             if (why === 'user_skipped') toast.warning('已跳过交接：这段对话的上下文不会进记忆');
+            // 静默跳过会让人以为交接做过了。CLI 不在跑时上下文早已随它退出，记忆可能落后于代码
+            else if (why === 'cli_not_running') toast.info('这个会话里没有在跑的 CLI，无需交接；若刚在终端里改过东西，记忆可能落后于代码');
           }}
           onDone={(receipt) => {
             setLongRunHandoff(null);

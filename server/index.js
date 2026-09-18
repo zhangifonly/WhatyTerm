@@ -7562,9 +7562,17 @@ io.on('connection', (socket) => {
 
       const receipt = parseHandoffReceipt(lastReply);
       step(HANDOFF_PHASE.quitting);
-      session.write('/quit');
-      await new Promise((r) => setTimeout(r, 50));
-      session.write('\r');
+      // 斜杠命令比照其余三处 /quit：send-keys 字面量整行 + 延迟 Enter。
+      // session.write 只在 tmux 发送失败时兜底（历史上它是 catch 分支，不是主路径）。
+      try {
+        tmuxSendLiteral(tmux, '/quit');
+        await new Promise((r) => setTimeout(r, 100));
+        execSync(`${getTmuxPrefix()} send-keys -t "${tmux}" Enter`);
+      } catch {
+        session.write('/quit');
+        await new Promise((r) => setTimeout(r, 100));
+        session.write('\r');
+      }
       let exited = false;
       for (const t0 = Date.now(); Date.now() - t0 < 30000; await new Promise((r) => setTimeout(r, 1500))) {
         if (!processDetector.isCliRunning(tmux)) { exited = true; break; }
