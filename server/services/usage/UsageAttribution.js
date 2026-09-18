@@ -5,7 +5,7 @@
  * 而 `lsof` 拿不到 CLI 与 .jsonl 的绑定（append 完就关文件），所以只能靠下面三级：
  *   1. hook 给的 claudeSessionId —— hook 带 TMUX_PANE，服务端按窗格精确反查会话，是唯一 100% 可靠的通道
  *   2. 同目录同类型只有这一个在跑 —— 排他推断
- *   3. 都不满足 → **不认领**，如实标「归属不明」，该会话不参与预算。绝不按 mtime 猜。
+ *   3. 都不满足 → **不认领**，如实标「归属不明」，界面上如实说明拿不到。绝不按 mtime 猜。
  */
 
 export const SUPPORTED = ['claude', 'codex'];
