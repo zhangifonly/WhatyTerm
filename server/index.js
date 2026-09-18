@@ -7557,7 +7557,7 @@ io.on('connection', (socket) => {
         if (isMemoryWritten(lastReply, round)) { written = true; break; }
       }
       if (!written) {
-        return reply({ ok: false, error: '等了 5 分钟它还没说写完，CLI 没退出，你可以再等等或自己看一眼', reply: lastReply });
+        return reply({ ok: false, error: '等了 5 分钟，它还没说记忆写完了', reply: lastReply });
       }
 
       const receipt = parseHandoffReceipt(lastReply);

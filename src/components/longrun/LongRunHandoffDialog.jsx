@@ -37,7 +37,7 @@ const LongRunHandoffDialog = ({ lr, socket, sessionId, sessionName, onSkip, onDo
   const summary = handoffSummary(result);
 
   return (
-    <div className="modal-overlay" onClick={() => !busy && onClose()}>
+    <div className="modal-overlay" onClick={onClose}>
       <div className="modal confirm-modal lr-modal" style={{ maxWidth: 620 }} onClick={(e) => e.stopPropagation()}>
         <h2>交接给长程{sessionName ? `：${sessionName}` : ''}</h2>
 
@@ -64,6 +64,7 @@ const LongRunHandoffDialog = ({ lr, socket, sessionId, sessionName, onSkip, onDo
             {phase || '正在联系这个会话…'}
             {phase === HANDOFF_STEPS.writing && seconds > 0 && <span className="lr-dim">（已等 {seconds} 秒）</span>}
             <div className="lr-dim">这一步要等它自己写完，通常一两分钟。中途不会打断它正在跑的活。</div>
+            <div className="lr-dim">现在关掉窗口也不影响：交接在后台照常走完（写完仍会退出 CLI），只是你看不到进度。</div>
           </div>
         )}
 
@@ -87,7 +88,8 @@ const LongRunHandoffDialog = ({ lr, socket, sessionId, sessionName, onSkip, onDo
         )}
 
         <div className="modal-actions">
-          {!result && <button className="btn btn-secondary" disabled={busy} onClick={onClose}>取消</button>}
+          {/* 等待期最长六分多钟，这期间必须留得出出口：关窗只是不看了，服务端那边照走 */}
+          {!result && <button className="btn btn-secondary" onClick={onClose}>{busy ? '先关掉窗口' : '取消'}</button>}
           {!busy && !result && <button className="btn btn-primary" onClick={start}>开始交接</button>}
           {result && !done && (
             <>
@@ -97,7 +99,12 @@ const LongRunHandoffDialog = ({ lr, socket, sessionId, sessionName, onSkip, onDo
               <button className="btn btn-primary" onClick={start}>再试一次</button>
             </>
           )}
-          {done && <button className="btn btn-primary" onClick={() => onDone(result.receipt)}>继续开长程</button>}
+          {done && (
+            <>
+              <button className="btn btn-secondary" onClick={onClose} title="交接已完成，记忆已写好；长程随时可以再开">稍后再说</button>
+              <button className="btn btn-primary" onClick={() => onDone(result.receipt)}>继续开长程</button>
+            </>
+          )}
         </div>
       </div>
     </div>

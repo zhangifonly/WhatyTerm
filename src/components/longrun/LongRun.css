@@ -114,18 +114,25 @@
   border-radius: 6px; padding: 6px 8px; overflow-wrap: anywhere; }
 
 /* ── 转长程前的交接向导 ───────────────────────────────────────── */
+/* ⚠ 颜色一律走主题变量（hsl(var(--…))）。自造 --bg-tertiary 这类变量本项目没定义，
+   浅色主题下会退到 fallback 的深色底、配深色前景字，实测几乎读不清。 */
 .lr-handoff-why {
-  margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--warning, #d08700);
-  background: rgba(208, 135, 0, 0.08); font-size: 12px; line-height: 1.6;
+  margin: 8px 0; padding: 8px 10px; border-left: 3px solid #d9b945;
+  background: hsl(var(--muted)); color: hsl(var(--foreground));
+  font-size: 12px; line-height: 1.6;
 }
 .lr-handoff-prompt {
   max-height: 220px; overflow: auto; margin: 8px 0; padding: 8px 10px;
-  background: var(--bg-tertiary, #1b1b1b); border-radius: 4px;
-  font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+  background: hsl(var(--muted)); color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border)); border-radius: 4px;
+  font: 12px/1.6 Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .lr-handoff-progress { display: flex; flex-direction: column; gap: 6px; padding: 12px 0; font-size: 13px; }
 .lr-handoff-progress .lr-bell-dot { margin-right: 6px; }
 .lr-handoff-sum { margin: 6px 0; font-size: 13px; }
 .lr-handoff-files { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-.lr-handoff-files code { padding: 1px 6px; background: var(--bg-tertiary, #1b1b1b); border-radius: 3px; font-size: 12px; }
+.lr-handoff-files code {
+  padding: 1px 6px; background: hsl(var(--muted)); color: hsl(var(--foreground));
+  border-radius: 3px; font-size: 12px;
+}
 .lr-handoff-fail .lr-err { margin-bottom: 4px; }
