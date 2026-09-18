@@ -72,9 +72,11 @@ export function readClaudeRun(cur, pricing) {
       if (state.anchor) { anchorUsd = state.anchor.totalCostUSD; state.anchor = null; }
     }
     const unknownModels = [];
-    let post = 0;
+    let post = 0, mainModel = '', mainTokens = -1;
     for (const [model, usage] of Object.entries(state.byModel)) {
       if (model === '<synthetic>') continue;      // CLI 自己合成的记录，不是 API 调用
+      const weight = usage.input + usage.cacheRead + usage.output;
+      if (weight > mainTokens) { mainTokens = weight; mainModel = model; }   // 用量最大的那个模型报给界面
       const { price } = pricing.get(model);
       const usd = priceUsage(usage, price);
       if (usd === null) { unknownModels.push(model); continue; }
@@ -84,7 +86,7 @@ export function readClaudeRun(cur, pricing) {
       cumUsd: anchorUsd + post,
       costComplete: unknownModels.length === 0 && (anchorUsd > 0 || post > 0 || st.size === 0),
       estimated: anchorUsd === 0,                  // 没有锚点：整份都是折算值
-      byModel: state.byModel, unknownModels,
+      byModel: state.byModel, unknownModels, model: mainModel,
       scanOffset: st.size - Buffer.byteLength(state.remainder, 'utf8'),
       anchorUsd, inode: String(st.ino), fileSize: st.size, fileMtime: st.mtimeMs,
     };

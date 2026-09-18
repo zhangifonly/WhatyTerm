@@ -2953,6 +2953,8 @@ export default function App() {
               )}
             </div>
 
+            {/* 用量：与 AI 分析结果无关，没分析过也要显示 */}
+            <SessionUsageCard usage={usageMap[currentSession.id]} />
             {aiStatusMap[currentSession.id] ? (
               <>
                 {/* 监控策略插件信息 - 紧凑的状态标签 */}
@@ -3018,7 +3020,6 @@ export default function App() {
                     </div>
                   );
                 })()}
-                <SessionUsageCard usage={usageMap[currentSession.id]} />
                 <div className="ai-status-section">
                   <h4>{t('aiPanel.currentState')}</h4>
                   <p>{aiStatusMap[currentSession.id].currentState || t('aiPanel.waitingAnalysis')}</p>
