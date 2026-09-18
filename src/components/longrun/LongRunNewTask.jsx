@@ -18,7 +18,8 @@ const MODE_HINT = {
 const LongRunNewTask = ({ lr, preset, sessions = [], onClose, onStarted, onOpened, onOpenLegacy }) => {
   const [form, setForm] = useState(() => ({
     kind: preset?.projectRoot ? 'existing' : 'new', projectName: '', projectRoot: preset?.projectRoot || '',
-    mode: preset?.mode || 'start', source: 'paste', requirementText: '', docPath: '', fresh: false, providerId: '',
+    // requirementText 可能是刚交接过来的「下一会话应该从哪一项开始」：预填但让人过目，随时可改
+    mode: preset?.mode || 'start', source: 'paste', requirementText: preset?.requirementText || '', docPath: '', fresh: false, providerId: '',
     ...ADVANCED_DEFAULTS,
   }));
   const [dir, setDir] = useState(null);        // 已有项目的现状（longrun:projectState）

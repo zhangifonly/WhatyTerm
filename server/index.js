@@ -195,7 +195,9 @@ import { getProjectRecordingService } from './services/ProjectRecordingService.j
 import cliRegistry from './services/CliRegistry.js';
 import HookServer, { isLongRunHookRequest } from './services/HookServer.js';
 import cliLearner from './services/CliLearner.js';
-import { readContextWaterline, decideWaterlinePhase, isMemoryWritten, HANDOFF_PROMPT, COMPACT_COMMAND, RESUME_PROMPT } from './services/contextWaterline.js';
+import { readContextWaterline, decideWaterlinePhase, isMemoryWritten, HANDOFF_PROMPT, COMPACT_COMMAND, RESUME_PROMPT, LONGRUN_HANDOFF_PROMPT } from './services/contextWaterline.js';
+import { parseHandoffReceipt, HANDOFF_PHASE, HANDOFF_WAIT_MS } from './services/longrunHandoff.js';
+import { promptPendingText } from './services/promptState.js';
 import tokenStatsService from './services/TokenStatsService.js';
 import { UsageLedger } from './services/usage/UsageLedger.js';
 import { SessionUsageService } from './services/usage/SessionUsageService.js';
@@ -7495,6 +7497,81 @@ io.on('connection', (socket) => {
       const { resumePrompt, ...rest } = plan;
       reply({ ok: true, ...rest, removed, providerNote, promptSent,
         note: plan.mode === 'fresh' && !promptSent ? '60 秒内没等到 claude 输入框就绪，没有发「新对话开始提示词」，请手动让它先读记忆' : '' });
+    } catch (e) {
+      reply({ ok: false, error: e.message });
+    }
+  });
+
+  /** 交接指令原文：给界面「看看将要发给它的原话」用。前端不复制一份，免得两边措辞不一致 */
+  socket.on('longrun:handoffPrompt', (_ = {}, cb) => {
+    if (typeof cb === 'function') cb({ ok: true, prompt: LONGRUN_HANDOFF_PROMPT });
+  });
+
+  /**
+   * 普通会话 → 长程 的交接：让当前 CLI 把这一段的进度写进 Auto Memory，写完再退出。
+   *
+   * 为什么必须有这一步：CLI 对话里的进度、结论、失败过的方案都只在它的上下文里。
+   * 直接 /exit 再开长程，接管方从 .memory 起步 —— 那一段全丢。
+   *
+   * ⚠ 超时/失败一律**不发 /quit**：上下文还在 CLI 里，退了才是真丢了。
+   */
+  socket.on('longrun:handoff', async ({ sessionId } = {}, cb) => {
+    const reply = (d) => { if (typeof cb === 'function') cb(d); };
+    // 直接回给发起方，不走 session: 房间：交接要等几分钟，期间人多半切去看别的会话，
+    // 一离开那个房间就再也收不到进度，界面会停在「已发送」一动不动。
+    const step = (phase, extra = {}) => socket.emit('longrun:handoffProgress', { sessionId, phase, ...extra });
+    try {
+      const session = sessionManager?.getSession(sessionId);
+      if (!session) return reply({ ok: false, error: '会话不存在' });
+      if (isLongRunMode(session)) return reply({ ok: false, error: '这个条目已经是长程模式' });
+      const tmux = session.tmuxSessionName;
+      if (!tmux) return reply({ ok: false, error: '会话没有 tmux' });
+      if (!processDetector.isCliRunning(tmux)) return reply({ ok: true, skipped: 'cli_not_running' });
+
+      // 输入框里有人家没提交的草稿 → 不发。发下去会把草稿和指令搅成一句
+      const pending = promptPendingText(stripAnsiForProbe(await session.getScreenContentAsync()));
+      if (pending) return reply({ ok: false, error: `输入框里有未提交的内容「${pending.slice(0, 30)}」，先处理掉再交接` });
+
+      // 等它闲下来再发：正在跑任务时发指令会排在后面，判据也会误读
+      step(HANDOFF_PHASE.waiting_idle);
+      let ready = false;
+      for (const t0 = Date.now(); Date.now() - t0 < 60000; await new Promise((r) => setTimeout(r, 2000))) {
+        if (isClaudeInputReady(await session.getScreenContentAsync())) { ready = true; break; }
+      }
+      if (!ready) return reply({ ok: false, error: '60 秒内它一直在忙，没发收尾指令（不打断正在跑的活）' });
+
+      // 多行提示词必须走 bracketed paste：直接发换行会被当成提交，只发出去第一行
+      tmuxSendLiteral(tmux, bracketedPaste(LONGRUN_HANDOFF_PROMPT));
+      await new Promise((r) => setTimeout(r, 50));
+      execSync(`${getTmuxPrefix()} send-keys -t "${tmux}" Enter`);
+      step(HANDOFF_PHASE.sent);
+
+      // 等它把记忆写完。判据复用水位交接那套（含自指防护：指令自身含「更新了哪些记忆文件」）
+      let lastReply = '';
+      let written = false;
+      const startedAt = Date.now();
+      for (let round = 0; Date.now() - startedAt < HANDOFF_WAIT_MS; round += 1) {
+        await new Promise((r) => setTimeout(r, 3000));
+        lastReply = getLastClaudeReply(await session.getScreenContentAsync());
+        step(HANDOFF_PHASE.writing, { seconds: Math.round((Date.now() - startedAt) / 1000) });
+        if (isMemoryWritten(lastReply, round)) { written = true; break; }
+      }
+      if (!written) {
+        return reply({ ok: false, error: '等了 5 分钟它还没说写完，CLI 没退出，你可以再等等或自己看一眼', reply: lastReply });
+      }
+
+      const receipt = parseHandoffReceipt(lastReply);
+      step(HANDOFF_PHASE.quitting);
+      session.write('/quit');
+      await new Promise((r) => setTimeout(r, 50));
+      session.write('\r');
+      let exited = false;
+      for (const t0 = Date.now(); Date.now() - t0 < 30000; await new Promise((r) => setTimeout(r, 1500))) {
+        if (!processDetector.isCliRunning(tmux)) { exited = true; break; }
+      }
+      step(HANDOFF_PHASE.done);
+      reply({ ok: true, reply: lastReply, receipt, exited,
+        note: exited ? '' : 'CLI 30 秒内没退出，开长程前请手动确认它已退出' });
     } catch (e) {
       reply({ ok: false, error: e.message });
     }

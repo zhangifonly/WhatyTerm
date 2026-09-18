@@ -23,10 +23,11 @@ export function useLongRun(socket) {
   /**
    * socket 请求。带超时：服务端没有这个接口（进程还在跑旧代码）或断线时回调永远不来，
    * 不设超时按钮会一直卡在"处理中"。解析大会话记录要几秒，给足 30 秒。
+   * 少数接口天生要等更久（交接要等 CLI 自己写完记忆，可达数分钟），由调用方传 timeoutMs 放宽。
    */
-  const call = useCallback((event, payload = {}) => new Promise((resolve) => {
+  const call = useCallback((event, payload = {}, timeoutMs = 30000) => new Promise((resolve) => {
     if (!socket) { resolve({ ok: false, error: '未连接' }); return; }
-    const timer = setTimeout(() => resolve({ ok: false, error: `服务端无响应（${event}）：可能断线，或服务端还在跑旧代码需要重启` }), 30000);
+    const timer = setTimeout(() => resolve({ ok: false, error: `服务端无响应（${event}）：可能断线，或服务端还在跑旧代码需要重启` }), timeoutMs);
     socket.emit(event, payload, (r) => { clearTimeout(timer); resolve(r || { ok: false, error: '无响应' }); });
   }), [socket]);
 

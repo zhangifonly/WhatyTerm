@@ -112,3 +112,20 @@
 .lr-finish-outcome { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: 12px; }
 .lr-finish-next { font-size: 12px; line-height: 1.6; color: #d9b945; background: hsl(var(--muted) / .25);
   border-radius: 6px; padding: 6px 8px; overflow-wrap: anywhere; }
+
+/* ── 转长程前的交接向导 ───────────────────────────────────────── */
+.lr-handoff-why {
+  margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--warning, #d08700);
+  background: rgba(208, 135, 0, 0.08); font-size: 12px; line-height: 1.6;
+}
+.lr-handoff-prompt {
+  max-height: 220px; overflow: auto; margin: 8px 0; padding: 8px 10px;
+  background: var(--bg-tertiary, #1b1b1b); border-radius: 4px;
+  font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+}
+.lr-handoff-progress { display: flex; flex-direction: column; gap: 6px; padding: 12px 0; font-size: 13px; }
+.lr-handoff-progress .lr-bell-dot { margin-right: 6px; }
+.lr-handoff-sum { margin: 6px 0; font-size: 13px; }
+.lr-handoff-files { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.lr-handoff-files code { padding: 1px 6px; background: var(--bg-tertiary, #1b1b1b); border-radius: 3px; font-size: 12px; }
+.lr-handoff-fail .lr-err { margin-bottom: 4px; }
