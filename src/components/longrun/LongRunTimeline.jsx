@@ -54,7 +54,10 @@ const LongRunTimeline = ({ board, resetKey }) => {
         {!list.length && <span className="lr-dim">等待事件…</span>}
         {list.map((e) => {
           const v = entryView(e, { fold: prefs.fold, expanded });
-          const cls = `lr-entry r-${e.role}${v.isTrace ? ' trace' : ''}`;
+          // 收工那条服务端归在灰色的 system 角色（与原版逐字段对拍，不能改），
+          // 但它是整条时间线上最该被看见的一条 —— 前端单独加一个醒目类。
+          // 条目里没有 kind 字段（只有 role/label/head/body），所以按标签认，标签来自服务端常量
+          const cls = `lr-entry r-${e.role}${v.isTrace ? ' trace' : ''}${e.label === '运行结束' ? ' lr-finished' : ''}`;
           if (!v.open) {
             return (
               <div key={`${e.stream}-${e.id}`} className={`${cls} one`} onClick={() => toggle(e.id)}>

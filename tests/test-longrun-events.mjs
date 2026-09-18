@@ -131,7 +131,7 @@ await test('折叠规则：过程明细默认折叠；旁白 900 字才折；不
 
 await test('水位条、耗时、列表徽标与文案表', () => {
   assert(ctxView({}).text === '水位 —' && ctxView({ occupied: 81, peak: 90, limit: 100 }).hot && !ctxView({ occupied: 80, peak: 1, limit: 100 }).hot);
-  assert(fmtDur(59.4) === '59s' && fmtDur(725) === '12m05s');
+  assert(fmtDur(59.4) === '59s' && fmtDur(725) === '12m05s' && fmtDur(4320) === '1h12m', fmtDur(4320));
   assert(taskBadge({ state: 'running', awaitingHuman: true, halted: true })[1].includes('等你回答'), '等人优先');
   assert(taskBadge({ state: 'running', pauseArmed: true })[1].includes('暂停闸'), '闸挂上≠已停住');
   assert(taskBadge({ state: 'failed', report: { stop: 'interrupted' } })[1] === '已中断');

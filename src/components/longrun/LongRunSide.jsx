@@ -46,7 +46,7 @@ const LongRunSide = ({ lr, serverStale, collapsed, onToggle }) => {
         <ProviderCards provider={provider} task={task} />
         {board && <WaterlineSection board={board} task={task} />}
 
-        {board && <StatusSection board={board} />}
+        {board && <StatusSection board={board} report={meta.report || task?.report} />}
 
         <div className="ai-status-section">
           <h4>工作目录</h4>

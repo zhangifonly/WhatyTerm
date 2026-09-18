@@ -97,3 +97,18 @@
 .lr-wl-pct.hot { color: #d2694a; }
 /* AI 面板的 .ai-status-section p 是 14px 正文；长程的说明行是次要信息，压回 12px */
 .ai-status-section p.lr-kv { font-size: 12px; line-height: 1.5; color: hsl(var(--muted-foreground)); margin-top: 4px; }
+
+/* ── 收工结论卡与时间线上的结束条目 ── */
+.lr-finished { border-left-color: #4ea672 !important; background: #1b2b22; }
+.lr-finish { display: flex; flex-direction: column; gap: 6px; }
+.lr-finish-head { display: flex; align-items: center; gap: 8px; }
+.lr-finish-title { font-size: 15px; }
+.lr-finish.ok .lr-finish-title { color: #4ea672; }
+.lr-finish.wait .lr-finish-title { color: #d9b945; }
+.lr-finish.bad .lr-finish-title { color: #e08865; }
+.lr-finish-summary { font-size: 13px; overflow-wrap: anywhere; }
+.lr-finish-facts { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: hsl(var(--foreground)); }
+.lr-finish-facts i { font-style: normal; color: hsl(var(--muted-foreground)); margin-right: 4px; }
+.lr-finish-outcome { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: 12px; }
+.lr-finish-next { font-size: 12px; line-height: 1.6; color: #d9b945; background: hsl(var(--muted) / .25);
+  border-radius: 6px; padding: 6px 8px; overflow-wrap: anywhere; }

@@ -44,6 +44,8 @@ export const PAUSE_TEMPLATE = '先停一下，把当前在做的这一步收个�
 export function fmtDur(s) {
   const n = Math.round(s || 0);
   if (n < 60) return `${n}s`;
+  // 长程动辄跑几小时，只给分钟会变成「312m00s」这种没法一眼读的数
+  if (n >= 3600) return `${Math.floor(n / 3600)}h${String(Math.floor((n % 3600) / 60)).padStart(2, '0')}m`;
   return `${Math.floor(n / 60)}m${String(n % 60).padStart(2, '0')}s`;
 }
 

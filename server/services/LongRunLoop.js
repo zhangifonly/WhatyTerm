@@ -30,6 +30,7 @@ import { ExitReason, LongRunRunner, DEFAULT_TOOLS, TASK_WAIT, looksLikeQuestion 
 import { Judgement, Verdict } from './LongRunSupervisor.js';
 import { CONTINUE_PROMPT } from './LongRunPrompts.js';
 import { realResolve } from './LongRunSandbox.js';
+import { memoryFiles } from './LongRunLaunch.js';
 
 /** 正常结束且水位过此线 → 交接（不再继续追问，换个干净窗口） */
 export const HANDOFF_FLOOR = 200_000;
@@ -55,6 +56,9 @@ export const MAX_LEGS = 200;
 export const LOOP_WALL_TIMEOUT = 7200.0;
 /** 暂停期间多久看一次闸门。人删完文件会盯着等反应，更长会让人以为没生效 */
 export const PAUSE_POLL_S = 3.0;
+
+/** 成果摘要落盘文件名。与 report.json 分开：report.json 的字段要与原版逐字段一致 */
+export const OUTCOME_FILE = 'outcome.json';
 
 export const Stop = {
   PROJECT_DONE: 'project_done',   // 监督者判定整体完成
@@ -247,6 +251,38 @@ export class LongRunLoop {
     writeFileSync(gi, cur + add, 'utf8');
   }
 
+  /**
+   * 收尾时的成果摘要：本轮改了哪些文件、快照 commit、记忆条数。给界面的结论卡用。
+   *
+   * ⚠ 整段包在 try 里：统计只是锦上添花，**不能让收尾失败**（收尾失败等于任务白跑）。
+   * 拿不到就返回 null，界面相应不显示成果行 —— 宁可不显示，也不显示编出来的数字。
+   */
+  collectOutcome(stop) {
+    try {
+      // 始终再收一次工作区：没打过收尾快照的停机原因（预算/次数上限/异常/等人）靠它保住最后一段工作；
+      // 已经打过的（project_done/interrupted）这里是空提交，git 自己会拒绝，不会多出垃圾提交
+      const commit = this.snapshotCommit(String(stop || 'stopped')) || this.finishCommit || '';
+      if (!this.startCommit) return { commit, files: [], fileCount: 0, memoryCount: memoryFiles(this.spec.root).length };
+      const [code, out] = this._git(['diff', '--numstat', `${this.startCommit}..HEAD`]);
+      const rows = code === 0 ? String(out).split('\n').filter(Boolean) : [];
+      let insertions = 0, deletions = 0;
+      const files = [];
+      for (const row of rows) {
+        const [add, del, file] = row.split('\t');
+        insertions += Number(add) || 0;          // 二进制文件是 '-'，Number('-') 是 NaN → 计 0
+        deletions += Number(del) || 0;
+        if (file) files.push(file);
+      }
+      return {
+        commit, fileCount: files.length, files: files.slice(0, 5), insertions, deletions,
+        memoryCount: memoryFiles(this.spec.root).length,
+      };
+    } catch (e) {
+      this.log(`  成果摘要统计失败（不影响收尾）: ${e.message}`);
+      return null;
+    }
+  }
+
   /** 打一个快照 commit。只是存点保命，不做成败判定 —— 跑坏了能回退到任意一次交接点。 */
   snapshotCommit(label) {
     this._git(['add', '-A']);
@@ -428,6 +464,8 @@ export class LongRunLoop {
   async run() {
     this.ensureRepo();
     const started = Date.now() / 1000;
+    // 开跑时的 HEAD：收尾时用它 diff 出「本轮改了哪些文件」（拿不到就不给成果摘要，不报错）
+    this.startCommit = this._git(['rev-parse', '--short', 'HEAD'])[1] || '';
     this.log(`沙箱: ${this.spec.root}`);
     this.log(`记忆: ${this.spec.memoryDir}`);
     this.log(`提示词: ${this.prompts.source}`);
@@ -446,7 +484,7 @@ export class LongRunLoop {
         [stop, needs] = [Stop.BUDGET, e.message];
       } else if (e instanceof LoopInterrupted) {
         this.log(`■ 人工终止: ${e.message}`);
-        this.snapshotCommit('interrupted');
+        this.finishCommit = this.snapshotCommit('interrupted');
         [stop, needs] = [Stop.INTERRUPTED, e.message];
       } else {
         this.log(`异常停机: ${e.stack || e.message}`);
@@ -459,6 +497,14 @@ export class LongRunLoop {
       elapsed_s: Date.now() / 1000 - started, cost_usd: this.spentUsd,
       decisions: this.decisions, needs_from_human: needs,
     };
+    // 成果摘要给界面用，**不能进 report 与 finished 事件**：那两处与原版逐字段对拍（多一个键就整片不一致）。
+    // 单独落 .run/outcome.json，服务层读它挂到任务上。
+    const outcome = this.collectOutcome(stop);
+    if (outcome) {
+      try { writeFileSync(path.join(this.spec.runDir, OUTCOME_FILE), JSON.stringify(outcome, null, 2), 'utf8'); }
+      catch (e) { this.log(`  成果摘要落盘失败（不影响收尾）: ${e.message}`); }
+    }
+    this.outcome = outcome;
     this.saveState();
     this.log('\n' + renderReport(report));
     this.emit('finished', {
@@ -609,7 +655,7 @@ export class LongRunLoop {
       });
 
       if (j.projectDone) {
-        this.snapshotCommit('project done');         // 停机前保住最后一段工作（审计 G22）
+        this.finishCommit = this.snapshotCommit('project done');   // 停机前保住最后一段工作（审计 G22）
         return [Stop.PROJECT_DONE, ''];
       }
 

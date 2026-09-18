@@ -1,14 +1,21 @@
 import React from 'react';
 import { verdictClass, STOP_LABEL, VERDICT_LABEL } from './longrunBoard.js';
+import { longRunAdvice } from './longrunAdvice.js';
 
 /** 右侧面板「当前状态」（对应 AI 面板同名卡片）：正在跑哪一发 / 停机原因、最近工具、claude 会话 */
-export const StatusSection = ({ board }) => {
+export const StatusSection = ({ board, report }) => {
   const f = board.finished;
+  // 结束后与主区结论卡同源：同一份 longRunAdvice，不写两套文案（两处说法不一致比没说更糟）
+  const advice = f ? longRunAdvice(report, board) : null;
   return (
     <div className="ai-status-section">
       <h4>当前状态</h4>
       {f ? (
-        <p><span className={`lr-badge ${f.stop === 'project_done' ? 'ok' : 'wait'}`}>已停机</span> {STOP_LABEL[f.stop] || f.stop}</p>
+        <>
+          <p><span className={`lr-badge ${advice?.tone || 'wait'}`}>已停机</span> <b>{advice?.title || STOP_LABEL[f.stop] || f.stop}</b></p>
+          {advice?.summary && <p className="lr-kv">{advice.summary}</p>}
+          {/* 「下一步建议」只在主区结论卡说一遍：两处都铺一遍反而没人读 */}
+        </>
       ) : <p>{board.current_label ? <>正在跑 <b>{board.current_label}</b></> : '等待启动…'}</p>}
       {f?.needs_from_human && <p className="lr-kv">需你提供：<b>{f.needs_from_human}</b></p>}
       {board.last_tool?.length > 0 && <p className="lr-kv">最近工具 <b>{board.last_tool.join(', ')}</b></p>}

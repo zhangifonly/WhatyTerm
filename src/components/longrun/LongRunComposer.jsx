@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import LongRunIntervene from './LongRunIntervene.jsx';
-import { isSubmitKey, STOP_LABEL } from './longrunBoard.js';
+import { isSubmitKey } from './longrunBoard.js';
+import LongRunFinishCard from './LongRunFinishCard.jsx';
 
 /**
  * 主区底部输入区 —— 人要输入的一切都在这里，位置与 Claude Code 的输入框相同，使用习惯一致：
@@ -61,17 +62,9 @@ const LongRunComposer = ({ lr, onResume, onHandover }) => {
 
   if (live) return <div className="lr-composer"><LongRunIntervene lr={lr} task={task} /></div>;
 
-  const f = board.finished;
   return (
     <div className="lr-composer ended">
-      <div className="lr-composer-bar">
-        <span className="lr-dim lr-grow">
-          {board.replay ? '上一轮的记录' : '本轮已结束'}{f ? `（${STOP_LABEL[f.stop] || f.stop}）` : ''}。项目与记忆（.memory）都在：
-          转为终端 = 同一条目用交互式 claude 接着开发；续跑长程 = 追加需求，执行者从记忆接上
-        </span>
-        <button className="btn btn-secondary btn-small" onClick={onResume}>续跑长程…</button>
-        <button className="btn btn-primary btn-small" onClick={onHandover}>转为终端…</button>
-      </div>
+      <LongRunFinishCard report={meta.report || task?.report} outcome={task?.outcome || meta.report?.outcome} board={board} onResume={onResume} onHandover={onHandover} />
     </div>
   );
 };

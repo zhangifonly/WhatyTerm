@@ -109,6 +109,7 @@ class LongRunTask {
       selfCheck: this.selfCheck,
       ...this.snapshot,
       report: this.report,
+      outcome: this.outcome || null,   // 成果摘要（与 report 分开：report 的字段要与原版逐字段一致）
       injectPath: loop.injectPath,
       injectNowPath: loop.injectNowPath,
       pausePath: loop.pausePath,
@@ -365,6 +366,7 @@ export class LongRunService {
 
     task.loop.run().then((report) => {
       task.report = report;
+      task.outcome = task.loop.outcome || null;
       task.state = report.stop === Stop.PROJECT_DONE ? 'done' : 'failed';
       task._humanWaiter = null;
       this._emit(task, 'state', { state: task.state, stop: report.stop });   // finished 已由 loop 发过

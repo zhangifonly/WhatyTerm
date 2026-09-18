@@ -66,7 +66,8 @@ export function useLongRun(socket) {
     setView(next);
     if (!r.ok) { setMeta({ error: r.error, projectRoot: r.projectRoot }); return; }
     setBoard(normalizeSnapshot(r.snapshot));
-    setMeta({ notices: r.notices, file: r.file, count: r.count, spanMinutes: r.spanMinutes, projectRoot: r.projectRoot });
+    // report：服务重启后内存里没有任务了，结论卡的成果摘要只能靠回放读回来的 report.json
+    setMeta({ notices: r.notices, file: r.file, count: r.count, spanMinutes: r.spanMinutes, projectRoot: r.projectRoot, report: r.report });
   }, [call, open]);
 
 

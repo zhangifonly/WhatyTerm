@@ -13,6 +13,16 @@ import { sandboxBase, assertSandboxName, listLongRunProjects } from './LongRunLa
 import { assertSandboxed } from './LongRunSandbox.js';
 
 export const EVENTS_FILE = 'orchestrator.jsonl';
+export const REPORT_FILE = 'report.json';
+export const OUTCOME_FILE = 'outcome.json';
+
+/** 收尾报告与成果摘要。服务重启后内存里没有任务了，结论卡只能靠这两个文件 */
+export function loadReport(runDir) {
+  const read = (f) => { try { return JSON.parse(readFileSync(path.join(runDir, f), 'utf8')); } catch { return null; } };
+  const report = read(REPORT_FILE);
+  const outcome = read(OUTCOME_FILE);
+  return report ? { ...report, outcome } : (outcome ? { outcome } : null);
+}
 
 /**
  * 读事件文件。坏行跳过并计数，不让一行截断的 JSON 废掉整轮回放 ——
@@ -99,5 +109,6 @@ export function replay({ sandboxName, projectRoot, file } = {}) {
   if (bad) notices.push(`⚠ 跳过 ${bad} 行无法解析的事件（多半是最后一行被截断）`);
   const span = ((events.at(-1).at || 0) - (events[0].at || 0)) / 60;
   return { ok: true, file: evFile, sandboxRoot: root, count: events.length, bad,
-    spanMinutes: Number(pyFixed(span, 0)), notices, snapshot: board.snapshot() };
+    spanMinutes: Number(pyFixed(span, 0)), notices, snapshot: board.snapshot(),
+    report: loadReport(path.dirname(evFile)) };
 }

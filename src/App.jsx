@@ -6,6 +6,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11';
 import Anser from 'anser';
 import PinyinMatch from 'pinyin-match';
 import { ToastContainer, toast } from './components/Toast';
+import { longRunAdvice } from './components/longrun/longrunAdvice.js';
 import { useTranslation } from './i18n';
 import ScheduleManager from './components/ScheduleManager';
 import ClosedSessionsList from './components/ClosedSessionsList';
@@ -169,7 +170,14 @@ export default function App() {
   const longRunView = currentSession?.runMode === 'longrun';
   const [longRunNew, setLongRunNew] = useState(null);         // null | {mode, projectRoot?}
   const [longRunHandover, setLongRunHandover] = useState(null); // null | sessionId
-  useLongRunBell(longRun.tasks, longRun.muted);
+  // 长程收工：响一声 + 改标题（useLongRunBell 内），再补一条 toast —— 人正看着别的会话时，这是唯一能看到的提示
+  useLongRunBell(longRun.tasks, longRun.muted, useCallback((task) => {
+    const advice = longRunAdvice(task.report, {});
+    if (!advice) return;
+    const name = task.sandboxName || '长程任务';
+    const say = advice.tone === 'ok' ? toast.success : advice.tone === 'bad' ? toast.error : toast.warning;
+    say(`${name} · ${advice.title}｜${advice.summary}`);   // toast 只收一个字符串，合成一句
+  }, []));
   useEffect(() => {
     if (currentSession?.id && longRunView) longRun.openForSession(currentSession.id);
     else longRun.close();
