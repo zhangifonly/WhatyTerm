@@ -28,7 +28,7 @@ import { execFileSync } from 'child_process';
 import path from 'path';
 import { ExitReason, LongRunRunner, DEFAULT_TOOLS, TASK_WAIT, looksLikeQuestion } from './LongRunRunner.js';
 import { Judgement, Verdict } from './LongRunSupervisor.js';
-import { CONTINUE_PROMPT } from './LongRunPrompts.js';
+import { CONTINUE_PROMPT, MODE_SWITCH_NOTICE } from './LongRunPrompts.js';
 import { realResolve } from './LongRunSandbox.js';
 import { memoryFiles } from './LongRunLaunch.js';
 import { briefLine, classifyError } from './longrunErrorBrief.js';
@@ -138,6 +138,9 @@ export class LongRunLoop {
     this.askHuman = o.askHuman ?? true;
     // 断点续跑：跳过初始化提示词，第一发就是「新对话开始提示词」+ 新需求
     this.skipInit = !!o.skipInit;
+    // 续接终端那条 Claude 对话的 id（从终端转长程且选「续同一条对话」时给）。
+    // 给了它就不发初始化/新对话提示词，见 open()
+    this.resumeSessionId = o.resumeSessionId || '';
     this.extraDirs = [...(o.extraDirs || []), ...(this.spec.extraDirs || [])];
     this.humanChannel = o.humanChannel || null;
     this.runnerFactory = o.runnerFactory || ((opts) => new LongRunRunner(opts));
@@ -556,6 +559,22 @@ export class LongRunLoop {
 
   /** 开场：新项目发初始化 + 需求；续跑发新对话开始 + 需求。返回非 null 表示开场就该停机。 */
   async open() {
+    // 从终端会话转入长程、且选了「续同一条对话」：不发初始化、不发新对话开始提示词，
+    // 直接续那条已有的 Claude 会话 —— 上下文一字不丢，它记得刚才说过的每句话。
+    //
+    // ⚠ 第一发必须先声明规则变了：长程执行者跑在更严的权限白名单下
+    //   （executorSettings），而这条对话是在终端的宽松规则下开始的。
+    //   静默换规则会让它按旧印象去做现在做不了的事，然后在权限拒绝上反复撞墙。
+    if (this.resumeSessionId) {
+      this.sessionId = this.resumeSessionId;
+      this.log(`续接终端会话 ${this.resumeSessionId.slice(0, 8)}…：不发初始化，声明运行方式后继续`);
+      const first = this.requirementText
+        ? `${MODE_SWITCH_NOTICE}\n\n【本次新增需求】\n${this.requirementText}`
+        : MODE_SWITCH_NOTICE;
+      await this.send(first, '运行方式变更声明', { resume: true, killAt: this.hardKill });
+      return null;
+    }
+
     if (this.skipInit) {
       this.log('断点续跑模式：跳过初始化提示词');
       await this.send(this.prompts.resume, '新对话开始提示词', { resume: false, killAt: this.hardKill });
