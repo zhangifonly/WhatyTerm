@@ -7516,6 +7516,17 @@ io.on('connection', (socket) => {
     }
   });
 
+  /**
+   * 某供应商（空=CC Switch 当前配置）的可用模型清单，给开长程时的模型下拉用。
+   * 拿不到就如实回 ok:false + 原因，界面退回手输 —— 编一份清单只会再撞「无可用渠道」。
+   */
+  socket.on('longrun:providerModels', async ({ providerId, refresh } = {}, cb) => {
+    let d;
+    try { d = await listProviderModels({ engine: aiEngine, providerId: providerId || '', refresh: !!refresh }); }
+    catch (e) { d = { ok: false, models: [], error: e.message }; }
+    if (typeof cb === 'function') cb(d);
+  });
+
   /** 交接指令原文：给界面「看看将要发给它的原话」用。前端不复制一份，免得两边措辞不一致 */
   socket.on('longrun:handoffPrompt', (_ = {}, cb) => {
     if (typeof cb === 'function') cb({ ok: true, prompt: LONGRUN_HANDOFF_PROMPT });

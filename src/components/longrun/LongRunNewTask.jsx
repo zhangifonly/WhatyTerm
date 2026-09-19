@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import LongRunAdvanced, { ADVANCED_DEFAULTS, thresholdError } from './LongRunAdvanced.jsx';
 import LongRunPlanView from './LongRunPlanView.jsx';
+import LongRunModelPicker from './LongRunModelPicker.jsx';
 
 const MODE_TEXT = { start: '新建', takeover: '接管已有项目', resume: '续跑' };
 const MODE_HINT = {
@@ -157,6 +158,11 @@ const LongRunNewTask = ({ lr, preset, sessions = [], onClose, onStarted, onOpene
             {providers.map((p) => <option key={p.id} value={p.id}>{p.name}{p.isCurrent ? '（当前）' : ''}</option>)}
           </select>
         </div>
+
+        {/* 模型放在主区而不是折叠的高级参数里：Hitech 两轮全败就败在模型没渠道，
+            而那时它藏在「高级参数」后面，开跑前没人会去看一眼 */}
+        <LongRunModelPicker lr={lr} providerId={form.providerId} value={form.model}
+          onChange={(m) => { set({ model: m }); setPlan(null); }} />
 
         <button type="button" className="lr-link" onClick={() => setShowAdv(!showAdv)}>{showAdv ? '▾' : '▸'} 高级参数（水位、预算、维护、等待、监督者…）</button>
         {showAdv && <LongRunAdvanced form={form} set={set} />}

@@ -52,10 +52,6 @@ const LongRunAdvanced = ({ form, set }) => {
         <Num label="总预算（美元）" hint="留空 = 不限" value={form.totalBudgetUsd} step={0.5} onChange={(v) => set({ totalBudgetUsd: v })} />
         <Num label="调用次数上限" hint="执行者最多被调用多少发" value={form.maxLegs} onChange={(v) => set({ maxLegs: v })} />
         <Num label="后台任务等待（秒）" hint="主线说完后等后台 subagent 收尾的上限；0 = 不等，在飞的 agent 会连坐死掉" value={form.taskWait} onChange={(v) => set({ taskWait: v })} />
-        <div className="form-group half">
-          <label>执行者模型</label>
-          <input value={form.model} onChange={(e) => set({ model: e.target.value })} placeholder="留空 = CLI 默认" />
-        </div>
       </div>
       {err && <div className="lr-err">{err}</div>}
       <Check label="需要人时不等，直接停机" hint="无人值守过夜时用：等一个不在场的人等于永久挂死" checked={form.noAsk} onChange={(v) => set({ noAsk: v })} />
