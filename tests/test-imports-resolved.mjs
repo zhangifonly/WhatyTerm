@@ -133,6 +133,19 @@ test('守卫：监控循环抛异常时要把错误摆到界面上，不能只�
   assert(/needsAction: false/.test(seg), '出错时必须清掉「需要操作」，否则面板继续显示将自动执行却什么都不做');
 });
 
+test('守卫：规则判出「不需要动作」时要推给界面，不能留着旧的「将自动执行」', () => {
+  // iSpring 2026-09-19：Codex 正在跑，规则正确判为"程序运行中，等待完成"，
+  // 但这条路径只 delete 缓存不写入，界面一直显示上一轮的「需要操作：继续 / 将自动执行」，
+  // 而这一轮一个键都不会发 —— 用户看到的就是"说要发却没发"。
+  const src = fs.readFileSync(path.join(ROOT, 'server/index.js'), 'utf8');
+  const at = src.indexOf('预判断成功 - ${preResult.currentState}');
+  assert(at > 0, '没找到预判断成功分支');
+  const seg = src.slice(at, at + 1200);
+  assert(/!status\.needsAction/.test(seg), '没有「不需要动作」的分支');
+  assert(/aiStatusCache\.set/.test(seg), '没写缓存 —— 界面拿不到这个结论');
+  assert(/emit\('ai:status'/.test(seg), '没推 ai:status —— 正在看的人不会收到更新');
+});
+
 test('导入识别要覆盖默认、命名空间、别名三种写法', () => {
   const s = [
     "import fs from 'fs';",

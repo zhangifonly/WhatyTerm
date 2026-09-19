@@ -1,4 +1,5 @@
 import React from 'react';
+import LongRunRuntimeSwitch from './LongRunRuntimeSwitch.jsx';
 import { ctxView, fmtDur } from './longrunBoard.js';
 
 /**
@@ -39,7 +40,7 @@ const ModelLine = ({ model }) => (
  * CLAUDE（执行者）与监督者两张供应商卡。执行者用 CC Switch 当前全局配置（项目里的会话级 relay 已剥离），
  * provider 与 AI 面板同一个 getCurrentProvider 口径。
  */
-export const ProviderCards = ({ provider: p, task }) => {
+export const ProviderCards = ({ provider: p, task, lr }) => {
   const sup = task?.supervisor;
   const supName = sup?.via === 'cli' ? (p?.name || 'CC Switch 当前配置') : sup?.providerName;
   return (
@@ -53,6 +54,10 @@ export const ProviderCards = ({ provider: p, task }) => {
         {p?.isOAuth && p?.oauthEmail && <p className="mono lr-prov-line lr-oauth">{p.oauthEmail}</p>}
         {!p?.isOAuth && p?.url && <p className="mono lr-prov-line">{p.url}</p>}
         <ModelLine model={task?.options?.model || p?.model || '跟随配置'} />
+        {lr && task?.state === 'running' && (
+          <LongRunRuntimeSwitch lr={lr} taskId={task.id} running
+            currentModel={task?.options?.model || ''} currentProviderId={task?.options?.providerId || ''} />
+        )}
       </div>
       {sup && (
         <div className="ai-status-section">

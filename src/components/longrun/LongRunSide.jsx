@@ -43,7 +43,7 @@ const LongRunSide = ({ lr, serverStale, collapsed, onToggle }) => {
       </div>
       <div className="ai-panel-content">
         <ServerStaleBanner stale={serverStale} />
-        <ProviderCards provider={provider} task={task} />
+        <ProviderCards provider={provider} task={task} lr={lr} />
         {board && <WaterlineSection board={board} task={task} />}
 
         {board && <StatusSection board={board} report={meta.report || task?.report} />}

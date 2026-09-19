@@ -343,7 +343,9 @@ export class LongRunLoop {
   _runner(killAt) {
     return this.runnerFactory({
       cwd: this.spec.root,
-      env: this.spec.childEnv(),
+      // envOverride：人在面板上换供应商时注入的地址与密钥（下一发生效）。
+      // 执行者本来继承 CC Switch 全局配置，不注入的话换供应商按钮就是假的。
+      env: { ...this.spec.childEnv(), ...(this.envOverride || {}) },
       allowedTools: this.allowedTools,
       model: this.model,
       // 不设 handoffLimit：水位判断统一在本循环里做，避免两处阈值各说一套

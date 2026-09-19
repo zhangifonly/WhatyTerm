@@ -5023,6 +5023,16 @@ async function runBackgroundAutoAction() {
         let status = preResult;
         updateAiHealthState(true, null, 'rule', sessionData.id);
 
+        // ⚠ 规则判出「不需要动作」（最常见是"程序运行中，等待完成"）时，必须把这个结论
+        //   推到界面。此前这条路径只在按键后 delete 缓存、从不写入，于是界面一直挂着
+        //   上一轮的「需要操作：继续 / 将自动执行」，而实际这一轮什么都不会发
+        //   —— 用户看到的就是"说要发却没发"（iSpring 2026-09-19 实测）。
+        if (!status.needsAction) {
+          const idleStatus = { ...status, updatedAt: new Date().toISOString() };
+          aiStatusCache.set(sessionData.id, idleStatus);
+          io.emit('ai:status', { sessionId: sessionData.id, ...idleStatus, ...getAIProviderInfo() });
+        }
+
         // 检查是否需要 AI 错误分析（检测到 API 错误但需要判断类型）
         if (status.needsErrorAnalysis && status.errorContent) {
           // 无 AI API，直接走默认错误处理策略
@@ -7680,6 +7690,20 @@ io.on('connection', (socket) => {
    * 暂停/继续。⚠ 删掉 pause 后编排器发的是「继续完成项目」，执行者会**接着干** ——
    * 暂停不是终止。
    */
+  /** 运行中换执行者模型（下一发生效，不打断当前这发） */
+  socket.on('longrun:setModel', ({ taskId, model } = {}, cb) => {
+    let d;
+    try { d = longRunService.setModel(taskId, model); } catch (e) { d = { ok: false, error: e.message }; }
+    if (typeof cb === 'function') cb(d);
+  });
+
+  /** 运行中换供应商（下一发生效）。自动恢复永远不碰供应商，只有人点选才换 */
+  socket.on('longrun:setProvider', ({ taskId, providerId } = {}, cb) => {
+    let d;
+    try { d = longRunService.setProvider(taskId, providerId); } catch (e) { d = { ok: false, error: e.message }; }
+    if (typeof cb === 'function') cb(d);
+  });
+
   socket.on('longrun:pause', ({ taskId, on }, cb) => {
     const d = longRunService.pause(taskId, on !== false);
     if (typeof cb === 'function') cb(d);

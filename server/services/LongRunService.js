@@ -533,6 +533,64 @@ export class LongRunService {
     return { ok: true, path: file, immediate: !!immediate };
   }
 
+  /**
+   * 运行中换执行者模型。**下一发生效，不打断当前这发** ——
+   * loop 每次构造 runner 时才读 this.model（LongRunLoop.js 的 _runner），
+   * 所以这里改完，正在跑的那一发照常跑完，不会把它的成果丢掉。
+   *
+   * 不校验模型名是否存在：清单可能拉不到，而人有权填一个清单外的名字。
+   * 填错的代价是下一发报「无可用渠道」，那时自动恢复会接手（longrunRecovery）。
+   */
+  setModel(taskId, model) {
+    const [task, err] = this._running(taskId);
+    if (err) return err;
+    const m = String(model || '').trim();
+    const before = task.loop.model || '';
+    task.loop.model = m;
+    // 计进已试过，免得自动恢复又把它换回来（人的选择优先于自救策略）
+    if (m && Array.isArray(task.loop.triedModels) && !task.loop.triedModels.includes(m)) task.loop.triedModels.push(m);
+    if (task.options) task.options.model = m;
+    task.loop.log(`  人工换模型：${before || '(跟随配置)'} → ${m || '(跟随配置)'}，下一发生效`);
+    this._push(task, { type: 'log', text: `人工换模型：${before || '(跟随配置)'} → ${m || '(跟随配置)'}` });
+    this._broadcast(task);
+    return { ok: true, model: m, before, note: '下一发生效，当前这发照常跑完' };
+  }
+
+  /**
+   * 运行中换供应商（CC Switch）。同样下一发生效。
+   *
+   * ⚠ 换供应商意味着接下来的代码发往另一家中转站、费用记在那边，所以只在人明确点选时做，
+   *   自动恢复永远不碰它（见 longrunRecovery 的注释与守卫）。
+   */
+  setProvider(taskId, providerId) {
+    const [task, err] = this._running(taskId);
+    if (err) return err;
+    const id = String(providerId || '').trim();
+    if (!id) return { ok: false, error: '没有选择供应商' };
+    const st = this.aiEngine?.resolveSessionSettings?.('claude', id);
+    if (!st?.claude?.apiUrl) return { ok: false, error: '这个供应商没有可用的 API 地址' };
+    const before = task.options?.providerId || '';
+    if (task.options) task.options.providerId = id;
+    const name = st._providerName || id;
+
+    // ⚠ 关键：执行者**不读** task.options.providerId —— 它继承 process.env，
+    //   用的是 CC Switch 当前全局配置（实测 childEnv 只做删减不做注入）。
+    //   所以换供应商必须往子进程环境里注入地址与密钥，否则这个按钮是假的：
+    //   面板显示换了，执行者还在发往原来那家。
+    task.loop.envOverride = {
+      ANTHROPIC_BASE_URL: st.claude.apiUrl,
+      ANTHROPIC_AUTH_TOKEN: st.claude.apiKey || '',
+      ANTHROPIC_API_KEY: st.claude.apiKey || '',
+    };
+    // 换了供应商，原来试过的模型清单作废：另一家支持的模型不一样
+    task.loop.triedModels = task.loop.model ? [task.loop.model] : [];
+    task.loop.providerFailures = 0;
+    task.loop.log(`  人工换供应商：${before || '(当前配置)'} → ${name}，下一发生效`);
+    this._push(task, { type: 'log', text: `人工换供应商 → ${name}` });
+    this._broadcast(task);
+    return { ok: true, providerId: id, name, baseUrl: st.claude.apiUrl, note: '下一发生效，当前这发照常跑完' };
+  }
+
   /** 暂停/继续：建或删 .run/pause 空文件。暂停闸在派发口，当前这发照常跑完。 */
   pause(taskId, on = true) {
     const [task, err] = this._running(taskId);
