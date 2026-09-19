@@ -149,3 +149,4 @@
 }
 .lr-rt-warn { font-size: 11px; line-height: 1.5; color: #d9b945; }
 .lr-rt-ok { font-size: 11.5px; color: #6fbf73; }
+.lr-warn-line { margin-top: 4px; color: #d9b945; font-size: 11.5px; line-height: 1.55; }

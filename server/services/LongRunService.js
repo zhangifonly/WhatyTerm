@@ -26,7 +26,7 @@ import { apiSessions, apiSession } from './LongRunTranscript.js';
 import { listProviderModels } from './ProviderModels.js';
 import { resolveClaudeSessionId, lastContextPeak, decideHandover, buildLaunchCommand, buildShellLine } from './LongRunHandover.js';
 import {
-  LaunchError, deriveSandboxName, memoryFiles, priorState, checkRejectedRefs, requirementInput,
+  LaunchError, deriveSandboxName, memoryFiles, priorState, interruptedRun, checkRejectedRefs, requirementInput,
   previewRequirement, resolveProjectRoot, projectDirState, prepareProject, listLongRunProjects,
 } from './LongRunLaunch.js';
 import {
@@ -238,6 +238,7 @@ export class LongRunService {
       suggestedMode: state === 'project' ? 'takeover' : state === 'longrun' ? 'resume' : 'start',
       resumable: state === 'longrun' && memoryFiles(root).length > 0,
       prior: state === 'missing' ? null : priorState(root),
+      interrupted: state === 'missing' ? null : interruptedRun(root),
       runningTaskId: this._runningOn(root)?.id || null,
     };
   }
@@ -272,6 +273,7 @@ export class LongRunService {
       suggestedMode: state === 'project' ? 'takeover' : state === 'longrun' ? 'resume' : 'start',
       resumable: state === 'longrun' && memoryFiles(root).length > 0,
       prior: state === 'missing' ? null : priorState(root),
+      interrupted: state === 'missing' ? null : interruptedRun(root),
       runningTaskId: this._runningOn(root)?.id || null,
       projects: listLongRunProjects(),
       // 旧字段名，界面改完前保留
@@ -502,7 +504,10 @@ export class LongRunService {
   /** 跑过长程的项目与各自上次运行痕迹（续跑与回放挑项目用，resume.py list_sandboxes + show_prior_state）。 */
   sandboxes() {
     return listLongRunProjects().map(({ name, root, legacy }) => {
+      // interrupted：上一轮被中断（重启/关机/崩溃）。列表上要标出来，
+      // 否则那条任务在面板上凭空消失，人不知道该点续跑
       return { name, root, legacy, resumable: memoryFiles(root).length > 0, prior: priorState(root),
+        interrupted: interruptedRun(root),
         hasEvents: existsSync(path.join(root, '.run', EVENTS_FILE)),
         runningTaskId: this._runningOn(root)?.id || null };
     });

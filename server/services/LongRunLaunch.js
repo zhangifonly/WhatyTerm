@@ -142,6 +142,38 @@ export function prepareProject(root, { mode = 'start', fresh = false } = {}) {
  * 上一次运行留下的痕迹（resume.py show_prior_state），让人确认续的是对的项目。
  * @returns {{legs, handoffs, spentUsd, memoryCount, memoryIndex: string[], moreIndex: number}|null}
  */
+/**
+ * 上一轮是不是被**中断**的（而不是正常收工）。
+ *
+ * 判据：`.run/session_state.json` 有进度，却没有 `.run/report.json` ——
+ * 收工一定写报告（LongRunLoop 的 finish 路径），所以"有进度、无报告"只能是中途没了。
+ *
+ * 为什么需要它：JobGuard 是有意设计的 —— WebTmux 一死，执行者整组跟着死，
+ * 防止它无人监管地继续改代码（原版实测过编排器被杀后执行者又跑了 30 分钟）。
+ * 代价是重启服务、关机、崩溃都会终止长程，而任务只在内存里，
+ * **重启后面板上那条任务凭空消失，人不知道发生了什么**。记忆与 git 快照都还在盘上，
+ * 点"续跑"就能接上，但前提是有人告诉他这件事。
+ *
+ * @param {string} root 项目目录
+ * @returns {{interrupted:boolean, legs:number, spentUsd:number, at:number}|null}
+ */
+export function interruptedRun(root) {
+  try {
+    const dir = path.join(root, '.run');
+    const st = JSON.parse(readFileSync(path.join(dir, 'session_state.json'), 'utf8'));
+    if (!(Number(st.legs) > 0)) return null;             // 一发都没跑过，没什么可续的
+    if (existsSync(path.join(dir, 'report.json'))) return null;   // 有收工报告 = 正常结束
+    return {
+      interrupted: true,
+      legs: Number(st.legs) || 0,
+      spentUsd: Number(st.spent_usd || 0),
+      at: Number(st.updated_at || 0),
+    };
+  } catch {
+    return null;    // 没有状态文件或读坏了：当成没跑过，不猜
+  }
+}
+
 export function priorState(root) {
   const out = { legs: null, handoffs: null, spentUsd: null, memoryCount: memoryFiles(root).length,
     memoryIndex: [], moreIndex: 0 };

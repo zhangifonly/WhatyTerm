@@ -124,6 +124,15 @@ const LongRunNewTask = ({ lr, preset, sessions = [], onClose, onStarted, onOpene
               <div className="lr-note wait">
                 将以「{MODE_TEXT[mode]}」方式启动：{MODE_HINT[mode]}
                 {dir.prior?.legs != null && <div>上次长程：调用 {dir.prior.legs} 次 · 交接 {dir.prior.handoffs ?? 0} 次 · ${Number(dir.prior.spentUsd || 0).toFixed(2)}</div>}
+                {/* 上一轮被中断（重启/关机/崩溃）：JobGuard 会连带杀掉执行者，任务只在内存里，
+                    不提示的话那条任务在面板上凭空消失，人不知道该点续跑 */}
+                {dir.interrupted?.interrupted && (
+                  <div className="lr-warn-line">
+                    上一轮没有正常收工（跑了 {dir.interrupted.legs} 发、花 ${Number(dir.interrupted.spentUsd || 0).toFixed(2)}，
+                    最后活动 {new Date((dir.interrupted.at || 0) * 1000).toLocaleString('zh-CN', { hour12: false })}）。
+                    多半是当时重启了服务或关了机 —— 记忆与 git 快照都在，续跑能接上。
+                  </div>
+                )}
                 {dir.runningTaskId && <div className="lr-err">这个项目上已有长程在跑。</div>}
                 {mode === 'resume' && !dir.resumable && <div className="lr-err">没有记忆文件，无法续跑。</div>}
                 {dir.dirState === 'longrun' && onOpened && (
