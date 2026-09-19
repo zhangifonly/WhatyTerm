@@ -32,6 +32,7 @@ import { CONTINUE_PROMPT } from './LongRunPrompts.js';
 import { realResolve } from './LongRunSandbox.js';
 import { memoryFiles } from './LongRunLaunch.js';
 import { briefLine, classifyError } from './longrunErrorBrief.js';
+import { planRecovery } from './longrunRecovery.js';
 
 /** 正常结束且水位过此线 → 交接（不再继续追问，换个干净窗口） */
 export const HANDOFF_FLOOR = 200_000;
@@ -118,6 +119,11 @@ export class LongRunLoop {
     this.requirementText = o.requirementText || '';
     this.supervisor = o.supervisor || null;
     this.model = o.model || '';
+    // 供应商侧故障的自救状态：失败次数决定等多久，试过的模型不重复试
+    this.providerFailures = 0;
+    this.triedModels = this.model ? [this.model] : [];
+    this.recoveries = [];              // 自救记录，收工报告里要如实说
+    this.modelLister = o.modelLister || null;   // () => Promise<string[]>；测试注入，缺省不查
     this.allowedTools = o.allowedTools ?? DEFAULT_TOOLS;
     this.handoffFloor = o.handoffFloor ?? HANDOFF_FLOOR;
     this.handoffCeiling = o.handoffCeiling ?? HANDOFF_CEILING;
@@ -295,10 +301,14 @@ export class LongRunLoop {
    * 白花时间。归类为 provider 的，结论卡会改口让人换模型/换供应商或等一会儿。
    */
   _failureBrief() {
+    // 自救记录即使最终跑成了也要留：人有权知道"这一轮中途等过 5 分钟、换过模型"，
+    // 否则只看到耗时变长却不知道为什么。
+    const recs = Array.isArray(this.recoveries) ? this.recoveries : [];
+    const out = recs.length ? { recoveries: recs.slice(0, 8), recoveryCount: recs.length } : {};
     const raw = this._lastResult?.error || '';
-    if (!raw) return {};
+    if (!raw) return out;
     const c = classifyError(raw);
-    return { failure: { kind: c.kind, label: c.label, advice: c.advice, detail: c.detail, actionable: c.actionable } };
+    return { ...out, failure: { kind: c.kind, label: c.label, advice: c.advice, detail: c.detail, actionable: c.actionable } };
   }
 
   /** 打一个快照 commit。只是存点保命，不做成败判定 —— 跑坏了能回退到任意一次交接点。 */
@@ -603,8 +613,38 @@ export class LongRunLoop {
         //   人看不出是换模型还是等一会儿，只能自己去翻 .run/events/*.jsonl。
         // 拿不到错误正文时**保持原版文案逐字不变**（38 个 parity 场景按字节比对 needs）；
         // 有正文才追加 —— 那种情况原版同样拿不到，不构成行为分歧。
-        if (consecutiveErrors >= 3) {
-          return [Stop.ERROR, `连续 ${consecutiveErrors} 次进程异常${last.error ? `：${briefLine(last.error)}` : ''}`];
+        // 供应商侧故障（503 / 无渠道 / 限流）先自救：等待，再换模型。
+        // 不这样做的后果实测过：CLI 内部已指数退避重试 10 次约 3 分钟，我们零等待又发 3 发，
+        // 12 分钟全撞在同一个坏渠道上然后停机（Hitech 2026-09-18）。
+        //
+        // ⚠ 没有错误正文时**一律不介入**，走原版路径：原版就是拿不到正文照样重试 3 次，
+        //   38 个 parity 场景按字节比对 sent/events，这里多等一次或少发一发都会红。
+        //   自救只在"认出是供应商侧故障"时才启动 —— 那种情况原版同样只能干等着挂。
+        const rec = last.error
+          ? planRecovery({
+            error: last.error,
+            providerFailures: this.providerFailures + 1,
+            triedModels: this.triedModels,
+            available: await this.availableModels(),
+          })
+          : { action: 'stop', waitMs: 0, model: '', reason: '' };
+        if (rec.action !== 'stop') {
+          this.providerFailures += 1;
+          this.log(`  自动恢复：${rec.reason}`);
+          this.emit('recovery', { attempt: this.providerFailures, action: rec.action, reason: rec.reason, model: rec.model || '' });
+          this.recoveries.push(rec.reason);
+          if (rec.action === 'wait') await this.pauseSleep(rec.waitMs / 1000);
+          else if (rec.action === 'switch_model') { this.model = rec.model; this.triedModels.push(rec.model); }
+          this._checkAborted();          // 等待期间人可能已经终止
+          consecutiveErrors = 0;         // 自救过就重新计数，别让等待被当成第 N 次失败
+          await this.send(CONTINUE_PROMPT, '继续完成项目', { resume: true, killAt: this.killAt() });
+          continue;
+        }
+
+        // 自动恢复无能为力（不是供应商侧故障，或手段用尽）→ 按原逻辑停机
+        if (consecutiveErrors >= 3 || rec.reason) {
+          const why = rec.reason || `连续 ${consecutiveErrors} 次进程异常${last.error ? `：${briefLine(last.error)}` : ''}`;
+          return [Stop.ERROR, consecutiveErrors >= 3 && !rec.reason ? why : `连续 ${consecutiveErrors} 次进程异常：${rec.reason}`];
         }
         this.log(`  进程异常（第 ${consecutiveErrors} 次）${last.error ? `：${briefLine(last.error)}` : ''}，重试`);
         await this.send(CONTINUE_PROMPT, '继续完成项目', { resume: true, killAt: this.killAt() });
@@ -724,6 +764,21 @@ export class LongRunLoop {
 
   /** 暂停轮询的等待。单独成方法便于测试同步驱动（原版用线程测会占住沙箱目录）。 */
   pauseSleep(seconds) { return new Promise((r) => setTimeout(r, seconds * 1000)); }
+
+  /**
+   * 当前供应商支持的模型清单，供自动换模型用。查不到就返回空数组 ——
+   * 那时 planRecovery 会退回"继续等待"，绝不凭名字规律拼一个不存在的模型。
+   */
+  async availableModels() {
+    if (!this.modelLister) return [];
+    try {
+      const list = await this.modelLister();
+      return Array.isArray(list) ? list : [];
+    } catch (e) {
+      this.log(`  查询可用模型失败（不影响自救，退回等待）: ${e.message}`);
+      return [];
+    }
+  }
 
   /**
    * 暂停闸：.run/pause 存在就原地等，删掉才继续。**粒度是"一发"**：当前那发会跑完，

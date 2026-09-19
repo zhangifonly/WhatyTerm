@@ -43,6 +43,9 @@ export function longRunAdvice(report, board = {}) {
   if (f.maintenances) facts.push(['记忆维护', `${f.maintenances} 轮`]);
   // 代答要单独说：那是"有 N 个决定不是你做的"，人有权知道
   if (f.decisions) facts.push(['监督者代你作答', `${f.decisions} 次`]);
+  // 自救也要摆出来：中途等过十几分钟或换过模型，人只看耗时会以为是项目难
+  const recN = f.outcome?.recoveryCount || 0;
+  if (recN) facts.push(['供应商故障自动恢复', `${recN} 次`]);
 
   const base = { tone: TONE[stop] || 'idle', facts, outcome: f.outcome || null, actions: [ACT.terminal, ACT.resume] };
   switch (stop) {

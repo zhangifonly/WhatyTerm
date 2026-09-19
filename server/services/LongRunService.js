@@ -23,6 +23,7 @@ import { TASK_WAIT } from './LongRunRunner.js';
 import { LongRunBoard } from './LongRunBoard.js';
 import { replay as replayRun, EVENTS_FILE } from './LongRunReplay.js';
 import { apiSessions, apiSession } from './LongRunTranscript.js';
+import { listProviderModels } from './ProviderModels.js';
 import { resolveClaudeSessionId, lastContextPeak, decideHandover, buildLaunchCommand, buildShellLine } from './LongRunHandover.js';
 import {
   LaunchError, deriveSandboxName, memoryFiles, priorState, checkRejectedRefs, requirementInput,
@@ -352,6 +353,9 @@ export class LongRunService {
     task.loop = new LongRunLoop({
       sandbox, prompts, requirementText: input, supervisor,
       model: o.model, handoffFloor: o.handoffFloor, handoffCeiling: o.handoffCeiling, hardKill: o.hardKill,
+      // 供应商侧故障时自动换模型用：只从供应商自己的 /v1/models 清单里挑，拿不到就退回等待
+      modelLister: () => listProviderModels({ engine: this.aiEngine, providerId: o.providerId || '' })
+        .then((r) => (r.ok ? r.models : [])),
       maintenanceEvery: o.maintenanceEvery, totalBudgetUsd: o.totalBudgetUsd, maxLegs: o.maxLegs,
       taskWait: o.taskWait, askHuman: !o.noAsk, skipInit: resume,
       onEvent: (ev) => this._push(task, ev),
