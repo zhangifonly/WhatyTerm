@@ -229,6 +229,26 @@ export function isEmptyResult(resultEv, meter) {
     && (meter?.calls ?? 0) === 0;
 }
 
+/**
+ * 从 result 事件里取「人能看懂的错误正文」。
+ *
+ * CLI 报 API 错误的形态实测是：`result` 事件带 `is_error:true`、`terminal_reason:"api_error"`，
+ * 错误全文在 `result` 字段里（例：`API Error: 503 分组 X 下模型 claude-fable-5-1 无可用渠道`），
+ * 而 **stderr 是空的**。原先只读 stderr，导致停机原因只剩「连续 3 次进程异常」这种无信息量的话。
+ *
+ * @param {object} ev result 事件
+ * @param {string} stderr 进程 stderr（兜底）
+ * @returns {string} 错误正文，取不到则空串
+ */
+export function errorDetail(ev, stderr = '') {
+  const body = String(ev?.result ?? '').trim();
+  // 正常完成时 result 字段装的是执行者的成果文本，不能当错误报出去
+  if (body && (ev?.is_error || ev?.terminal_reason === 'api_error')) return body.slice(-2000);
+  const err = String(ev?.error ?? '').trim();
+  if (err) return err.slice(-2000);
+  return String(stderr || '').trim().slice(-2000);
+}
+
 /** 构造 `claude -p` 的参数。⚠ 提示词不作为参数传（见 BASE_FLAGS 注释）。 */
 export function buildArgs({
   sessionId, resume = false, allowedTools = DEFAULT_TOOLS, extraDirs = [],
@@ -716,7 +736,11 @@ export class LongRunRunner {
       eventsPath,
       durationS: Date.now() / 1000 - started,
       // 判据跟着结果走，否则日志上只剩 hang_killed 三个字
-      error: reason === ExitReason.ERROR ? stderr.slice(-2000)
+      // ⚠ CLI 把 API 错误写进 **result 事件的 result 字段**，stderr 往往是空的
+      //（Hitech 2026-09-18 实测：503「无可用渠道」重试 10 次全败，stderr 一个字都没有，
+      //  于是 error 是空串 → 停机原因只剩「连续 3 次进程异常」，人无从判断该修什么）。
+      //  所以优先取事件里的错误正文，stderr 只作补充。
+      error: reason === ExitReason.ERROR ? (errorDetail(ev, stderr) || stderr.slice(-2000))
         : (reason === ExitReason.HANG_KILLED || reason === ExitReason.INTERRUPTED_BY_HUMAN) ? state.hangDetail
           : reason === ExitReason.COST_KILLED ? state.costDetail : '',
     };

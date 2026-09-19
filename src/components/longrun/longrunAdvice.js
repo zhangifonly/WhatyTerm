@@ -68,11 +68,19 @@ export function longRunAdvice(report, board = {}) {
         title: '🔁 调用次数用完了',
         summary: `跑满 ${legs} 次调用停机，${elapsed}、花费 ${money(cost)}。`,
         next: '在「续跑长程」的高级参数里调大调用次数上限；如果是卡在同一步反复试，先「转为终端」看一眼再决定。' };
-    case 'error':
+    case 'error': {
+      // 归类来自服务端（outcome.failure）。错在供应商时，「转为终端手工跑」这条默认建议
+      // 是有害的 —— 手工跑必然再撞同一个 503/限流，白花时间。所以按归类改口。
+      const fail = base.outcome?.failure || null;
       return { ...base,
-        title: '⚠ 连续异常，停机了',
-        summary: needs ? `最后的错误：${needs}` : '执行者连续异常，已停机。',
-        next: '别直接续跑（多半会再撞同一个坑）：先「转为终端」手工跑一下看报什么错，编排日志在 .run/loop.log。' };
+        title: fail?.label ? `⚠ 停机了：${fail.label}` : '⚠ 连续异常，停机了',
+        summary: fail?.detail
+          ? `${needs ? `${needs}\n` : ''}执行者报的原话：${fail.detail}`
+          : (needs ? `最后的错误：${needs}` : '执行者连续异常，已停机。'),
+        next: fail?.advice
+          ? `${fail.advice}。${fail.actionable === 'provider' ? '这类错误与项目代码无关，手工跑也会撞同一个坑。' : '编排日志在 .run/loop.log。'}`
+          : '别直接续跑（多半会再撞同一个坑）：先「转为终端」手工跑一下看报什么错，编排日志在 .run/loop.log。' };
+    }
     case 'interrupted':
       return { ...base,
         title: '■ 你终止了它',

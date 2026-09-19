@@ -31,6 +31,7 @@ import { Judgement, Verdict } from './LongRunSupervisor.js';
 import { CONTINUE_PROMPT } from './LongRunPrompts.js';
 import { realResolve } from './LongRunSandbox.js';
 import { memoryFiles } from './LongRunLaunch.js';
+import { briefLine, classifyError } from './longrunErrorBrief.js';
 
 /** 正常结束且水位过此线 → 交接（不再继续追问，换个干净窗口） */
 export const HANDOFF_FLOOR = 200_000;
@@ -262,7 +263,9 @@ export class LongRunLoop {
       // 始终再收一次工作区：没打过收尾快照的停机原因（预算/次数上限/异常/等人）靠它保住最后一段工作；
       // 已经打过的（project_done/interrupted）这里是空提交，git 自己会拒绝，不会多出垃圾提交
       const commit = this.snapshotCommit(String(stop || 'stopped')) || this.finishCommit || '';
-      if (!this.startCommit) return { commit, files: [], fileCount: 0, memoryCount: memoryFiles(this.spec.root).length };
+      if (!this.startCommit) {
+        return { commit, files: [], fileCount: 0, memoryCount: memoryFiles(this.spec.root).length, ...this._failureBrief() };
+      }
       const [code, out] = this._git(['diff', '--numstat', `${this.startCommit}..HEAD`]);
       const rows = code === 0 ? String(out).split('\n').filter(Boolean) : [];
       let insertions = 0, deletions = 0;
@@ -276,11 +279,26 @@ export class LongRunLoop {
       return {
         commit, fileCount: files.length, files: files.slice(0, 5), insertions, deletions,
         memoryCount: memoryFiles(this.spec.root).length,
+        ...this._failureBrief(),
       };
     } catch (e) {
       this.log(`  成果摘要统计失败（不影响收尾）: ${e.message}`);
       return null;
     }
+  }
+
+  /**
+   * 最后一发的错误摘要与归类，写进 outcome.json 供结论卡用。
+   *
+   * 为什么要归类而不只是原文：错在供应商（没渠道/限流/认证）时，
+   * 「先转为终端手工跑一下」这条默认建议是**有害的** —— 手工跑必然再撞同一个 503，
+   * 白花时间。归类为 provider 的，结论卡会改口让人换模型/换供应商或等一会儿。
+   */
+  _failureBrief() {
+    const raw = this._lastResult?.error || '';
+    if (!raw) return {};
+    const c = classifyError(raw);
+    return { failure: { kind: c.kind, label: c.label, advice: c.advice, detail: c.detail, actionable: c.actionable } };
   }
 
   /** 打一个快照 commit。只是存点保命，不做成败判定 —— 跑坏了能回退到任意一次交接点。 */
@@ -371,6 +389,10 @@ export class LongRunLoop {
     const est = result.costUsd ? '' : '（估算）';
     this.log(`    ${result.exitReason} · 水位 ${result.contextPeak.toLocaleString('en-US')} · `
       + `${result.durationS.toFixed(0)}s · $${billed.toFixed(4)}${est}`);
+    // 每发就把错误正文落进 loop.log。原先只记 exitReason，实测四发全 error 的日志里
+    // 只有四行 `error`，真因（503 无可用渠道）只存在于 .run/events/*.jsonl 里，
+    // 而那是给人看的最后一道口 —— 提示语还让人「去看 loop.log」，看了也没有。
+    if (result.error) this.log(`    ↳ ${briefLine(result.error)}`);
     if (result.pendingTasks?.length) {
       const names = result.pendingTasks.slice(0, 4).map((t) => t.description || t.task_id || '?').join('、');
       this.log(`    ⚠ ${result.pendingTasks.length} 个后台任务仍在飞: ${names}`);
@@ -576,8 +598,15 @@ export class LongRunLoop {
       // ⚠ 在原会话里催继续重试，**不是交接**（审计 G11）；计数器在这之后立刻清零（G12）
       if (last.exitReason === ExitReason.ERROR) {
         consecutiveErrors += 1;
-        if (consecutiveErrors >= 3) return [Stop.ERROR, `连续 ${consecutiveErrors} 次进程异常`];
-        this.log(`  进程异常（第 ${consecutiveErrors} 次），重试`);
+        // ⚠ 必须带上错误正文。Hitech 2026-09-18 实测：真因是「503 无可用渠道（模型
+        //   claude-fable-5-1）」，重试 10 次全败，而停机只说「连续 3 次进程异常」——
+        //   人看不出是换模型还是等一会儿，只能自己去翻 .run/events/*.jsonl。
+        // 拿不到错误正文时**保持原版文案逐字不变**（38 个 parity 场景按字节比对 needs）；
+        // 有正文才追加 —— 那种情况原版同样拿不到，不构成行为分歧。
+        if (consecutiveErrors >= 3) {
+          return [Stop.ERROR, `连续 ${consecutiveErrors} 次进程异常${last.error ? `：${briefLine(last.error)}` : ''}`];
+        }
+        this.log(`  进程异常（第 ${consecutiveErrors} 次）${last.error ? `：${briefLine(last.error)}` : ''}，重试`);
         await this.send(CONTINUE_PROMPT, '继续完成项目', { resume: true, killAt: this.killAt() });
         continue;
       }
