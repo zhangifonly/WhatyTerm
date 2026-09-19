@@ -7484,6 +7484,27 @@ io.on('connection', (socket) => {
     if (typeof cb === 'function') cb(d);
   });
 
+  /**
+   * 长程 ⇄ 终端 切换的统一预检。只读，不动任何东西。
+   * CLI 是否在跑、输入框有没有草稿这两件事只有 index.js 探得到，查好传给 service。
+   */
+  socket.on('longrun:switchPlan', async ({ sessionId, to } = {}, cb) => {
+    const reply = (d) => { if (typeof cb === 'function') cb(d); };
+    try {
+      const session = sessionManager?.getSession(sessionId);
+      if (!session) return reply({ ok: false, error: '会话不存在', blockers: ['会话不存在'], warnings: [] });
+      const tmux = session.tmuxSessionName;
+      const cliRunning = tmux ? processDetector.isCliRunning(tmux) : false;
+      let pendingDraft = '';
+      try {
+        pendingDraft = promptPendingText(stripAnsiForProbe(await session.getScreenContentAsync())) || '';
+      } catch { /* 抓屏失败不影响判定，只是少一条提醒 */ }
+      reply(longRunService.switchPlanFor(sessionId, { to, cliRunning, pendingDraft }));
+    } catch (e) {
+      reply({ ok: false, error: e.message, blockers: [e.message], warnings: [] });
+    }
+  });
+
   /** 转为终端的计划预览：接续方式（按水位自动）、理由、要打的命令。只读 */
   socket.on('longrun:handoverPlan', ({ sessionId, mode } = {}, cb) => {
     let d;
@@ -7514,6 +7535,8 @@ io.on('connection', (socket) => {
         const r = applySessionProvider(session, 'claude', plan.providerId);
         providerNote = r?.ok === false ? `会话级供应商未能恢复：${r.error}` : '已恢复长程期间移走的会话级供应商';
       }
+      // 标记"这一轮是主动切回终端的"，否则 interruptedRun 会把正常往返误报成"上一轮没正常收工"
+      longRunService.markSwitchedOut(plan.root, { mode: plan.mode, claudeSessionId: plan.claudeSessionId || '' });
       session.runMode = 'terminal';
       session.origin = 'longrun';
       session.aiType = 'claude';

@@ -70,6 +70,21 @@ test('没有 .run、状态文件损坏、目录不存在 → 一律返回 null�
   assert(interruptedRun('') === null && interruptedRun(null) === null, '空参数');
 });
 
+test('主动切回终端留下的标记 → 不算被中断（否则每次正常往返都挂告警）', () => {
+  const root = tmp({ legs: 5, spent_usd: 12.3, updated_at: 1789800000 });
+  assert(interruptedRun(root)?.interrupted === true, '前提：没标记时应判为中断');
+  fs.writeFileSync(path.join(root, '.run', 'switched.json'),
+    JSON.stringify({ at: 1789800001, mode: 'resume' }), 'utf8');
+  assert(interruptedRun(root) === null, '有切出标记还报中断 —— 正常往返会被误报');
+});
+
+test('标记文件名由 SWITCHED_FILE 导出，写入方与判定方用同一个常量', async () => {
+  const { SWITCHED_FILE } = await import('../server/services/LongRunLaunch.js');
+  assert(SWITCHED_FILE === 'switched.json', `常量变了：${SWITCHED_FILE}`);
+  const svc = fs.readFileSync(new URL('../server/services/LongRunService.js', import.meta.url), 'utf8');
+  assert(/SWITCHED_FILE/.test(svc), '写入方硬编码了文件名 —— 两边会漂移');
+});
+
 // ── 接线守卫 ──────────────────────────────────────────────────────
 const SVC = fs.readFileSync(new URL('../server/services/LongRunService.js', import.meta.url), 'utf8');
 const UI = fs.readFileSync(new URL('../src/components/longrun/LongRunNewTask.jsx', import.meta.url), 'utf8');
@@ -77,6 +92,13 @@ const UI = fs.readFileSync(new URL('../src/components/longrun/LongRunNewTask.jsx
 test('守卫：项目列表与项目现状两个接口都要带这个字段', () => {
   const hits = SVC.split('interruptedRun(root)').length - 1;
   assert(hits >= 3, `只接了 ${hits} 处 —— 列表(1)与 projectState 的两条返回路径(2)都要带，否则某些入口看不到提示`);
+});
+
+test('守卫：切出时写标记、切回时清标记（漏一边就会误报或漏报）', () => {
+  const IDX = fs.readFileSync(new URL('../server/index.js', import.meta.url), 'utf8');
+  assert(/markSwitchedOut\(/.test(IDX), '转终端路径没写标记 —— 正常往返会被误报成被中断');
+  // 只查**调用点**：方法定义本身也含这个名字，光匹配名字删掉调用也照样通过
+  assert(/this\.clearSwitchedOut\(/.test(SVC), '重新开跑没清标记 —— 之后真被中断也不会报');
 });
 
 test('守卫：界面要说清「记忆还在、续跑能接上」，不能只报警不给出路', () => {

@@ -157,12 +157,18 @@ export function prepareProject(root, { mode = 'start', fresh = false } = {}) {
  * @param {string} root 项目目录
  * @returns {{interrupted:boolean, legs:number, spentUsd:number, at:number}|null}
  */
+/** 主动切回终端时留下的标记。它与 report.json 的区别：报告 = 这一轮结束了；这个 = 换人开车了 */
+export const SWITCHED_FILE = 'switched.json';
+
 export function interruptedRun(root) {
   try {
     const dir = path.join(root, '.run');
     const st = JSON.parse(readFileSync(path.join(dir, 'session_state.json'), 'utf8'));
     if (!(Number(st.legs) > 0)) return null;             // 一发都没跑过，没什么可续的
     if (existsSync(path.join(dir, 'report.json'))) return null;   // 有收工报告 = 正常结束
+    // 主动切回终端也不是"被中断"：那是人有意为之，记忆与进度都好着。
+    // 不排除它的话，每次正常往返都会在界面上挂一条"上一轮没正常收工"的告警。
+    if (existsSync(path.join(dir, SWITCHED_FILE))) return null;
     return {
       interrupted: true,
       legs: Number(st.legs) || 0,

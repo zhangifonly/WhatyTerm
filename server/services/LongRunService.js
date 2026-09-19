@@ -23,10 +23,11 @@ import { TASK_WAIT } from './LongRunRunner.js';
 import { LongRunBoard } from './LongRunBoard.js';
 import { replay as replayRun, EVENTS_FILE } from './LongRunReplay.js';
 import { apiSessions, apiSession } from './LongRunTranscript.js';
+import { switchPlan } from './longrunSwitch.js';
 import { listProviderModels } from './ProviderModels.js';
 import { resolveClaudeSessionId, lastContextPeak, decideHandover, buildLaunchCommand, buildShellLine } from './LongRunHandover.js';
 import {
-  LaunchError, deriveSandboxName, memoryFiles, priorState, interruptedRun, checkRejectedRefs, requirementInput,
+  LaunchError, deriveSandboxName, memoryFiles, priorState, interruptedRun, SWITCHED_FILE, checkRejectedRefs, requirementInput,
   previewRequirement, resolveProjectRoot, projectDirState, prepareProject, listLongRunProjects,
 } from './LongRunLaunch.js';
 import {
@@ -157,6 +158,9 @@ export function normalizeOptions(o = {}) {
     noSupervisor: !!o.noSupervisor,
     allowMissingRefs: !!o.allowMissingRefs,
     providerId: o.providerId || null,
+    // 从终端会话转长程且选「续同一条对话」时给：续那条 Claude 会话而不是开新的。
+    // 只认 uuid 形态，免得把别的字符串当会话 id 传给 claude --resume
+    resumeSessionId: /^[0-9a-f-]{36}$/i.test(String(o.resumeSessionId || '')) ? String(o.resumeSessionId) : '',
   };
   try { assertThresholds(out); } catch (e) { throw new LaunchError(e.message); }
   return out;
@@ -352,6 +356,8 @@ export class LongRunService {
     task = new LongRunTask({ id, mode: o.mode, sandbox, docPath, requirementText: input, requirementDoc: req.text,
       options: { ...o }, selfCheck: sc.toJSON(), supervisorInfo });
     task.sessionId = sessionId;
+    // 这一轮重新开跑，清掉"已切出"标记：此后真被中断就该如实报中断
+    this.clearSwitchedOut(sandbox.root);
     task.loop = new LongRunLoop({
       sandbox, prompts, requirementText: input, supervisor,
       model: o.model, handoffFloor: o.handoffFloor, handoffCeiling: o.handoffCeiling, hardKill: o.hardKill,
@@ -360,6 +366,7 @@ export class LongRunService {
         .then((r) => (r.ok ? r.models : [])),
       maintenanceEvery: o.maintenanceEvery, totalBudgetUsd: o.totalBudgetUsd, maxLegs: o.maxLegs,
       taskWait: o.taskWait, askHuman: !o.noAsk, skipInit: resume,
+      resumeSessionId: o.resumeSessionId || '',
       onEvent: (ev) => this._push(task, ev),
       // Promise 执行器同步运行，waiter 在同一 tick 挂好，不存在回答先到的竞态
       // 挂起点就绪后立刻广播：need_human 事件先于挂起发出，那一刻的摘要里 awaitingHuman 还是 false，
@@ -488,6 +495,71 @@ export class LongRunService {
       resumePrompt: decided.mode === 'fresh' ? loadPrompts(task?.options?.promptsFile || PROMPT_FILE).resume : '',
       // 长程期间从项目配置移走的会话级供应商：转回终端时重新应用
       providerId: backup?._localProviderId || null,
+    };
+  }
+
+  /**
+   * 记下「这一轮是主动切回终端的」，并保住当时的进度数字。
+   *
+   * 为什么需要这个标记：interruptedRun 判"有进度、无收工报告"为被中断，
+   * 而主动切回终端恰好也是这个形态 —— 不区分的话，每次正常往返都会在界面上
+   * 挂一条"上一轮没正常收工"的告警，久了人就不看告警了。
+   */
+  markSwitchedOut(root, extra = {}) {
+    try {
+      const dir = path.join(root, '.run');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, SWITCHED_FILE),
+        JSON.stringify({ at: Date.now() / 1000, prior: priorState(root), ...extra }, null, 2), 'utf8');
+      return true;
+    } catch { return false; }   // 标记写不上只影响告警显示，不该让切换失败
+  }
+
+  /** 切回长程时清掉标记：这一轮重新开跑，再中断就该如实报中断了 */
+  clearSwitchedOut(root) {
+    try { unlinkSync(path.join(root, '.run', SWITCHED_FILE)); } catch { /* 本来就没有 */ }
+  }
+
+  /**
+   * 切换预检：查好事实交给纯逻辑判定（longrunSwitch.switchPlan）。
+   *
+   * 两个方向共用一个入口，因为前置条件与失败原因高度重叠；
+   * 事实在这里查、判定在那边做，判定才可单测。
+   *
+   * @param {string} sessionId
+   * @param {object} p
+   * @param {'longrun'|'terminal'} p.to
+   * @param {boolean} [p.cliRunning]  由调用方（index.js）探进程后传入
+   * @param {string} [p.pendingDraft] 输入框里未提交的内容
+   */
+  switchPlanFor(sessionId, { to, cliRunning = false, pendingDraft = '' } = {}) {
+    const bound = this.sessionBinder?.get(sessionId) || null;
+    const task = [...this.tasks.values()].filter((t) => t.sessionId === sessionId)
+      .sort((a, b) => b.startedAt - a.startedAt)[0] || null;
+    const root = task?.sandbox?.root || bound?.workingDir || '';
+    const rootExists = !!root && existsSync(root);
+    const from = bound?.runMode === 'longrun' || task?.state === 'running' ? 'longrun' : 'terminal';
+
+    const found = rootExists ? resolveClaudeSessionId({ root, liveSessionId: task?.loop?.sessionId || null }) : null;
+    const other = rootExists ? this._runningOn(root) : null;
+    const plan = switchPlan({
+      to, from, rootExists, cliRunning,
+      longRunRunning: task?.state === 'running',
+      // 同一目录上别的条目在跑长程（自己这条不算）
+      otherLongRunOnRoot: !!other && other.sessionId !== sessionId,
+      contextPeak: rootExists ? lastContextPeak(root) : null,
+      handoffFloor: task?.loop?.handoffFloor ?? HANDOFF_FLOOR,
+      hasSessionId: !!found?.id,
+      hasMemory: rootExists && memoryFiles(root).length > 0,
+      // 续跑有记忆就够；新需求由界面在切换时补
+      hasRequirement: rootExists && memoryFiles(root).length > 0,
+      pendingDraft,
+      interrupted: rootExists ? interruptedRun(root) : null,
+    });
+    return {
+      ok: plan.ok, ...plan, root, from, to,
+      claudeSessionId: found?.id || '', idSource: found?.source || '',
+      prior: rootExists ? priorState(root) : null,
     };
   }
 
