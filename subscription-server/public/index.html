@@ -18,25 +18,159 @@
   </style>
 </head>
 <body class="text-gray-100">
-  <div id="app" class="container mx-auto px-4 py-8 max-w-4xl">
+  <div id="app" class="container mx-auto px-4 py-8 max-w-5xl">
     <!-- 头部 -->
-    <header class="flex justify-between items-center mb-12">
+    <header class="flex flex-wrap justify-between items-center gap-4 mb-14">
       <div>
         <h1 class="text-4xl font-bold mb-2 bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
           WhatyTerm
         </h1>
-        <p class="text-gray-400">开源 AI 智能终端管理工具 · 个人免费</p>
+        <p class="text-gray-400">让 AI 编程 CLI 无人值守地把活干完 · 开源 · 个人免费</p>
       </div>
       <div class="flex gap-3">
-        <a href="#download" class="px-6 py-3 bg-green-600 hover:bg-green-700 rounded-lg font-medium">
-          下载客户端
-        </a>
-        <a href="/user.html" class="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded-lg font-medium">
-          登录 / 用户中心
-        </a>
+        <a href="/user-center.html" class="px-4 py-2 glass rounded-lg hover:bg-white/10 transition text-sm">用户中心</a>
+        <a href="https://github.com/zhangifonly/WhatyTerm" target="_blank" rel="noopener"
+           class="px-4 py-2 glass rounded-lg hover:bg-white/10 transition text-sm">GitHub</a>
       </div>
     </header>
 
+    <!-- 首屏：一句话说清它替你做什么 -->
+    <section class="mb-16">
+      <h2 class="text-3xl font-bold mb-4 leading-snug">
+        你把需求交给它，<span class="text-blue-400">剩下的几小时它自己跑</span>
+      </h2>
+      <p class="text-gray-300 leading-relaxed mb-6 max-w-3xl">
+        Claude Code、Codex 这类 AI 编程 CLI 很能干，但都要人守着：等它问话、催它继续、
+        上下文满了得手动收尾。WhatyTerm 把这些盯守的活接过去 —— 它读屏判断 CLI 当前在干什么，
+        该答就答、该催才催、上下文快满时先让它把进度写进记忆再换一个干净窗口接着做。
+      </p>
+      <div class="grid md:grid-cols-3 gap-4">
+        <div class="glass rounded-xl p-5">
+          <div class="text-2xl mb-2">🖥️</div>
+          <h3 class="font-semibold mb-2">终端会话管理</h3>
+          <p class="text-sm text-gray-400 leading-relaxed">
+            基于 tmux，关掉网页会话照常跑。手机、平板打开同一个地址就能看能操作。
+          </p>
+        </div>
+        <div class="glass rounded-xl p-5">
+          <div class="text-2xl mb-2">👁️</div>
+          <h3 class="font-semibold mb-2">AI 读屏监控</h3>
+          <p class="text-sm text-gray-400 leading-relaxed">
+            16 种场景策略，判断该确认、该回答还是该等它跑完。拿不准时只给建议，不替你按键。
+          </p>
+        </div>
+        <div class="glass rounded-xl p-5">
+          <div class="text-2xl mb-2">🌙</div>
+          <h3 class="font-semibold mb-2">长程编程</h3>
+          <p class="text-sm text-gray-400 leading-relaxed">
+            给一份需求文档，它自己分段推进、跨窗口交接、到点收工给结论。过夜也能跑。
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 长程编程：这一版的重点 -->
+    <section class="mb-16">
+      <div class="flex items-baseline gap-3 mb-2">
+        <h2 class="text-2xl font-semibold">长程编程</h2>
+        <span class="text-xs px-2 py-0.5 rounded bg-blue-500/20 text-blue-300">v1.4 新架构</span>
+      </div>
+      <p class="text-gray-400 mb-6 max-w-3xl">
+        一次交待清楚，然后可以去睡觉。它不做任务拆解 —— 拆解交给 CLI 自己，
+        它只管一件事：让这段工作在上下文用完之后还能接着往下走。
+      </p>
+      <div class="grid md:grid-cols-2 gap-4">
+        <div class="glass rounded-xl p-5">
+          <h3 class="font-semibold mb-2">上下文用满了会自己交接</h3>
+          <p class="text-sm text-gray-400 leading-relaxed">
+            水位到阈值时，先让它把进度、已确认的结论、失败过的方案写进项目记忆，
+            再开一个干净窗口从记忆接上。不是简单压缩，是真的换一段新对话。
+          </p>
+        </div>
+        <div class="glass rounded-xl p-5">
+          <h3 class="font-semibold mb-2">有个监督者在旁边判断</h3>
+          <p class="text-sm text-gray-400 leading-relaxed">
+            每段结束时判断：继续、叫人、还是项目已完成。它拿不准的事不替你决定，
+            会停下来在面板上问你，你回一句它接着跑。
+          </p>
+        </div>
+        <div class="glass rounded-xl p-5">
+          <h3 class="font-semibold mb-2">花了多少钱看得见</h3>
+          <p class="text-sm text-gray-400 leading-relaxed">
+            按模型定价实时结算，每段调用花多少、今天累计多少都在面板上。
+            可以设总预算，到了就停机保住现场。
+          </p>
+        </div>
+        <div class="glass rounded-xl p-5">
+          <h3 class="font-semibold mb-2">收工给结论，不是丢个状态码</h3>
+          <p class="text-sm text-gray-400 leading-relaxed">
+            结束时告诉你做完了什么、改了哪些文件、下一步该干什么。
+            跑挂了会说清真实原因 —— 是供应商没渠道还是代码有问题，分得清。
+          </p>
+        </div>
+      </div>
+      <p class="text-sm text-gray-500 mt-4">
+        普通会话也能随时转成长程：转之前它会先让当前 CLI 把这一段的上下文写进记忆，再交给无人值守接手。
+      </p>
+    </section>
+    <!-- 支持哪些 CLI -->
+    <section class="mb-16">
+      <h2 class="text-2xl font-semibold mb-2">支持的 AI 编程 CLI</h2>
+      <p class="text-gray-400 mb-6 max-w-3xl">
+        用你已经装好的 CLI 和已经配好的 API，不需要另外提供密钥。
+        监控判断也走这些 CLI 自己的配置，所以你换供应商它跟着换。
+      </p>
+      <div class="grid sm:grid-cols-2 lg:grid-cols-5 gap-3">
+        <div class="glass rounded-lg p-4 text-center">
+          <div class="font-semibold text-sm mb-1">Claude Code</div>
+          <div class="text-xs text-gray-500">监控 · 长程</div>
+        </div>
+        <div class="glass rounded-lg p-4 text-center">
+          <div class="font-semibold text-sm mb-1">OpenAI Codex</div>
+          <div class="text-xs text-gray-500">监控</div>
+        </div>
+        <div class="glass rounded-lg p-4 text-center">
+          <div class="font-semibold text-sm mb-1">Google Gemini</div>
+          <div class="text-xs text-gray-500">监控</div>
+        </div>
+        <div class="glass rounded-lg p-4 text-center">
+          <div class="font-semibold text-sm mb-1">Grok (xAI)</div>
+          <div class="text-xs text-gray-500">监控</div>
+        </div>
+        <div class="glass rounded-lg p-4 text-center">
+          <div class="font-semibold text-sm mb-1">Droid AI</div>
+          <div class="text-xs text-gray-500">监控</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 远程访问 -->
+    <section class="mb-16">
+      <h2 class="text-2xl font-semibold mb-2">在外面也能看着它跑</h2>
+      <p class="text-gray-400 mb-6 max-w-3xl">
+        会话跑在你自己的机器上，代码和密钥都不出本机。出门时用隧道从手机连回来。
+      </p>
+      <div class="grid md:grid-cols-3 gap-4">
+        <div class="glass rounded-xl p-5">
+          <h3 class="font-semibold mb-2 text-sm">手机版界面</h3>
+          <p class="text-sm text-gray-400 leading-relaxed">
+            专门做过的移动端页面，看状态、回问题、点确认都能在手机上完成。
+          </p>
+        </div>
+        <div class="glass rounded-xl p-5">
+          <h3 class="font-semibold mb-2 text-sm">扫码免密登录</h3>
+          <p class="text-sm text-gray-400 leading-relaxed">
+            手机扫码，电脑上点一下确认就登上，不用在手机上敲密码。
+          </p>
+        </div>
+        <div class="glass rounded-xl p-5">
+          <h3 class="font-semibold mb-2 text-sm">隧道穿透</h3>
+          <p class="text-sm text-gray-400 leading-relaxed">
+            Cloudflare 随机域名开箱可用；企业版提供固定域名的专属中转。
+          </p>
+        </div>
+      </div>
+    </section>
     <!-- 下载区域 -->
     <section id="download" class="glass rounded-xl p-6 mb-8">
       <h2 class="text-xl font-semibold mb-4">下载 WhatyTerm <span class="text-sm text-gray-400 font-normal">v1.4.36</span></h2>
@@ -92,30 +226,36 @@
         <!-- 计划卡片将通过 JS 动态生成 -->
       </div>
     </section>
-
-    <!-- 激活说明 -->
+    <!-- 怎么开始 -->
     <section class="glass rounded-xl p-6 mb-8">
-      <h2 class="text-xl font-semibold mb-4">如何使用？</h2>
+      <h2 class="text-xl font-semibold mb-4">怎么开始</h2>
       <div class="space-y-4 text-gray-400">
         <div class="flex items-start gap-3">
           <span class="flex-shrink-0 w-8 h-8 bg-green-600 rounded-full flex items-center justify-center text-white font-bold">1</span>
           <div>
-            <p class="font-medium text-white">下载安装</p>
-            <p class="text-sm">下载对应平台的安装包，安装即可使用全部功能，无需注册</p>
+            <p class="font-medium text-white">装好你要用的 AI 编程 CLI</p>
+            <p class="text-sm">Claude Code、Codex、Gemini、Grok、Droid 任选。WhatyTerm 用你已经配好的 API，不另外要密钥。</p>
           </div>
         </div>
         <div class="flex items-start gap-3">
           <span class="flex-shrink-0 w-8 h-8 bg-green-600 rounded-full flex items-center justify-center text-white font-bold">2</span>
           <div>
-            <p class="font-medium text-white">开箱即用</p>
-            <p class="text-sm">所有监控策略、AI 功能对个人用户完全免费开放</p>
+            <p class="font-medium text-white">下载安装 WhatyTerm</p>
+            <p class="text-sm">装完直接用，不用注册。全部功能对个人用户开放，包括长程编程。</p>
           </div>
         </div>
         <div class="flex items-start gap-3">
-          <span class="flex-shrink-0 w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center text-white font-bold">3</span>
+          <span class="flex-shrink-0 w-8 h-8 bg-green-600 rounded-full flex items-center justify-center text-white font-bold">3</span>
+          <div>
+            <p class="font-medium text-white">开一个会话，或者直接交一份需求</p>
+            <p class="text-sm">想自己盯着就开普通会话、打开 AI 监控；想让它自己跑就开长程编程，交一份需求文档。</p>
+          </div>
+        </div>
+        <div class="flex items-start gap-3">
+          <span class="flex-shrink-0 w-8 h-8 bg-gray-600 rounded-full flex items-center justify-center text-white font-bold">4</span>
           <div>
             <p class="font-medium text-white">企业用户（可选）</p>
-            <p class="text-sm">需要专属中转服务器和技术支持的企业用户，可前往 <a href="/user.html" class="text-blue-400 hover:underline">用户中心</a> 购买企业版</p>
+            <p class="text-sm">需要固定域名的专属中转、不限设备数或技术支持，可在 <a href="/user-center.html" class="text-blue-400 hover:text-white">用户中心</a> 购买企业版。</p>
           </div>
         </div>
       </div>
@@ -124,94 +264,131 @@
     <!-- 功能对比 -->
     <section class="glass rounded-xl p-6 mb-8">
       <h2 class="text-xl font-semibold mb-4">功能对比</h2>
-      <table class="w-full">
-        <thead>
-          <tr class="border-b border-gray-700">
-            <th class="text-left py-3">功能</th>
-            <th class="text-center py-3">个人版（免费）</th>
-            <th class="text-center py-3">企业版</th>
-          </tr>
-        </thead>
-        <tbody class="text-gray-400">
-          <tr class="border-b border-gray-800">
-            <td class="py-3">基础终端管理</td>
-            <td class="text-center text-green-400">✓</td>
-            <td class="text-center text-green-400">✓</td>
-          </tr>
-          <tr class="border-b border-gray-800">
-            <td class="py-3">全部 15+ 监控策略</td>
-            <td class="text-center text-green-400">✓</td>
-            <td class="text-center text-green-400">✓</td>
-          </tr>
-          <tr class="border-b border-gray-800">
-            <td class="py-3">AI 智能分析</td>
-            <td class="text-center text-green-400">✓</td>
-            <td class="text-center text-green-400">✓</td>
-          </tr>
-          <tr class="border-b border-gray-800">
-            <td class="py-3">开源代码</td>
-            <td class="text-center text-green-400">✓</td>
-            <td class="text-center text-green-400">✓</td>
-          </tr>
-          <tr class="border-b border-gray-800">
-            <td class="py-3">设备数量</td>
-            <td class="text-center">3 台</td>
-            <td class="text-center text-green-400">不限</td>
-          </tr>
-          <tr class="border-b border-gray-800">
-            <td class="py-3">专属中转服务器</td>
-            <td class="text-center text-red-400">✗</td>
-            <td class="text-center text-green-400">✓</td>
-          </tr>
-          <tr class="border-b border-gray-800">
-            <td class="py-3">专属技术支持</td>
-            <td class="text-center">社区</td>
-            <td class="text-center text-green-400">专属</td>
-          </tr>
-          <tr>
-            <td class="py-3">定制功能</td>
-            <td class="text-center text-red-400">✗</td>
-            <td class="text-center text-green-400">✓</td>
-          </tr>
-        </tbody>
-      </table>
+      <p class="text-sm text-gray-500 mb-4">产品能力对个人用户全部开放。企业版卖的是基础设施与服务，不是功能开关。</p>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-gray-700">
+              <th class="text-left py-3 px-2">功能</th>
+              <th class="text-center py-3 px-2">个人版（免费）</th>
+              <th class="text-center py-3 px-2">企业版</th>
+            </tr>
+          </thead>
+          <tbody class="text-gray-400">
+            <tr class="border-b border-gray-800">
+              <td class="py-3 px-2">终端会话管理（tmux 持久化）</td>
+              <td class="text-center text-green-400">✓</td><td class="text-center text-green-400">✓</td>
+            </tr>
+            <tr class="border-b border-gray-800">
+              <td class="py-3 px-2">五种 AI 编程 CLI 接入</td>
+              <td class="text-center text-green-400">✓</td><td class="text-center text-green-400">✓</td>
+            </tr>
+            <tr class="border-b border-gray-800">
+              <td class="py-3 px-2">AI 读屏监控 · 16 种场景策略</td>
+              <td class="text-center text-green-400">✓</td><td class="text-center text-green-400">✓</td>
+            </tr>
+            <tr class="border-b border-gray-800">
+              <td class="py-3 px-2"><span class="text-white">长程编程（无人值守）</span></td>
+              <td class="text-center text-green-400">✓</td><td class="text-center text-green-400">✓</td>
+            </tr>
+            <tr class="border-b border-gray-800">
+              <td class="py-3 px-2">上下文交接与项目记忆</td>
+              <td class="text-center text-green-400">✓</td><td class="text-center text-green-400">✓</td>
+            </tr>
+            <tr class="border-b border-gray-800">
+              <td class="py-3 px-2">用量与花费统计</td>
+              <td class="text-center text-green-400">✓</td><td class="text-center text-green-400">✓</td>
+            </tr>
+            <tr class="border-b border-gray-800">
+              <td class="py-3 px-2">手机版界面 · 扫码登录</td>
+              <td class="text-center text-green-400">✓</td><td class="text-center text-green-400">✓</td>
+            </tr>
+            <tr class="border-b border-gray-800">
+              <td class="py-3 px-2">开源代码（PolyForm NC）</td>
+              <td class="text-center text-green-400">✓</td><td class="text-center text-green-400">✓</td>
+            </tr>
+            <tr class="border-b border-gray-800">
+              <td class="py-3 px-2">远程访问隧道</td>
+              <td class="text-center text-gray-400">Cloudflare 随机域名</td>
+              <td class="text-center text-green-400">专属中转 · 固定域名</td>
+            </tr>
+            <tr class="border-b border-gray-800">
+              <td class="py-3 px-2">设备数量</td>
+              <td class="text-center">3 台</td><td class="text-center text-green-400">不限</td>
+            </tr>
+            <tr class="border-b border-gray-800">
+              <td class="py-3 px-2">技术支持</td>
+              <td class="text-center">社区</td><td class="text-center text-green-400">专属</td>
+            </tr>
+            <tr>
+              <td class="py-3 px-2">定制功能</td>
+              <td class="text-center text-gray-600">✗</td><td class="text-center text-green-400">✓</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </section>
-
     <!-- 常见问题 -->
-    <section class="glass rounded-xl p-6">
+    <section class="glass rounded-xl p-6 mb-8">
       <h2 class="text-xl font-semibold mb-4">常见问题</h2>
-      <div class="space-y-4">
+      <div class="space-y-5 text-sm">
         <div>
-          <h3 class="font-medium text-blue-400">个人用户真的完全免费吗？</h3>
-          <p class="text-gray-400 text-sm mt-1">是的。WhatyTerm 已开源，所有功能（包括全部监控策略和 AI 分析）对个人用户完全免费，支持最多 3 台设备。</p>
+          <h3 class="font-medium text-white mb-1">个人用户真的完全免费吗？</h3>
+          <p class="text-gray-400 leading-relaxed">
+            是的。产品功能全部开放，包括长程编程。代码也是公开的。个人版限 3 台设备。
+          </p>
         </div>
         <div>
-          <h3 class="font-medium text-blue-400">企业版有什么额外服务？</h3>
-          <p class="text-gray-400 text-sm mt-1">企业版提供专属中转服务器（更稳定的远程连接）、不限设备数、专属技术支持和定制功能开发。</p>
+          <h3 class="font-medium text-white mb-1">它会不会自己乱按、把我的代码改坏？</h3>
+          <p class="text-gray-400 leading-relaxed">
+            自动操作默认关着，要你自己打开。打开之后也有几道闸：AI 对该不该按把握不足时只给建议不动手；
+            CLI 在问你业务决策（比如"这两个方案选哪个"）时它不会替你答，会停下来等你；
+            连着催了几次没有进展就熔断，交回给你。长程编程还会每段打一个 git 快照，跑坏了能回退。
+          </p>
         </div>
         <div>
-          <h3 class="font-medium text-blue-400">如何获取企业版？</h3>
-          <p class="text-gray-400 text-sm mt-1">前往 <a href="/user.html" class="text-blue-400 hover:underline">用户中心</a> 注册账户，选择企业版计划并完成支付即可。</p>
+          <h3 class="font-medium text-white mb-1">要另外给它 API Key 吗？</h3>
+          <p class="text-gray-400 leading-relaxed">
+            不用。它用你机器上 CLI 已经配好的地址和登录，你换供应商它跟着换。
+            监控判断也是调这些 CLI 本身，不经过我们的服务器 —— 代码和密钥不出你的机器。
+          </p>
         </div>
         <div>
-          <h3 class="font-medium text-blue-400">源代码在哪里？</h3>
-          <p class="text-gray-400 text-sm mt-1">WhatyTerm 在 <a href="https://github.com/zhangifonly/WhatyTerm" class="text-blue-400 hover:underline" target="_blank">GitHub</a> 上开源，欢迎 Star 和贡献代码。</p>
+          <h3 class="font-medium text-white mb-1">长程编程一晚上会花多少钱？</h3>
+          <p class="text-gray-400 leading-relaxed">
+            取决于你用的模型和项目大小 —— 它调用的是你自己的 API，费用直接产生在你的供应商那边。
+            面板上按模型定价实时结算，能看到每段花了多少、今天累计多少；可以设总预算，到了就停机保住现场。
+          </p>
+        </div>
+        <div>
+          <h3 class="font-medium text-white mb-1">企业版多的是什么？</h3>
+          <p class="text-gray-400 leading-relaxed">
+            专属中转服务器（固定域名，远程连接更稳）、不限设备数、专属技术支持和定制开发。
+            功能上没有为付费另设开关。
+          </p>
+        </div>
+        <div>
+          <h3 class="font-medium text-white mb-1">源代码在哪里？许可是什么？</h3>
+          <p class="text-gray-400 leading-relaxed">
+            在 <a href="https://github.com/zhangifonly/WhatyTerm" target="_blank" rel="noopener" class="text-blue-400 hover:text-white">GitHub</a> 上公开，
+            采用 PolyForm Noncommercial 许可：个人与非商业用途自由使用、修改、分发；商业使用请联系我们。
+          </p>
         </div>
       </div>
     </section>
 
     <!-- 页脚 -->
-    <footer class="text-center text-gray-500 text-sm mt-12">
-      <p>© 2025 WhatyTerm. Open Source under MIT License.</p>
-      <p class="mt-2">
-        <a href="https://github.com/zhangifonly/WhatyTerm" class="text-blue-400 hover:underline" target="_blank">GitHub</a>
+    <footer class="text-center text-gray-500 text-sm py-8">
+      <p class="mb-2">© 2026 WhatyTerm · 源码公开，采用 PolyForm Noncommercial 许可</p>
+      <p>
+        <a href="https://github.com/zhangifonly/WhatyTerm" target="_blank" rel="noopener" class="hover:text-white transition">GitHub</a>
         &nbsp;·&nbsp;
-        <a href="mailto:zhangzhen@gmail.com" class="text-blue-400 hover:underline">zhangzhen@gmail.com</a>
+        <a href="/user-center.html" class="hover:text-white transition">用户中心</a>
+        &nbsp;·&nbsp;
+        <a href="mailto:zhangzhen@gmail.com" class="hover:text-white transition">zhangzhen@gmail.com</a>
       </p>
     </footer>
   </div>
-
-  <!-- 支付弹窗 -->
   <div id="payment-modal" class="payment-modal fixed inset-0 bg-black/70 items-center justify-center z-50">
     <div class="glass rounded-2xl p-8 max-w-md w-full mx-4">
       <div class="flex justify-between items-center mb-6">
