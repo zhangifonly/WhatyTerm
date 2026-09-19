@@ -198,6 +198,8 @@ import cliLearner from './services/CliLearner.js';
 import { readContextWaterline, decideWaterlinePhase, isMemoryWritten, HANDOFF_PROMPT, COMPACT_COMMAND, RESUME_PROMPT, LONGRUN_HANDOFF_PROMPT } from './services/contextWaterline.js';
 import { parseHandoffReceipt, HANDOFF_PHASE, HANDOFF_WAIT_MS } from './services/longrunHandoff.js';
 import { promptPendingText, stripPromptSuggestion } from './services/promptState.js';
+import { shouldStopMechanicalContinue, nextStreak } from './services/continueStreak.js';
+import { listProviderModels } from './services/ProviderModels.js';
 import tokenStatsService from './services/TokenStatsService.js';
 import { UsageLedger } from './services/usage/UsageLedger.js';
 import { SessionUsageService } from './services/usage/SessionUsageService.js';
@@ -5660,6 +5662,26 @@ async function runBackgroundAutoAction() {
       updateAiHealthState(false, err, 'error', sessionData.id);
       // 出错也更新状态，避免频繁重试
       updateCheckState(sessionData.id, false, null);
+      // ⚠ 必须把错误摆到界面上。2026-09-19 实测：一个未导入的标识符让本函数每轮都抛，
+      //   自动操作实际一次没执行，而面板还挂着上一轮的「需要操作：继续 / 将自动执行」，
+      //   「最近操作」显示「无」—— 用户只看到会话僵住，完全不知道监控自己已经坏了。
+      //   错误只进服务端控制台等于没人看见。
+      const brokenStatus = {
+        currentState: `监控循环出错，已停止自动操作：${String(err.message || err).slice(0, 120)}`,
+        workingDir: '未显示',
+        recentAction: '无（监控本身报错，这一轮没有执行任何操作）',
+        needsAction: false,
+        actionType: 'none',
+        suggestedAction: null,
+        actionReason: '监控循环抛异常，不是 CLI 的问题；看服务端日志或重启服务',
+        suggestion: null,
+        updatedAt: new Date().toISOString(),
+        _source: 'loop_error',
+      };
+      aiStatusCache.set(sessionData.id, brokenStatus);
+      io.to(`session:${sessionData.id}`).emit('ai:status', {
+        sessionId: sessionData.id, ...brokenStatus, ...getAIProviderInfo(),
+      });
     } finally {
       session.isAutoActioning = false;
     }
