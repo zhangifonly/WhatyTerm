@@ -16,7 +16,7 @@ import { ClaudeCliTextClient, cliTextCwd } from './ClaudeCliText.js';
 import { CodexExecTextClient, codexTextCwd } from './CodexExecText.js';
 import { GrokSingleTextClient, GROK_CWD_PREFIX } from './GrokSingleText.js';
 import { hasPendingQuestion } from './pendingQuestion.js';
-import { promptPendingText, isOwnPendingInput } from './promptState.js';
+import { promptPendingText, isOwnPendingInput, stripPromptSuggestion } from './promptState.js';
 import { isLiveConfirmMenu, hasNearbyConfirmMenu, isCodexLiveConfirm } from './liveMenu.js';
 import { evalEarlyRules } from './aiRules/earlyRules.js';
 import { DEFAULT_MODEL, CLAUDE_CODE_FAKE, CODEX_FAKE, CLAUDE_MODEL_FALLBACK_LIST, getModelsConfig } from '../config/constants.js';
@@ -1928,6 +1928,8 @@ ${historyText || '(空)'}
    * @param {string} forcedPluginId - 强制使用的插件 ID（可选）
    */
   preAnalyzeStatus(terminalContent, aiType = 'claude', tmuxSession = null, projectContext = null, forcedPluginId = null) {
+    // 输入框里的灰色建议文字不是输入内容，剥色前先去掉，否则会被当成用户草稿而停手
+    terminalContent = stripPromptSuggestion(terminalContent);
     // 获取选中的插件（用于在返回结果中显示）
     const selectedPlugin = pluginManager.selectPlugin(projectContext || {}, forcedPluginId);
     const pluginInfo = selectedPlugin ? {
@@ -3347,6 +3349,8 @@ ${historyText || '(空)'}
    * @param {string} forcedPluginId - 强制使用的插件 ID（可选）
    */
   async analyzeStatus(terminalContent, aiType = 'claude', sessionId = null, tmuxSession = null, projectContext = null, forcedPluginId = null) {
+    // 同 preAnalyzeStatus：交给 AI 读的屏幕也不能带灰色建议，否则 AI 同样会以为输入框有草稿
+    terminalContent = stripPromptSuggestion(terminalContent);
     // 因「CLI 正在提问」而被丢弃的预判断结果。AI 不可用时不能就这么什么都不返回：
     // 屏幕上挂着一个真问题，用户界面却一片空白，等于问题被静默吞掉。
     let escalatedQuestion = null;

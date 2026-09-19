@@ -89,4 +89,80 @@ export function isOwnPendingInput(pending, autoActions = ['继续'], lastSentTex
   return known.some(a => text === a.trim());
 }
 
-export default { promptPendingText, isEmptyPrompt, hasUnsentInput, isOwnPendingInput };
+// 转义序列：SGR 单独捕获参数，其余 CSI / OSC / 单字符转义原样保留
+const ESCAPE = /\x1b\[([0-9;:]*)m|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/y;
+const ANSI_ALL = /\x1b\[[0-9;?:]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
+const PROMPT_LINE = /^\s*[│|]?\s*[❯>](?:\s|$)/;
+
+/** 按 SGR 参数更新“暗淡”状态。38/48/58 后面跟的是颜色值（如 38;5;2 里的 2 不是暗淡），要整段跳过 */
+function applySgr(params, dim) {
+  const p = params === '' ? ['0'] : params.split(/[;:]/);
+  for (let i = 0; i < p.length; i++) {
+    const n = p[i] === '' ? 0 : Number(p[i]);
+    if (n === 38 || n === 48 || n === 58) {
+      i += Number(p[i + 1]) === 5 ? 2 : Number(p[i + 1]) === 2 ? 4 : 1;
+    } else if (n === 0 || n === 22) dim = false;
+    else if (n === 2) dim = true;
+  }
+  return dim;
+}
+
+/** 删掉一行里暗淡样式（SGR 2）的可见文字，转义序列原样保留；返回处理后的行与被删掉的文字 */
+function dropDimText(line) {
+  let out = '';
+  let dropped = '';
+  let dim = false;
+  for (let i = 0; i < line.length;) {
+    ESCAPE.lastIndex = i;
+    const m = ESCAPE.exec(line);
+    if (m) {
+      if (m[1] !== undefined) dim = applySgr(m[1], dim);
+      out += m[0];
+      i += m[0].length;
+      continue;
+    }
+    const ch = String.fromCodePoint(line.codePointAt(i));
+    if (!dim || ch < ' ') out += ch; // 控制字符（如 capturePane 补的 \r）照留
+    else dropped += ch;
+    i += ch.length;
+  }
+  return { out, dropped };
+}
+
+// 新会话欢迎屏的占位提示：没有任何对话历史，自动发「继续」毫无意义，保留它让后续判断交给 AI
+const WELCOME_PLACEHOLDER = /^\s*Try\s*"/; // 逐词分段着色时词间空格不是暗淡样式，拼出来是 Try"…
+
+/**
+ * 去掉输入框里 Claude Code 显示的灰色建议文字（带颜色码的原始屏幕进，同样格式出）。
+ *
+ * 背景：CLI 干完活后会在空输入框里用暗淡样式（SGR 2）预填一句下一步建议，
+ * 如「❯ 继续做家长端」（按 Tab/→ 才采纳）。
+ * 一旦剥掉颜色码，它和真正打进去的字无法区分：promptPendingText 会认成“用户未提交的草稿”，
+ * 监控就停手不动（2026-09-18 Hitech 会话实测）。真正打进去的字不会是暗淡样式。
+ *
+ * 只处理屏幕末尾那一行输入框（与 promptPendingText 同一范围），历史里的 `>` 引用行不动。
+ * 新会话欢迎屏的占位提示 `Try "…"` 同样是暗淡样式，但**有意保留**：那时没有任何对话，
+ * 不该自动发「继续」，原行为是交给 AI 判断（fixture whatyterm-4258a341）。
+ * 前端 xterm 显示不走这里，画面不受影响。
+ *
+ * @param {string} raw capture-pane -e 抓到的屏幕（含颜色码）
+ * @returns {string}
+ */
+export function stripPromptSuggestion(raw) {
+  if (!raw || typeof raw !== 'string' || !raw.includes('\x1b[')) return raw;
+  const lines = raw.split('\n');
+  let seen = 0;
+  for (let i = lines.length - 1; i >= 0 && seen < 6; i--) {
+    const plain = lines[i].replace(ANSI_ALL, '').replace(/\s+$/, '');
+    if (!plain.trim() || DECORATION.test(plain)) continue;
+    seen++;
+    if (PROMPT_LINE.test(plain)) {
+      const { out, dropped } = dropDimText(lines[i]);
+      if (dropped.trim() && !WELCOME_PLACEHOLDER.test(dropped)) lines[i] = out;
+      break;
+    }
+  }
+  return lines.join('\n');
+}
+
+export default { promptPendingText, isEmptyPrompt, hasUnsentInput, isOwnPendingInput, stripPromptSuggestion };

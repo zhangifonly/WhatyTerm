@@ -197,7 +197,7 @@ import HookServer, { isLongRunHookRequest } from './services/HookServer.js';
 import cliLearner from './services/CliLearner.js';
 import { readContextWaterline, decideWaterlinePhase, isMemoryWritten, HANDOFF_PROMPT, COMPACT_COMMAND, RESUME_PROMPT, LONGRUN_HANDOFF_PROMPT } from './services/contextWaterline.js';
 import { parseHandoffReceipt, HANDOFF_PHASE, HANDOFF_WAIT_MS } from './services/longrunHandoff.js';
-import { promptPendingText } from './services/promptState.js';
+import { promptPendingText, stripPromptSuggestion } from './services/promptState.js';
 import tokenStatsService from './services/TokenStatsService.js';
 import { UsageLedger } from './services/usage/UsageLedger.js';
 import { SessionUsageService } from './services/usage/SessionUsageService.js';
@@ -4806,7 +4806,8 @@ async function runBackgroundAutoAction() {
     session.isAutoActioning = true;
 
     try {
-      const terminalContent = quickContent || await session.getScreenContentAsync();
+      // 输入框里的灰色建议（CLI 预填的下一步，暗淡样式）不是输入内容，后面所有判断之前先去掉
+      const terminalContent = stripPromptSuggestion(quickContent || await session.getScreenContentAsync());
       if (!terminalContent || terminalContent.length < 10) {
         session.isAutoActioning = false;
         updateCheckState(sessionData.id, false, null);
@@ -4967,12 +4968,21 @@ async function runBackgroundAutoAction() {
           ? (lastAction.continueCount || 1) + 1
           : 1;
 
-        if (continueCount >= 2) {
-          const lastReply = getLastClaudeReply(terminalContent);
+        // 第二道计数：只数连发次数，**不因屏幕变化归零**。上面那个 continueCount 判的是
+        // "发了继续但回复正文没变"，而 CLI 完全可以一边礼貌回话一边原地等人决策
+        //（tableCard 实测：每轮都真回话 → 每轮归零 → 三道闸一次没触发，发了 15 万余次）。
+        const lastReplyEarly = getLastClaudeReply(terminalContent);
+        const streakVerdict = shouldStopMechanicalContinue({
+          streak: nextStreak(lastAction?.streak, '继续'),
+          lastReply: lastReplyEarly,
+        });
+
+        if (continueCount >= 2 || streakVerdict.stop) {
+          const lastReply = lastReplyEarly;
           // 等待型回复：CLI 在告诉我们"别催了，我在等后台任务/通知"——继续发只会复读
           const replyIsWaiting = /等(候|待)?.{0,6}通知|不空转|轮询不出|后台.{0,6}(进行|运行|生成)中|还在(生成|执行|运行)|等(它|其)?(跑完|完成|结束)|正常范围|等通知即可/.test(lastReply);
-          if (lastReply.length < 20 || replyIsWaiting || continueCount >= 4) {
-            console.log(`[循环检测] 会话 ${session.name}: 连续${continueCount}次"继续"（回复${replyIsWaiting ? '为等待型' : `"${lastReply.slice(0, 30)}"`}），停止机械继续，交给AI判断`);
+          if (lastReply.length < 20 || replyIsWaiting || continueCount >= 4 || streakVerdict.stop) {
+            console.log(`[循环检测] 会话 ${session.name}: ${streakVerdict.stop ? streakVerdict.reason : `连续${continueCount}次"继续"（回复${replyIsWaiting ? '为等待型' : `"${lastReply.slice(0, 30)}"`}）`}，停止机械继续，交给AI判断`);
             preResult = null; // 清除 preResult，走 AI 分析路径（提示词含后台等待判则）
 
             // ⚠️ 必须作废内容哈希，否则这次"交给 AI"根本交不出去：
@@ -4984,7 +4994,7 @@ async function runBackgroundAutoAction() {
             // 不改的话，AI 循环跳过时会把旧状态原样重播，面板一直显示
             //「建议操作：继续 / 将自动执行」，而实际上一个字也不会发出去。
             const stalledStatus = {
-              currentState: `连续${continueCount}次"继续"无效，已停止机械继续`,
+              currentState: streakVerdict.stop ? streakVerdict.reason : `连续${continueCount}次"继续"无效，已停止机械继续`,
               workingDir: '未显示',
               recentAction: '等待 AI 重新判断',
               needsAction: false,
@@ -5305,7 +5315,8 @@ async function runBackgroundAutoAction() {
           const continueCount = (action === '继续' && prevAction?.action === '继续' && !prevAdvanced)
             ? (prevAction.continueCount || 1) + 1
             : (action === '继续' ? 1 : 0);
-          lastActionMap.set(session.id, { action, time: now, contentHash, advanceSig: curAdvanceSig, continueCount });
+          lastActionMap.set(session.id, { action, time: now, contentHash, advanceSig: curAdvanceSig, continueCount,
+            streak: nextStreak(prevAction?.streak, action) });
           // ⚠️ 按键发出后必须立即作废状态缓存：缓存 30 秒才刷一轮
           //（AI_ANALYSIS_INTERVAL），而确认框一旦被自动选掉、屏幕就往下走了。
           // 不清的话「N 个等确认」会挂着一条已经处理完的陈旧状态最长 30 秒，
@@ -5426,7 +5437,8 @@ async function runBackgroundAutoAction() {
             const continueCountCache = (action === '继续' && prevActionCache?.action === '继续' && !prevAdvancedCache)
               ? (prevActionCache.continueCount || 1) + 1
               : (action === '继续' ? 1 : 0);
-            lastActionMap.set(session.id, { action, contentHash, advanceSig: curAdvanceSig, continueCount: continueCountCache, time: now });
+            lastActionMap.set(session.id, { action, contentHash, advanceSig: curAdvanceSig, continueCount: continueCountCache, time: now,
+              streak: nextStreak(prevActionCache?.streak, action) });
             // 同 preAnalyze 路径：按键后立即作废状态缓存，否则陈旧的「确认界面」
             // 会在摘要里挂最长 30 秒（AI_ANALYSIS_INTERVAL），点进去已无事可做。
             aiStatusCache.delete(session.id);
@@ -5610,7 +5622,8 @@ async function runBackgroundAutoAction() {
         const continueCountAi = (action === '继续' && prevActionAi?.action === '继续' && !prevAdvancedAi)
           ? (prevActionAi.continueCount || 1) + 1
           : (action === '继续' ? 1 : 0);
-        lastActionMap.set(session.id, { action, time: now, contentHash, advanceSig: curAdvanceSigAi, continueCount: continueCountAi });
+        lastActionMap.set(session.id, { action, time: now, contentHash, advanceSig: curAdvanceSigAi, continueCount: continueCountAi,
+          streak: nextStreak(prevActionAi?.streak, action) });
         // 同 preAnalyze 路径：按键后立即作废状态缓存，否则陈旧的「确认界面」
         // 会在摘要里挂最长 30 秒（AI_ANALYSIS_INTERVAL），点进去已无事可做。
         aiStatusCache.delete(session.id);
@@ -5928,7 +5941,8 @@ let nextAiAnalysisTime = Date.now() + AI_ANALYSIS_INTERVAL; // 下次分析时�
 // 提取终端中最后一条 Claude Code 回复内容（用于循环检测）
 function getLastClaudeReply(terminalContent) {
   if (!terminalContent) return '';
-  const lines = terminalContent.split('\n');
+  // 灰色建议会让提示符行不再为空，下面按空提示符定界就找不到回复
+  const lines = stripPromptSuggestion(terminalContent).split('\n');
   const cleanLines = lines.map(l => l.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').trim()).filter(Boolean);
   if (cleanLines.length === 0) return '';
 
@@ -7529,7 +7543,7 @@ io.on('connection', (socket) => {
       if (!processDetector.isCliRunning(tmux)) return reply({ ok: true, skipped: 'cli_not_running' });
 
       // 输入框里有人家没提交的草稿 → 不发。发下去会把草稿和指令搅成一句
-      const pending = promptPendingText(stripAnsiForProbe(await session.getScreenContentAsync()));
+      const pending = promptPendingText(stripAnsiForProbe(stripPromptSuggestion(await session.getScreenContentAsync())));
       if (pending) return reply({ ok: false, error: `输入框里有未提交的内容「${pending.slice(0, 30)}」，先处理掉再交接` });
 
       // 等它闲下来再发：正在跑任务时发指令会排在后面，判据也会误读

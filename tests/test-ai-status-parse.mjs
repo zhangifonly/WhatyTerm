@@ -110,23 +110,19 @@ const IDLE_FIXTURES = {
   'whatyterm-d660315f.txt': '✻ Cogitated for 1m 12s',
   'whatyterm-fca2bfbb.txt': '✻ Cooked for 2m 8s',
   'whatyterm-e0e95cf7.txt': 'Settings dialog dismissed 后空闲',
+  // 输入框里是 CLI 的灰色建议（逐词 SGR 2 暗淡），不是输入内容，按空闲处理。见下方订正说明
+  'whatyterm-b7d80d07.txt': '✻ Churned for 2m 31s，输入框里是灰色建议「检查 Clash 里 whaty.org 的分流规则」',
 };
 for (const [f, note] of Object.entries(IDLE_FIXTURES)) {
   EXPECTATIONS[f] = { needsAction: true, actionType: 'text_input', action: '继续', note };
 }
 
-// ---- 输入框里留着没提交的内容：不能再发文本，否则会拼接 ----
-// 这几个样本的提示符行不是空的。原先这里期望发「继续」，那其实固化了一个 bug：
-// 屏上是 `❯ 检查 Clash 里 whaty.org 的分流规则`，再发「继续」会拼成
-// 「…分流规则继续」。现在改为：认得出是自己打的就回车提交，认不出就不动。
-// 单测环境拿不到 lastSentText（那是运行时 lastActionMap 里的事实），
-// 所以这里落到保守分支 —— 不操作，等人工。
-const PENDING_INPUT_FIXTURES = {
-  'whatyterm-b7d80d07.txt': '✻ Churned for 2m 31s，但输入框里留着一句未提交的指令',
-};
-for (const [f, note] of Object.entries(PENDING_INPUT_FIXTURES)) {
-  EXPECTATIONS[f] = { needsAction: false, note };
-}
+// ---- 订正（2026-09-18）：whatyterm-b7d80d07 原在「输入框留着未提交内容 → 不操作」组 ----
+// 查原始字节，那句「检查 Clash 里 whaty.org 的分流规则」逐词都是 ESC[2m 暗淡样式 ——
+// 是 Claude Code 干完活预填的下一步建议（Tab/→ 才采纳），不在输入缓冲里，打字即被替换，
+// 不存在「拼成 …分流规则继续」的问题。剥色后与真输入无法区分，才被误标成草稿。
+// 现由 promptState.stripPromptSuggestion 在剥色前去掉，归入上面的空闲组。
+// 真正未提交的输入（正常亮度）的判定见 tests/test-prompt-pending.mjs。
 
 // ---- 边界样本：preAnalyze 不该硬判，交给 AI ----
 const DEFER_FIXTURES = {

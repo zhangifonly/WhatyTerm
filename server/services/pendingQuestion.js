@@ -34,6 +34,11 @@ const ASK_PATTERNS = [
 // 编号确认菜单特征 —— 命中则不算「开放式提问」，交给 select 分支处理
 const CONFIRM_MENU = /[❯›>]?\s*1\.\s*(Yes|Allow|是)/i;
 
+// CLI 自己印出来的「我问了，但没得到回答」。这是它的原话，比任何句式推断都硬：
+// 出现即说明球在人这边，机械「继续」只会让它再问一遍。
+// （Claude Code 在 AskUserQuestion 被拒答时打印 "User declined to answer questions"。）
+const DECLINED_MARK = /User declined to answer question/i;
+
 /**
  * 判断终端尾部是否存在等待用户决策的开放式提问。
  * @param {string} text 已剥离 ANSI 的终端内容
@@ -42,12 +47,17 @@ const CONFIRM_MENU = /[❯›>]?\s*1\.\s*(Yes|Allow|是)/i;
 // 提示符行、状态栏、计时器、分隔线 —— 提问之后出现这些不代表问题被回答了
 const NOISE_LINE = /^\s*(?:[›❯>*·✱✳]\s*)?(?:$|继续$|[─━—\-=_]{3,}\s*$)/
   ;
-const NOISE_CONTENT = /esc to interrupt|auto mode|shift\+tab|accept edits|Churned for|Worked for|tokens\)|\(\d+[hms]|Update installed|Restart to update|ctrl\+[a-z]|to expand\)|to cycle\)/i;
+// ⚠️ 计时行的动词是**随机轮换**的（Churned/Worked/Cooked/Cogitated/Baked/Brewed/Simmered…），
+//    枚举两个必然漏。实测（tableCard 2026-09-18）同一屏就出现了 Cooked/Brewed/Baked/Cogitated 四种，
+//    漏掉后紧跟提问的计时行留在 clean 里，把「问号右侧是选项清单」这条判据算歪。
+//    改判形态：`<动词> for <数字><单位>`，动词不限。
+const TIMER_LINE = /\b[A-Z][a-z]+(?:ed|ing)?\s+for\s+\d+(?:\.\d+)?\s*[a-z]{1,2}\b/;
+const NOISE_CONTENT = /esc to interrupt|auto mode|shift\+tab|accept edits|tokens\)|\(\d+[hms]|Update installed|Restart to update|ctrl\+[a-z]|to expand\)|to cycle\)/i;
 
 /** 去掉提示符/状态栏/计时器这类噪音行，只留 CLI 真正说的话 */
 function stripNoise(tail) {
   return tail.split('\n')
-    .filter(l => !NOISE_LINE.test(l) && !NOISE_CONTENT.test(l))
+    .filter(l => !NOISE_LINE.test(l) && !NOISE_CONTENT.test(l) && !TIMER_LINE.test(l))
     .join('\n');
 }
 
@@ -61,6 +71,7 @@ export function hasPendingQuestion(text) {
   // 只看尾部：更早的历史提问可能早已被回答过
   const tail = text.slice(-1200);
   if (CONFIRM_MENU.test(tail)) return false;
+  if (DECLINED_MARK.test(tail)) return true;     // 先于句式判断：它已经明说没人答它
   if (!ASK_PATTERNS.some(re => re.test(tail))) return false;
 
   // 提问必须**落在结尾**：若问号之后 CLI 自己又说了成句的话，
@@ -69,7 +80,24 @@ export function hasPendingQuestion(text) {
   const lastQ = Math.max(clean.lastIndexOf('？'), clean.lastIndexOf('?'));
   if (lastQ < 0) return true; // 无问号的问法（your call / let me know）视为在等
   const after = clean.slice(lastQ + 1).replace(/\s/g, '');
-  return after.length < 8;
+  if (after.length < 8) return true;
+  // 问号之后是**选项清单**时，那恰恰是在等人选，不是自答。
+  // 实测（tableCard，2026-09-18）：CLI 写「你想要哪个？（你自己挑一件做 / 撤回广联达旧包 /
+  // 我已经发布了 / 别做了，就此停下）」，选项全在问号右侧共 32 字，被上一行判成自问自答，
+  // 于是机械「继续」一路发到 15 万余次、烧掉 $1519 —— 最该停手的形态反而最理直气壮地不停。
+  return looksLikeOptionList(after);
+}
+
+/**
+ * 问号之后的残留文本是否是「供人选的清单」而非 CLI 的自答。
+ * 判据取形态而非语义：分隔符（/ ｜ 、 或 "或"）把它切成两段以上，
+ * 且每段都短（选项是词组，自答是成句）。括号包裹是常见写法，不作必需。
+ */
+function looksLikeOptionList(after) {
+  const body = after.replace(/^[（(]|[）)]$/g, '');
+  const parts = body.split(/[/｜|、]|\bor\b|或/).map(s => s.trim()).filter(Boolean);
+  if (parts.length < 2) return false;
+  return parts.every(p => p.length <= 30);
 }
 
 export default { hasPendingQuestion };

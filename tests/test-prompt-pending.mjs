@@ -203,6 +203,55 @@ test('lastSentText 对不上时仍然不动（用户后来自己改写了输入�
   eq(r?.needsAction, false);
 });
 
+// ============ 4. 输入框里的灰色建议（2026-09-18 Hitech 会话实测停摆） ============
+// CLI 干完活会在空输入框里用暗淡样式（SGR 2）预填一句下一步建议，按 Tab/→ 才采纳。
+// 剥掉颜色码后与真打进去的字一模一样，于是被当成用户草稿，监控停手不动。
+// 下面这行是当时 capture-pane -e 抓到的原始字节。
+const GHOST = '\x1b[39m❯ \x1b[2m继续做家长端\x1b[0m';
+const { stripPromptSuggestion } = await import('../server/services/promptState.js');
+const plainOf = (s) => s.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
+
+test('真实样本：灰色建议被去掉，输入框按空处理', () => {
+  eq(promptPendingText(plainOf(screenWith(GHOST))), '继续做家长端', '对照：不处理时确实会被读成草稿');
+  eq(promptPendingText(plainOf(stripPromptSuggestion(screenWith(GHOST)))), '');
+});
+
+test('真实样本端到端：不再停手，照常发「继续」', () => {
+  const r = engine.preAnalyzeStatus(screenWith(GHOST), 'claude');
+  eq(r?.actionType, 'text_input', `应发文本，实际 ${r?.actionType}（${r?.actionReason || ''}）`);
+  eq(r?.suggestedAction, '继续');
+});
+
+test('真正打进去的字（正常亮度）仍当作用户草稿，不碰', () => {
+  const r = engine.preAnalyzeStatus(screenWith('\x1b[39m❯ 继续做家长端\x1b[0m'), 'claude');
+  eq(r?.needsAction, false, '不能替用户提交');
+});
+
+test('新会话欢迎屏的占位提示 Try "…" 保留（无对话历史，不该自动发「继续」，交给 AI）', () => {
+  const s = screenWith('\x1b[39m❯\xa0\x1b[2mTry\x1b[0m \x1b[2m"fix\x1b[0m \x1b[2mlint"\x1b[0m');
+  eq(stripPromptSuggestion(s), s);
+});
+
+test('逐词分段着色的建议（真实样本 whatyterm-b7d80d07）同样去掉', () => {
+  const line = '\x1b[39m❯\xa0\x1b[2m检查\x1b[0m \x1b[2mClash\x1b[0m \x1b[2m里\x1b[0m \x1b[2mwhaty.org\x1b[0m \x1b[2m的分流规则\x1b[0m';
+  eq(promptPendingText(plainOf(stripPromptSuggestion(screenWith(line)))), '');
+});
+
+test('只动末尾输入框：历史里暗淡的 > 引用行原样保留', () => {
+  const screen = '\x1b[2m> 之前问过的一句话\x1b[0m\n  回复正文\n' + screenWith(GHOST);
+  assert(stripPromptSuggestion(screen).includes('之前问过的一句话'), '历史行被误删');
+});
+
+test('256 色里的 2（38;5;2 绿色）不是暗淡，文字保留', () => {
+  eq(plainOf(stripPromptSuggestion('\x1b[38;5;2m❯ 绿色的字\x1b[0m')), '❯ 绿色的字');
+});
+
+test('行尾 \\r 保留；无颜色码的输入原样返回', () => {
+  eq(stripPromptSuggestion('❯ \x1b[2m建议\x1b[0m\r\n'), '❯ \x1b[2m\x1b[0m\r\n');
+  eq(stripPromptSuggestion('❯ 普通文本'), '❯ 普通文本');
+  eq(stripPromptSuggestion(''), '');
+});
+
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
 if (results.failed) for (const e of results.errors) console.log(`  • ${e.name}\n    ${e.error}`);
 process.exit(results.failed ? 1 : 0);
