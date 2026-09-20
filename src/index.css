@@ -336,6 +336,15 @@ body {
   transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+/* 禁用态必须看得出来。此前 .btn 没有 :disabled 样式，按钮 disabled 后外观完全不变，
+   人会以为"点了没反应"而反复点 —— 实测在长程切换确认框上（有 blocker 时按钮不可点）。 */
+.btn:disabled,
+.btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: grayscale(0.4);
+}
+
 .btn-primary {
   background: linear-gradient(135deg,
     hsl(var(--primary)) 0%,

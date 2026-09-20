@@ -208,9 +208,16 @@ export class LongRunService {
   }
 
   /** 粘贴的文本 → 文件路径。按内容哈希命名，幂等：plan 与 start 各调一次只落同一个文件。 */
-  resolveDocPath({ docPath, requirementText }) {
+  resolveDocPath({ docPath, requirementText, resumeSessionId = '' }) {
     if (docPath) return String(docPath);
-    const text = String(requirementText || '').trim();
+    let text = String(requirementText || '').trim();
+    // 续同一条对话时新需求可以为空：那条对话正记着刚才聊的内容，
+    // 「照着刚才的继续做」本身就是需求。落一份说明文本，让下游（监督者、看板、
+    // 需求卡）都有东西可读，而不是给整条链路开一个"需求可以不存在"的特例。
+    if (!text && resumeSessionId) {
+      text = '接续此前的终端会话继续开发：目标与上下文见那条对话本身，'
+        + '按会话里已经讨论定的方向做下去，不要重新规划。';
+    }
     if (!text) throw new LaunchError('需求为空：请粘贴需求文本，或填写本机需求文档的绝对路径');
     const hash = createHash('sha256').update(text).digest('hex').slice(0, 12);
     const file = path.join(REQUIREMENT_DIR, `${deriveName(text)}-${hash}.md`);
@@ -262,8 +269,8 @@ export class LongRunService {
    * 预检：解析需求、给出项目目录现状与参考清单。**不建目录、不起进程、不删任何东西。**
    * 面板据此提示：新建 / 接管已有项目 / 续跑。
    */
-  plan({ docPath: rawDoc, requirementText, projectRoot, projectName, sandboxName, promptsFile } = {}) {
-    const docPath = this.resolveDocPath({ docPath: rawDoc, requirementText });
+  plan({ docPath: rawDoc, requirementText, projectRoot, projectName, sandboxName, promptsFile, resumeSessionId } = {}) {
+    const docPath = this.resolveDocPath({ docPath: rawDoc, requirementText, resumeSessionId });
     const prompts = loadPrompts(promptsFile || PROMPT_FILE);   // 缺段就在这里硬失败
     const req = previewRequirement(docPath);
     const root = this._projectRoot({ docPath: rawDoc, requirementText, projectRoot, projectName, sandboxName }, docPath);

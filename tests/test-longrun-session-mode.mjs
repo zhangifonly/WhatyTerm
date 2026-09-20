@@ -121,7 +121,9 @@ await test('绑定器：同目录 claude 在跑先拒绝再动条目；切模式
 
 await test('socket 处理器把项目参数转给服务层（按字段挑选时漏掉 projectRoot 会让预检看错目录）', () => {
   const idx = src('index.js');
-  const plan = between(idx, "socket.on('longrun:plan',", 400), replay = between(idx, "socket.on('longrun:replay',", 300);
+  // 窗口要给足：处理器里加几行注释就会把调用推出窗口，让守卫假红（2026-09-19 实测）。
+  // 守卫该盯的是"字段有没有转发"，不是"代码有多紧凑"。
+  const plan = between(idx, "socket.on('longrun:plan',", 900), replay = between(idx, "socket.on('longrun:replay',", 600);
   assert(/longRunService\.plan\(\{[^}]*projectRoot, projectName[^}]*\}\)/.test(plan), '预检没转发 projectRoot/projectName');
   assert(/longRunService\.replay\(\{[^}]*projectRoot[^}]*\}\)/.test(replay), '回放没转发 projectRoot');
 });

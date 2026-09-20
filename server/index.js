@@ -7419,10 +7419,12 @@ io.on('connection', (socket) => {
   // 面板上的按钮也是写这些文件，与从终端投件是同一条路。
 
   /** 预检：解析需求，给出沙箱现状与外部参考清单。不建沙箱、不起进程、不删任何东西。 */
-  socket.on('longrun:plan', ({ docPath, requirementText, projectRoot, projectName, sandboxName, promptsFile } = {}, cb) => {
+  socket.on('longrun:plan', ({ docPath, requirementText, projectRoot, projectName, sandboxName, promptsFile, resumeSessionId } = {}, cb) => {
     const reply = (d) => { socket.emit('longrun:planned', d); if (typeof cb === 'function') cb(d); };
     try {
-      reply({ ok: true, ...longRunService.plan({ docPath, requirementText, projectRoot, projectName, sandboxName, promptsFile }) });
+      // ⚠ 解构的字段必须逐个透传（v1.4.19 就是这里漏了 projectRoot/projectName）。
+      //   resumeSessionId 漏掉的后果：续接模式下需求为空会被判成"需求为空"而拒绝启动
+      reply({ ok: true, ...longRunService.plan({ docPath, requirementText, projectRoot, projectName, sandboxName, promptsFile, resumeSessionId }) });
     } catch (e) {
       reply({ ok: false, error: e.message });
     }

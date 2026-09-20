@@ -33,6 +33,7 @@ import LongRunMain from './components/longrun/LongRunMain';
 import LongRunSide from './components/longrun/LongRunSide';
 import LongRunNewTask from './components/longrun/LongRunNewTask';
 import LongRunHandoffDialog from './components/longrun/LongRunHandoffDialog';
+import LongRunSwitchDialog from './components/longrun/LongRunSwitchDialog';
 import './components/longrun/LongRun.css';
 import './components/longrun/LongRunEntries.css';
 import { registerOsc52, writeClipboard } from './terminalClipboard';
@@ -171,6 +172,7 @@ export default function App() {
   const longRunView = currentSession?.runMode === 'longrun';
   const [longRunNew, setLongRunNew] = useState(null);         // null | {mode, projectRoot?, requirementText?}
   const [longRunHandoff, setLongRunHandoff] = useState(null); // null | {sessionId, name, root}：转长程前先让会话把进度写进记忆
+  const [longRunSwitch, setLongRunSwitch] = useState(null);   // null | {sessionId, name, to}：长程⇄终端 切换确认框
   const [longRunHandover, setLongRunHandover] = useState(null); // null | sessionId
   // 长程收工：响一声 + 改标题（useLongRunBell 内），再补一条 toast —— 人正看着别的会话时，这是唯一能看到的提示
   useLongRunBell(longRun.tasks, longRun.muted, useCallback((task) => {
@@ -2027,7 +2029,8 @@ export default function App() {
         {currentSession && longRunView ? (
           <LongRunMain lr={longRun}
             onResume={() => setLongRunNew({ mode: 'resume', projectRoot: currentSession.workingDir })}
-            onHandover={() => setLongRunHandover(currentSession.id)} />
+            onHandover={() => setLongRunSwitch({ sessionId: currentSession.id,
+              name: currentSession.projectName || currentSession.name, to: 'terminal' })} />
         ) : currentSession ? (
           <div className="terminal-container">
             <div
@@ -3263,6 +3266,32 @@ export default function App() {
         />
       )}
 
+      {/* 长程 ⇄ 终端 切换：先出预检计划，再按选定方式执行 */}
+      {longRunSwitch && (
+        <LongRunSwitchDialog
+          lr={longRun}
+          sessionId={longRunSwitch.sessionId}
+          sessionName={longRunSwitch.name}
+          to={longRunSwitch.to}
+          onClose={(r) => {
+            setLongRunSwitch(null);
+            if (r?.ok && r.note) toast.warning(r.note);
+            if (r?.ok) longRun.refreshLists();
+          }}
+          // 选了「交接后开新对话」：走已有的交接向导（写记忆 → 退出 CLI → 开长程弹窗）
+          onNeedHandoff={({ root }) => {
+            const s = longRunSwitch;
+            setLongRunSwitch(null);
+            setLongRunHandoff({ sessionId: s.sessionId, name: s.name, root });
+          }}
+          // 选了「续同一条对话」：直接开长程弹窗，带上要续接的会话 id
+          onNeedStart={({ resumeSessionId, root }) => {
+            setLongRunSwitch(null);
+            setLongRunNew({ projectRoot: root, mode: 'resume', resumeSessionId });
+          }}
+        />
+      )}
+
       {/* 转长程前的交接：写记忆 → 退出 CLI → 打开长程弹窗（下一步预填进需求） */}
       {longRunHandoff && (
         <LongRunHandoffDialog
@@ -3436,11 +3465,11 @@ export default function App() {
                     className="context-menu-item"
                     title="在这个项目上开长程：已跑过长程就续跑，否则接管（需先在终端里退出 claude）"
                     onClick={() => {
-                      // 先走交接：让这个会话把上下文写进记忆再退出。CLI 没在跑时对话框会自己跳过
-                      setLongRunHandoff({
+                      // 走统一预检：它会查 CLI 在不在跑、水位多高，再推荐续同一条对话还是先交接
+                      setLongRunSwitch({
                         sessionId: sessionContextMenu.session.id,
                         name: sessionContextMenu.session.projectName || sessionContextMenu.session.name,
-                        root: sessionContextMenu.session.workingDir,
+                        to: 'longrun',
                       });
                       setSessionContextMenu(null);
                     }}

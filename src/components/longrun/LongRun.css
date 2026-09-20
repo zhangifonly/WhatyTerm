@@ -150,3 +150,19 @@
 .lr-rt-warn { font-size: 11px; line-height: 1.5; color: #d9b945; }
 .lr-rt-ok { font-size: 11.5px; color: #6fbf73; }
 .lr-warn-line { margin-top: 4px; color: #d9b945; font-size: 11.5px; line-height: 1.55; }
+
+/* ── 长程 ⇄ 终端 切换确认框 ──────────────────────────────────── */
+.lr-sw-block, .lr-sw-warn { margin: 8px 0; padding: 8px 10px; border-radius: 5px; font-size: 12px; line-height: 1.6; }
+.lr-sw-block { background: rgba(224, 136, 101, 0.1); border-left: 3px solid #e08865; }
+.lr-sw-warn { background: rgba(217, 185, 69, 0.1); border-left: 3px solid #d9b945; color: #d9b945; }
+.lr-sw-modes { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+.lr-sw-mode {
+  display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; align-items: baseline;
+  padding: 8px 10px; border: 1px solid hsl(var(--border)); border-radius: 6px; cursor: pointer;
+}
+.lr-sw-mode.on { border-color: hsl(var(--primary)); background: hsl(var(--muted)); }
+.lr-sw-mode-t { font-size: 13px; }
+.lr-sw-mode-d { grid-column: 2; font-size: 11.5px; line-height: 1.5; }
+.lr-sw-tag { margin-left: 6px; padding: 1px 5px; border-radius: 3px; background: hsl(var(--primary)); color: #fff; font-size: 10.5px; }
+.lr-sw-why, .lr-sw-prior { font-size: 11.5px; line-height: 1.5; }
+.lr-sw-prior { margin-top: 8px; padding-top: 8px; border-top: 1px solid hsl(var(--border)); }

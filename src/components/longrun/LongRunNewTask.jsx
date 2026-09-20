@@ -21,6 +21,8 @@ const LongRunNewTask = ({ lr, preset, sessions = [], onClose, onStarted, onOpene
     kind: preset?.projectRoot ? 'existing' : 'new', projectName: '', projectRoot: preset?.projectRoot || '',
     // requirementText 可能是刚交接过来的「下一会话应该从哪一项开始」：预填但让人过目，随时可改
     mode: preset?.mode || 'start', source: 'paste', requirementText: preset?.requirementText || '', docPath: '', fresh: false, providerId: '',
+    // 从终端「续同一条对话」转过来时带的会话 id：给了它长程就续那条对话，不发初始化
+    resumeSessionId: preset?.resumeSessionId || '',
     ...ADVANCED_DEFAULTS,
   }));
   const [dir, setDir] = useState(null);        // 已有项目的现状（longrun:projectState）
@@ -95,7 +97,10 @@ const LongRunNewTask = ({ lr, preset, sessions = [], onClose, onStarted, onOpene
     onOpened(r.sessionId);
   };
 
-  const hasReq = form.source === 'path' ? form.docPath.trim() : form.requirementText.trim();
+  // 续同一条对话时新需求可以为空：它正记着刚才聊的上下文，不给新需求就是"照着刚才的继续做"。
+  // 其余情况必须有需求，否则执行者不知道要干什么。
+  const hasReq = !!form.resumeSessionId
+    || (form.source === 'path' ? form.docPath.trim() : form.requirementText.trim());
   const blocked = form.kind === 'existing' && (!form.projectRoot || !dir || dir.runningTaskId
     || (mode === 'resume' && !dir.resumable) || dir.dirState === 'missing');
 
