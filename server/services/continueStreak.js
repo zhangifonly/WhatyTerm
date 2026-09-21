@@ -37,10 +37,14 @@ const COMPLAINT_RE = /(你|您)一直(在)?发.{0,4}继续|一直在等(你的)?
  * @param {string} p.lastReply  CLI 最近一段回复正文（已剥 ANSI）
  * @returns {{stop:boolean, reason:string}} stop 为真时应放弃机械继续、升级判断
  */
-export function shouldStopMechanicalContinue({ streak = 0, lastReply = '' } = {}) {
+export function shouldStopMechanicalContinue({ streak = 0, lastReply = '', advanced = false } = {}) {
+  // 抱怨优先于一切：它明说了「继续」不是它要的，推进与否都别再发
   if (COMPLAINT_RE.test(String(lastReply || ''))) {
     return { stop: true, reason: 'CLI 明确表示「继续」不是它要的输入，已停止机械继续' };
   }
+  // 工作确实推进了 → 次数上限这一档不成立。否则正常节奏（每发都干完一批活）攒到上限
+  // 就永久熔断，且再也不恢复（iSpring 实测，2067 次）。
+  if (advanced) return { stop: false, reason: '' };
   if (streak >= MECHANICAL_CONTINUE_LIMIT) {
     return { stop: true, reason: `已连发 ${streak} 次「继续」仍需我们催，屏幕虽在变但工作没往前走，已停止机械继续` };
   }
@@ -51,8 +55,15 @@ export function shouldStopMechanicalContinue({ streak = 0, lastReply = '' } = {}
  * 累计连发次数：只要本次动作还是「继续」就 +1，换了别的动作（或人工介入）归零。
  * 与 index.js 里那个「屏幕没变才累加」的 continueCount 互补，两者都不单独充分。
  */
-export function nextStreak(prevStreak, action) {
-  return /^继续/.test(String(action || '')) ? (Number(prevStreak) || 0) + 1 : 0;
+export function nextStreak(prevStreak, action, advanced = false) {
+  if (!/^继续/.test(String(action || ''))) return 0;
+  // ⚠ 工作确实推进了就清零。只增不减的后果实测过（iSpring 2026-09-19）：
+  //   Codex 每发「继续」都真在干活（一批做完、68/68 测试通过），可 streak 一路涨到 8
+  //   就永久熔断 —— 日志里同一句刷了 2067 次、影响 4 个会话，会话就此停住不动。
+  //   这与 v1.2.59 修过的"误熔断致永久挂死"是同一类错误，我又造了一遍。
+  //   本闸要拦的是"催了也没用"，不是"催过很多次"；推进信号由调用方按回复正文哈希算。
+  if (advanced) return 1;
+  return (Number(prevStreak) || 0) + 1;
 }
 
 export default { shouldStopMechanicalContinue, nextStreak, MECHANICAL_CONTINUE_LIMIT };

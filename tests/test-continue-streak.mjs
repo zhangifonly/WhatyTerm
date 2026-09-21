@@ -11,6 +11,7 @@
  * 运行: node tests/test-continue-streak.mjs
  */
 
+import fs from 'fs';
 import { shouldStopMechanicalContinue, nextStreak, MECHANICAL_CONTINUE_LIMIT } from '../server/services/continueStreak.js';
 import { hasPendingQuestion } from '../server/services/pendingQuestion.js';
 
@@ -103,12 +104,56 @@ test('次数到顶兜底：屏幕一直在变也照样停（本次事故的正�
   assert(MECHANICAL_CONTINUE_LIMIT >= 5, `上限 ${MECHANICAL_CONTINUE_LIMIT} 太小会误伤正常节奏（v1.2.59 的 4 就误伤过）`);
 });
 
+test('工作推进了就不许因次数熔断（iSpring 实测：正常节奏被误熔断且永不恢复）', () => {
+  const normal = 'P1-540 已完成：新增宿主场景，普通与 ASan 全量测试各 68/68 通过。';
+  // 每发「继续」都真干完一批活 —— 这是最正常的开发节奏，绝不能熔断
+  const v = shouldStopMechanicalContinue({ streak: 50, lastReply: normal, advanced: true });
+  assert(v.stop === false, `推进了还熔断 —— iSpring 就是这么停住的，同一句日志刷了 2067 次：${v.reason}`);
+  // 没推进才算卡住
+  assert(shouldStopMechanicalContinue({ streak: 50, lastReply: normal, advanced: false }).stop === true,
+    '没推进时该拦住');
+});
+
+test('抱怨优先于推进：它明说「继续」没用时，哪怕屏幕在动也停手', () => {
+  const v = shouldStopMechanicalContinue({
+    streak: 1, lastReply: '我一直在等指令，你一直发「继续」', advanced: true });
+  assert(v.stop === true, '它已经明说了，推进与否都别再发');
+});
+
+test('连发计数：推进就清零，避免正常节奏攒到上限', () => {
+  assert(nextStreak(7, '继续', true) === 1, '推进后应清零重数，实际 ' + nextStreak(7, '继续', true));
+  assert(nextStreak(7, '继续', false) === 8, '没推进才累加');
+  assert(nextStreak(7, '2', true) === 0, '换动作一律归零');
+});
+
 test('连发计数：只要还是「继续」就累加，换动作归零', () => {
   assert(nextStreak(undefined, '继续') === 1, '首次');
   assert(nextStreak(7, '继续') === 8, '累加');
   assert(nextStreak(7, '2') === 0, '换成菜单选择 → 归零');
   assert(nextStreak(7, null) === 0, '无动作 → 归零');
   assert(nextStreak(3, '继续完成剩下的') === 4, '以「继续」开头的变体也算');
+});
+
+// ── 接线守卫：纯函数测不到"推进信号有没有真的传进去" ─────────────
+// ⚠ test() 是同步的：传 async 回调会让断言在 Promise 里抛出并被吞掉，守卫静默变绿
+//   （2026-09-19 实测漏报了"接线断开"这个变异）。所以在外面同步读文件。
+const IDX_SRC = fs.readFileSync(new URL('../server/index.js', import.meta.url), 'utf8');
+
+test('守卫：推进信号必须从调用处传进判定与计数（断开就退回 iSpring 那个事故）', () => {
+  const IDX = IDX_SRC;
+  const at = IDX.indexOf('shouldStopMechanicalContinue({');
+  assert(at > 0, '没找到调用处');
+  const seg = IDX.slice(at, at + 400);
+  assert(/advanced:\s*screenAdvanced/.test(seg),
+    '判定没收到推进信号 —— 正常节奏会被误熔断且永不恢复：' + seg.slice(0, 160));
+  assert(/nextStreak\([^)]*screenAdvanced\)/.test(seg), '计数没收到推进信号，streak 会只增不减');
+  // 另外三处写台账的地方也要传，否则下一轮读到的 streak 仍是没清零的
+  const writes = IDX.split('nextStreak(').slice(1);
+  assert(writes.length >= 4, `nextStreak 调用点只有 ${writes.length} 处，应有 4 处（1 判定 + 3 写台账）`);
+  for (const w of writes) {
+    const head = w.slice(0, 90);
+    assert(/prevAdvanced|screenAdvanced|Advanced/.test(head), '有调用点没传推进信号：' + head.slice(0, 70));
+  }
 });
 
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);

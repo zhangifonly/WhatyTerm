@@ -4978,13 +4978,17 @@ async function runBackgroundAutoAction() {
           ? (lastAction.continueCount || 1) + 1
           : 1;
 
-        // 第二道计数：只数连发次数，**不因屏幕变化归零**。上面那个 continueCount 判的是
-        // "发了继续但回复正文没变"，而 CLI 完全可以一边礼貌回话一边原地等人决策
-        //（tableCard 实测：每轮都真回话 → 每轮归零 → 三道闸一次没触发，发了 15 万余次）。
+        // 第二道计数：数连发次数，但**工作推进了就清零**。
+        // 它与上面 continueCount 的分工：continueCount 只看"这一轮回复正文变没变"，
+        // 粒度太细 —— CLI 可以一边礼貌回话一边原地等人决策（tableCard 实测发了 15 万余次）；
+        // streak 看的是更长的跨度，累计催了很多次仍要靠催才动，才算真卡住。
+        // ⚠ 但它必须能被推进信号清零。只增不减的版本实测把 iSpring 这类正常节奏
+        //   （每发都真干完一批活）也熔断了，且永不恢复 —— 同一句日志刷了 2067 次。
         const lastReplyEarly = getLastClaudeReply(terminalContent);
         const streakVerdict = shouldStopMechanicalContinue({
-          streak: nextStreak(lastAction?.streak, '继续'),
+          streak: nextStreak(lastAction?.streak, '继续', screenAdvanced),
           lastReply: lastReplyEarly,
+          advanced: screenAdvanced,
         });
 
         if (continueCount >= 2 || streakVerdict.stop) {
@@ -5336,7 +5340,7 @@ async function runBackgroundAutoAction() {
             ? (prevAction.continueCount || 1) + 1
             : (action === '继续' ? 1 : 0);
           lastActionMap.set(session.id, { action, time: now, contentHash, advanceSig: curAdvanceSig, continueCount,
-            streak: nextStreak(prevAction?.streak, action) });
+            streak: nextStreak(prevAction?.streak, action, prevAdvanced) });
           // ⚠️ 按键发出后必须立即作废状态缓存：缓存 30 秒才刷一轮
           //（AI_ANALYSIS_INTERVAL），而确认框一旦被自动选掉、屏幕就往下走了。
           // 不清的话「N 个等确认」会挂着一条已经处理完的陈旧状态最长 30 秒，
@@ -5458,7 +5462,7 @@ async function runBackgroundAutoAction() {
               ? (prevActionCache.continueCount || 1) + 1
               : (action === '继续' ? 1 : 0);
             lastActionMap.set(session.id, { action, contentHash, advanceSig: curAdvanceSig, continueCount: continueCountCache, time: now,
-              streak: nextStreak(prevActionCache?.streak, action) });
+              streak: nextStreak(prevActionCache?.streak, action, prevAdvancedCache) });
             // 同 preAnalyze 路径：按键后立即作废状态缓存，否则陈旧的「确认界面」
             // 会在摘要里挂最长 30 秒（AI_ANALYSIS_INTERVAL），点进去已无事可做。
             aiStatusCache.delete(session.id);
@@ -5643,7 +5647,7 @@ async function runBackgroundAutoAction() {
           ? (prevActionAi.continueCount || 1) + 1
           : (action === '继续' ? 1 : 0);
         lastActionMap.set(session.id, { action, time: now, contentHash, advanceSig: curAdvanceSigAi, continueCount: continueCountAi,
-          streak: nextStreak(prevActionAi?.streak, action) });
+          streak: nextStreak(prevActionAi?.streak, action, prevAdvancedAi) });
         // 同 preAnalyze 路径：按键后立即作废状态缓存，否则陈旧的「确认界面」
         // 会在摘要里挂最长 30 秒（AI_ANALYSIS_INTERVAL），点进去已无事可做。
         aiStatusCache.delete(session.id);
