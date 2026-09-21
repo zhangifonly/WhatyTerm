@@ -34,6 +34,7 @@ import LongRunSide from './components/longrun/LongRunSide';
 import LongRunNewTask from './components/longrun/LongRunNewTask';
 import LongRunHandoffDialog from './components/longrun/LongRunHandoffDialog';
 import LongRunSwitchDialog from './components/longrun/LongRunSwitchDialog';
+import { orderSessions, sessionNumbers as computeSessionNumbers, nextSortMode } from './utils/sessionSort.js';
 import './components/longrun/LongRun.css';
 import './components/longrun/LongRunEntries.css';
 import { registerOsc52, writeClipboard } from './terminalClipboard';
@@ -1271,49 +1272,61 @@ export default function App() {
   // 跟着会话走、不重排 —— 否则 ⌘1 今天是 A 明天是 B，肌肉记忆无法积累。
   // 服务端 _loadSessions 已补 ORDER BY created_at，这里再按同一键排一次兜底
   //（socket 增量更新 setSessions(prev => prev.map(...)) 不保证顺序）。
-  const sessionNumbers = useMemo(() => {
-    const byCreated = [...sessions].sort((a, b) => {
-      const ta = new Date(a.createdAt || 0).getTime();
-      const tb = new Date(b.createdAt || 0).getTime();
-      if (ta !== tb) return ta - tb;
-      return String(a.id).localeCompare(String(b.id));  // createdAt 相同时用 id 兜底
-    });
-    const map = {};
-    byCreated.forEach((s, i) => { map[s.id] = i + 1; });
-    return map;
-  }, [sessions]);
+  const sessionNumbers = useMemo(() => computeSessionNumbers(sessions), [sessions]);
 
   // 置顶存 localStorage（sessions 本来就从 localStorage 缓存初始化，同一套机制）。
   // ⚠️ 用**数组**而非 Set 作唯一状态源：置顶顺序决定快捷键位（先置顶的拿 ⌘1），
   //    Set 不保证顺序语义清晰，两份状态更会不同步。pinnedIds 只是它的派生视图。
-  const [pinnedOrder, setPinnedOrder] = useState(() => {
-    try {
-      const raw = localStorage.getItem('webtmux_pinned_sessions');
-      return raw ? JSON.parse(raw) : [];
-    } catch { return []; }
-  });
+  const [pinnedOrder, setPinnedOrder] = useState([]);   // 真值来自服务端，见下面的 ui:prefs
   const pinnedIds = useMemo(() => new Set(pinnedOrder), [pinnedOrder]);
-  const togglePinned = useCallback((sessionId) => {
-    setPinnedOrder(prev => {
-      const next = prev.includes(sessionId)
-        ? prev.filter(id => id !== sessionId)
-        : [...prev, sessionId];        // 追加到末尾：先置顶的先拿小号
-      try { localStorage.setItem('webtmux_pinned_sessions', JSON.stringify(next)); } catch {}
-      return next;
-    });
-  }, []);
 
   // 显示排序模式：fixed（门牌号顺序）/ active（最近活跃）/ pending（待处理优先）
-  const [sortMode, setSortMode] = useState(() => {
-    try { return localStorage.getItem('webtmux_session_sort') || 'fixed'; } catch { return 'fixed'; }
-  });
+  const [sortMode, setSortMode] = useState('fixed');
+
+  // ⚠ 置顶与排序模式**存服务端**，不再存 localStorage：手机是另一台设备，
+  //   读不到电脑的 localStorage，于是两端顺序完全对不上（2026-09-21 检查移动版时发现）。
+  //   首次连上时把本机旧的 localStorage 值迁移上去，迁完即删，避免两个来源打架。
+  useEffect(() => {
+    if (!socket) return;
+    const apply = (p) => {
+      if (!p) return;
+      setPinnedOrder(Array.isArray(p.pinnedSessions) ? p.pinnedSessions : []);
+      setSortMode(p.sessionSort || 'fixed');
+    };
+    socket.emit('ui:prefs', {}, (r) => {
+      if (!r?.ok) return;
+      let legacy = null;
+      try {
+        const rawPin = localStorage.getItem('webtmux_pinned_sessions');
+        const rawSort = localStorage.getItem('webtmux_session_sort');
+        // 服务端还是空的、而本机有旧值 → 这台机器的偏好值得带上去
+        if ((rawPin || rawSort) && !r.prefs.pinnedSessions.length && r.prefs.sessionSort === 'fixed') {
+          legacy = { pinnedSessions: rawPin ? JSON.parse(rawPin) : [], sessionSort: rawSort || 'fixed' };
+        }
+        localStorage.removeItem('webtmux_pinned_sessions');
+        localStorage.removeItem('webtmux_session_sort');
+      } catch { /* 隐私模式读不了就算了，服务端值照用 */ }
+      if (legacy) socket.emit('ui:prefs:set', legacy, (w) => apply(w?.prefs || r.prefs));
+      else apply(r.prefs);
+    });
+    const onPrefs = (payload) => apply(payload?.prefs);
+    socket.on('ui:prefs', onPrefs);          // 另一端改了，这边跟着变
+    return () => socket.off('ui:prefs', onPrefs);
+  }, [socket]);
+
+  const togglePinned = useCallback((sessionId) => {
+    // 乐观更新一下，网络慢时按钮不会像没反应；服务端广播回来会覆盖成权威值
+    setPinnedOrder(prev => (prev.includes(sessionId) ? prev.filter(id => id !== sessionId) : [...prev, sessionId]));
+    socket?.emit('ui:prefs:togglePin', { sessionId });
+  }, [socket]);
+
   const cycleSortMode = useCallback(() => {
     setSortMode(prev => {
-      const next = prev === 'fixed' ? 'active' : prev === 'active' ? 'pending' : 'fixed';
-      try { localStorage.setItem('webtmux_session_sort', next); } catch {}
+      const next = nextSortMode(prev);
+      socket?.emit('ui:prefs:set', { sessionSort: next });
       return next;
     });
-  }, []);
+  }, [socket]);
 
   // 「真的在等你确认」和「只是空闲、可以推进」是两回事，必须分开。
   //
@@ -1385,24 +1398,8 @@ export default function App() {
 
   // 实际渲染顺序：置顶永远在最前，其余按当前排序模式。门牌号不参与重排。
   const orderedSessions = useMemo(() => {
-    const num = (s) => sessionNumbers[s.id] || 9999;
-    const arr = [...sessions];
-    arr.sort((a, b) => {
-      const pa = pinnedIds.has(a.id) ? 0 : 1;
-      const pb = pinnedIds.has(b.id) ? 0 : 1;
-      if (pa !== pb) return pa - pb;
-      if (sortMode === 'active') {
-        const ta = new Date(a.updatedAt || a.createdAt || 0).getTime();
-        const tb = new Date(b.updatedAt || b.createdAt || 0).getTime();
-        if (ta !== tb) return tb - ta;   // 新的在前
-      } else if (sortMode === 'pending') {
-        const na = needsActionIds.has(a.id) ? 0 : 1;
-        const nb = needsActionIds.has(b.id) ? 0 : 1;
-        if (na !== nb) return na - nb;
-      }
-      return num(a) - num(b);            // 同档内按门牌号，保证顺序确定
-    });
-    return arr;
+    // 排序规则在 src/utils/sessionSort.js，移动版用的是同一份 —— 两端顺序才不会漂移
+    return orderSessions({ sessions, pinnedIds, sortMode, numbers: sessionNumbers, needIds: needsActionIds });
   }, [sessions, pinnedIds, sortMode, sessionNumbers, needsActionIds]);
 
   // 切到某个会话后，左侧列表滚到它所在的位置。

@@ -6,7 +6,7 @@ const AI_COLORS = {
 };
 
 /** 单个会话卡片：名称 + CLI 徽标 + AI 状态行 + 内存；needsAction 高亮 */
-export default function SessionCard({ session, aiStatus, loading, memory, onClick }) {
+export default function SessionCard({ session, aiStatus, loading, memory, onClick, pinned }) {
   const needsAction = !!aiStatus?.needsAction && !session.autoActionEnabled;
   const stateText = aiStatus?.currentState || aiStatus?.phaseName || '等待分析';
   const aiType = (session.aiType || 'claude').toLowerCase();
@@ -21,6 +21,7 @@ export default function SessionCard({ session, aiStatus, loading, memory, onClic
         <span className="m-ai-badge" style={{ background: AI_COLORS[aiType] || '#666' }}>
           {aiType.toUpperCase()}
         </span>
+        {pinned && <span className="m-pin-tag" title="已置顶（与电脑端同步）">📌</span>}
         <span className="m-card-name">{session.projectName || session.name}</span>
         {session.autoActionEnabled && <span className="m-auto-tag">🤖 自动</span>}
         {needsAction && <span className="m-action-tag">⚠ 需操作</span>}

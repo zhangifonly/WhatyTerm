@@ -11,6 +11,9 @@ export function useSessions() {
   const [loadingMap, setLoadingMap] = useState({});     // sessionId -> bool
   const [memoryMap, setMemoryMap] = useState({});       // sessionId -> {memory, processCount}
   const [loaded, setLoaded] = useState(false);
+  // 置顶与排序模式来自**服务端**（不是本机 localStorage）——
+  // 手机与电脑因此看到同一个顺序，一端改了另一端跟着变
+  const [prefs, setPrefs] = useState({ pinnedSessions: [], sessionSort: 'fixed' });
 
   useEffect(() => {
     const handleList = (data) => {
@@ -41,6 +44,8 @@ export function useSessions() {
     socket.on('ai:status', handleAiStatus);
     socket.on('ai:statusLoading', handleLoading);
     socket.on('sessions:memory', handleMemory);
+    const handlePrefs = (payload) => { if (payload?.prefs) setPrefs(payload.prefs); };
+    socket.on('ui:prefs', handlePrefs);
     socket.on('connect', refresh);
 
     refresh();
@@ -51,6 +56,7 @@ export function useSessions() {
       socket.off('ai:status', handleAiStatus);
       socket.off('ai:statusLoading', handleLoading);
       socket.off('sessions:memory', handleMemory);
+      socket.off('ui:prefs', handlePrefs);
       socket.off('connect', refresh);
     };
   }, []);
@@ -58,7 +64,14 @@ export function useSessions() {
   const refresh = () => {
     socket.emit('sessions:list');
     socket.emit('ai:statusAll');
+    socket.emit('ui:prefs', {}, (r) => { if (r?.ok) setPrefs(r.prefs); });
   };
 
-  return { sessions, aiStatusMap, loadingMap, memoryMap, loaded, refresh };
+  /** 切排序模式：写服务端，广播回来后两端一起变 */
+  const setSortMode = (mode) => {
+    setPrefs((p) => ({ ...p, sessionSort: mode }));   // 乐观更新，手机上点了立刻有反应
+    socket.emit('ui:prefs:set', { sessionSort: mode });
+  };
+
+  return { sessions, aiStatusMap, loadingMap, memoryMap, loaded, refresh, prefs, setSortMode };
 }

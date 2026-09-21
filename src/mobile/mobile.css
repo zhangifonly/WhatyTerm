@@ -374,3 +374,8 @@ html, body {
   outline: none;
 }
 .m-login-form input:focus { border-color: var(--m-accent); }
+
+/* 列表头右侧的两个按钮（排序模式 / 刷新） */
+.m-list-actions { display: flex; gap: 6px; align-items: center; }
+/* 置顶标记：与电脑端同步，手机上也要看得出哪几条是置顶的 */
+.m-pin-tag { margin-right: 4px; font-size: 12px; flex-shrink: 0; }

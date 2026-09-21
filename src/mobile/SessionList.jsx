@@ -1,17 +1,24 @@
 import React from 'react';
 import SessionCard from './SessionCard';
+import { orderSessions, needsActionIds, nextSortMode, SORT_LABELS, DEFAULT_SORT } from '../utils/sessionSort.js';
 
-/** 会话列表页：needsAction 的会话置顶排序 */
-export default function SessionList({ sessions, aiStatusMap, loadingMap, memoryMap, loaded, refresh, onOpen }) {
-  const sorted = [...sessions].sort((a, b) => {
-    const na = aiStatusMap[a.id]?.needsAction && !a.autoActionEnabled ? 1 : 0;
-    const nb = aiStatusMap[b.id]?.needsAction && !b.autoActionEnabled ? 1 : 0;
-    return nb - na;
-  });
-
-  const needCount = sorted.filter(
-    (s) => aiStatusMap[s.id]?.needsAction && !s.autoActionEnabled
-  ).length;
+/**
+ * 会话列表页。
+ *
+ * ⚠ 排序**必须**用共享的 src/utils/sessionSort.js —— 与桌面版同一份。
+ *   这里原来自己写了一层「needsAction 置顶」，而桌面是「置顶 → 排序模式 → 门牌号」三层，
+ *   且 needsAction 的口径只覆盖三类中的一类（漏了屏上挂确认菜单、任务报错这两类，
+ *   恰恰最该先看）。结果同一批会话在手机和电脑上顺序完全对不上号。
+ */
+export default function SessionList({
+  sessions, aiStatusMap, loadingMap, memoryMap, loaded, refresh, onOpen,
+  prefs, setSortMode,
+}) {
+  const sortMode = prefs?.sessionSort || DEFAULT_SORT;
+  const pinnedIds = new Set(prefs?.pinnedSessions || []);
+  const needIds = needsActionIds(sessions, aiStatusMap);
+  const sorted = orderSessions({ sessions, pinnedIds, sortMode, needIds });
+  const needCount = needIds.size;
 
   return (
     <div className="m-list">
@@ -20,7 +27,13 @@ export default function SessionList({ sessions, aiStatusMap, loadingMap, memoryM
           会话 {sessions.length} 个
           {needCount > 0 && <span className="m-need-count">🔴 {needCount} 个需操作</span>}
         </span>
-        <button className="m-btn" onClick={refresh}>刷新</button>
+        <span className="m-list-actions">
+          {/* 与桌面同一套模式与循环顺序；改了会同步到电脑端 */}
+          <button className="m-btn" onClick={() => setSortMode?.(nextSortMode(sortMode))}>
+            {SORT_LABELS[sortMode] || SORT_LABELS[DEFAULT_SORT]}
+          </button>
+          <button className="m-btn" onClick={refresh}>刷新</button>
+        </span>
       </div>
       {!loaded && <div className="m-empty">加载中…</div>}
       {loaded && sessions.length === 0 && (
@@ -33,6 +46,7 @@ export default function SessionList({ sessions, aiStatusMap, loadingMap, memoryM
           aiStatus={aiStatusMap[s.id]}
           loading={loadingMap[s.id]}
           memory={memoryMap[s.id]}
+          pinned={pinnedIds.has(s.id)}
           onClick={() => onOpen(s.id)}
         />
       ))}

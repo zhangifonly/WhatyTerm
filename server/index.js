@@ -200,6 +200,7 @@ import { parseHandoffReceipt, HANDOFF_PHASE, HANDOFF_WAIT_MS } from './services/
 import { promptPendingText, stripPromptSuggestion } from './services/promptState.js';
 import { shouldStopMechanicalContinue, nextStreak } from './services/continueStreak.js';
 import { listProviderModels } from './services/ProviderModels.js';
+import uiPrefs from './services/uiPrefs.js';
 import tokenStatsService from './services/TokenStatsService.js';
 import { UsageLedger } from './services/usage/UsageLedger.js';
 import { SessionUsageService } from './services/usage/SessionUsageService.js';
@@ -7496,6 +7497,28 @@ io.on('connection', (socket) => {
     let d;
     try { d = longRunService.forSession(sessionId); } catch (e) { d = { ok: false, error: e.message }; }
     if (typeof cb === 'function') cb(d);
+  });
+
+  /**
+   * 界面偏好（置顶 / 列表排序模式）。存服务端而非 localStorage，
+   * 手机与电脑才看得到同一个顺序 —— 两台设备的 localStorage 互不相通。
+   */
+  socket.on('ui:prefs', (_ = {}, cb) => {
+    if (typeof cb === 'function') cb({ ok: true, prefs: uiPrefs.readPrefs() });
+  });
+
+  /** 写偏好并广播给所有客户端：一端改了，另一端立刻跟着变 */
+  socket.on('ui:prefs:set', (patch = {}, cb) => {
+    const r = uiPrefs.writePrefs(patch);
+    if (r.ok) io.emit('ui:prefs', { prefs: r.prefs });
+    if (typeof cb === 'function') cb(r);
+  });
+
+  /** 切换某条会话的置顶（追加到末尾：先置顶的先拿小号） */
+  socket.on('ui:prefs:togglePin', ({ sessionId } = {}, cb) => {
+    const r = uiPrefs.togglePinned(sessionId);
+    if (r.ok) io.emit('ui:prefs', { prefs: r.prefs });
+    if (typeof cb === 'function') cb(r);
   });
 
   /**
