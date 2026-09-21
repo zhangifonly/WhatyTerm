@@ -114,9 +114,18 @@ await test('绑定器：同目录 claude 在跑先拒绝再动条目；切模式
   const mk = between(src('index.js'), 'async _create(root, projectName) {', 400);
   assert(/mkdirSync\(root, \{ recursive: true \}\);[\s\S]*createSession\(/.test(mk), '建条目前必须先建目录，否则 tmux -c 落到主目录');
   // 只看记录的入口：已有同目录条目原样返回，绝不能把传统会话切成长程模式
-  const open = between(bind, 'async open(root, { projectName }) {', 400);
-  const early = open.indexOf('if (existing.length) return existing[0].id;'), flip = open.indexOf("session.runMode = 'longrun'");
+  // 锚点不绑具体模式值：这里要守的是"已有条目先返回"，而新建条目设成哪个模式是另一条守卫的事。
+  // 原来用 runMode = 'longrun' 定位，2026-09-19 把默认改成 terminal 后这条就假红了。
+  const open = between(bind, 'async open(root, { projectName }) {', 900);
+  const early = open.indexOf('if (existing.length) return existing[0].id;'), flip = open.search(/session\.runMode = '/);
   assert(early > 0 && flip > early && open.slice(0, flip).includes('this._create('), '打开项目：已有条目要在改模式之前直接返回');
+});
+
+await test('打开项目看记录：新建的条目是终端模式（那一刻没有任务在跑）', () => {
+  const bind = between(src('index.js'), 'async open(root, { projectName }) {', 700);
+  assert(bind.includes("session.runMode = 'terminal'"),
+    '设成 longrun 的后果：面板显示长程模式却没有在跑的任务，切换预检还会以"已经是长程模式了"把人拦住（2026-09-19 真机实测）');
+  assert(bind.includes("session.origin = 'longrun'"), '来历仍要记 longrun —— 这条目确实是从长程项目列表点进来的');
 });
 
 await test('socket 处理器把项目参数转给服务层（按字段挑选时漏掉 projectRoot 会让预检看错目录）', () => {

@@ -1240,13 +1240,21 @@ const longRunSessionBinder = {
     io.emit('sessions:updated', sessionManager.listSessions());
     return session.id;
   },
-  /** 只为查看上一轮记录打开：同目录已有条目就用它（不改模式、不碰 CLI），没有才建一个长程模式条目 */
+  /**
+   * 只为查看上一轮记录打开：同目录已有条目就用它（不改模式、不碰 CLI），没有才新建一个。
+   *
+   * ⚠ 新建的条目是**终端模式**，不是长程模式。此前写的是 longrun，可是这个入口只是
+   *   "打开看看上一轮跑了什么"，那一刻并没有任务在跑 —— 条目却显示成长程模式，
+   *   面板上看不到任何在跑的东西，切换预检也会以"已经是长程模式了"把人拦住
+   *   （2026-09-19 真机往返验证时实测到）。真要开长程，走 longrun:start 或切换入口。
+   *   origin 仍记 longrun：这条目确实是从长程项目列表点进来的，来历不该抹掉。
+   */
   async open(root, { projectName }) {
     if (!sessionManagerReady || !sessionManager) throw new Error('会话管理器尚未就绪，请稍后再试');
     const existing = sessionsInDir(sessionManager.listSessions(), root);
     if (existing.length) return existing[0].id;
     const session = await this._create(root, projectName);
-    session.runMode = 'longrun';
+    session.runMode = 'terminal';
     session.origin = 'longrun';
     session.autoActionEnabled = false;
     sessionManager.updateSession(session);
