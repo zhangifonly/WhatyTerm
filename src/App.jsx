@@ -1277,6 +1277,13 @@ export default function App() {
   // 置顶存 localStorage（sessions 本来就从 localStorage 缓存初始化，同一套机制）。
   // ⚠️ 用**数组**而非 Set 作唯一状态源：置顶顺序决定快捷键位（先置顶的拿 ⌘1），
   //    Set 不保证顺序语义清晰，两份状态更会不同步。pinnedIds 只是它的派生视图。
+  // 与 index.html 跳转脚本同一套 UA 正则（两处口径必须一致，否则会出现
+  // "跳过来了却看不到回去的链接"这种死角）
+  const isMobileUA = useMemo(
+    () => /Mobi|Android|iPhone|iPod/i.test(navigator.userAgent || ''),
+    []
+  );
+
   const [pinnedOrder, setPinnedOrder] = useState([]);   // 真值来自服务端，见下面的 ui:prefs
   const pinnedIds = useMemo(() => new Set(pinnedOrder), [pinnedOrder]);
 
@@ -1788,6 +1795,13 @@ export default function App() {
               title="长程开发：执行者在独立沙箱里无人值守连续开发，水位高了自动交接，监督者判断继续/叫你/完成">
               <span className="btn-ico">🧭</span>长程开发
             </button>
+            {/* 只在手机 UA 下出现：桌面浏览器上这个链接没有意义。
+                没有它就是一道有去无回的门 —— 手机上点过「桌面版」就再也回不去移动版。 */}
+            {isMobileUA && (
+              <a className="btn btn-small" href="/?mobile=1" title="回到为手机做的界面">
+                <span className="btn-ico">📱</span>移动版
+              </a>
+            )}
           </div>
         </div>
 
