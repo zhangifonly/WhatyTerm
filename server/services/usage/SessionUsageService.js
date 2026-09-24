@@ -32,6 +32,11 @@ export class SessionUsageService {
   constructor({ ledger, pricing = pricingTable, claudeProjectsRoot = null, codexRoot = null } = {}) {
     Object.assign(this, { ledger, pricing, claudeProjectsRoot, codexRoot });
     this.state = new Map();   // sessionId -> 上一轮结果（用于 diff，不变就不广播）
+    /**
+     * runKey -> {incomplete, estimated, unknownModels, pricingVersion}：最近一次真正读到的结果。
+     * 文件没动时读取器返回 null，以前那一轮的"费用不完整"就丢了（面板上只闪一分钟）；这里沿用上次的。
+     */
+    this.runFlags = new Map();
   }
 
   /** 一个会话的一轮采集。返回 {ok, sessionUsd, todayUsd, ...} 或 {ok:false, kind, reason} */
@@ -44,9 +49,15 @@ export class SessionUsageService {
     if (!runs.length) return { ok: true, kind: 'empty', cli: binding.cli, sessionUsd: this.ledger.sessionTotal(session.id), todayUsd: this._today(session.id, now) };
 
     let estimated = false, incomplete = false, model = '';
+    const unknown = new Set();
+    const pricingVersion = this.pricing.version ?? 0;
     for (const run of runs) {
       const prev = this.ledger.getCursor(binding.cli, run.runKey);
       const cur = { filePath: run.filePath, ...(prev ? { inode: prev.inode, fileSize: prev.file_size, fileMtime: prev.file_mtime, scanOffset: prev.scan_offset, anchorUsd: prev.anchor_usd, byModel: prev.byModel } : {}) };
+      const flags = this.runFlags.get(run.runKey);
+      // 价格表换了（在 CC Switch 里补了价），或本进程还没读过这个 run（刚重启）：强制按现价重算一次。
+      // 游标里存着分模型的累计 token，重算只扫游标之后的新增，成本很低
+      if (prev && (!flags || flags.pricingVersion !== pricingVersion)) cur.fileMtime = -1;
       const read = binding.cli === 'claude'
         ? readClaudeRun(cur, this.pricing)
         : readCodexRun(cur, this.pricing, session.currentModel || session.codexProvider?.model || '');
@@ -57,8 +68,16 @@ export class SessionUsageService {
         if (!cur0 || cur0.session_id !== session.id) {
           this.ledger.claim(session.id, binding.cli, run.runKey, prev?.cum_usd || 0, binding.source || 'exclusive', now);
         }
+        if (flags) {
+          if (flags.estimated) estimated = true;
+          if (flags.incomplete) incomplete = true;
+          flags.unknownModels.forEach((m) => unknown.add(m));
+        }
         continue;
       }
+      this.runFlags.set(run.runKey, { estimated: !!read.estimated, incomplete: read.costComplete === false,
+        unknownModels: read.unknownModels || [], pricingVersion });
+      (read.unknownModels || []).forEach((m) => unknown.add(m));
       if (read.estimated) estimated = true;
       if (read.costComplete === false) incomplete = true;
       if (read.model) model = read.model;
@@ -79,7 +98,7 @@ export class SessionUsageService {
     return {
       ok: true, kind: 'ok', cli: binding.cli, source: binding.source,
       sessionUsd: this.ledger.sessionTotal(session.id), todayUsd: this._today(session.id, now),
-      estimated, incomplete, model,
+      estimated, incomplete, model, unknownModels: [...unknown],
     };
   }
 

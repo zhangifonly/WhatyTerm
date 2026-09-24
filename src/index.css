@@ -4573,3 +4573,8 @@ body {
   background: hsl(var(--primary) / 0.15); color: hsl(var(--primary)); }
 .usage-note { font-size: 11px; line-height: 1.6; color: #d9b945; margin-top: 6px; }
 .usage-note.dim { color: hsl(var(--muted-foreground)); }
+.usage-missing { margin-top: 8px; }
+.usage-missing-toggle { background: none; border: none; padding: 0; font-size: 11px; color: #d9b945; cursor: pointer; }
+.usage-missing-list { margin: 6px 0 0; padding-left: 16px; font-size: 11px; line-height: 1.7; }
+.usage-missing-list code { font-size: 11px; }
+.usage-missing-list .dim { color: hsl(var(--muted-foreground)); }

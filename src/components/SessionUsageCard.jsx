@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 
 /**
  * AI 面板的「用量」卡片：这个会话里 CLI 自己花的钱（不含 WebTmux 监控自身的调用）。
@@ -11,7 +11,38 @@ import React from 'react';
  */
 const money = (n) => `$${Number(n || 0).toFixed(2)}`;
 
-const SessionUsageCard = ({ usage }) => {
+/**
+ * 价格表缺哪些在用模型（全局，所有会话 + 长程共用一张表）。收成一行，点开看清单。
+ * 价格在 CC Switch 里维护：模型更新后在那边补一条，这里 10 分钟内自动按新价重算，不用重启。
+ */
+export const MissingPrices = ({ data }) => {
+  const [open, setOpen] = useState(false);
+  if (!data) return null;
+  if (!data.tableFound) {
+    return <p className="usage-note">没找到 CC Switch 的价格表（~/.cc-switch/cc-switch.db），费用只能显示未知</p>;
+  }
+  const models = data.models || [];
+  if (!models.length) return null;
+  return (
+    <div className="usage-missing">
+      <button type="button" className="usage-missing-toggle" onClick={() => setOpen((v) => !v)}>
+        {open ? '▾' : '▸'} 价格表缺 {models.length} 个在用模型
+      </button>
+      {open && (
+        <>
+          <ul className="usage-missing-list">
+            {models.map((m) => (
+              <li key={m.model}><code>{m.model}</code>{m.sessions > 0 && <span className="dim"> · {m.sessions} 个会话在用</span>}</li>
+            ))}
+          </ul>
+          <p className="usage-note dim">到 CC Switch「模型定价」按官网价补上，10 分钟内自动按新价重算（已用的 token 也会补算）。</p>
+        </>
+      )}
+    </div>
+  );
+};
+
+const SessionUsageCard = ({ usage, missingPrices }) => {
   if (!usage) return null;
   if (usage.kind === 'unsupported' || usage.kind === 'ambiguous') {
     return (
@@ -43,7 +74,13 @@ const SessionUsageCard = ({ usage }) => {
           估算值：这份记录里没有 CLI 自己的账，全部按价格表折算
         </p>
       )}
-      {usage.incomplete && <p className="usage-note">费用不完整：有模型不在价格表里，只统计了已知模型</p>}
+      {/* 只在真有缺价模型时说"不在价格表里"：不完整也可能只是还没有可计价的调用（金额本来就是 0） */}
+      {usage.incomplete && usage.unknownModels?.length > 0 && (
+        <p className="usage-note">
+          费用不完整：{usage.unknownModels.join('、')} 不在价格表里，这部分没算进去
+        </p>
+      )}
+      <MissingPrices data={missingPrices} />
     </div>
   );
 };

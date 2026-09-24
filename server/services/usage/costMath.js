@@ -18,20 +18,42 @@ const num = (v) => {
 };
 
 /**
+ * 前缀兜底只认这些「不改价」的后缀：预览/实验/思考模式。
+ *
+ * 为什么是白名单（2026-09-24 实测）：原来取任意最长前缀，`claude-opus-5-5` 被悄悄按 `claude-opus-5` 计价
+ * （3572 条记录），界面上不报缺价 —— 新版本号、`-mini`/`-flash`/`-pro` 这类不同档位都会这样被套旧价，
+ * 错了也看不出来。宁可报「不完整」让人去 CC Switch 补一条，不可静默算错。
+ */
+export const BENIGN_SUFFIX = /^-(preview|exp|experimental|beta|thinking)(-.*)?$/i;
+
+/**
  * 模型名归一化：价格表里查不到时逐级放宽。
  * 实测 `claude-opus-5[1m]` 表里没有，归一到 `claude-opus-5` 误差 −0.34%，可接受。
+ * @returns {string} 表里的条目名；查不到返回 ''（调用方标不完整，绝不记 0）
  */
 export function normalizeModelId(model, known = []) {
+  return matchModelId(model, known).id;
+}
+
+/**
+ * 同上，但同时说明是怎么匹配上的：exact | context | date | dots | suffix | ''（没匹配上）。
+ * 除 exact 外都是「借用」别的条目的价格，界面据此提示。
+ */
+export function matchModelId(model, known = []) {
   const raw = String(model || '').trim();
-  if (!raw) return '';
-  if (known.includes(raw)) return raw;
+  if (!raw) return { id: '', how: '' };
+  if (known.includes(raw)) return { id: raw, how: 'exact' };
   const noCtx = raw.replace(/\[[^\]]*\]$/, '');                 // claude-opus-5[1m] → claude-opus-5
-  if (known.includes(noCtx)) return noCtx;
+  if (known.includes(noCtx)) return { id: noCtx, how: 'context' };
   const noDate = noCtx.replace(/-20\d{6}$/, '').replace(/-latest$/, '');
-  if (known.includes(noDate)) return noDate;
-  // 最长前缀：gpt-5.6-sol-preview → gpt-5.6-sol
-  const prefix = known.filter((k) => noDate.startsWith(k)).sort((a, b) => b.length - a.length)[0];
-  return prefix || '';
+  if (known.includes(noDate)) return { id: noDate, how: 'date' };
+  // 中转常把 claude-opus-4-8 写成 claude-opus-4.8。只在 claude- 上换：gpt-5.6 的点是正式名的一部分
+  const dashed = /^claude-/.test(noDate) ? noDate.replace(/\./g, '-') : noDate;
+  if (dashed !== noDate && known.includes(dashed)) return { id: dashed, how: 'dots' };
+  // 最长前缀，且剩下的必须是白名单后缀：gpt-5.6-sol-preview → gpt-5.6-sol；claude-opus-5-5 ✗
+  const prefix = known.filter((k) => noDate.startsWith(k) && BENIGN_SUFFIX.test(noDate.slice(k.length)))
+    .sort((a, b) => b.length - a.length)[0];
+  return prefix ? { id: prefix, how: 'suffix' } : { id: '', how: '' };
 }
 
 /**

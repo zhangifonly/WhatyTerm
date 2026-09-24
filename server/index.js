@@ -219,6 +219,7 @@ import sleepPrevention from './services/SleepPreventionService.js';
 import PuppeteerReaper from './services/PuppeteerReaper.js';
 import SessionRelay from './services/SessionRelay.js';
 import { LongRunService } from './services/LongRunService.js';
+import pricingTable from './services/usage/PricingTable.js';
 import { PushService, hostOf } from './services/PushService.js';
 import { LongRunPushNotifier } from './services/longrunPush.js';
 
@@ -5898,6 +5899,14 @@ const sessionUsageService = new SessionUsageService({ ledger: usageLedger });
 const usageMap = new Map();          // sessionId -> {usd, today, kind, ...}，供列表与面板显示
 let usageTickRunning = false;
 const round2 = (n) => Math.round((n || 0) * 100) / 100;
+let lastMissingPrices = '';
+/** 价格表里缺的模型 + 各有几个会话在用（让人知道先补哪条）。只给模型名，时间戳每次查询都在变，不进比较 */
+function missingPricesView() {
+  const { tableFound, models } = pricingTable.missing();
+  const bySession = {};
+  for (const [id, v] of usageMap) for (const m of v.unknownModels || []) (bySession[m] ||= []).push(id);
+  return { tableFound, models: models.map(({ model }) => ({ model, sessions: (bySession[model] || []).length })) };
+}
 
 async function runUsageTick() {
   if (usageTickRunning || !io || !sessionManagerReady || !sessionManager) return;
@@ -5911,7 +5920,8 @@ async function runUsageTick() {
       try {
         const r = sessionUsageService.collect(sd, alive);
         const view = r.ok
-          ? { kind: r.kind, cli: r.cli, usd: round2(r.sessionUsd), today: round2(r.todayUsd), estimated: !!r.estimated, incomplete: !!r.incomplete, model: r.model || '' }
+          ? { kind: r.kind, cli: r.cli, usd: round2(r.sessionUsd), today: round2(r.todayUsd), estimated: !!r.estimated, incomplete: !!r.incomplete, model: r.model || '',
+            unknownModels: r.unknownModels || [] }
           : { kind: r.kind, cli: r.cli, reason: r.reason || '' };
         // 金额先 round 到 2 位再比：浮点每轮都在抖，不这么做 37 张卡每分钟全量重渲染
         const prev = usageMap.get(sd.id);
@@ -5922,6 +5932,9 @@ async function runUsageTick() {
       if (Date.now() - started > 3000) break;   // 单轮硬上限，剩下的下一轮续（游标保证不漏）
     }
     if (changed) io.emit('sessions:usage', Object.fromEntries(usageMap));
+    // 全局缺价清单（所有计费入口共用一张价格表，长程的折算也在内）：变了才推
+    const missing = missingPricesView();
+    if (JSON.stringify(missing) !== lastMissingPrices) { lastMissingPrices = JSON.stringify(missing); io.emit('usage:missingPrices', missing); }
   } finally {
     usageTickRunning = false;
   }
@@ -7139,6 +7152,7 @@ io.on('connection', (socket) => {
 
   // 获取会话列表
   socket.emit('sessions:usage', Object.fromEntries(usageMap));   // 新连上的客户端先拿一份当前值，不用等下一轮
+  socket.emit('usage:missingPrices', missingPricesView());
 
   socket.on('sessions:list', async () => {
     // 等待 SessionManager 初始化完成

@@ -75,11 +75,13 @@ export function readClaudeRun(cur, pricing) {
     let post = 0, mainModel = '', mainTokens = -1;
     for (const [model, usage] of Object.entries(state.byModel)) {
       if (model === '<synthetic>') continue;      // CLI 自己合成的记录，不是 API 调用
+      // token 全 0 的条目没有钱可算，不能因为它查不到价就标「不完整」（实测有无模型名的零用量行）
+      if (!(usage.input || usage.output || usage.cacheRead || usage.cacheWrite)) continue;
       const weight = usage.input + usage.cacheRead + usage.output;
       if (weight > mainTokens) { mainTokens = weight; mainModel = model; }   // 用量最大的那个模型报给界面
       const { price } = pricing.get(model);
       const usd = priceUsage(usage, price);
-      if (usd === null) { unknownModels.push(model); continue; }
+      if (usd === null) { unknownModels.push(model || '(未标模型名)'); continue; }
       post += usd;
     }
     return {
