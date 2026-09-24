@@ -394,3 +394,32 @@ html, body {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .m-hist-item:active { background: rgba(255, 255, 255, 0.16); }
+
+/* ── 选项面板（把终端里的面板变成可点按钮） ─────────────────── */
+.m-panel {
+  margin: 8px; padding: 10px; border-radius: 10px;
+  background: rgba(96, 165, 250, 0.08); border: 1px solid rgba(96, 165, 250, 0.3);
+}
+.m-panel-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; margin-bottom: 8px; }
+.m-panel-tag {
+  padding: 1px 6px; border-radius: 4px; background: #3b82f6; color: #fff;
+  font-size: 10.5px; flex-shrink: 0;
+}
+.m-panel-q { font-size: 13px; font-weight: 600; color: #e6e6f0; line-height: 1.4; }
+.m-panel-opt {
+  display: flex; gap: 8px; width: 100%; margin-bottom: 6px; padding: 9px 10px;
+  text-align: left; border-radius: 8px; font-size: 13px; line-height: 1.45;
+  background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #e6e6f0;
+}
+.m-panel-opt.cursor { border-color: rgba(96, 165, 250, 0.7); }
+.m-panel-opt.checked { background: rgba(96, 165, 250, 0.18); }
+.m-panel-opt:disabled { opacity: 0.5; }
+.m-panel-box { flex-shrink: 0; width: 18px; text-align: center; color: #93c5fd; }
+.m-panel-label { flex: 1; min-width: 0; }
+/* 说明文字：另起一行、限两行，长说明不至于把按钮撑得满屏 */
+.m-panel-detail {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  margin-top: 3px; color: #9aa0aa; font-size: 11.5px; line-height: 1.4;
+}
+.m-panel-foot { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }

@@ -1,0 +1,17 @@
+ ←  ☒ 存量现状   □ 目的   ✔ Submit   →
+
+上架 Google 主要想解决什么？
+
+❯ 1. [ ] 装机不被拦
+      扫码装机被 Play Protect 拦住，想恢复不用 USB 的批量装机
+  2. [ ] 用户自己下载
+      学校或家长在 Play 商店里搜到、自己装
+  3. [x] 自动升级
+      存量设备通过 Play 自动更新，不靠我们服务器推送
+  4. [ ] 合规/信任背书
+      招标或客户要求软件在 Google Play 上架
+  5. [ ] Type something
+     Submit
+
+  6. Chat about this
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

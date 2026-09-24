@@ -91,6 +91,10 @@ export default function QuickActions({ sessionId }) {
         <button className="m-btn" onClick={() => sendRaw('2', '2')}>2</button>
         <button className="m-btn" onClick={() => sendRaw('3', '3')}>3</button>
         <button className="m-btn" onClick={() => sendRaw('\t', 'Tab')} title="发 Tab 给终端，由 CLI 自己补全">Tab</button>
+        {/* 方向键与空格：选项面板要靠它们导航与勾选。PanelPicker 认不出面板时这就是唯一通路 */}
+        <button className="m-btn" onClick={() => sendRaw('\x1b[A', '↑')}>↑</button>
+        <button className="m-btn" onClick={() => sendRaw('\x1b[B', '↓')}>↓</button>
+        <button className="m-btn" onClick={() => sendRaw(' ', '空格')} title="勾选/取消">空格</button>
         <button className="m-btn" onClick={() => sendRaw('\x1b', 'Esc')}>Esc</button>
         <button className="m-btn" onClick={() => sendRaw('\r', '回车')}>↵</button>
       </div>
