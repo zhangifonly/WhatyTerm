@@ -50,6 +50,7 @@ export class SessionUsageService {
 
     let estimated = false, incomplete = false, model = '';
     const unknown = new Set();
+    const autoPriced = new Set();
     const pricingVersion = this.pricing.version ?? 0;
     for (const run of runs) {
       const prev = this.ledger.getCursor(binding.cli, run.runKey);
@@ -72,12 +73,14 @@ export class SessionUsageService {
           if (flags.estimated) estimated = true;
           if (flags.incomplete) incomplete = true;
           flags.unknownModels.forEach((m) => unknown.add(m));
+          flags.autoModels.forEach((m) => autoPriced.add(m));
         }
         continue;
       }
       this.runFlags.set(run.runKey, { estimated: !!read.estimated, incomplete: read.costComplete === false,
-        unknownModels: read.unknownModels || [], pricingVersion });
+        unknownModels: read.unknownModels || [], autoModels: read.autoModels || [], pricingVersion });
       (read.unknownModels || []).forEach((m) => unknown.add(m));
+      (read.autoModels || []).forEach((m) => autoPriced.add(m));
       if (read.estimated) estimated = true;
       if (read.costComplete === false) incomplete = true;
       if (read.model) model = read.model;
@@ -98,7 +101,7 @@ export class SessionUsageService {
     return {
       ok: true, kind: 'ok', cli: binding.cli, source: binding.source,
       sessionUsd: this.ledger.sessionTotal(session.id), todayUsd: this._today(session.id, now),
-      estimated, incomplete, model, unknownModels: [...unknown],
+      estimated, incomplete, model, unknownModels: [...unknown], autoModels: [...autoPriced],
     };
   }
 

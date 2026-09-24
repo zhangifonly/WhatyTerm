@@ -97,12 +97,13 @@ export function readCodexRun(cur, pricing, fallbackModel = '') {
   const billable = codexBillable(parsed.total);
   // 模型名三级兜底：尾部 → 头部 → 调用方（会话已知模型 / codex 配置默认）。查不到价就标不完整，绝不按 0 计价
   const model = parsed.model || findModelInHead(cur.filePath) || fallbackModel;
-  const { price, modelId } = pricing.get(model);
+  const { price, modelId, source } = pricing.get(model);
   const usd = priceUsage(billable, price);
   return {
     cumUsd: usd === null ? 0 : usd,
     costComplete: usd !== null,
     unknownModels: usd === null ? [model || '(未知模型)'] : [],
+    autoModels: usd !== null && source === 'litellm' ? [model] : [],
     tokens: billable, model: modelId || model,
     inode: String(st.ino), fileSize: st.size, fileMtime: st.mtimeMs,
   };

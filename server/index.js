@@ -220,6 +220,7 @@ import PuppeteerReaper from './services/PuppeteerReaper.js';
 import SessionRelay from './services/SessionRelay.js';
 import { LongRunService } from './services/LongRunService.js';
 import pricingTable from './services/usage/PricingTable.js';
+import { AutoPricing } from './services/usage/AutoPricing.js';
 import { PushService, hostOf } from './services/PushService.js';
 import { LongRunPushNotifier } from './services/longrunPush.js';
 
@@ -5899,13 +5900,31 @@ const sessionUsageService = new SessionUsageService({ ledger: usageLedger });
 const usageMap = new Map();          // sessionId -> {usd, today, kind, ...}，供列表与面板显示
 let usageTickRunning = false;
 const round2 = (n) => Math.round((n || 0) * 100) / 100;
-let lastMissingPrices = '';
-/** 价格表里缺的模型 + 各有几个会话在用（让人知道先补哪条）。只给模型名，时间戳每次查询都在变，不进比较 */
-function missingPricesView() {
-  const { tableFound, models } = pricingTable.missing();
-  const bySession = {};
-  for (const [id, v] of usageMap) for (const m of v.unknownModels || []) (bySession[m] ||= []).push(id);
-  return { tableFound, models: models.map(({ model }) => ({ model, sessions: (bySession[model] || []).length })) };
+let lastPricingView = '';
+// 自动价格（LiteLLM）挂到全局价格表上：CC Switch 没有的模型自动补价，CC Switch 仍优先（见 AutoPricing.js）
+const autoPricing = new AutoPricing();
+pricingTable.auto = autoPricing;
+setTimeout(() => autoPricing.refresh().catch(() => {}), 15000);                 // 启动后别和首轮用量采集抢
+setInterval(() => autoPricing.refresh().catch(() => {}), 6 * 3600 * 1000);     // 6 小时看一次，缓存满 24 小时才真拉
+/**
+ * 价格汇总：缺价 / 用了自动价 / CC Switch 与自动价不一致，各附几个会话在用。
+ * 所有计费入口共用一张价格表（长程的折算也在内）。时间戳不进比较，否则每轮都推
+ */
+function pricingView() {
+  const r = pricingTable.report();
+  const count = (field) => {
+    const by = {};
+    for (const v of usageMap.values()) for (const m of v[field] || []) by[m] = (by[m] || 0) + 1;
+    return by;
+  };
+  const unknown = count('unknownModels'), auto = count('autoModels');
+  return {
+    tableFound: r.tableFound,
+    auto: { ok: !!r.auto.ok, count: r.auto.count || 0, fetchedAt: r.auto.fetchedAt || 0, error: r.auto.error || '' },
+    missing: r.missing.map(({ model }) => ({ model, sessions: unknown[model] || 0 })),
+    autoPriced: r.autoPriced.map(({ model, modelId, price }) => ({ model, modelId, in: price.in, out: price.out, sessions: auto[model] || 0 })),
+    conflicts: r.conflicts,
+  };
 }
 
 async function runUsageTick() {
@@ -5921,7 +5940,7 @@ async function runUsageTick() {
         const r = sessionUsageService.collect(sd, alive);
         const view = r.ok
           ? { kind: r.kind, cli: r.cli, usd: round2(r.sessionUsd), today: round2(r.todayUsd), estimated: !!r.estimated, incomplete: !!r.incomplete, model: r.model || '',
-            unknownModels: r.unknownModels || [] }
+            unknownModels: r.unknownModels || [], autoModels: r.autoModels || [] }
           : { kind: r.kind, cli: r.cli, reason: r.reason || '' };
         // 金额先 round 到 2 位再比：浮点每轮都在抖，不这么做 37 张卡每分钟全量重渲染
         const prev = usageMap.get(sd.id);
@@ -5933,8 +5952,8 @@ async function runUsageTick() {
     }
     if (changed) io.emit('sessions:usage', Object.fromEntries(usageMap));
     // 全局缺价清单（所有计费入口共用一张价格表，长程的折算也在内）：变了才推
-    const missing = missingPricesView();
-    if (JSON.stringify(missing) !== lastMissingPrices) { lastMissingPrices = JSON.stringify(missing); io.emit('usage:missingPrices', missing); }
+    const pv = JSON.stringify(pricingView());
+    if (pv !== lastPricingView) { lastPricingView = pv; io.emit('usage:pricing', JSON.parse(pv)); }
   } finally {
     usageTickRunning = false;
   }
@@ -7152,7 +7171,7 @@ io.on('connection', (socket) => {
 
   // 获取会话列表
   socket.emit('sessions:usage', Object.fromEntries(usageMap));   // 新连上的客户端先拿一份当前值，不用等下一轮
-  socket.emit('usage:missingPrices', missingPricesView());
+  socket.emit('usage:pricing', pricingView());
 
   socket.on('sessions:list', async () => {
     // 等待 SessionManager 初始化完成

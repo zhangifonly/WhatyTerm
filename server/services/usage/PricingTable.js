@@ -1,40 +1,41 @@
 /**
- * 模型单价（来自 CC Switch 的 model_pricing，只读）
+ * 模型单价：CC Switch 的 model_pricing（只读，**优先**）+ LiteLLM 自动价格（补缺，见 AutoPricing.js）。
  *
- * 实测：201 个模型，覆盖在用的 claude-opus-5 / gpt-5.6-sol / grok-4.6；
- * 四个价格列在库里是 **TEXT**，必须 Number()，否则 '5' * n 会变成字符串运算。
- * 用它重算 claude-opus-4-8 得 403.50，CLI 自记 403.50252 —— 精度可信。
- * 读不到库时返回"无价格表"，让调用方显示"未知"，**不能当成 0**。
- *
- * 价格表在 CC Switch 里维护（「模型定价」），这里只读。模型更新后要做的只有一件事：去 CC Switch 补一条。
- * 为了让人知道要补哪条，这里记下所有查不到价格的模型（misses），界面列出来。
+ * CC Switch 实测：四个价格列在库里是 **TEXT**，必须 Number()；重算 claude-opus-4-8 得 403.50，CLI 自记 403.50252。
+ * 两边都查不到才算缺价 —— 调用方显示"未知/不完整"，**不能当成 0**。
+ * 选价规则见 priceResolve.js。每个查过的模型记下「从哪层取到的价」，界面据此列出自动价格、缺价、不一致。
  */
-
-/** 缺价记录保留多久。超过的视为不再使用（换掉了），不再提示 */
-export const MISS_TTL_MS = 7 * 24 * 3600 * 1000;
 
 import Database from 'better-sqlite3';
 import { existsSync, statSync } from 'fs';
 import os from 'os';
 import path from 'path';
-import { matchModelId } from './costMath.js';
+import { resolvePrice, priceConflict } from './priceResolve.js';
 
 export const CC_SWITCH_DB = () => path.join(os.homedir(), '.cc-switch', 'cc-switch.db');
 const RECHECK_MS = 10 * 60 * 1000;
+/** 查询记录保留多久。超过的视为不再使用（换掉了），不再提示 */
+export const MISS_TTL_MS = 7 * 24 * 3600 * 1000;
 
 export class PricingTable {
-  constructor({ dbPath = null } = {}) {
+  /** @param {{dbPath?:string, auto?:{prices:object|null, version:number, status?:object}|null}} opts */
+  constructor({ dbPath = null, auto = null } = {}) {
     this.dbPath = dbPath || CC_SWITCH_DB();
-    this.prices = null;       // model_id -> {in,out,cacheRead,cacheWrite}
+    this.auto = auto;
+    this.prices = null;       // CC Switch：model_id -> {in,out,cacheRead,cacheWrite}
     this.loadedAt = 0;
     this.mtime = 0;
-    /** 每次真正重读价格表 +1。用量采集据此强制重算：补了价格不必等会话文件变动才生效 */
-    this.version = 0;
-    /** 原始模型名 -> {firstAt, lastAt}：查不到价格的模型 */
-    this.misses = new Map();
+    this.ccsVersion = 0;
+    /** 原始模型名 -> {lastAt}：查过的模型（缺价/自动价/不一致都从这里按现价重新判定） */
+    this.used = new Map();
+    this._memo = new Map();
+    this._memoVer = '';
   }
 
-  /** 按 mtime + 10 分钟复查；库不存在返回 null（调用方据此显示"无价格表"） */
+  /** 任一层价格表换了就变。用量采集据此强制按现价重算：补了价不必等会话文件变动才生效 */
+  get version() { return `${this.ccsVersion}.${this.auto?.version || 0}`; }
+
+  /** CC Switch 表：按 mtime + 10 分钟复查；库不存在返回 null */
   load() {
     const now = Date.now();
     if (this.prices && now - this.loadedAt < RECHECK_MS) return this.prices;
@@ -48,16 +49,10 @@ export class PricingTable {
       db.close();
       const map = {};
       for (const r of rows) {
-        map[r.model_id] = {
-          in: Number(r.input_cost_per_million) || 0,
-          out: Number(r.output_cost_per_million) || 0,
-          cacheRead: Number(r.cache_read_cost_per_million) || 0,
-          cacheWrite: Number(r.cache_creation_cost_per_million) || 0,
-        };
+        map[r.model_id] = { in: Number(r.input_cost_per_million) || 0, out: Number(r.output_cost_per_million) || 0,
+          cacheRead: Number(r.cache_read_cost_per_million) || 0, cacheWrite: Number(r.cache_creation_cost_per_million) || 0 };
       }
-      this.prices = map; this.mtime = mtime; this.loadedAt = now; this.version += 1;
-      // 表换了：已补上价格的从缺价记录里清掉（没补的下次查询会重新记上）
-      for (const m of [...this.misses.keys()]) if (matchModelId(m, Object.keys(map)).id) this.misses.delete(m);
+      this.prices = map; this.mtime = mtime; this.loadedAt = now; this.ccsVersion += 1;
     } catch (e) {
       console.warn('[用量] 读价格表失败:', e.message);
       this.prices = null; this.loadedAt = now;
@@ -65,31 +60,48 @@ export class PricingTable {
     return this.prices;
   }
 
-  /**
-   * @returns {{price: object|null, modelId: string, how: string}} 查不到时 price 为 null ——
-   *   调用方必须标"费用不完整"，不得记 0。how 见 costMath.matchModelId
-   */
-  get(model, now = Date.now()) {
-    const prices = this.load();
-    if (!prices) return { price: null, modelId: '', how: '' };
-    const { id, how } = matchModelId(model, Object.keys(prices));
-    const name = String(model || '').trim();
-    if (!id && name && name !== '<synthetic>') {
-      const m = this.misses.get(name);
-      this.misses.set(name, { firstAt: m?.firstAt || now, lastAt: now });
+  /** 不记录查询的纯解析（带缓存：自动表两千多条，匹配要扫全表） */
+  resolve(model) {
+    const ccs = this.load();
+    const auto = this.auto?.prices || null;
+    if (this._memoVer !== this.version) {
+      this._memo.clear(); this._memoVer = this.version;
+      this._keys = { ccsKeys: ccs ? Object.keys(ccs) : [], autoKeys: auto ? Object.keys(auto) : [] };
     }
-    return { price: id ? prices[id] : null, modelId: id, how };
+    const k = String(model || '').trim();
+    if (!this._memo.has(k)) this._memo.set(k, resolvePrice(k, ccs, auto, this._keys));
+    return this._memo.get(k);
   }
 
   /**
-   * 最近 7 天用过但价格表里没有的模型（新的在前）。
-   * @returns {{tableFound:boolean, models:Array<{model:string, firstAt:number, lastAt:number}>}}
+   * @returns {{price:object|null, modelId:string, how:string, source:string}} 查不到时 price 为 null ——
+   *   调用方必须标"费用不完整"，不得记 0。source: ccswitch | litellm | ''
    */
-  missing(now = Date.now()) {
-    const tableFound = !!this.load();
-    const models = [...this.misses.entries()].filter(([, v]) => now - v.lastAt <= MISS_TTL_MS)
-      .map(([model, v]) => ({ model, ...v })).sort((a, b) => b.lastAt - a.lastAt);
-    return { tableFound, models };
+  get(model, now = Date.now()) {
+    const r = this.resolve(model);
+    const name = String(model || '').trim();
+    if (name && name !== '<synthetic>') this.used.set(name, { lastAt: now });
+    return r;
+  }
+
+  /** 最近 7 天查过的模型，按**现价**重新判定（补了价的自然消失） */
+  _recent(now) {
+    return [...this.used.entries()].filter(([, v]) => now - v.lastAt <= MISS_TTL_MS)
+      .sort((a, b) => b[1].lastAt - a[1].lastAt).map(([model, v]) => ({ model, lastAt: v.lastAt, ...this.resolve(model) }));
+  }
+
+  /** 界面用的汇总：缺价 / 用了自动价格 / CC Switch 与自动价不一致，以及两层表各自的状态 */
+  report(now = Date.now()) {
+    const recent = this._recent(now);
+    const auto = this.auto?.prices || null;
+    return {
+      tableFound: !!this.load(),
+      auto: this.auto?.status || { ok: false },
+      missing: recent.filter((r) => !r.price).map(({ model, lastAt }) => ({ model, lastAt })),
+      autoPriced: recent.filter((r) => r.source === 'litellm').map(({ model, modelId, price }) => ({ model, modelId, price })),
+      conflicts: recent.filter((r) => r.source === 'ccswitch').map((r) => priceConflict(r.modelId, this.prices, auto))
+        .filter(Boolean).filter((c, i, a) => a.findIndex((x) => x.model === c.model) === i),
+    };
   }
 }
 

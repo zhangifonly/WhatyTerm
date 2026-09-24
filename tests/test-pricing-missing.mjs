@@ -63,21 +63,21 @@ test('价格表：查不到的模型记进缺价清单；<synthetic> 不记；�
   const t = new PricingTable({ dbPath: db.file });
   assert(t.get('claude-opus-5-5', 1000).price === null, '新版本不该有价');
   t.get('<synthetic>', 1000); t.get('gpt-6', 2000);
-  const m = t.missing(3000);
-  assert(m.tableFound && m.models.map((x) => x.model).join() === 'gpt-6,claude-opus-5-5', JSON.stringify(m));
+  const m = t.report(3000);
+  assert(m.tableFound && m.missing.map((x) => x.model).join() === 'gpt-6,claude-opus-5-5', JSON.stringify(m));
   const v0 = t.version;
   db.add('claude-opus-5-5', 5, 25); expire(t, db.file);
   assert(t.get('claude-opus-5-5').price?.in === 5, '补价后没读到');
-  assert(t.version === v0 + 1, '重读后版本号没变 —— 用量采集不会按新价重算');
-  assert(t.missing(3000).models.map((x) => x.model).join() === 'gpt-6', '补上的没从缺价清单里清掉');
+  assert(t.version !== v0, '重读后版本号没变 —— 用量采集不会按新价重算');
+  assert(t.report(3000).missing.map((x) => x.model).join() === 'gpt-6', '补上的没从缺价清单里清掉');
 });
 
 test('缺价清单只列最近 7 天用过的；没有价格表时明说', () => {
   const t = new PricingTable({ dbPath: priceDb([]).file });
   t.get('old-model', 0); t.get('new-model', MISS_TTL_MS + 10);
-  assert(t.missing(MISS_TTL_MS + 20).models.map((x) => x.model).join() === 'new-model');
+  assert(t.report(MISS_TTL_MS + 20).missing.map((x) => x.model).join() === 'new-model');
   const none = new PricingTable({ dbPath: path.join(TMP, 'nope.db') });
-  assert(none.missing().tableFound === false, '找不到库要让界面说出来');
+  assert(none.report().tableFound === false, '找不到库要让界面说出来');
 });
 
 // ── 采集服务：缺价不闪、补价即重算、重启后仍知道缺价 ─────────────────────
@@ -131,13 +131,31 @@ test('零用量条目不算缺价；有用量却没标模型名的显示为「(�
   assert(r2.unknownModels.join() === '(未标模型名)', `应显示「(未标模型名)」：${JSON.stringify(r2.unknownModels)}`);
 });
 
-test('接线：面板点名缺价模型并列出全局清单；服务端推 usage:missingPrices（连上即推一份）', () => {
+test('用自动价格折算的模型要报出来（面板据此标「按自动价格折算」）', () => {
+  const dir = path.join(PROJECTS, encodeCwd('/work/auto'));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'run-a.jsonl'), JSON.stringify({ type: 'cost-state', totalCostUSD: 1 }) + '\n'
+    + msg('m1', 'claude-opus-5', 1000) + msg('m2', 'claude-opus-5-5', 1000));
+  const pricing = { version: 1, get: (m) => (m === 'claude-opus-5-5'
+    ? { price: { in: 4, out: 20, cacheRead: 0, cacheWrite: 0 }, modelId: m, source: 'litellm' }
+    : { price: { in: 5, out: 25, cacheRead: 0, cacheWrite: 0 }, modelId: m, source: 'ccswitch' }) };
+  const S = { ...SESSION, id: 'sa', workingDir: '/work/auto', claudeSessionId: 'run-a' };
+  const r = new SessionUsageService({ ledger: new UsageLedger({ dbPath: path.join(TMP, 'l3.db') }), pricing, claudeProjectsRoot: PROJECTS }).collect(S, [S]);
+  assert(r.autoModels.join() === 'claude-opus-5-5' && !r.incomplete, JSON.stringify(r));
+});
+
+test('接线：面板点名缺价/自动价模型并列出全局价格状况；服务端推 usage:pricing（连上即推一份）', () => {
   const card = fs.readFileSync(new URL('../src/components/SessionUsageCard.jsx', import.meta.url), 'utf8');
   assert(/usage\.incomplete && usage\.unknownModels\?\.length > 0 && \([\s\S]{0,200}usage\.unknownModels\.join/.test(card),
     '面板没点名缺价模型，或没缺价模型时也说"不在价格表里"（实测 5 个 $0 会话被误报）');
-  assert(/<MissingPrices data=\{missingPrices\} \/>/.test(card) && /CC Switch「模型定价」/.test(card), '没列全局缺价清单/没说去哪补');
+  assert(/<PricingNotes data=\{pricing\} \/>/.test(card), '没列全局价格状况');
+  assert(/usage\.autoModels\?\.length > 0/.test(card), '没标出本会话哪些模型按自动价格折算');
+  const notes = fs.readFileSync(new URL('../src/components/PricingNotes.jsx', import.meta.url), 'utf8');
+  assert(/CC Switch「模型定价」/.test(notes) && /conflicts\.map/.test(notes) && /autoPriced\.map/.test(notes), '价格状况缺了一段（缺价/自动价/不一致）');
   const idx = fs.readFileSync(new URL('../server/index.js', import.meta.url), 'utf8');
-  assert((idx.match(/emit\('usage:missingPrices', /g) || []).length >= 2, '缺价清单要在变化时推、新客户端连上时也推');
+  assert((idx.match(/emit\('usage:pricing', /g) || []).length >= 2, '价格状况要在变化时推、新客户端连上时也推');
+  assert(/autoModels: r\.autoModels \|\| \[\]/.test(idx), '会话用量视图没带自动价模型名');
+  assert(/pricingTable\.auto = autoPricing/.test(idx) && /autoPricing\.refresh\(\)/.test(idx), '自动价格没挂到全局价格表上或从不刷新');
   assert(/unknownModels: r\.unknownModels \|\| \[\]/.test(idx), '会话用量视图没带缺价模型名');
 });
 

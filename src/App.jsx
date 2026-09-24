@@ -243,7 +243,7 @@ export default function App() {
   // 界面上完全看不出来，只会显得"修了没用" —— 这条提示就是为了避免再白排查一轮。
   const [serverStale, setServerStale] = useState(null);
   const [usageMap, setUsageMap] = useState({});   // sessionId -> {usd, today, kind, ...}
-  const [missingPrices, setMissingPrices] = useState(null);   // 价格表缺的在用模型（全局）
+  const [pricing, setPricing] = useState(null);   // 价格表状况（全局）：缺价 / 自动价 / 与 CC Switch 不一致
   // 上次见到的服务端启动时刻。变了说明进程重启过，此时前端手里的 AI 判定
   // 全是上个进程留下的（服务端内存缓存已清空），必须丢弃 —— 否则面板会拿
   // 重启前的旧判定继续显示，看上去就像"修复没生效"。
@@ -837,7 +837,7 @@ export default function App() {
     socket.on('sessions:usage', (map) => {
       setUsageMap(map || {});
     });
-    socket.on('usage:missingPrices', (data) => setMissingPrices(data || null));
+    socket.on('usage:pricing', (data) => setPricing(data || null));
 
     // 监听进程详情响应
     socket.on('session:processDetails', (data) => {
@@ -2982,7 +2982,7 @@ export default function App() {
             </div>
 
             {/* 用量：与 AI 分析结果无关，没分析过也要显示 */}
-            <SessionUsageCard usage={usageMap[currentSession.id]} missingPrices={missingPrices} />
+            <SessionUsageCard usage={usageMap[currentSession.id]} pricing={pricing} />
             {aiStatusMap[currentSession.id] ? (
               <>
                 {/* 监控策略插件信息 - 紧凑的状态标签 */}

@@ -49,7 +49,7 @@ export function findLastAnchorOffset(fd, size, limit = BOOTSTRAP_LIMIT) {
  * 读一个 run 的当前累计费用。
  * @param {object} cur 游标：{filePath, inode, fileSize, fileMtime, scanOffset, anchorUsd, byModel}
  * @param {object} pricing PricingTable 实例
- * @returns {object|null} null = 文件没动；否则 {cumUsd, costComplete, byModel, scanOffset, inode, fileSize, fileMtime, anchorUsd, unknownModels}
+ * @returns {object|null} null = 文件没动；否则 {cumUsd, costComplete, byModel, scanOffset, inode, fileSize, fileMtime, anchorUsd, unknownModels, autoModels}
  */
 export function readClaudeRun(cur, pricing) {
   if (!cur?.filePath || !existsSync(cur.filePath)) return null;
@@ -72,6 +72,7 @@ export function readClaudeRun(cur, pricing) {
       if (state.anchor) { anchorUsd = state.anchor.totalCostUSD; state.anchor = null; }
     }
     const unknownModels = [];
+    const autoModels = [];      // 价格取自 LiteLLM 自动表（CC Switch 里没有）的模型，界面要标明
     let post = 0, mainModel = '', mainTokens = -1;
     for (const [model, usage] of Object.entries(state.byModel)) {
       if (model === '<synthetic>') continue;      // CLI 自己合成的记录，不是 API 调用
@@ -79,16 +80,17 @@ export function readClaudeRun(cur, pricing) {
       if (!(usage.input || usage.output || usage.cacheRead || usage.cacheWrite)) continue;
       const weight = usage.input + usage.cacheRead + usage.output;
       if (weight > mainTokens) { mainTokens = weight; mainModel = model; }   // 用量最大的那个模型报给界面
-      const { price } = pricing.get(model);
+      const { price, source } = pricing.get(model);
       const usd = priceUsage(usage, price);
       if (usd === null) { unknownModels.push(model || '(未标模型名)'); continue; }
+      if (source === 'litellm') autoModels.push(model);
       post += usd;
     }
     return {
       cumUsd: anchorUsd + post,
       costComplete: unknownModels.length === 0 && (anchorUsd > 0 || post > 0 || st.size === 0),
       estimated: anchorUsd === 0,                  // 没有锚点：整份都是折算值
-      byModel: state.byModel, unknownModels, model: mainModel,
+      byModel: state.byModel, unknownModels, autoModels, model: mainModel,
       scanOffset: st.size - Buffer.byteLength(state.remainder, 'utf8'),
       anchorUsd, inode: String(st.ino), fileSize: st.size, fileMtime: st.mtimeMs,
     };
