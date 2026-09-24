@@ -10,6 +10,8 @@
  * 1. 上次用的那台仍可用，且没比最快那台慢出 SLACK_MS → 继续用它
  * 2. 没有记录（首次）→ 按配置顺序取第一台可用的（配置顺序即优先级，与延迟抖动无关）
  * 3. 上次那台不可用或慢得离谱 → 才换最快的
+ * 4. avoid：隧道检测连续失败而重连时避开当前那台 —— TCP 通不代表隧道通（如证书过期），
+ *    不避开的话粘性会把重连永远粘回坏的那台。只剩它一台可用时仍用它（总比没有强）
  */
 
 /** 上次那台比最快的慢多少以内仍然坚持用它。握手延迟的正常抖动在几百毫秒内 */
@@ -18,11 +20,17 @@ export const SLACK_MS = 2000;
 /**
  * @param {Array<{server:{name:string}, latency:number}>} available  可用服务器（顺序 = 配置顺序）
  * @param {string|null} lastName  上次用的服务器名
- * @returns {{server:object, latency:number, reason:'sticky'|'config-order'|'fastest'}|null}
+ * @param {{avoid?:string|null, slackMs?:number}} [opts]
+ * @returns {{server:object, latency:number, reason:'sticky'|'config-order'|'fastest'|'avoid'}|null}
  */
-export function pickFrpServer(available, lastName, slackMs = SLACK_MS) {
-  const list = (available || []).filter((r) => r && r.server && Number.isFinite(r.latency));
-  if (!list.length) return null;
+export function pickFrpServer(available, lastName, { avoid = null, slackMs = SLACK_MS } = {}) {
+  const ok = (available || []).filter((r) => r && r.server && Number.isFinite(r.latency));
+  if (!ok.length) return null;
+  const others = avoid ? ok.filter((r) => r.server.name !== avoid) : ok;
+  if (avoid && others.length) {
+    return { ...others.reduce((a, b) => (b.latency < a.latency ? b : a)), reason: 'avoid' };
+  }
+  const list = ok;
   const fastest = list.reduce((a, b) => (b.latency < a.latency ? b : a));
   if (lastName) {
     const last = list.find((r) => r.server.name === lastName);

@@ -291,7 +291,7 @@ class FrpTunnel {
    * 测试所有服务器，选一台：上次那台仍可用就继续用（域名稳定），否则按配置顺序/最快（规则见 frp/pickServer.js）
    * @returns {Promise<Object|null>}
    */
-  async _selectFastestServer() {
+  async _selectFastestServer(avoid = null) {
     console.log('[FrpTunnel] 测试所有 FRP 服务器...');
 
     // 过滤掉禁用的服务器
@@ -307,13 +307,13 @@ class FrpTunnel {
 
     let lastName = null;
     try { lastName = JSON.parse(readFileSync(FRP_LAST_SERVER_PATH, 'utf8')).name || null; } catch { /* 首次 */ }
-    const pick = pickFrpServer(available, lastName);
+    const pick = pickFrpServer(available, lastName, { avoid });
     if (!pick) {
       console.log('[FrpTunnel] 所有 FRP 服务器都不可用');
       return null;
     }
 
-    const why = { sticky: '沿用上次', 'config-order': '按配置顺序', fastest: lastName ? `上次的 ${lastName} 不可用或过慢，改用最快` : '最快' };
+    const why = { sticky: '沿用上次', 'config-order': '按配置顺序', avoid: `避开检测失败的 ${avoid}`, fastest: lastName ? `上次的 ${lastName} 不可用或过慢，改用最快` : '最快' };
     console.log(`[FrpTunnel] 选择服务器: ${pick.server.name} (${pick.latency}ms，${why[pick.reason]})`);
     try {
       writeFileSync(FRP_LAST_SERVER_PATH, JSON.stringify({ name: pick.server.name, domain: pick.server.domain, at: new Date().toISOString() }));
@@ -363,7 +363,8 @@ subdomain = "${this.subdomain}"
    * Windows 使用 NativeFrpClient，其他平台使用 frpc 可执行文件
    * @param {Function} progressCallback - 安装进度回调（可选）
    */
-  async start(progressCallback = null) {
+  /** @param {{avoid?:string}} [opts] avoid: 不要选这台（隧道检测连续失败时传当前服务器名） */
+  async start(progressCallback = null, { avoid = null } = {}) {
     if (!this.enabled) {
       console.log('[FrpTunnel] 服务已禁用');
       return null;
@@ -375,7 +376,7 @@ subdomain = "${this.subdomain}"
     }
 
     // 选择最快的服务器
-    const server = await this._selectFastestServer();
+    const server = await this._selectFastestServer(avoid);
     if (!server) {
       return null;
     }
@@ -919,9 +920,11 @@ subdomain = "${this.subdomain}"
           });
         }
 
-        // 重新启动隧道
+        // 重新启动隧道。⚠ 必须避开当前这台：选服务器是粘性的，TCP 通而隧道不通（证书过期等）时
+        // 不避开就会永远重连回这台坏的
+        const failed = this.selectedServer?.name || null;
         this.stop();
-        const newUrl = await this.start();
+        const newUrl = await this.start(null, { avoid: failed });
 
         if (newUrl) {
           console.log(`[FrpTunnel] 重连成功: ${newUrl}`);

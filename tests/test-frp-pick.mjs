@@ -36,6 +36,13 @@ test('首次没有记录：按配置顺序取第一台可用的，不看延迟�
   assert(p.server.name === 'US-LAX02' && p.reason === 'config-order', JSON.stringify(p));
 });
 
+test('隧道检测连续失败重连：避开当前那台（TCP 通不代表隧道通，不避开会永远粘回坏的）', () => {
+  const p = pickFrpServer([R('US-LAX02', 100), R('US-LAX01', 900)], 'US-LAX02', { avoid: 'US-LAX02' });
+  assert(p.server.name === 'US-LAX01' && p.reason === 'avoid', JSON.stringify(p));
+  const only = pickFrpServer([R('US-LAX02', 100)], 'US-LAX02', { avoid: 'US-LAX02' });
+  assert(only.server.name === 'US-LAX02', '只剩它一台可用时仍要连它，总比没隧道强');
+});
+
 test('全不可用返回 null；脏数据不炸', () => {
   assert(pickFrpServer([], 'A') === null && pickFrpServer(null, null) === null);
   assert(pickFrpServer([null, R('A', NaN), R('B', 10)], null).server.name === 'B');
@@ -43,10 +50,18 @@ test('全不可用返回 null；脏数据不炸', () => {
 
 test('接线：FrpTunnel 用 pickFrpServer 选、不再按延迟排序，并记下所选服务器', () => {
   const src = fs.readFileSync(new URL('../server/services/FrpTunnel.js', import.meta.url), 'utf8');
-  const fn = src.slice(src.indexOf('async _selectFastestServer()'), src.indexOf('_createConfig(server)'));
-  assert(/pickFrpServer\(available, lastName\)/.test(fn), '没用共享的选择规则');
+  const from = src.indexOf('async _selectFastestServer(');
+  assert(from > 0, '找不到选服务器的函数 —— 锚点失效时必须报错，不能切出空串让后面的断言空过');
+  const fn = src.slice(from, src.indexOf('_createConfig(server)', from));
+  assert(/pickFrpServer\(available, lastName, \{ avoid \}\)/.test(fn), '没用共享的选择规则');
   assert(!/\.sort\(/.test(fn), '又按延迟排序了 —— 配置顺序会被打乱，首次选择又变成看抖动');
   assert(/writeFileSync\(FRP_LAST_SERVER_PATH/.test(fn), '没记下所选服务器，下次启动还会翻');
+  // 检测失败重连那一处：avoid 必须在 stop() 之前取（stop 会清空 selectedServer），并传给 start
+  const re = src.slice(src.indexOf('隧道连续 3 次检测失败'));
+  const at = (t) => re.indexOf(t);
+  assert(at('const failed = this.selectedServer?.name') > 0 && at('const failed') < at('this.stop()'),
+    '当前服务器名要在 stop() 之前取，否则取到的是 null，等于没避开');
+  assert(/this\.start\(null, \{ avoid: failed \}\)/.test(re), '检测失败重连没避开当前服务器');
 });
 
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
