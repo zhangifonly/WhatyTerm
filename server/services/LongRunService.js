@@ -186,6 +186,8 @@ export class LongRunService {
     this.runnerFactory = runnerFactory;
     /** id → LongRunTask */
     this.tasks = new Map();
+    /** 任务摘要每次广播后回调 (json, brief)（手机推送挂这里）。brief 惰性：取看板快照很重 */
+    this.onTask = null;
   }
 
   /**
@@ -438,7 +440,10 @@ export class LongRunService {
 
   /** 向所有客户端广播任务摘要（左侧列表用）。不走事件的状态变化（挂起等人、面板暂停）也要调它 */
   _broadcast(task) {
-    this.io?.emit?.('longrun:task', task.toJSON());
+    const json = task.toJSON();
+    this.io?.emit?.('longrun:task', json);
+    // 观察者出错不能影响广播与编排本身
+    try { this.onTask?.(json, () => this.brief(task.id)); } catch (e) { console.error('[长程] onTask 出错:', e?.message || e); }
   }
 
   // ── 查询 ───────────────────────────────────────────────────

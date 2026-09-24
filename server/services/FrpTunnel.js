@@ -9,6 +9,7 @@ import net from 'net';
 import https from 'https';
 import dependencyManager from './DependencyManager.js';
 import NativeFrpClient from './frp/NativeFrpClient.js';
+import { pickFrpServer } from './frp/pickServer.js';
 
 /**
  * 从 `ps -Ao pid=,ppid=,command=` 的输出里找**孤儿** frpc：用的是同一份配置文件，且父进程已是 launchd（ppid=1）。
@@ -37,6 +38,8 @@ const SETTINGS_PATH = join(__dirname, '../db/ai-settings.json');
 
 // FRP 服务器配置缓存路径
 const FRP_CONFIG_CACHE_PATH = join(os.homedir(), '.webtmux', 'frp-servers.json');
+// 上次用的服务器：让隧道域名跨重启保持不变（主屏幕图标与推送订阅都绑在域名上，见 frp/pickServer.js）
+const FRP_LAST_SERVER_PATH = join(os.homedir(), '.webtmux', 'frp-last-server.json');
 const FRP_CONFIG_CACHE_TTL = 3600 * 1000; // 1 小时缓存
 
 // 订阅服务器地址
@@ -285,7 +288,7 @@ class FrpTunnel {
   }
 
   /**
-   * 测试所有服务器，返回最快可用的
+   * 测试所有服务器，选一台：上次那台仍可用就继续用（域名稳定），否则按配置顺序/最快（规则见 frp/pickServer.js）
    * @returns {Promise<Object|null>}
    */
   async _selectFastestServer() {
@@ -299,19 +302,23 @@ class FrpTunnel {
       enabledServers.map(server => this._testServerLatency(server))
     );
 
-    // 过滤可用的服务器并按延迟排序
-    const available = results
-      .filter(r => r !== null)
-      .sort((a, b) => a.latency - b.latency);
+    // ⚠ 保持配置顺序（Promise.all 按输入顺序返回），不要按延迟排序：配置顺序本身就是首次选择的优先级
+    const available = results.filter(r => r !== null);
 
-    if (available.length === 0) {
+    let lastName = null;
+    try { lastName = JSON.parse(readFileSync(FRP_LAST_SERVER_PATH, 'utf8')).name || null; } catch { /* 首次 */ }
+    const pick = pickFrpServer(available, lastName);
+    if (!pick) {
       console.log('[FrpTunnel] 所有 FRP 服务器都不可用');
       return null;
     }
 
-    const fastest = available[0];
-    console.log(`[FrpTunnel] 选择最快服务器: ${fastest.server.name} (${fastest.latency}ms)`);
-    return fastest.server;
+    const why = { sticky: '沿用上次', 'config-order': '按配置顺序', fastest: lastName ? `上次的 ${lastName} 不可用或过慢，改用最快` : '最快' };
+    console.log(`[FrpTunnel] 选择服务器: ${pick.server.name} (${pick.latency}ms，${why[pick.reason]})`);
+    try {
+      writeFileSync(FRP_LAST_SERVER_PATH, JSON.stringify({ name: pick.server.name, domain: pick.server.domain, at: new Date().toISOString() }));
+    } catch (e) { console.warn('[FrpTunnel] 记录所选服务器失败:', e.message); }
+    return pick.server;
   }
 
   /**

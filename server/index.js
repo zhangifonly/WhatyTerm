@@ -219,6 +219,8 @@ import sleepPrevention from './services/SleepPreventionService.js';
 import PuppeteerReaper from './services/PuppeteerReaper.js';
 import SessionRelay from './services/SessionRelay.js';
 import { LongRunService } from './services/LongRunService.js';
+import { PushService, hostOf } from './services/PushService.js';
+import { LongRunPushNotifier } from './services/longrunPush.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1276,6 +1278,10 @@ const longRunSessionBinder = {
   },
 };
 const longRunService = new LongRunService({ io, aiEngine, sessionBinder: longRunSessionBinder });
+// 手机推送：只推「长程开始等你」与「长程收工」两件事（见 longrunPush.js 顶部说明）
+const pushService = new PushService();
+const longRunPush = new LongRunPushNotifier({ push: pushService });
+longRunService.onTask = (json, getBrief) => longRunPush.observe(json, getBrief);
 const authService = new AuthService();
 const providerService = new ProviderService(io);
 const healthCheckScheduler = new HealthCheckScheduler(io);
@@ -3632,6 +3638,33 @@ app.post('/api/sleep-prevention/toggle', (req, res) => {
 
 // API 路由使用认证中间件
 app.use('/api', authMiddleware);
+
+// 手机网页推送（在 /api 认证之后：订阅等于拿到这台电脑的推送投递权）
+app.get('/api/push/key', (req, res) => {
+  try { res.json({ ok: true, publicKey: pushService.publicKey() }); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+});
+app.post('/api/push/subscribe', (req, res) => {
+  try {
+    const count = pushService.subscribe(req.body?.subscription, req.headers['user-agent'] || '');
+    console.log(`[推送] 新订阅 ${hostOf(req.body.subscription.endpoint)}，共 ${count} 台设备`);
+    res.json({ ok: true, count });
+  } catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+});
+app.post('/api/push/unsubscribe', (req, res) => {
+  res.json({ ok: true, removed: pushService.unsubscribe(req.body?.endpoint || '') });
+});
+app.post('/api/push/status', (req, res) => {
+  res.json({ ok: true, subscribed: pushService.has(req.body?.endpoint || ''), devices: pushService.list().length });
+});
+// 只发给点按钮的这台设备：验证「这台手机真的能收到」，不打扰其他设备
+app.post('/api/push/test', async (req, res) => {
+  const endpoint = req.body?.endpoint || '';
+  if (!pushService.has(endpoint)) return res.status(404).json({ ok: false, error: '这台设备还没开启提醒' });
+  const r = await pushService.send({ title: '🔔 测试提醒', body: '收到这条，长程等你或收工时就能收到通知', url: '/m/',
+    tag: 'push-test' }, { only: endpoint });
+  res.json({ ok: r.sent > 0, ...r, error: r.sent ? undefined : (r.removed ? '订阅已失效，请重新开启' : r.errors.join('; ')) });
+});
 
 // Config 路由（管理配置文件）
 app.use('/api/config', configRoutes);

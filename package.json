@@ -1,6 +1,6 @@
 {
   "name": "whatyterm",
-  "version": "1.4.50",
+  "version": "1.4.51",
   "description": "网梯终端 - AI 智能终端管理工具",
   "license": "SEE LICENSE IN LICENSE",
   "author": {
@@ -49,6 +49,7 @@
     "socket.io": "^4.8.1",
     "undici": "^7.16.0",
     "uuid": "^11.0.3",
+    "web-push": "^3.6.7",
     "yamux-js": "^0.2.0"
   },
   "devDependencies": {
