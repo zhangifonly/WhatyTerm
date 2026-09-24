@@ -5984,6 +5984,29 @@ function cleanupAllSessionCache(sessionId) {
 let nextAiAnalysisTime = Date.now() + AI_ANALYSIS_INTERVAL; // 下次分析时间
 
 // 提取终端中最后一条 Claude Code 回复内容（用于循环检测）
+/**
+ * 让交互式 CLI 退出并等它真的退出。转长程的两条路都要走这一步：
+ *   交接方式：写完记忆后调；
+ *   续同一条对话方式：直接调（对话由长程用 --resume 续上，不丢）。
+ * 斜杠命令比照其余几处 /quit：send-keys 字面量整行 + 延迟 Enter；session.write 只在 tmux 发送失败时兜底。
+ * @returns {Promise<boolean>} 限时内是否真的退出了
+ */
+async function quitCliAndWait(session, tmux, waitMs = 30000) {
+  try {
+    tmuxSendLiteral(tmux, '/quit');
+    await new Promise((r) => setTimeout(r, 100));
+    execSync(`${getTmuxPrefix()} send-keys -t "${tmux}" Enter`);
+  } catch {
+    session.write('/quit');
+    await new Promise((r) => setTimeout(r, 100));
+    session.write('\r');
+  }
+  for (const t0 = Date.now(); Date.now() - t0 < waitMs; await new Promise((r) => setTimeout(r, 1500))) {
+    if (!processDetector.isCliRunning(tmux)) return true;
+  }
+  return false;
+}
+
 function getLastClaudeReply(terminalContent) {
   if (!terminalContent) return '';
   // 灰色建议会让提示符行不再为空，下面按空提示符定界就找不到回复
@@ -7533,10 +7556,14 @@ io.on('connection', (socket) => {
       const tmux = session.tmuxSessionName;
       const cliRunning = tmux ? processDetector.isCliRunning(tmux) : false;
       let pendingDraft = '';
+      let cliBusy = false;
       try {
-        pendingDraft = promptPendingText(stripAnsiForProbe(await session.getScreenContentAsync())) || '';
+        const screen = await session.getScreenContentAsync();
+        pendingDraft = promptPendingText(stripAnsiForProbe(stripPromptSuggestion(screen))) || '';
+        // 在忙 = CLI 在跑但没回到输入框（正在干活或停在确认框上）。只有这种才拦：不打断它
+        cliBusy = cliRunning && !isClaudeInputReady(screen);
       } catch { /* 抓屏失败不影响判定，只是少一条提醒 */ }
-      reply(longRunService.switchPlanFor(sessionId, { to, cliRunning, pendingDraft }));
+      reply(longRunService.switchPlanFor(sessionId, { to, cliRunning, cliBusy, pendingDraft }));
     } catch (e) {
       reply({ ok: false, error: e.message, blockers: [e.message], warnings: [] });
     }
@@ -7625,6 +7652,36 @@ io.on('connection', (socket) => {
   });
 
   /**
+   * 转长程「续同一条对话」前让交互式 CLI 退出。不写记忆 —— 那条对话会被长程用 --resume 接着续，
+   * 上下文本来就在，不需要搬。前置条件与交接一致：有未提交草稿不动（发下去会搅成一句），
+   * 正在干活就等它回到输入框（上限 60 秒，不打断它）。
+   */
+  socket.on('longrun:quitCli', async ({ sessionId } = {}, cb) => {
+    const reply = (d) => { if (typeof cb === 'function') cb(d); };
+    try {
+      const session = sessionManager?.getSession(sessionId);
+      if (!session) return reply({ ok: false, error: '会话不存在' });
+      const tmux = session.tmuxSessionName;
+      if (!tmux) return reply({ ok: false, error: '会话没有 tmux' });
+      if (!processDetector.isCliRunning(tmux)) return reply({ ok: true, exited: true, skipped: 'cli_not_running' });
+
+      const pending = promptPendingText(stripAnsiForProbe(stripPromptSuggestion(await session.getScreenContentAsync())));
+      if (pending) return reply({ ok: false, error: `输入框里有未提交的内容「${pending.slice(0, 30)}」，先发出去或清掉再转长程` });
+
+      let ready = false;
+      for (const t0 = Date.now(); Date.now() - t0 < 60000; await new Promise((r) => setTimeout(r, 2000))) {
+        if (isClaudeInputReady(await session.getScreenContentAsync())) { ready = true; break; }
+      }
+      if (!ready) return reply({ ok: false, error: '60 秒内它一直在忙，没有退出（不打断正在跑的活）' });
+
+      const exited = await quitCliAndWait(session, tmux);
+      reply({ ok: exited, exited, error: exited ? '' : 'CLI 30 秒内没退出，请到终端里确认后再开长程' });
+    } catch (e) {
+      reply({ ok: false, error: e.message });
+    }
+  });
+
+  /**
    * 普通会话 → 长程 的交接：让当前 CLI 把这一段的进度写进 Auto Memory，写完再退出。
    *
    * 为什么必须有这一步：CLI 对话里的进度、结论、失败过的方案都只在它的上下文里。
@@ -7679,21 +7736,7 @@ io.on('connection', (socket) => {
 
       const receipt = parseHandoffReceipt(lastReply);
       step(HANDOFF_PHASE.quitting);
-      // 斜杠命令比照其余三处 /quit：send-keys 字面量整行 + 延迟 Enter。
-      // session.write 只在 tmux 发送失败时兜底（历史上它是 catch 分支，不是主路径）。
-      try {
-        tmuxSendLiteral(tmux, '/quit');
-        await new Promise((r) => setTimeout(r, 100));
-        execSync(`${getTmuxPrefix()} send-keys -t "${tmux}" Enter`);
-      } catch {
-        session.write('/quit');
-        await new Promise((r) => setTimeout(r, 100));
-        session.write('\r');
-      }
-      let exited = false;
-      for (const t0 = Date.now(); Date.now() - t0 < 30000; await new Promise((r) => setTimeout(r, 1500))) {
-        if (!processDetector.isCliRunning(tmux)) { exited = true; break; }
-      }
+      const exited = await quitCliAndWait(session, tmux);
       step(HANDOFF_PHASE.done);
       reply({ ok: true, reply: lastReply, receipt, exited,
         note: exited ? '' : 'CLI 30 秒内没退出，开长程前请手动确认它已退出' });

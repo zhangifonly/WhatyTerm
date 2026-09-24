@@ -539,7 +539,7 @@ export class LongRunService {
    * @param {boolean} [p.cliRunning]  由调用方（index.js）探进程后传入
    * @param {string} [p.pendingDraft] 输入框里未提交的内容
    */
-  switchPlanFor(sessionId, { to, cliRunning = false, pendingDraft = '' } = {}) {
+  switchPlanFor(sessionId, { to, cliRunning = false, cliBusy = false, pendingDraft = '' } = {}) {
     const bound = this.sessionBinder?.get(sessionId) || null;
     const task = [...this.tasks.values()].filter((t) => t.sessionId === sessionId)
       .sort((a, b) => b.startedAt - a.startedAt)[0] || null;
@@ -550,7 +550,8 @@ export class LongRunService {
     const found = rootExists ? resolveClaudeSessionId({ root, liveSessionId: task?.loop?.sessionId || null }) : null;
     const other = rootExists ? this._runningOn(root) : null;
     const plan = switchPlan({
-      to, from, rootExists, cliRunning,
+      to, from, rootExists, cliRunning, cliBusy,
+      cliType: bound?.aiType || 'claude',
       longRunRunning: task?.state === 'running',
       // 同一目录上别的条目在跑长程（自己这条不算）
       otherLongRunOnRoot: !!other && other.sessionId !== sessionId,
@@ -558,13 +559,12 @@ export class LongRunService {
       handoffFloor: task?.loop?.handoffFloor ?? HANDOFF_FLOOR,
       hasSessionId: !!found?.id,
       hasMemory: rootExists && memoryFiles(root).length > 0,
-      // 续跑有记忆就够；新需求由界面在切换时补
-      hasRequirement: rootExists && memoryFiles(root).length > 0,
       pendingDraft,
       interrupted: rootExists ? interruptedRun(root) : null,
     });
     return {
-      ok: plan.ok, ...plan, root, from, to,
+      // cliRunning 要带回去：界面据此决定「续同一条对话」前是否先让 CLI 退出
+      ok: plan.ok, ...plan, root, from, to, cliRunning,
       claudeSessionId: found?.id || '', idSource: found?.source || '',
       prior: rootExists ? priorState(root) : null,
     };

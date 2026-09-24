@@ -135,8 +135,13 @@ test('真静默被看门狗杀，判据三要素齐全；Bash 在飞时同样静
 });
 
 test('delta 持续到达时不被误杀', async () => {
-  const script = Array.from({ length: 6 }, () => ({ delay: 0.15, line: { type: 'stream_event', event: { type: 'content_block_delta' } } }));
-  const r = await makeRunner([...script, { line: evResult() }], { silence: { idle: 0.3 } }).run('x', 'sid-1');
+  // 三个量要同时成立，缺一个测试就失效：
+  //   ① 间隔 0.15s ≪ 阈值 —— 每条 delta 都来得及重置计时器
+  //   ② 总时长 20×0.15=3s ≫ 阈值 —— 若 delta 不重置计时器，中途必被杀（否则是空测试）
+  //   ③ 阈值要扛得住子进程慢启动 —— 计时从 spawn 就开始。原来阈值 0.3s，机器负载 13~15 时
+  //      光起一个 node 子进程就超过它，第一条 delta 还没到就被判静默（2026-09-24 实测三次挂一次）
+  const script = Array.from({ length: 20 }, () => ({ delay: 0.15, line: { type: 'stream_event', event: { type: 'content_block_delta' } } }));
+  const r = await makeRunner([...script, { line: evResult() }], { silence: { idle: 1.5 } }).run('x', 'sid-1');
   assert(r.exitReason === ExitReason.COMPLETED, `delta 期间不该被杀: ${r.exitReason} ${r.error}`);
 });
 

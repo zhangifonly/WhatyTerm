@@ -95,10 +95,21 @@ const BODY = SRC.slice(SRC.indexOf("socket.on('longrun:handoff'"), SRC.indexOf("
 
 test('守卫：超时分支绝不 /quit —— 没写完就退，这一段对话就真丢了', () => {
   assert(BODY.length > 500, '没找到 longrun:handoff 处理器，守卫失效了');
+  // 盯的是「退出动作」本身而不是 '/quit' 这个字面量：2026-09-24 退出逻辑抽成公共函数
+  // quitCliAndWait 后，处理器里不再出现 '/quit'，原来那条按字面量找的断言就假红了。
+  const QUIT = /quitCliAndWait\(|'\/quit'/;
   const bail = BODY.slice(BODY.indexOf('if (!written)'), BODY.indexOf('const receipt'));
-  assert(bail.includes('reply(') && !bail.includes('/quit'), '超时分支里出现了 /quit：' + bail);
-  assert(BODY.indexOf('/quit') > BODY.indexOf('isMemoryWritten'), '/quit 必须排在「确认写完」之后');
-  assert(BODY.includes("tmuxSendLiteral(tmux, '/quit')"), '/quit 走 tmux send-keys 主路径，session.write 只作兜底');
+  assert(bail.includes('reply(') && !QUIT.test(bail), '超时分支里出现了退出动作：' + bail);
+  const quitAt = BODY.search(QUIT);
+  assert(quitAt > 0, '处理器里找不到退出动作，守卫失效了');
+  assert(quitAt > BODY.indexOf('isMemoryWritten'), '退出必须排在「确认写完」之后');
+  // 公共函数本身：tmux send-keys 是主路径，session.write 只作兜底
+  const fnAt = SRC.indexOf('async function quitCliAndWait(');
+  assert(fnAt > 0, '找不到公共退出函数');
+  const fn = SRC.slice(fnAt, fnAt + 700);
+  assert(fn.indexOf("tmuxSendLiteral(tmux, '/quit')") > 0
+    && fn.indexOf("tmuxSendLiteral(tmux, '/quit')") < fn.indexOf("session.write('/quit')"),
+    '/quit 要走 tmux send-keys 主路径，session.write 只在 catch 里兜底');
 });
 
 test('守卫：发指令前先看输入框有没有用户草稿，且等它闲下来', () => {

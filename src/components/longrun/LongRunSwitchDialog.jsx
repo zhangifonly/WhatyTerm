@@ -15,6 +15,7 @@ const LongRunSwitchDialog = ({ lr, sessionId, sessionName, to, onClose, onNeedHa
   const [mode, setMode] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
+  const [stage, setStage] = useState('');   // 长动作进行中的说明（等 CLI 退出可能要一分钟）
 
   useEffect(() => {
     let alive = true;
@@ -35,10 +36,22 @@ const LongRunSwitchDialog = ({ lr, sessionId, sessionName, to, onClose, onNeedHa
       onClose(r);
       return;
     }
+    // 转长程分两条路，都要先让交互式 CLI 退出（否则长程与它会抢同一条对话）：
+    //   续同一条对话：直接退出，不写记忆 —— 对话由长程用 --resume 接着续；
+    //   交接：交给交接向导，它先让 CLI 写记忆、再退出。
+    if (mode === 'resume_session') {
+      if (plan.cliRunning) {
+        setStage('正在让 CLI 退出…（它若正在干活会等它回到输入框，最多 60 秒）');
+        const q = await lr.call('longrun:quitCli', { sessionId }, 120000);
+        setStage('');
+        if (!q?.ok) { setBusy(false); setErr(q?.error || 'CLI 没能退出'); return; }
+      }
+      setBusy(false);
+      onNeedStart({ resumeSessionId: plan.claudeSessionId, root: plan.root });
+      return;
+    }
     setBusy(false);
-    // 转长程分两条路：续同一条对话直接开跑；交接则先让 CLI 写记忆再退出
-    if (mode === 'resume_session') onNeedStart({ resumeSessionId: plan.claudeSessionId, root: plan.root });
-    else onNeedHandoff({ root: plan.root });
+    onNeedHandoff({ root: plan.root });
   };
 
   const blocked = !plan || !plan.ok || busy;
@@ -99,6 +112,7 @@ const LongRunSwitchDialog = ({ lr, sessionId, sessionName, to, onClose, onNeedHa
           </>
         )}
 
+        {stage && <p className="lr-dim">{stage}</p>}
         {err && <div className="lr-err">{err}</div>}
 
         <div className="modal-actions">
