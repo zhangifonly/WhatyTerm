@@ -58,6 +58,7 @@ export default function MobileApp() {
             session={currentSession}
             aiStatus={sessionsData.aiStatusMap[currentId]}
             loading={sessionsData.loadingMap[currentId]}
+            longRunTasks={sessionsData.longRunTasks}
           />
         )}
       </main>

@@ -12,11 +12,14 @@ import { orderSessions, needsActionIds, nextSortMode, SORT_LABELS, DEFAULT_SORT 
  */
 export default function SessionList({
   sessions, aiStatusMap, loadingMap, memoryMap, loaded, refresh, onOpen,
-  prefs, setSortMode,
+  prefs, setSortMode, longRunTasks = [],
 }) {
   const sortMode = prefs?.sessionSort || DEFAULT_SORT;
   const pinnedIds = new Set(prefs?.pinnedSessions || []);
-  const needIds = needsActionIds(sessions, aiStatusMap);
+  const needIds = needsActionIds(sessions, aiStatusMap, longRunTasks);   // 含「长程在等你」
+  // 每个条目最新的那个长程任务（一个条目可能跑过好几轮）
+  const lrOf = (sid) => longRunTasks.filter((t) => t.sessionId === sid)
+    .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))[0] || null;
   const sorted = orderSessions({ sessions, pinnedIds, sortMode, needIds });
   const needCount = needIds.size;
 
@@ -47,6 +50,7 @@ export default function SessionList({
           loading={loadingMap[s.id]}
           memory={memoryMap[s.id]}
           pinned={pinnedIds.has(s.id)}
+          lrTask={s.runMode === 'longrun' ? lrOf(s.id) : null}
           onClick={() => onOpen(s.id)}
         />
       ))}

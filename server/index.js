@@ -7483,6 +7483,19 @@ io.on('connection', (socket) => {
    * 订阅已有任务：先入房间再取看板快照（同一 tick 内），之后的增量一定排在快照之后到达。
    * 快照带 seq，前端丢弃 seq ≤ 它的增量。
    */
+  /**
+   * 手机用的精简快照：状态、在不在等你、**问题原文**、最近 10 条进展、收工结论。
+   * 不订阅房间 —— 手机靠全局广播的 longrun:task 得知变化，变了再来拉这一份。
+   */
+  socket.on('longrun:brief', ({ taskId } = {}, cb) => {
+    let d;
+    try {
+      const brief = longRunService.brief(taskId);
+      d = brief ? { ok: true, brief } : { ok: false, error: '任务不在内存里（服务重启过或已被清理）' };
+    } catch (e) { d = { ok: false, error: e.message }; }
+    if (typeof cb === 'function') cb(d);
+  });
+
   socket.on('longrun:subscribe', ({ taskId } = {}, cb) => {
     const board = taskId ? longRunService.board(taskId) : null;
     if (board) socket.join(`longrun:${taskId}`);

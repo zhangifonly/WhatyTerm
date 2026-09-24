@@ -11,7 +11,7 @@
 
 import fs from 'fs';
 import {
-  SORT_MODES, DEFAULT_SORT, nextSortMode, sessionNumbers, needsActionIds, orderSessions,
+  SORT_MODES, DEFAULT_SORT, nextSortMode, sessionNumbers, needsActionIds, orderSessions, longRunWaitingIds,
 } from '../src/utils/sessionSort.js';
 
 const results = { passed: 0, failed: 0, errors: [] };
@@ -99,6 +99,33 @@ test('等确认与报错**不受**自动操作开关影响（屏上真挂着东�
   assert(n.has('a') && n.has('b'), '这两类与自动操作无关，漏了就在手机上看不到最该看的会话');
 });
 
+test('长程在等你算需操作 —— 长程条目不经过 AI 监控，只看 aiStatusMap 它是隐形的', () => {
+  const sessions = [
+    { id: 'L', runMode: 'longrun' },     // 长程，等你
+    { id: 'R', runMode: 'longrun' },     // 长程，在跑但没等你
+    { id: 'D', runMode: 'longrun' },     // 长程，已收工
+    { id: 'T', runMode: 'terminal' },    // 普通会话
+  ];
+  const tasks = [
+    { sessionId: 'L', state: 'running', awaitingHuman: true },
+    { sessionId: 'R', state: 'running', awaitingHuman: false },
+    { sessionId: 'D', state: 'done', awaitingHuman: true },      // 收工后残留的标志不该算
+    { sessionId: 'T', state: 'running', awaitingHuman: true },   // 条目不是长程模式，不该算
+  ];
+  const w = longRunWaitingIds(sessions, tasks);
+  assert([...w].join() === 'L', `只有 L 在等你：${[...w]}`);
+  const n = needsActionIds(sessions, {}, tasks);
+  assert(n.has('L'), 'aiStatusMap 为空时长程等你也必须算进去');
+  // 待处理优先下它要排到最前
+  const order = orderSessions({ sessions, sortMode: 'pending', needIds: n }).map((x) => x.id);
+  assert(order[0] === 'L', `长程等你没排最前：${order}`);
+});
+
+test('不传长程任务时行为不变（老调用方不受影响）', () => {
+  assert(needsActionIds([{ id: 'a' }], { a: { needsAction: true } }).has('a'));
+  assert(longRunWaitingIds().size === 0 && longRunWaitingIds(null, null).size === 0, '空参数不炸');
+});
+
 test('模式循环：固定 → 活跃 → 待处理 → 固定；非法值回到固定', () => {
   assert(nextSortMode('fixed') === 'active' && nextSortMode('active') === 'pending'
     && nextSortMode('pending') === 'fixed', '循环顺序错');
@@ -120,6 +147,13 @@ test('不改动入参数组（React 里就地排序会让 memo 判不出变化�
 
 // ── 接线守卫：两端都必须用这一份 ──────────────────────────────────
 const read = (p) => fs.readFileSync(new URL(p, import.meta.url), 'utf8');
+
+test('守卫：桌面的「待处理优先」与「长程等你摘要条」都用共享的 longRunWaitingIds', () => {
+  const app = read('../src/App.jsx');
+  const uses = app.split('longRunWaitingIds(').length - 1;
+  assert(uses >= 2, `桌面只有 ${uses} 处用了共享判定 —— 排序与摘要条应各一处，否则两处定义会分叉`);
+  assert(!/x\.runMode === 'longrun'\s*\n?\s*&& longRun\.taskForSession/.test(app), '摘要条又在自己写判定');
+});
 
 test('守卫：桌面与移动都从共享模块取排序，不各写一份', () => {
   const app = read('../src/App.jsx');

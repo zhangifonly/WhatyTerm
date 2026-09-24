@@ -34,7 +34,7 @@ import LongRunSide from './components/longrun/LongRunSide';
 import LongRunNewTask from './components/longrun/LongRunNewTask';
 import LongRunHandoffDialog from './components/longrun/LongRunHandoffDialog';
 import LongRunSwitchDialog from './components/longrun/LongRunSwitchDialog';
-import { orderSessions, sessionNumbers as computeSessionNumbers, nextSortMode } from './utils/sessionSort.js';
+import { orderSessions, sessionNumbers as computeSessionNumbers, nextSortMode, longRunWaitingIds } from './utils/sessionSort.js';
 import './components/longrun/LongRun.css';
 import './components/longrun/LongRunEntries.css';
 import { registerOsc52, writeClipboard } from './terminalClipboard';
@@ -1382,9 +1382,11 @@ export default function App() {
   }, [sessions, aiStatusMap, awaitingConfirmIds, erroredIds]);
 
   // 列表红点/排序沿用三类合一的口径（都属于需要你看一眼）
+  // 长程在等你也并进来：长程条目不经过 AI 监控，只看上面三类的话它在「待处理优先」里是隐形的。
+  // 判定用共享模块的 longRunWaitingIds —— 手机上用的是同一个
   const needsActionIds = useMemo(
-    () => new Set([...awaitingConfirmIds, ...erroredIds, ...idleWaitingIds]),
-    [awaitingConfirmIds, erroredIds, idleWaitingIds]
+    () => new Set([...longRunWaitingIds(sessions, longRun.tasks), ...awaitingConfirmIds, ...erroredIds, ...idleWaitingIds]),
+    [sessions, longRun.tasks, awaitingConfirmIds, erroredIds, idleWaitingIds]
   );
 
   // 快捷键位：与门牌号**分开的第二套编号**，只发给置顶会话。
@@ -1839,8 +1841,8 @@ export default function App() {
         )}
         {(() => {
           // 长程模式的条目在等人回答：与「等确认」同一种摘要条，点一下跳到下一个
-          const waiting = sessions.filter((x) => x.runMode === 'longrun'
-            && longRun.taskForSession(x.id)?.state === 'running' && longRun.taskForSession(x.id)?.awaitingHuman);
+          const waitingIds = longRunWaitingIds(sessions, longRun.tasks);   // 与排序、手机同一个判定
+          const waiting = sessions.filter((x) => waitingIds.has(x.id));
           if (!waiting.length) return null;
           const next = waiting.find((x) => x.id !== currentSession?.id) || waiting[0];
           return (

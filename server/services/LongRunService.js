@@ -24,6 +24,7 @@ import { LongRunBoard } from './LongRunBoard.js';
 import { replay as replayRun, EVENTS_FILE } from './LongRunReplay.js';
 import { apiSessions, apiSession } from './LongRunTranscript.js';
 import { switchPlan } from './longrunSwitch.js';
+import { longRunBrief } from './longrunBrief.js';
 import { listProviderModels } from './ProviderModels.js';
 import { resolveClaudeSessionId, lastContextPeak, decideHandover, buildLaunchCommand, buildShellLine } from './LongRunHandover.js';
 import {
@@ -446,6 +447,12 @@ export class LongRunService {
   board(taskId) {
     const task = this.tasks.get(taskId);
     return task ? { seq: task.seq, snapshot: task.board.snapshot() } : null;
+  }
+
+  /** 手机用的精简快照（见 longrunBrief.js）。任务不在内存里（服务重启过）返回 null */
+  brief(taskId) {
+    const task = this.tasks.get(taskId);
+    return task ? longRunBrief(task.toJSON(), task.board.snapshot()) : null;
   }
 
   /**

@@ -50,7 +50,28 @@ export function sessionNumbers(sessions = []) {
  * @param {Array} sessions
  * @param {object} aiStatusMap  sessionId -> ai:status 载荷
  */
-export function needsActionIds(sessions = [], aiStatusMap = {}) {
+/**
+ * 长程在等你回答的会话。定义只写这一处：条目是长程模式、任务在跑、且执行者停下来等人。
+ *
+ * ⚠ 长程条目不经过 AI 监控（监控会跳过长程模式），所以 aiStatusMap 里永远没有它们 ——
+ *   只看 aiStatusMap 的话，长程等你这件最要紧的事在排序里完全隐形。
+ *
+ * @param {Array} sessions
+ * @param {Array} tasks  长程任务摘要（longrun:task 广播 / longrun:status 的结果）
+ */
+export function longRunWaitingIds(sessions = [], tasks = []) {
+  const bySession = new Map();
+  for (const t of tasks || []) if (t?.sessionId) bySession.set(t.sessionId, t);
+  const out = new Set();
+  for (const s of sessions || []) {
+    if (s?.runMode !== 'longrun') continue;
+    const t = bySession.get(s.id);
+    if (t?.state === 'running' && t.awaitingHuman) out.add(s.id);
+  }
+  return out;
+}
+
+export function needsActionIds(sessions = [], aiStatusMap = {}, longRunTasks = []) {
   const awaiting = new Set();   // 屏上有确认菜单等按键
   const errored = new Set();    // 任务失败要你判断（与"等确认"是两回事，不并档）
   const idle = new Set();       // 空闲等「继续」，且自动操作关着 —— 没人替它按
@@ -71,7 +92,8 @@ export function needsActionIds(sessions = [], aiStatusMap = {}) {
     if (awaiting.has(s.id) || errored.has(s.id)) continue;
     idle.add(s.id);
   }
-  return new Set([...awaiting, ...errored, ...idle]);
+  // 长程在等你也算「需要你看一眼」—— 而且是最该先看的：它整轮都停在那里
+  return new Set([...longRunWaitingIds(sessions, longRunTasks), ...awaiting, ...errored, ...idle]);
 }
 
 /**
@@ -109,4 +131,4 @@ export function orderSessions({ sessions = [], pinnedIds, sortMode = DEFAULT_SOR
   return list;
 }
 
-export default { SORT_MODES, SORT_LABELS, DEFAULT_SORT, nextSortMode, sessionNumbers, needsActionIds, orderSessions };
+export default { SORT_MODES, SORT_LABELS, DEFAULT_SORT, nextSortMode, sessionNumbers, needsActionIds, longRunWaitingIds, orderSessions };

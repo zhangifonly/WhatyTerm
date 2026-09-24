@@ -6,9 +6,19 @@ const AI_COLORS = {
 };
 
 /** 单个会话卡片：名称 + CLI 徽标 + AI 状态行 + 内存；needsAction 高亮 */
-export default function SessionCard({ session, aiStatus, loading, memory, onClick, pinned }) {
-  const needsAction = !!aiStatus?.needsAction && !session.autoActionEnabled;
-  const stateText = aiStatus?.currentState || aiStatus?.phaseName || '等待分析';
+/** 长程条目的状态文案。长程不经过 AI 监控，不能用 aiStatus（那里永远是「等待分析」） */
+function longRunText(t) {
+  if (!t) return '长程 · 没有运行中的任务';
+  if (t.state === 'running' && t.awaitingHuman) return '🔔 长程在等你回答';
+  if (t.state === 'running') return `长程运行中 · 第 ${t.legs || 0} 发 · $${Number(t.costUsd || 0).toFixed(2)}`;
+  return `长程已收工 · ${t.legs || 0} 发 · $${Number(t.costUsd || 0).toFixed(2)}`;
+}
+
+export default function SessionCard({ session, aiStatus, loading, memory, onClick, pinned, lrTask }) {
+  const isLongRun = session.runMode === 'longrun';
+  const lrWaiting = isLongRun && lrTask?.state === 'running' && !!lrTask.awaitingHuman;
+  const needsAction = isLongRun ? lrWaiting : (!!aiStatus?.needsAction && !session.autoActionEnabled);
+  const stateText = isLongRun ? longRunText(lrTask) : (aiStatus?.currentState || aiStatus?.phaseName || '等待分析');
   const aiType = (session.aiType || 'claude').toLowerCase();
 
   return (
@@ -18,8 +28,8 @@ export default function SessionCard({ session, aiStatus, loading, memory, onClic
       role="button"
     >
       <div className="m-card-row">
-        <span className="m-ai-badge" style={{ background: AI_COLORS[aiType] || '#666' }}>
-          {aiType.toUpperCase()}
+        <span className="m-ai-badge" style={{ background: isLongRun ? '#7c3aed' : (AI_COLORS[aiType] || '#666') }}>
+          {isLongRun ? '🧭 长程' : aiType.toUpperCase()}
         </span>
         {pinned && <span className="m-pin-tag" title="已置顶（与电脑端同步）">📌</span>}
         <span className="m-card-name">{session.projectName || session.name}</span>
