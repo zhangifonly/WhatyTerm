@@ -12,11 +12,11 @@ import { orderSessions, needsActionIds, nextSortMode, SORT_LABELS, DEFAULT_SORT,
  */
 export default function SessionList({
   sessions, aiStatusMap, loadingMap, memoryMap, loaded, refresh, onOpen,
-  prefs, setSortMode, longRunTasks = [],
+  prefs, setSortMode, longRunTasks = [], inputStuck = {},
 }) {
   const sortMode = prefs?.sessionSort || DEFAULT_SORT;
   const pinnedIds = new Set(prefs?.pinnedSessions || []);
-  const needIds = needsActionIds(sessions, aiStatusMap, longRunTasks);   // 含「长程在等你」
+  const needIds = needsActionIds(sessions, aiStatusMap, longRunTasks, inputStuck);   // 含「长程在等你」「发送未生效」
   // 每个条目最新的那个长程任务（一个条目可能跑过好几轮）
   const lrOf = (sid) => longRunTasks.filter((t) => t.sessionId === sid)
     .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))[0] || null;
@@ -51,6 +51,7 @@ export default function SessionList({
           memory={memoryMap[s.id]}
           pinned={pinnedIds.has(s.id)}
           lrTask={s.runMode === 'longrun' ? lrOf(s.id) : null}
+          stuck={inputStuck[s.id] || null}
           onClick={() => onOpen(s.id)}
         />
       ))}

@@ -92,7 +92,12 @@ export function autoRunIds(sessions = [], longRunTasks = []) {
   return out;
 }
 
-export function needsActionIds(sessions = [], aiStatusMap = {}, longRunTasks = []) {
+/**
+ * @param {object} [inputStuck]  sessionId -> {reason, since}：自动发送没落进输入框、监控已停手的会话
+ *   （服务端 sessions:inputStuck）。这类会话 aiStatusMap 里常写着「发送继续」，看起来一切正常，
+ *   不单独算进来就永远排不到前面。
+ */
+export function needsActionIds(sessions = [], aiStatusMap = {}, longRunTasks = [], inputStuck = {}) {
   const awaiting = new Set();   // 屏上有确认菜单等按键
   const errored = new Set();    // 任务失败要你判断（与"等确认"是两回事，不并档）
   const idle = new Set();       // 空闲等「继续」，且自动操作关着 —— 没人替它按
@@ -113,8 +118,9 @@ export function needsActionIds(sessions = [], aiStatusMap = {}, longRunTasks = [
     if (awaiting.has(s.id) || errored.has(s.id)) continue;
     idle.add(s.id);
   }
+  const stuck = (sessions || []).filter((s) => s?.id && inputStuck?.[s.id]).map((s) => s.id);
   // 长程在等你也算「需要你看一眼」—— 而且是最该先看的：它整轮都停在那里
-  return new Set([...longRunWaitingIds(sessions, longRunTasks), ...awaiting, ...errored, ...idle]);
+  return new Set([...longRunWaitingIds(sessions, longRunTasks), ...awaiting, ...stuck, ...errored, ...idle]);
 }
 
 /**

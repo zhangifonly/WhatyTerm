@@ -17,6 +17,7 @@ export function useSessions() {
   // 长程任务摘要。长程条目不经过 AI 监控，aiStatusMap 里没有它们 ——
   // 不收这个，手机上就不知道哪个长程在等你
   const [longRunTasks, setLongRunTasks] = useState([]);
+  const [inputStuck, setInputStuck] = useState({});   // sessionId -> {reason, since}：发送未生效
 
   useEffect(() => {
     const handleList = (data) => {
@@ -55,11 +56,14 @@ export function useSessions() {
       setLongRunTasks((prev) => [...prev.filter((x) => x.id !== t.id), t]);
     };
     socket.on('longrun:task', handleLrTask);
+    const handleStuck = (m) => setInputStuck(m || {});
+    socket.on('sessions:inputStuck', handleStuck);
     socket.on('connect', refresh);
 
     refresh();
 
     return () => {
+      socket.off('sessions:inputStuck', handleStuck);
       socket.off('sessions:list', handleList);
       socket.off('sessions:updated', handleList);
       socket.off('ai:status', handleAiStatus);
@@ -87,5 +91,5 @@ export function useSessions() {
     socket.emit('ui:prefs:set', { sessionSort: mode });
   };
 
-  return { sessions, aiStatusMap, loadingMap, memoryMap, loaded, refresh, prefs, setSortMode, longRunTasks };
+  return { sessions, aiStatusMap, loadingMap, memoryMap, loaded, refresh, prefs, setSortMode, longRunTasks, inputStuck };
 }

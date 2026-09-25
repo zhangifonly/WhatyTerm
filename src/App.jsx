@@ -243,7 +243,8 @@ export default function App() {
   // 界面上完全看不出来，只会显得"修了没用" —— 这条提示就是为了避免再白排查一轮。
   const [serverStale, setServerStale] = useState(null);
   const [usageMap, setUsageMap] = useState({});   // sessionId -> {usd, today, kind, ...}
-  const [pricing, setPricing] = useState(null);   // 价格表状况（全局）：缺价 / 自动价 / 与 CC Switch 不一致
+  const [pricing, setPricing] = useState(null);
+  const [inputStuckMap, setInputStuckMap] = useState({});   // sessionId -> {reason, since}：发送未生效   // 价格表状况（全局）：缺价 / 自动价 / 与 CC Switch 不一致
   // 上次见到的服务端启动时刻。变了说明进程重启过，此时前端手里的 AI 判定
   // 全是上个进程留下的（服务端内存缓存已清空），必须丢弃 —— 否则面板会拿
   // 重启前的旧判定继续显示，看上去就像"修复没生效"。
@@ -838,6 +839,7 @@ export default function App() {
       setUsageMap(map || {});
     });
     socket.on('usage:pricing', (data) => setPricing(data || null));
+    socket.on('sessions:inputStuck', (map) => setInputStuckMap(map || {}));
 
     // 监听进程详情响应
     socket.on('session:processDetails', (data) => {
@@ -1384,9 +1386,14 @@ export default function App() {
   // 列表红点/排序沿用三类合一的口径（都属于需要你看一眼）
   // 长程在等你也并进来：长程条目不经过 AI 监控，只看上面三类的话它在「待处理优先」里是隐形的。
   // 判定用共享模块的 longRunWaitingIds —— 手机上用的是同一个
+  // 发送未生效：自动发出去了、CLI 没收进去、监控已停手（服务端 sessions:inputStuck）
+  const inputStuckIds = useMemo(
+    () => new Set(sessions.filter((s) => inputStuckMap[s.id]).map((s) => s.id)),
+    [sessions, inputStuckMap]
+  );
   const needsActionIds = useMemo(
-    () => new Set([...longRunWaitingIds(sessions, longRun.tasks), ...awaitingConfirmIds, ...erroredIds, ...idleWaitingIds]),
-    [sessions, longRun.tasks, awaitingConfirmIds, erroredIds, idleWaitingIds]
+    () => new Set([...longRunWaitingIds(sessions, longRun.tasks), ...awaitingConfirmIds, ...inputStuckIds, ...erroredIds, ...idleWaitingIds]),
+    [sessions, longRun.tasks, awaitingConfirmIds, inputStuckIds, erroredIds, idleWaitingIds]
   );
 
   // 快捷键位：与门牌号**分开的第二套编号**，只发给置顶会话。
@@ -1526,14 +1533,15 @@ export default function App() {
     if (next) attachSession(next.id);
   }, [orderedSessions, currentSession, attachSession]);
 
-  // ⌘↓ / Ctrl↓ 按紧迫度依次：等按键的面板 > 出错待判断 > 空闲待推进。
-  // 前两类是会话真的停住了，最后一类只是没人替它按「继续」。
+  // ⌘↓ / Ctrl↓ 按紧迫度依次：等按键的面板 > 发送未生效 > 出错待判断 > 空闲待推进。
+  // 前三类是会话真的停住了，最后一类只是没人替它按「继续」。
   const jumpToNextPending = useCallback(() => {
     const target = awaitingConfirmIds.size > 0 ? awaitingConfirmIds
+      : inputStuckIds.size > 0 ? inputStuckIds
       : erroredIds.size > 0 ? erroredIds
       : idleWaitingIds;
     jumpToNext(target);
-  }, [jumpToNext, awaitingConfirmIds, erroredIds, idleWaitingIds]);
+  }, [jumpToNext, awaitingConfirmIds, inputStuckIds, erroredIds, idleWaitingIds]);
 
   // 全局快捷键。⚠️ 终端聚焦时按键先经过 xterm 的 attachCustomKeyEventHandler，
   //    那边必须放行这些组合键（见终端初始化处），否则会被当成输入发给 CLI。
@@ -1853,6 +1861,16 @@ export default function App() {
             </button>
           );
         })()}
+        {inputStuckIds.size > 0 && (
+          <button
+            className="session-pending-bar error"
+            onClick={() => jumpToNext(inputStuckIds)}
+            title="自动发出的「继续」没进 CLI 输入框（重试后仍未生效），监控已停手 —— 需要你看一眼"
+          >
+            <span className="spb-dot" />
+            {inputStuckIds.size} 个发送未生效
+          </button>
+        )}
         {erroredIds.size > 0 && (
           <button
             className="session-pending-bar error"
@@ -3031,7 +3049,15 @@ export default function App() {
                 })()}
                 <div className="ai-status-section">
                   <h4>{t('aiPanel.currentState')}</h4>
-                  <p>{aiStatusMap[currentSession.id].currentState || t('aiPanel.waitingAnalysis')}</p>
+                  {/* 发送未生效时，分析结论（常是「发送继续」）与事实不符：先说真话 */}
+                  {inputStuckMap[currentSession.id] ? (
+                    <p className="input-stuck-note">
+                      ⚠ 发送未生效：{inputStuckMap[currentSession.id].reason}。
+                      请看一眼终端，手动发一次或检查 CLI 是否正常。
+                    </p>
+                  ) : (
+                    <p>{aiStatusMap[currentSession.id].currentState || t('aiPanel.waitingAnalysis')}</p>
+                  )}
                 </div>
                 <div className="ai-status-section">
                   <h4>{t('aiPanel.workingDir')}</h4>

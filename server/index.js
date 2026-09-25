@@ -171,6 +171,8 @@ import { SessionManager } from './services/SessionManager.js';
 import { HistoryLogger } from './services/HistoryLogger.js';
 import { AIEngine, hasRunningTimer } from './services/AIEngine.js';
 import actionOutcome from './services/ActionOutcome.js';
+import { InputStuckTracker } from './services/inputStuck.js';
+import { sendTextVerified } from './services/inputLanding.js';
 import { AuthService } from './services/AuthService.js';
 import { ProviderService } from './services/ProviderService.js';
 import ScheduleManager from './services/ScheduleManager.js';
@@ -1408,6 +1410,41 @@ function getSessionProviderId(session, aiType) {
  * @param {string} sessionId - 会话 ID（可选，用于查台账的连续空转熔断）
  * @returns {string|null} 拦截原因；null 表示放行
  */
+/** 「发送未生效」的会话（发了 CLI 没收进去、监控已停手），变了就整表推给前端，见 inputStuck.js */
+const inputStuck = new InputStuckTracker({ onChange: (all) => io.emit('sessions:inputStuck', all) });
+
+/** 抓当前屏幕（不走 1.5 秒缓存：核对打字有没有落地，缓存里是打字前那一屏）。带颜色码，用来分辨暗色建议文字 */
+function captureNow(tmuxName) {
+  return new Promise((resolve) => {
+    // 异步 exec：后台循环里禁用 execSync（会卡住事件循环，见终端输入卡顿那次复盘）
+    const target = String(tmuxName).replace(/'/g, `'\\''`);
+    execCb(`${getTmuxPrefix()} capture-pane -e -p -t '${target}'`, { timeout: 3000, maxBuffer: 4 * 1024 * 1024 },
+      (err, out) => resolve(err ? '' : String(out)));
+  });
+}
+
+/**
+ * 发文本并确认它进了输入框再回车；没进去就重打一次；还不行就不回车、标记「发送未生效」。
+ * 不 await：核对最多要 3 秒，不能拖住整轮扫描里的其他会话。
+ */
+function sendTextWithLanding(session, text) {
+  if (!session.tmuxSessionName) { session.sendInput(text, { submit: true }); return; }
+  sendTextVerified({
+    text,
+    typeText: (t) => session.sendInput(t, { submit: false }),
+    pressEnter: () => session.sendNamedKey('Enter'),
+    capture: () => captureNow(session.tmuxSessionName),
+  }).then((r) => {
+    if (r.landed === false) {
+      console.log(`[后台自动操作] 会话 ${session.name}: 「${text}」打了 ${r.attempts} 次都没进输入框，未按回车，标记发送未生效`);
+      inputStuck.set(session.id, `「${text}」发了 ${r.attempts} 次都没进输入框 —— CLI 没有接收输入，监控已停手`);
+    } else if (r.landed) {
+      if (r.attempts > 1) console.log(`[后台自动操作] 会话 ${session.name}: 「${text}」第 ${r.attempts} 次才进输入框`);
+      inputStuck.clear(session.id);
+    }
+  }).catch((e) => console.error(`[后台自动操作] 会话 ${session.name}: 核对发送失败:`, e.message));
+}
+
 function autoActionBlockReason(status, screenText = '', sessionId = null) {
   if (!status) return null;
   if (status.actionType === 'warning') return '警告类状态(仅展示)';
@@ -1417,7 +1454,11 @@ function autoActionBlockReason(status, screenText = '', sessionId = null) {
   // 占比最高的那条判定本质是"屏幕看不懂时的兜底猜测"，猜错时原本没有任何机制叫停。
   if (sessionId) {
     const paused = actionOutcome.shouldPause(sessionId, screenText);
-    if (paused) return paused;
+    if (paused) {
+      // 以前只在这里静默拦下，界面照样写着「发送继续」—— 现在标出来让人看见
+      inputStuck.set(sessionId, paused, 'ledger');
+      return paused;
+    }
   }
 
   // 注：这里原本还有一层「解析确认框里的命令、命中危险模式就停手」的复核，
@@ -4798,6 +4839,7 @@ async function runBackgroundAutoAction() {
 
     // 先快速检查终端内容是否变化（每次循环都检查，异步抓屏不阻塞事件循环）
     const quickContent = await session.getScreenContentAsync();
+    inputStuck.refresh(sessionData.id, quickContent);   // CLI 跑起来了 = 不再卡着
     if (quickContent && quickContent.length >= 10) {
       const contentHash = computeContentHash(quickContent, 1000);
       const state = sessionCheckState.get(sessionData.id) || {
@@ -5302,7 +5344,8 @@ async function runBackgroundAutoAction() {
             // Claude Code 文本输入模式：分两次发送，延迟50ms发送回车
             console.log(`[后台自动操作] 会话 ${session.name}: 发送文本 "${action}" + CR (延迟50ms)`);
             // v1.2.87 sendInput 直达 tmux server：write 依赖的 attach 客户端半死时静默丢键
-            session.sendInput(action, { submit: true });
+            // v1.4.59 先确认文本进了输入框再回车，没进去就重打一次，还不行标记「发送未生效」
+            sendTextWithLanding(session, action);
 
             // 记录操作到历史（用于智能监控）
             if (!session.actionHistory) session.actionHistory = [];
@@ -5470,7 +5513,7 @@ async function runBackgroundAutoAction() {
               console.error(`[后台自动操作] 会话 ${session.name}: 选项选择失败:`, e.message);
             }
           } else {
-            session.sendInput(action, { submit: true });  // v1.2.87 直达 tmux server
+            sendTextWithLanding(session, action);  // v1.4.59 确认进了输入框再回车（同规则路径）
           }
 
           // v1.2.96：ai_cache 路径也要维护 advanceSig + continueCount，否则下一轮熔断判定
@@ -5630,11 +5673,8 @@ async function runBackgroundAutoAction() {
           // Claude Code 文本输入模式或多字符操作：
           // 关键：分两次发送，模拟人工输入！
           console.log(`[后台自动操作] 会话 ${session.name}: 分开发送文本 "${action}" + CR`);
-          session.write(action);
-          // 延迟 200ms 后发送回车
-          setTimeout(() => {
-            session.write('\r');
-          }, 200);
+          // v1.4.59 与规则路径同一份实现：确认文本进了输入框再回车（原来走 write，attach 客户端半死时静默丢键）
+          sendTextWithLanding(session, action);
         } else if (status.actionType === 'single_char') {
           // 单字符特殊按键（如 Tab、Escape）：通过 tmux send-keys 发送更可靠
           const tmuxSession = session.tmuxSessionName;
@@ -7182,6 +7222,7 @@ io.on('connection', (socket) => {
   // 获取会话列表
   socket.emit('sessions:usage', Object.fromEntries(usageMap));   // 新连上的客户端先拿一份当前值，不用等下一轮
   socket.emit('usage:pricing', pricingView());
+  socket.emit('sessions:inputStuck', inputStuck.all());
 
   socket.on('sessions:list', async () => {
     // 等待 SessionManager 初始化完成

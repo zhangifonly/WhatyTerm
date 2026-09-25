@@ -14,11 +14,13 @@ function longRunText(t) {
   return `长程已收工 · ${t.legs || 0} 发 · $${Number(t.costUsd || 0).toFixed(2)}`;
 }
 
-export default function SessionCard({ session, aiStatus, loading, memory, onClick, pinned, lrTask }) {
+export default function SessionCard({ session, aiStatus, loading, memory, onClick, pinned, lrTask, stuck = null }) {
   const isLongRun = session.runMode === 'longrun';
   const lrWaiting = isLongRun && lrTask?.state === 'running' && !!lrTask.awaitingHuman;
-  const needsAction = isLongRun ? lrWaiting : (!!aiStatus?.needsAction && !session.autoActionEnabled);
-  const stateText = isLongRun ? longRunText(lrTask) : (aiStatus?.currentState || aiStatus?.phaseName || '等待分析');
+  // 发送未生效：分析结论常写着「发送继续」，与事实不符，先说真话（见服务端 inputStuck.js）
+  const needsAction = !!stuck || (isLongRun ? lrWaiting : (!!aiStatus?.needsAction && !session.autoActionEnabled));
+  const stateText = stuck ? '⚠ 发送未生效，监控已停手，请看一眼'
+    : isLongRun ? longRunText(lrTask) : (aiStatus?.currentState || aiStatus?.phaseName || '等待分析');
   const aiType = (session.aiType || 'claude').toLowerCase();
 
   return (
