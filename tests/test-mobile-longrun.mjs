@@ -70,7 +70,8 @@ test('快照 hook：等人状态翻转时不被节流吞掉（那是最要紧的
 test('列表：收长程任务摘要，长程等你算需操作，卡片不再显示「等待分析」', () => {
   assert(/socket\.on\('longrun:task'/.test(SESS), '没收长程任务广播');
   assert(/socket\.emit\('longrun:status'/.test(SESS), '首屏没拉长程任务');
-  assert(/needsActionIds\(sessions, aiStatusMap, longRunTasks\)/.test(LIST), '排序没算上长程等你');
+  // 第三个参数是长程任务（后面还可以有「发送未生效」表，见 test-input-landing）
+  assert(/needsActionIds\(sessions, aiStatusMap, longRunTasks[,)]/.test(LIST), '排序没算上长程等你');
   assert(/isLongRun \? longRunText\(lrTask\)/.test(SCARD), '长程条目仍在显示 AI 监控状态（永远是「等待分析」）');
 });
 
