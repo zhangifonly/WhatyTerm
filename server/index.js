@@ -217,7 +217,7 @@ import telemetryService from './services/TelemetryService.js';
 import crashReporter from './services/CrashReporter.js';
 import sleepPrevention from './services/SleepPreventionService.js';
 import PuppeteerReaper from './services/PuppeteerReaper.js';
-import SessionRelay from './services/SessionRelay.js';
+import { sessionClaudeEnv, relayMigrationPlan, OAUTH_PROVIDER_INFO } from './services/sessionProviderEnv.js';
 import { LongRunService } from './services/LongRunService.js';
 import pricingTable from './services/usage/PricingTable.js';
 import { AutoPricing } from './services/usage/AutoPricing.js';
@@ -820,13 +820,6 @@ const sessionMiddleware = session({
   }
 });
 
-// 会话级 API 反代（"显示即转发"）：必须注册在 body parser 之前，原始流透传支持 SSE
-const sessionRelay = new SessionRelay();
-app.use('/relay', (req, res) => {
-  req.url = '/relay' + req.url; // 还原被 app.use 剥掉的挂载前缀，交给 handle 统一解析
-  sessionRelay.handle(req, res);
-});
-
 // 上限 10MB：默认 100KB 对本项目太小——终端屏幕内容、AI 分析载荷、hook 事件
 // 都可能超限，实测日志里反复出现 PayloadTooLargeError（请求被静默丢弃，
 // 表现为前端某些操作无响应而后端只打一条栈）。
@@ -1298,6 +1291,8 @@ let sessionManagerReady = false;
     sessionManager = await SessionManager.create();
     sessionManagerReady = true;
     console.log('[Server] SessionManager 初始化完成');
+    // 旧 relay 配置迁成直连（relay 已删除；不迁的话这些会话的 CLI 请求会全部失败）
+    migrateSessionsOffRelay().catch((e) => console.error('[relay 迁移] 出错:', e.message));
     ralphEngine = new RalphEngine(sessionManager, io);
     console.log('[Server] RalphEngine 初始化完成');
     hookServer = new HookServer(currentPort);
@@ -1309,6 +1304,7 @@ let sessionManagerReady = false;
     sessionManager = new SessionManager();
     await sessionManager.init().catch(e => console.error('[Server] SessionManager.init() 失败:', e));
     sessionManagerReady = true;
+    migrateSessionsOffRelay().catch((e) => console.error('[relay 迁移] 出错:', e.message));
     ralphEngine = new RalphEngine(sessionManager, io);
     hookServer = new HookServer(currentPort);
     hookServer.install();
@@ -1689,6 +1685,22 @@ function queryCcSwitchCurrentRow(db, appType, columns = '*') {
  * 钉住了具体供应商 id。
  * @returns {{url:string,key:string,model:string,isOAuth:boolean,providerId:string}|null}
  */
+/** 项目 settings.local.json 或全局 ~/.claude/settings.json 是否在 ts 之后改过（热加载会让在跑的 CLI 跟着变） */
+function settingsChangedSince(workingDir, ts) {
+  const files = [path.join(os.homedir(), '.claude', 'settings.json')];
+  if (workingDir) files.push(path.join(workingDir, '.claude', 'settings.local.json'));
+  return files.some((f) => { try { return statSync(f).mtimeMs > ts; } catch { return false; } });
+}
+
+/** 项目或全局 settings 的 env 里是否写了这个键（哪怕是 ""）。写了就会覆盖 CLI 进程的启动环境 */
+function settingsDefinesKey(workingDir, key) {
+  const files = [path.join(os.homedir(), '.claude', 'settings.json')];
+  if (workingDir) files.push(path.join(workingDir, '.claude', 'settings.local.json'));
+  return files.some((f) => {
+    try { return typeof JSON.parse(readFileSync(f, 'utf8'))?.env?.[key] === 'string'; } catch { return false; }
+  });
+}
+
 function readLocalProviderConfig(workingDir) {
   if (!workingDir) return null;
   const p = path.join(workingDir, '.claude', 'settings.local.json');
@@ -1724,11 +1736,9 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
     let actualApiUrl = '';
     let actualApiKey = '';
     let actualModel = '';
-    let configSource = 'global'; // 'global' | 'local' | 'process' | 'relay'(反代实测) | 'relay-lost'
+    let configSource = 'global'; // 'global' | 'local' | 'process' | 'hook' | 'status' | 'login'
     let localIsOAuth = false;    // 会话本地 settings.local.json 明确标记为官方 OAuth
     let localProviderId = '';    // 会话级切换记录的所选供应商 id（同URL+Key重名时精确命中）
-    let relayInfo = null;        // 反代实测信息 { stats: {lastAt,lastTarget,lastStatus,count}, providerName }
-    let modelFromRelay = false;  // 模型是否真来自 relay 请求体嗅探（没转发过请求时为 false）
 
     // 始终读取全局配置（用于显示和同步参考）
     let globalApiUrl = '';
@@ -1792,8 +1802,10 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
           actualApiKey = procEnv.ANTHROPIC_AUTH_TOKEN || procEnv.ANTHROPIC_API_KEY || actualApiKey;
           actualModel = procEnv.ANTHROPIC_MODEL || actualModel;
           configSource = 'process';
-        } else if (!actualApiUrl) {
-          // settings env 全空（如已切到 OAuth），进程 env 是唯一线索
+        } else if (!actualApiUrl && !settingsDefinesKey(workingDir, 'ANTHROPIC_BASE_URL')) {
+          // settings 里压根没有这个键，进程 env 是唯一线索。
+          // ⚠ settings 显式写了 ""（会话选官方登录时就是这样写的）会覆盖进程 env —— 此时进程 env 不生效，
+          //   不能拿它来显示：实测 phyviz 以 relay 环境启动、配置迁成官方登录后，面板仍显示 relay 地址
           actualApiUrl = procUrl;
           actualApiKey = procEnv.ANTHROPIC_AUTH_TOKEN || procEnv.ANTHROPIC_API_KEY || '';
           actualModel = procEnv.ANTHROPIC_MODEL || '';
@@ -1848,7 +1860,10 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         // 进程已换（两边启动时间都拿到了且不相等）→ 这份实测属于上一个 CLI 进程，作废。
         // 30 分钟 TTL 只在「进程启动时间取不到」时兜底，绝不用来跨进程续命（同 hookStale 原则）
         const spDeadProc = !!(sp?.procStart && _procStartEpoch && sp.procStart !== _procStartEpoch);
-        if (sp && !spDeadProc && (spSameProc || Date.now() - sp.at < 30 * 60 * 1000)) {
+        // 配置在快照之后改过 → 作废。Claude Code 会热加载 settings 的 env，「同一进程配置不变」不再成立：
+        // 实测 phyviz 9 月 16 日的 /status 快照（relay 地址）在配置迁成直连后仍被当成实测显示
+        const spConfigChanged = !!sp && settingsChangedSince(workingDir, sp.at);
+        if (sp && !spDeadProc && !spConfigChanged && (spSameProc || Date.now() - sp.at < 30 * 60 * 1000)) {
           if (sp.baseUrl) {
             actualApiUrl = sp.baseUrl;
             localIsOAuth = false;
@@ -1902,30 +1917,6 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         }
       }
 
-      // 本地反代识别（最高真实级）：URL 指向 /relay/<sessionId> 时，从服务端映射
-      // 取真实供应商——面板显示的目标与实际转发目标物理上是同一份数据。
-      {
-        const relayMatch = (actualApiUrl || '').match(/^https?:\/\/127\.0\.0\.1:\d+\/relay\/([^/\s]+)/);
-        if (relayMatch) {
-          const relayTarget = sessionRelay.get(relayMatch[1]);
-          if (relayTarget) {
-            actualApiUrl = relayTarget.url;
-            actualApiKey = relayTarget.key || actualApiKey;
-            configSource = 'relay';
-            if (relayTarget.providerId) localProviderId = relayTarget.providerId;
-            const relayStats = sessionRelay.getStats(relayMatch[1]);
-            // 只有真转发过请求才有 lastModel。刚切到 relay 或刚重启的会话还没发过请求，
-            // 此时不能把它当成「已有更可信的模型」，否则下面会跳过 transcript 兜底、
-            // 让面板永久停在切换前的旧值（phyviz 实测：面板 claude-fable-5[1m] vs
-            // transcript 真值 claude-opus-5）。
-            if (relayStats?.lastModel) { actualModel = relayStats.lastModel; modelFromRelay = true; }
-            relayInfo = { stats: relayStats, providerName: relayTarget.providerName };
-          } else {
-            // 映射丢失（异常）：如实显示反代地址并标注，请用户重选供应商
-            configSource = 'relay-lost';
-          }
-        }
-      }
 
       // 最后兜底：如果仍无 URL，检查 WebTmux 服务进程自身的环境变量
       // （tmux 会话继承服务进程 env，Claude Code 会使用这些变量）
@@ -2062,10 +2053,8 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
       // settings.json / settings.local.json 的 model 是「最后一次 /model 选择」的持久值，
       // 与实际在跑的模型无关（实测 glm-5.3-flash vs transcript 里的 claude-opus-5）。
       // transcript 是每次请求实际落盘的 model 字段，唯一反映"此刻在跑什么"。
-      // relay 例外只在**真嗅探到**时成立：那是请求体实测，物理同源、比 transcript 更即时；
-      // 但没转发过请求时 lastModel 为空，此时必须回落 transcript，否则停在旧值。
       let finalModel = extras.model !== undefined ? extras.model : '';
-      if (appType === 'claude' && !modelFromRelay) {
+      if (appType === 'claude') {
         const probed = probeModelByWorkingDirSync(workingDir);
         if (probed) finalModel = probed;
       }
@@ -2084,8 +2073,9 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
         // 显示全局供应商/官方登录兜底，但运行中进程早于配置变更 → 标记陈旧，
         // 前端提示"重启会话生效"（login 也要标：切官方前启动的进程仍在用旧第三方配置）
         stale: (cs === 'global' || cs === 'login') && !!extras.exists ? isGlobalStale() : false,
-        // 反代实测信息：面板据此显示"代理·实测"徽标 + 最近转发时间/状态
-        ...(relayInfo ? { relay: { ...(relayInfo.stats || {}), providerName: relayInfo.providerName } } : {}),
+        // 本会话是否有自己的供应商配置（项目 settings.local.json）。与 configSource 分开：
+        // 直连会话常被 hook 实测（configSource='hook'），不能靠来源推断有没有本地配置
+        hasLocalConfig: appType === 'claude' && !!readLocalProviderConfig(workingDir),
         // 同址多供应商无法区分时的如实标注（名称为主机名，候选列表给前端展示）
         ...(extras.nameAmbiguous ? { nameAmbiguous: true, sameUrlCandidates: extras.sameUrlCandidates || [] } : {}),
         ...(extras.globalConfig !== undefined ? { globalConfig: extras.globalConfig } : {})
@@ -2950,14 +2940,14 @@ app.post('/api/claude-code/config', async (req, res) => {
     // ⚠️ isOAuth 只能在「确实是官方登录」时为真。新版 CC Switch 把第三方供应商的
     // URL/key 落在自己的 DB 里，~/.claude/settings.json 的 env 已经是空的（实测
     // 2026-08-22：env 0 个键、.current 0 字节），于是 mergedEnv 也可能是空对象。
-    // 此时若仍按 isOAuth 处理，就会写出 `env:{} + _localProvider:'relay'` 的空壳
+    // 此时若仍按 isOAuth 处理，就会写出 `env:{} + _localProvider` 标记的空壳
     // ——readLocalProviderConfig 判为「无本地配置」→ 跟随全局，用户点「本地」毫无
     // 效果、再点还是一样（phyviz 实测就是这个文件）。判据必须是「DB 里当前供应商
     // 本身就是官方 OAuth」，而不是「读不到 URL」。
     const hasRealUrl = !!mergedEnv.ANTHROPIC_BASE_URL;
     const isOAuth = !hasRealUrl && dbIsOAuth;
 
-    // 定位该项目对应的会话：有会话才能走真正的会话级隔离（relay + 会话级 tmux env）
+    // 定位该项目对应的会话：有会话才能走真正的会话级隔离（项目配置直连 + 会话级 tmux env）
     let targetSession = null;
     try {
       const wanted = req.body?.sessionId;
@@ -2973,16 +2963,15 @@ app.post('/api/claude-code/config', async (req, res) => {
       console.warn('[Claude Code Config] 定位会话失败:', e.message);
     }
 
-    // 优先走 applySessionProvider：写 relay 地址 + 占位密钥到本地配置、注册服务端映射、
-    // 设置会话级 tmux env（不碰 -g 全局）。这样外部 CC Switch 再切换也影响不到本会话，
-    // 且面板显示的供应商 == 反代实际转发目标（configSource='relay'）。
+    // 优先走 applySessionProvider：把所选供应商的真实地址/密钥直连写进本地配置，
+    // 设置会话级 tmux env（不碰 -g 全局）。这样外部 CC Switch 再切换也影响不到本会话。
     // 拿不到会话或供应商 id 时，回落为原来的「快照复制当前全局」行为。
-    let appliedViaRelay = false;
+    let appliedPerSession = false;
     if (targetSession && dbProviderId) {
       try {
         const r = applySessionProvider(targetSession, 'claude', dbProviderId);
         if (r.ok) {
-          appliedViaRelay = true;
+          appliedPerSession = true;
           console.log(`[Claude Code Config] 已按会话级隔离设置供应商: ${targetSession.name} -> ${dbProviderId}`);
         } else {
           console.warn('[Claude Code Config] applySessionProvider 失败，回落快照模式:', r.error);
@@ -2999,8 +2988,8 @@ app.post('/api/claude-code/config', async (req, res) => {
     }
     const configPath = join(projectClaudeDir, 'settings.local.json');
 
-    // 注意：appliedViaRelay 时 applySessionProvider 刚写过该文件，必须重新读取，
-    // 否则下面的 writeFileSync 会用旧内容把 relay env 覆盖掉
+    // 注意：appliedPerSession 时 applySessionProvider 刚写过该文件，必须重新读取，
+    // 否则下面的 writeFileSync 会用旧内容把刚写的 env 覆盖掉
     let config = {};
     if (existsSync(configPath)) {
       try {
@@ -3013,10 +3002,10 @@ app.post('/api/claude-code/config', async (req, res) => {
     const localPermissions = config.permissions;
 
     // 同步配置
-    // appliedViaRelay 时 env/_localProvider/_localProviderId 已由 applySessionProvider 写好
-    // （relay 地址 + 占位密钥，或 OAuth 的清空+标记），这里绝不能再动，否则会把真实密钥
-    // 写回本地文件、或用 mergedEnv 覆盖掉 relay 地址。只补下面的 model/permissions 等。
-    if (!appliedViaRelay) {
+    // appliedPerSession 时 env/_localProvider/_localProviderId 已由 applySessionProvider 写好，
+    // 这里绝不能再动，否则会用 mergedEnv（全局那家）覆盖掉用户为本会话选的供应商。
+    // 只补下面的 model/permissions 等。
+    if (!appliedPerSession) {
       // 走到这里说明没能按会话级隔离落地（拿不到会话或供应商 id），只能退回
       // 「快照复制当前全局」。此时必须写出「有内容」的本地配置：只写 _localProvider
       // 标记会变成空壳，readLocalProviderConfig 判为无配置（跟随全局），用户点了
@@ -3035,9 +3024,7 @@ app.post('/api/claude-code/config', async (req, res) => {
         config._localProvider = 'oauth';
       } else {
         config.env = { ...mergedEnv };
-        // 这条路径是「快照复制全局」，并没有走反代，标记成 'relay' 会误导排查
-        // （真正走反代的是 applySessionProvider 写的 'relay-proxy'）。
-        // 判据靠 env 里的真实 URL，这个标记只作说明用。
+        // 这条路径是「快照复制全局」，标记只作说明用，判据靠 env 里的真实 URL。
         config._localProvider = 'snapshot';
       }
       // 钉住供应商 id：同 URL+Key 的多个供应商（如 Whaty 系列共用 zjz-ai）靠它精确命中
@@ -3064,7 +3051,7 @@ app.post('/api/claude-code/config', async (req, res) => {
     console.log(`[Claude Code Config] 已同步全局配置到项目: ${configPath}`);
 
     // 同步成功后，重新获取供应商信息并通知前端更新
-    // 带上 tmuxSessionName：relay 模式下才能让 configSource 正确解析为 'relay'（反代实测）
+    // 带上 tmuxSessionName：能读到在跑 CLI 的实测来源（hook/status）
     const provider = await getCurrentProvider('claude', projectPath, targetSession?.tmuxSessionName || null);
     console.log(`[Claude Code Config] 新的供应商信息: configSource=${provider.configSource}`);
 
@@ -3115,20 +3102,18 @@ app.delete('/api/claude-code/config/local', async (req, res) => {
     unlinkSync(localConfigPath);
     console.log('[Claude Code Config] 已删除本地配置:', localConfigPath);
 
-    // 同步清理会话级隔离残留：relay 映射 + 会话级 tmux env。
-    // 不清的话本地文件没了但 tmux 里仍留着 relay 地址，CLI 重启会连到一个已失效的
-    // /relay/<sid>（映射也在的话则继续走旧供应商），表现为「删了本地配置却没恢复全局」。
+    // 同步清理会话级 tmux env：不清的话本地文件没了但 tmux 里仍留着会话供应商的地址，
+    // CLI 重启后继续走旧供应商，表现为「删了本地配置却没恢复全局」。
     try {
       for (const sd of sessionManager.listSessions()) {
         const s = sessionManager.getSession(sd.id);
         if (!s || s.workingDir !== projectPath) continue;
-        sessionRelay.clear(s.id);
         if (s.tmuxSessionName) {
           for (const k of ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL']) {
             try { tmuxSetEnv({ target: s.tmuxSessionName, name: k, value: null }); } catch {}
           }
         }
-        console.log(`[Claude Code Config] 已清理会话 ${s.name} 的 relay 映射与会话级 env`);
+        console.log(`[Claude Code Config] 已清理会话 ${s.name} 的会话级 env`);
       }
     } catch (e) {
       console.warn('[Claude Code Config] 清理会话级隔离残留失败:', e.message);
@@ -5983,16 +5968,12 @@ setInterval(async () => {
       const session = sessionManager.getSession(sd.id);
       if (!session || !session.workingDir) continue;
       if (session.aiType && session.aiType !== 'claude') continue;
-      // relay 是物理同源（面板显示的就是实际转发目标），永不覆盖。
       // ⚠️ status 曾也在这个豁免名单里，但 `/status` 探针**只在用户手动敲 /status 的那一刻**
       //    才更新——之后用户在 CLI 里 /model 换了模型，这份陈旧快照会永久压住 transcript 兜底。
       //    实测 35 个会话里 3 个 src=status 显示 glm-5.3-flash（那是 ~/.claude/settings.json
       //    的持久值，即"最后一次 /model 选择"，不是在跑的模型），还有一个 src=status 是空值
       //    却同样被保护。所以 status 只在"确有非空模型且比 transcript 更新"时才优先。
       const cp = session.claudeProvider;
-      // relay 只在**真嗅探到模型**时豁免；没转发过请求时 lastModel 为空，
-      // 仍要走 transcript 兜底，否则 relay 会话的模型显示永久停在切换前的值。
-      if (cp?.configSource === 'relay' && sessionRelay.getStats(session.id)?.lastModel) continue;
       const model = await probeModelByWorkingDir(session.workingDir);
       if (!model) continue;
       // 只在**面板实际显示的值**（cp.model）与 transcript 不一致时才动。
@@ -6281,11 +6262,11 @@ async function runBackgroundStatusAnalysis() {
             // 防止 OAuth 误判覆盖：如果 session 已有非 OAuth provider（有 URL），
             // 但 getCurrentProvider 返回 OAuth（无 URL），说明配置文件被清除但 DB is_current 未变，
             // 此时应以 DB is_current 为准，不覆盖
-            // ⚠️ 但实测证据（/status 屏幕自报、本地反代嗅探）必须放行——它比"旧值有 URL"
+            // ⚠️ 但实测证据（/status 屏幕自报、hook 上报的 CLI 进程实际 env）必须放行——它比"旧值有 URL"
             //    可信得多。否则用户 /exit 换到官方账号后，会话里存的是换号**之前**那次算出的
             //    第三方对象，这条守卫会永久拒绝写入正确结果，面板冻结在死值上
             //   （实测：/status 明写 Login method: Claude Max account，面板仍报 zjz-ai，v1.2.45）
-            const newIsMeasured = ['status', 'relay'].includes(provider.configSource);
+            const newIsMeasured = ['status', 'hook'].includes(provider.configSource);
             const shouldSkipUpdate = cliType === 'claude' && currentProvider?.url &&
                                      !provider.url && provider.isOAuth && !newIsMeasured;
             if (shouldSkipUpdate) {
@@ -6488,7 +6469,11 @@ function resolveProviderInfo(appType, providerId) {
 function applySessionProvider(session, appType, providerId) {
   const info = resolveProviderInfo(appType, providerId);
   if (!info) return { ok: false, error: '供应商不存在' };
+  return applySessionProviderInfo(session, appType, info);
+}
 
+/** applySessionProvider 的写入部分：info 已解析好（迁移旧配置时也用它，见 migrateSessionsOffRelay） */
+function applySessionProviderInfo(session, appType, info) {
   const workdir = session.workingDir;
   const tmux = session.tmuxSessionName;
   const setEnv = (k, v) => {
@@ -6509,42 +6494,28 @@ function applySessionProvider(session, appType, providerId) {
       let ls = {};
       if (existsSync(lp)) { try { ls = JSON.parse(readFileSync(lp, 'utf-8')); } catch {} }
       ls.env = ls.env || {};
+      // 会话级供应商**直连**：真实地址与密钥直接写进本项目的 settings.local.json。
+      // Claude Code 会热加载 settings 里的 env（2026-09-25 实测 WebOffice：写入后约 20 秒 hook 即报新地址），
+      // 正在跑的 CLI 不用重启。
+      // ⚠ 不再用本地反代（/relay/<会话id>）：用户明确否定过（"这种relay的方式非常不可取"），
+      //   v1.4.55 已整体删除，旧配置启动时由 migrateSessionsOffRelay 迁成直连。
+      // 四个键一律写出（没有的写 ""）：热加载时**删键不会清掉**进程里已有的值，只有写 "" 才会覆盖。
       const keys = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL'];
-      if (info.isOAuth) {
-        // 官方登录：清除本地与会话 env 里的 ANTHROPIC_*，让 CLI 走订阅登录（不经反代）
-        for (const k of keys) { delete ls.env[k]; unsetEnv(k); providerEnv[k] = null; }
-        ls._localProvider = 'oauth';   // 标记本会话为官方OAuth，供 getCurrentProvider 正确识别(不被全局is_current覆盖)
-        delete ls._localProviderId;    // 清除第三方 id 残留
-        sessionRelay.clear(session.id);
-      } else {
-        // 第三方供应商走本地反代（"显示即转发"）：终端 env 只有反代地址+占位密钥，
-        // 真实 URL/密钥留在服务端映射；面板显示的目标 = 实际转发目标，物理一致。
-        // 附带收益：热切换供应商只改映射、无需重启 CLI；API 错误在 HTTP 层直接捕获。
-        const realUrl = info.env.ANTHROPIC_BASE_URL || '';
-        const realKey = info.env.ANTHROPIC_AUTH_TOKEN || info.env.ANTHROPIC_API_KEY || '';
-        const keyMode = info.env.ANTHROPIC_AUTH_TOKEN ? 'bearer' : 'x-api-key';
-        const relayPort = parseInt(process.env.PORT) || 3928;
-        const relayUrl = `http://127.0.0.1:${relayPort}/relay/${session.id}`;
-        sessionRelay.setProvider(session.id, {
-          url: realUrl, key: realKey, keyMode,
-          providerId: info.provider.id, providerName: info.provider.name
-        });
-        for (const k of keys) { delete ls.env[k]; unsetEnv(k); }
-        ls.env.ANTHROPIC_BASE_URL = relayUrl;
-        ls.env.ANTHROPIC_AUTH_TOKEN = `webtmux-relay-${session.id}`;
-        if (info.env.ANTHROPIC_MODEL) ls.env.ANTHROPIC_MODEL = info.env.ANTHROPIC_MODEL;
-        setEnv('ANTHROPIC_BASE_URL', relayUrl);
-        setEnv('ANTHROPIC_AUTH_TOKEN', `webtmux-relay-${session.id}`);
-        if (info.env.ANTHROPIC_MODEL) setEnv('ANTHROPIC_MODEL', info.env.ANTHROPIC_MODEL);
-        providerEnv.ANTHROPIC_BASE_URL = relayUrl;
-        providerEnv.ANTHROPIC_AUTH_TOKEN = `webtmux-relay-${session.id}`;
-        ls._localProvider = 'relay-proxy'; // 本会话经 WebTmux 本地反代
-        // 记录所选供应商 id：多个同 URL+Key 供应商(如 Whaty / Whaty copy)时，
-        // getCurrentProvider 反查按 id 精确命中，不再靠 URL/Key 猜名字
-        ls._localProviderId = info.provider.id;
+      const values = sessionClaudeEnv(info);
+      for (const k of keys) {
+        ls.env[k] = values[k];
+        if (values[k]) setEnv(k, values[k]); else unsetEnv(k);
+        providerEnv[k] = values[k] || null;
       }
+      // OAuth：本会话显式走官方登录（四个键全空，连全局 env 一并覆盖）；否则记下所选供应商 id，
+      // 多个同 URL+Key 供应商（如 Whaty / Whaty copy）时 getCurrentProvider 按 id 精确命中
+      ls._localProvider = info.isOAuth ? 'oauth' : 'session';
+      if (info.isOAuth) delete ls._localProviderId; else ls._localProviderId = info.provider.id;
       writeFileSync(lp, JSON.stringify(ls, null, 2), 'utf8');
       session.claudeProvider = { id: info.provider.id, name: info.provider.name };
+      // 实测缓存作废：/status 快照与 hook 上报都是切换前那家（热加载后同一进程也会变）
+      session.statusProbe = null;
+      session.effectiveEnv = null;
     } else if (appType === 'codex') {
       // 会话专属 CODEX_HOME，避免污染 ~/.codex
       const codexHome = path.join(os.homedir(), '.webtmux', 'sessions', session.id, 'codex');
@@ -6577,6 +6548,45 @@ function applySessionProvider(session, appType, providerId) {
     console.error('[applySessionProvider] 失败:', e.message);
     return { ok: false, error: e.message };
   }
+}
+
+/**
+ * 启动时把还挂在旧 relay 上的会话迁成直连（relay 已于 v1.4.55 删除，见 sessionProviderEnv.js）。
+ * 在跑的 CLI 靠 settings env 热加载当场切过去，不重启、不打断。
+ * 全部处理完才删旧映射文件（~/.webtmux/session-relay.json，里面是真实密钥），迁不动的会话留着它以便人工处理。
+ * @returns {Promise<Array<{name:string, action:string, ok:boolean, detail:string}>>}
+ */
+async function migrateSessionsOffRelay() {
+  const mapFile = path.join(os.homedir(), '.webtmux', 'session-relay.json');
+  let relayMap = {};
+  try { relayMap = JSON.parse(readFileSync(mapFile, 'utf-8')); } catch { /* 没有旧映射 */ }
+  const report = [];
+  for (const sd of sessionManager.listSessions()) {
+    const session = sessionManager.getSession(sd.id);
+    if (!session?.workingDir || (session.aiType && session.aiType !== 'claude')) continue;
+    const lp = path.join(session.workingDir, '.claude', 'settings.local.json');
+    let ls = {};
+    try { ls = existsSync(lp) ? JSON.parse(readFileSync(lp, 'utf-8')) : {}; } catch { continue; }
+    let procUrl = '';
+    try { procUrl = (await readClaudeProcessEnv(session.tmuxSessionName))?.ANTHROPIC_BASE_URL || ''; } catch {}
+    const plan = relayMigrationPlan(ls, procUrl, relayMap, session.id);
+    if (plan.action === 'none') continue;
+    let r = { ok: false, error: '' };
+    if (plan.action === 'provider') {
+      r = applySessionProvider(session, 'claude', plan.providerId);
+    } else if (plan.action === 'oauth') {
+      r = applySessionProviderInfo(session, 'claude', OAUTH_PROVIDER_INFO);
+    } else {
+      r = { ok: false, error: '配置是跟随全局、进程却在旧 relay 上，无法判断该迁成哪个供应商，请在面板里为它重新选择供应商' };
+    }
+    if (r.ok) sessionManager.updateSession(session);
+    report.push({ name: session.name, action: plan.action, ok: !!r.ok, detail: r.ok ? plan.why : r.error });
+    console.log(`[relay 迁移] ${session.name}: ${plan.why} → ${plan.action}${plan.providerId ? ` ${plan.providerId}` : ''} ${r.ok ? '已改为直连' : `失败：${r.error}`}`);
+  }
+  if (existsSync(mapFile) && report.every((x) => x.ok)) {
+    try { unlinkSync(mapFile); console.log('[relay 迁移] 已删除旧映射文件（含真实密钥）'); } catch {}
+  }
+  return report;
 }
 
 /**
@@ -6653,7 +6663,7 @@ async function switchProviderStateMachine(session, appType, providerId, socket) 
     if (appType === 'claude') {
       if (isOAuth) {
         // OAuth 类型（Claude Official）：必须清除 settings 里残留的 ANTHROPIC_* env，
-        // 否则 Claude Code 会继续使用上一个 relay 的 URL/Token，导致面板显示官方但实际走旧 relay。
+        // 否则 Claude Code 会继续使用上一个第三方供应商的 URL/Token，导致面板显示官方但实际走旧供应商。
         const anthropicKeys = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY',
                                'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL',
                                'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL'];
@@ -7586,7 +7596,7 @@ io.on('connection', (socket) => {
 
   /**
    * 长程右侧面板的 CLAUDE 卡：CC Switch 当前全局配置（与 AI 面板同一个 getCurrentProvider 口径）。
-   * 不带工作目录与 tmux：执行者与监督者用的是全局配置（项目里的会话级 relay 已被剥离），不是这个目录的会话配置。
+   * 不带工作目录与 tmux：执行者与监督者用的是全局配置（项目里的会话级供应商已被移走），不是这个目录的会话配置。
    */
   socket.on('longrun:provider', async (_ = {}, cb) => {
     let d;
@@ -7674,8 +7684,9 @@ io.on('connection', (socket) => {
 
       const removed = clearLeftoverInjections(plan.root);
       let providerNote = '';
-      if (plan.providerId) {
-        const r = applySessionProvider(session, 'claude', plan.providerId);
+      if (plan.providerId || plan.providerOAuth) {
+        const r = plan.providerId ? applySessionProvider(session, 'claude', plan.providerId)
+          : applySessionProviderInfo(session, 'claude', OAUTH_PROVIDER_INFO);
         providerNote = r?.ok === false ? `会话级供应商未能恢复：${r.error}` : '已恢复长程期间移走的会话级供应商';
       }
       // 标记"这一轮是主动切回终端的"，否则 interruptedRun 会把正常往返误报成"上一轮没正常收工"
@@ -9395,12 +9406,12 @@ ${terminalContext ? terminalContext : '（无）'}
   // ⚠️ 老实现走 switchProviderStateMachine，那条路会污染全局：
   //    - OAuth 分支 `stripAnthropicEnv(~/.claude/settings.json)` 清掉全局 env
   //    - `tmuxSetEnv({ scope: '-g' })` 写全局 tmux env
-  //    - 无条件 /exit + claude -c 重启 CLI（重启本身有用，下面保留，改为仅在 CLI 未指向 relay 时做）
+  //    - 无条件 /exit + claude -c 重启 CLI
   //    于是「给会话 A 换供应商」会把全局和其他会话一起带走，而用户的诉求恰恰是
   //    「单独给这个会话设，不影响别的」。
-  // 现在改走 applySessionProvider：写 <workdir>/.claude/settings.local.json 的
-  //    relay 占位地址 + 会话级 tmux env（target 而非 -g），真实 URL/密钥存服务端
-  //    映射。全局配置一字不动，外部 CC Switch 再切也影响不到本会话。
+  // 现在改走 applySessionProvider：把真实地址/密钥直连写进 <workdir>/.claude/settings.local.json
+  //    + 会话级 tmux env（target 而非 -g）。全局配置一字不动，外部 CC Switch 再切也影响不到本会话。
+  //    Claude Code 热加载 settings 的 env，在跑的 CLI 几秒内自己切过去，不用重启。
   // 需要整机全局切换时用 CC Switch 本身，WebTmux 不再提供污染全局的入口。
   socket.on('provider:switch', async (data) => {
     const { sessionId, appType, providerId } = data;
@@ -9437,7 +9448,7 @@ ${terminalContext ? terminalContext : '（无）'}
             apiType: type,
             app: type,
             exists: true,
-            configSource: 'relay',
+            configSource: 'local',
             isOAuth: !!info.isOAuth,
           };
           if (type === 'claude') session.claudeProvider = snap;
@@ -9453,37 +9464,13 @@ ${terminalContext ? terminalContext : '（无）'}
       session.statusProbe = null;
       session.effectiveEnv = null;
 
-      // relay 地址只与 sessionId 绑定、切供应商时地址不变，所以：
-      //   CLI 已指向 relay → 只改服务端映射即刻生效，**不用重启**（relay 的核心优势）
-      //   CLI 还在用旧地址（首次设置/原本直连）→ 进程内是启动时读的配置，必须重启才生效
-      // Claude Code 启动时读一次配置、不热更新，所以这里必须如实告知，不能假装已生效。
-      let needRestart = false;
-      if (type === 'claude') {
-        try {
-          const procEnv = await readClaudeProcessEnv(session.tmuxSessionName);
-          const cur = procEnv?.ANTHROPIC_BASE_URL || '';
-          // 取不到进程 env 时保守认为需要重启（宁可多提示一次，不要让用户以为已生效）
-          needRestart = !/^http:\/\/127\.0\.0\.1:\d+\/relay\//.test(cur);
-        } catch { needRestart = true; }
-      }
-
-      // 需要重启就自动重启：Esc → /exit → 等 shell → export 新 env && claude -c。
-      // 这是老下拉切换（switchProviderStateMachine）本来就有的行为，v1.3.8 改走
-      // applySessionProvider 时漏掉了，用户切完只能自己 /quit。现与状态机共用
-      // restartClaudeWithEnv，两条路径同一份实现。
-      // export 的是 applySessionProvider 返回的会话级 env：relay 占位地址 + 占位 token
-      //（不含真实密钥），OAuth 时为 null 即 unset。
-      // CLI 已指向 relay 时不重启——只改服务端映射即刻生效，没必要打断会话。
-      let restartResult = null;
-      if (type === 'claude' && needRestart) {
-        restartResult = await restartClaudeWithEnv(session, r.providerEnv || {}, emit);
-        // 自动重启成功或 CLI 根本没在跑（下次启动自动读新配置），都不需要用户再动手
-        if (restartResult === 'restarted' || restartResult === 'not_running') needRestart = false;
-      }
+      // Claude：settings 的 env 热加载，在跑的 CLI 几秒内自己切过去（2026-09-25 WebOffice 实测约 20 秒内
+      // hook 上报新地址），不重启、不打断。CLI 没在跑的，下次启动自然读新配置。
+      const needRestart = false;
+      const restartResult = null;
 
       const name = resolveProviderInfo(type, providerId)?.provider?.name || providerId;
-      const doneMsg = restartResult === 'restarted' ? '已自动重启 CLI，切换生效'
-        : needRestart ? '已写入，自动重启未完成，需手动重启' : '切换完成';
+      const doneMsg = type === 'claude' ? '已写入，CLI 几秒内自动切换（无需重启）' : '切换完成';
       emit('DONE', doneMsg, 100);
       socket.emit('provider:switchComplete', {
         sessionId, providerId, providerName: name, needRestart, restartResult,
@@ -10026,10 +10013,10 @@ async function startServer() {
             // 实际在用官方 OAuth / 本地 override 的会话（修复侧栏显示与 /status 不一致）。
             const sessionProvider = await getCurrentProvider('claude', session.workingDir, session.tmuxSessionName);
             const cs = sessionProvider.configSource;
-            // 模型来源优先级：/status 与 relay 是最权威的实测（CLI 自报/反代嗅探），保持不动；
+            // 模型来源优先级：/status 是最权威的实测（CLI 自报），保持不动；
             // 其余会话主动按 workingDir 读 transcript 最新 model（不依赖 hook，每轮刷新以
             // 捕获 /model 中途切换），覆盖 settings.json 陈旧的 model 字段（如 opus[1m]）。
-            if (!['status', 'relay'].includes(cs)) {
+            if (cs !== 'status') {
               if (session.workingDir) {
                 const m = await probeModelByWorkingDir(session.workingDir);
                 if (m) session.currentModel = m;

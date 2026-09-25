@@ -18,6 +18,7 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { IsolationViolation } from './LongRunPrompts.js';
+import { CLAUDE_ENV_KEYS, isLegacyRelayConfig } from './sessionProviderEnv.js';
 
 export { IsolationViolation };
 
@@ -113,9 +114,12 @@ export function templateClaudeDir() {
     || path.join(WEBTMUX_ROOT, 'server', 'prompts', 'longrun', 'claude-template');
 }
 
-/** 会话级 relay 地址形态（index.js applySessionProvider 写入）与它占用的环境变量 */
-const RELAY_URL = /^https?:\/\/127\.0\.0\.1:\d+\/relay\//;
-const RELAY_ENV_KEYS = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL'];
+/**
+ * 会话级供应商配置（index.js applySessionProvider 写入：直连 'session' / 官方登录 'oauth'；旧版 relay 遗留）。
+ * 长程期间移走：执行者用 CC Switch 全局配置（界面执行者卡片即如此说明），不跟某个终端会话的选择走。
+ */
+const SESSION_PROVIDER_MARKERS = ['session', 'oauth'];
+const isSessionProviderConfig = (p) => SESSION_PROVIDER_MARKERS.includes(p?._localProvider) || isLegacyRelayConfig(p);
 
 /** Claude 会话记录与默认记忆所在目录。覆盖仅供测试。 */
 export function claudeProjectsDir() {
@@ -183,7 +187,7 @@ export function assertSandboxed(p, what = '路径') {
  *     模板权限白名单、MCP 闸、具名 skills、禁止改项目外的 CLAUDE.md。
  *     早先把这些写进项目 `.claude/settings.local.json`，同目录的终端会话会继承 85 条宽松放行与 acceptEdits。
  *   · 项目配置 `.claude/settings.local.json`：**只合并写 autoMemoryDirectory**，终端会话与长程共用同一份记忆；
- *     首次改动前备份原文件。会话级 relay 地址在长程期间移走（执行者不能走别的会话的 relay），转回终端时重新应用。
+ *     首次改动前备份原文件。会话级供应商在长程期间移走（执行者用全局配置），转回终端时重新应用。
  * 真实 `claude -p` 探针已验证：--settings 的权限生效、项目配置的记忆目录生效、改祖先 CLAUDE.md 被拦下。
  */
 export class LongRunSandbox {
@@ -197,7 +201,7 @@ export class LongRunSandbox {
     this.mcpAllowed = [];      // 放行的 MCP 服务器
     this.mcpDenied = [];       // 已屏蔽的 MCP 服务器
     this.projectSettingsBackup = '';   // 首次改项目配置前的备份路径（没有原文件则为空）
-    this.relayStripped = false;        // 是否移走了会话级 relay 地址
+    this.providerStripped = false;     // 是否移走了会话级供应商配置
     this.memoryImported = [];          // 接管已有项目时从 Claude 默认记忆位置复制进来的文件
     // 需求文档里指名的外部参考路径，通过 --add-dir 挂给执行者。
     // ⚠ --add-dir 给的是**读写**权限，不是只读：执行者能改这些目录里的文件。
@@ -389,8 +393,8 @@ export class LongRunSandbox {
   }
 
   /**
-   * 项目配置：只合并写 autoMemoryDirectory，移走会话级 relay。首次改动前整份备份。
-   * 其余字段（终端会话攒下的授权、非 relay 的供应商配置）原样保留。
+   * 项目配置：只合并写 autoMemoryDirectory，移走会话级供应商配置。首次改动前整份备份。
+   * 其余字段（终端会话攒下的授权、「快照复制全局」的本地配置）原样保留。
    */
   _writeProjectSettings() {
     const claudeDir = path.join(this.root, '.claude');
@@ -413,14 +417,15 @@ export class LongRunSandbox {
     let changed = payload.autoMemoryDirectory !== this.memoryDir;
     payload.autoMemoryDirectory = this.memoryDir;
     const env = payload.env || {};
-    if (payload._localProvider === 'relay-proxy' || RELAY_URL.test(String(env.ANTHROPIC_BASE_URL || ''))) {
-      const saved = { env: {}, _localProvider: payload._localProvider, _localProviderId: payload._localProviderId };
-      for (const k of RELAY_ENV_KEYS) if (k in env) { saved.env[k] = env[k]; delete env[k]; }
+    if (isSessionProviderConfig(payload)) {
+      // 备份不含密钥：转回终端时按供应商 id（或官方登录标记）从 CC Switch 重新应用
+      const saved = { _localProvider: payload._localProvider, _localProviderId: payload._localProviderId };
+      for (const k of CLAUDE_ENV_KEYS) delete env[k];
       writeFileSync(path.join(this.runDir, 'provider-env.backup.json'), JSON.stringify(saved, null, 2) + '\n', 'utf8');
       delete payload._localProvider;
       delete payload._localProviderId;
       if (!Object.keys(env).length) delete payload.env;
-      this.relayStripped = true;
+      this.providerStripped = true;
       changed = true;
     }
     if (!changed) return;

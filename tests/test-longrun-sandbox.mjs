@@ -195,21 +195,32 @@ test('项目配置只合并记忆目录：原有权限与非 relay 配置原样�
   assert(execOf(spec3).autoMemoryDirectory === spec3.memoryDir, '记忆目录由执行者配置兜底');
 });
 
-test('会话级 relay 地址从项目配置移走并备份，非 relay 的供应商配置不动', () => {
+test('会话级供应商（直连/官方登录/旧 relay）长程期间移走，备份只留供应商 id 不留密钥；快照配置不动', () => {
   const root = path.join(sandboxRoots()[0], SANDBOX_NAME);
-  fs.rmSync(root, { recursive: true, force: true });
-  fs.mkdirSync(path.join(root, '.claude'), { recursive: true });
   const sf = path.join(root, '.claude', 'settings.local.json');
-  fs.writeFileSync(sf, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:3928/relay/abc', ANTHROPIC_AUTH_TOKEN: 'webtmux-relay-abc', OTHER: '1' },
-    _localProvider: 'relay-proxy', _localProviderId: 'p1' }));
-  const spec = LongRunSandbox.create(SANDBOX_NAME);
-  const now = settingsOf(spec);
-  assert(spec.relayStripped && !now._localProvider && !now.env.ANTHROPIC_BASE_URL && now.env.OTHER === '1', JSON.stringify(now));
-  const saved = readJson(path.join(spec.runDir, 'provider-env.backup.json'));
-  assert(saved.env.ANTHROPIC_BASE_URL.includes('/relay/abc') && saved._localProviderId === 'p1', '移走的 relay 要备份');
-  fs.writeFileSync(sf, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://api.example.com', ANTHROPIC_AUTH_TOKEN: 'x' } }));
+  const cases = [
+    ['直连', { env: { ANTHROPIC_BASE_URL: 'https://zjz.example.com', ANTHROPIC_AUTH_TOKEN: 'sk-real-secret', ANTHROPIC_API_KEY: '', ANTHROPIC_MODEL: '', OTHER: '1' },
+      _localProvider: 'session', _localProviderId: 'p1' }],
+    ['官方登录', { env: { ANTHROPIC_BASE_URL: '', ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_API_KEY: '', ANTHROPIC_MODEL: '', OTHER: '1' }, _localProvider: 'oauth' }],
+    ['旧 relay', { env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:3928/relay/abc', ANTHROPIC_AUTH_TOKEN: 'webtmux-relay-abc', OTHER: '1' },
+      _localProvider: 'relay-proxy', _localProviderId: 'p1' }],
+  ];
+  for (const [name, cfg] of cases) {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.mkdirSync(path.join(root, '.claude'), { recursive: true });
+    fs.writeFileSync(sf, JSON.stringify(cfg));
+    const spec = LongRunSandbox.create(SANDBOX_NAME);
+    const now = settingsOf(spec);
+    // 一个 ANTHROPIC_* 键都不能留：哪怕是 ""，也会把执行者钉在官方登录上而不是全局配置
+    assert(spec.providerStripped && !now._localProvider && !Object.keys(now.env || {}).some((k) => k.startsWith('ANTHROPIC_'))
+      && now.env.OTHER === '1', `${name}：${JSON.stringify(now)}`);
+    const saved = readJson(path.join(spec.runDir, 'provider-env.backup.json'));
+    assert(saved._localProvider === cfg._localProvider && (saved._localProviderId || '') === (cfg._localProviderId || ''), `${name}：备份没记下供应商`);
+    assert(!JSON.stringify(saved).includes('sk-real-secret'), `${name}：备份里留了密钥`);
+  }
+  fs.writeFileSync(sf, JSON.stringify({ env: { ANTHROPIC_BASE_URL: 'https://api.example.com', ANTHROPIC_AUTH_TOKEN: 'x' }, _localProvider: 'snapshot' }));
   const spec2 = LongRunSandbox.create(SANDBOX_NAME);
-  assert(!spec2.relayStripped && settingsOf(spec2).env.ANTHROPIC_BASE_URL === 'https://api.example.com', '非 relay 供应商不该动');
+  assert(!spec2.providerStripped && settingsOf(spec2).env.ANTHROPIC_BASE_URL === 'https://api.example.com', '「快照复制全局」的配置不该动');
 });
 
 test('执行者配置禁止改项目外的 CLAUDE.md（祖先目录逐级 + 用户级）', () => {

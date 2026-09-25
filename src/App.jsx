@@ -2641,25 +2641,13 @@ export default function App() {
 
                 const isLocalConfig = provider?.configSource === 'local';
                 const isProcessConfig = provider?.configSource === 'process';
-                const isRelayConfig = provider?.configSource === 'relay';
-                const isRelayLost = provider?.configSource === 'relay-lost';
                 const isHookConfig = provider?.configSource === 'hook';
                 const isStatusConfig = provider?.configSource === 'status';
                 const isLoginConfig = provider?.configSource === 'login';
-                // 本会话是否有自己的配置（不跟随全局）：local(推断) 与 relay/relay-lost(会话级反代)
-                // 都是会话独立配置——「删除本地配置」按钮和「本地」按钮的显示以此为准，
-                // 否则 relay 模式下会同时藏掉删除按钮、又错误地继续显示「本地」按钮。
-                const hasSessionLocalConfig = isLocalConfig || isRelayConfig || isRelayLost;
+                // 本会话是否有自己的配置（不跟随全局）：以服务端读项目配置的结果为准。
+                // 直连会话常显示为 hook 实测，只看 configSource 会藏掉「删除本地配置」按钮。
+                const hasSessionLocalConfig = isLocalConfig || !!provider?.hasLocalConfig;
                 const globalConfig = provider?.globalConfig;
-                // 反代实测提示：最近一次真实转发的时间/状态
-                const relayTip = (() => {
-                  if (!isRelayConfig) return '';
-                  const r = provider?.relay;
-                  if (!r?.lastAt) return '本会话 API 流量经 WebTmux 本地反代转发，显示的目标即实际转发目标（尚无请求经过）';
-                  const ago = Math.max(0, Math.round((Date.now() - r.lastAt) / 1000));
-                  const agoText = ago < 60 ? `${ago}秒前` : ago < 3600 ? `${Math.round(ago / 60)}分钟前` : `${Math.round(ago / 3600)}小时前`;
-                  return `实测：${agoText}向 ${r.lastTarget || '目标'} 转发了第 ${r.count} 个请求（HTTP ${r.lastStatus || '失败'}）。显示的目标即实际转发目标。`;
-                })();
 
                 return (
                   <>
@@ -2669,9 +2657,7 @@ export default function App() {
                       </p>
                       {provider?.configSource && (
                         <span
-                          title={isRelayConfig ? relayTip :
-                                 isRelayLost ? '反代映射丢失（服务重启所致），请重新为本会话选择供应商' :
-                                 isHookConfig ? '从 CLI 子进程（hook）继承的有效环境变量实测读取——即 CLI 实际生效配置' :
+                          title={isHookConfig ? '从 CLI 子进程（hook）继承的有效环境变量实测读取——即 CLI 实际生效配置' :
                                  isStatusConfig ? '从终端 /status 输出实测解析（30 分钟内有效）' :
                                  isLoginConfig ? '本会话未配置第三方供应商，且已登录官方账号（~/.claude.json）→ 使用官方 Claude 订阅' :
                                  isProcessConfig ? '从运行中 CLI 进程的环境变量实测读取' :
@@ -2682,20 +2668,16 @@ export default function App() {
                           padding: '1px 4px',
                           borderRadius: '3px',
                           cursor: 'help',
-                          background: (isRelayConfig || isHookConfig || isLoginConfig) ? 'hsl(142 70% 45% / 0.25)' :
-                                     isRelayLost ? 'hsl(0 84% 60% / 0.2)' :
+                          background: (isHookConfig || isLoginConfig) ? 'hsl(142 70% 45% / 0.25)' :
                                      isLocalConfig ? 'hsl(142 70% 45% / 0.2)' :
                                      (isProcessConfig || isStatusConfig) ? 'hsl(200 90% 50% / 0.2)' :
                                      'hsl(220 14% 40% / 0.3)',
-                          color: (isRelayConfig || isHookConfig || isLoginConfig) ? 'hsl(142 70% 55%)' :
-                                isRelayLost ? 'hsl(0 84% 65%)' :
+                          color: (isHookConfig || isLoginConfig) ? 'hsl(142 70% 55%)' :
                                 isLocalConfig ? 'hsl(142 70% 55%)' :
                                 (isProcessConfig || isStatusConfig) ? 'hsl(200 90% 60%)' :
                                 'hsl(220 14% 70%)'
                         }}>
-                          {isRelayConfig ? '代理·实测' :
-                           isRelayLost ? '代理失联' :
-                           isHookConfig ? 'hook·实测' :
+                          {isHookConfig ? 'hook·实测' :
                            isStatusConfig ? '/status·实测' :
                            isLoginConfig ? '官方登录' :
                            isProcessConfig ? 'env·实测' :
@@ -2735,7 +2717,7 @@ export default function App() {
                           ⚠️ 旧供应商·重启生效
                         </span>
                       )}
-                      {/* 本地配置时显示红色删除按钮（relay/relay-lost 也是会话级本地配置） */}
+                      {/* 本地配置时显示红色删除按钮（以服务端读到的项目配置为准，见 hasSessionLocalConfig） */}
                       {hasSessionLocalConfig && currentSession?.workingDir && (
                         <button
                           onClick={async (e) => {

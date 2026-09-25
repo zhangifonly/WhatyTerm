@@ -31,7 +31,7 @@ export function reportPrompts(sc, prompts) {
 
 /**
  * report_claude_template 的对应项（配置已拆分）：执行者专用配置、skills 授权与项目信任、MCP 放行/屏蔽、
- * 项目配置只写记忆目录（备份、relay 移走）、接管时导入的记忆、两处记忆目录实际取值。
+ * 项目配置只写记忆目录（备份、会话级供应商移走）、接管时导入的记忆、两处记忆目录实际取值。
  */
 export function reportClaudeTemplate(sc, spec) {
   const g = '项目配置';
@@ -64,8 +64,8 @@ export function reportClaudeTemplate(sc, spec) {
     sc.warn(g, '  项目配置没有写上记忆目录（文件读不动时不覆盖），终端会话暂时不会共用 .memory');
   }
   if (spec.projectSettingsBackup) sc.info(g, `  项目原配置已备份: ${spec.projectSettingsBackup}`);
-  if (spec.relayStripped) {
-    sc.warn(g, '  项目配置里的会话级 relay 地址已移走（执行者不能走别的会话的 relay）；转为终端时会重新应用该会话的供应商');
+  if (spec.providerStripped) {
+    sc.warn(g, '  项目配置里的会话级供应商已移走（执行者用 CC Switch 全局配置）；转为终端时会重新应用该会话的供应商');
   }
   if (spec.memoryImported?.length) {
     sc.info(g, `  已从 Claude 默认记忆位置导入 ${spec.memoryImported.length} 个记忆文件（原处保留）: ${spec.memoryImported.join(', ')}`);

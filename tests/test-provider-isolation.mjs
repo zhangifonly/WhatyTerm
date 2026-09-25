@@ -12,6 +12,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { sessionClaudeEnv } from '../server/services/sessionProviderEnv.js';
 
 let pass = 0, fail = 0;
 const results = [];
@@ -101,7 +102,7 @@ check('标记 relay 且无 env 键（空壳）→ 跟随全局',
     JSON.stringify(r));
 }
 
-// 1h relay 地址 + 占位密钥（applySessionProvider 写出的形态）→ 有效且带 id
+// 1h 旧 relay 形态（v1.4.55 前 applySessionProvider 写出的；启动迁移前仍可能存在）→ 有效且带 id
 {
   const r = readLocalProviderConfig(makeProject('p-relay-proxy', {
     env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:3928/relay/sid-1',
@@ -209,11 +210,14 @@ console.log(results.join('\n'));
 results.length = 0;
 
 // ══ 组 3：applySessionProvider 真实实现（桩注入依赖）═════════════════════
-// 从 server/index.js 原样抽取函数体，只把 resolveProviderInfo / sessionRelay /
-// tmuxSetEnv 换成桩，验证它写出的文件形态、relay 映射、tmux env 作用域。
+// 从 server/index.js 原样抽取函数体（applySessionProvider + applySessionProviderInfo），
+// 只把 resolveProviderInfo / tmuxSetEnv 换成桩，sessionClaudeEnv 用真实实现，
+// 验证它写出的文件形态与 tmux env 作用域。
 console.log('\n【组 3】applySessionProvider 写出的形态');
 
-const applyMatch = src.match(/function applySessionProvider\(session, appType, providerId\) \{[\s\S]*?\n\}\n/);
+const applyOuter = src.match(/function applySessionProvider\(session, appType, providerId\) \{[\s\S]*?\n\}\n/);
+const applyInner = src.match(/function applySessionProviderInfo\(session, appType, info\) \{[\s\S]*?\n\}\n/);
+const applyMatch = applyOuter && applyInner ? [applyOuter[0] + applyInner[0]] : null;
 if (!applyMatch) {
   console.error('✗ 未能抽取 applySessionProvider');
   process.exit(1);
@@ -224,11 +228,7 @@ function buildApply(providerInfo) {
   const tmuxCalls = [];
   const stubs = {
     resolveProviderInfo: () => providerInfo,
-    sessionRelay: {
-      setProvider: (sid, p) => relayMap.set(sid, p),
-      clear: (sid) => relayMap.delete(sid),
-      get: (sid) => relayMap.get(sid) || null
-    },
+    sessionClaudeEnv,
     tmuxSetEnv: (opts) => tmuxCalls.push(opts),
     sessionManager: { updateSession() {} },
     path, os, existsSync: fs.existsSync, mkdirSync: fs.mkdirSync,
@@ -241,11 +241,11 @@ function buildApply(providerInfo) {
   return { fn, relayMap, tmuxCalls };
 }
 
-// 3a 第三方供应商 → 本地文件写 relay 地址+占位密钥，真实密钥只在服务端映射
+// 3a 第三方供应商 → 本地文件直连写真实地址与密钥（不经任何本地转发，relay 已于 v1.4.55 删除）
 {
   const wd = makeProject('a-third', { permissions: { allow: ['Bash'] } });
   const session = { id: 'sid-A', workingDir: wd, tmuxSessionName: 'tmux-A' };
-  const { fn, relayMap, tmuxCalls } = buildApply({
+  const { fn, tmuxCalls } = buildApply({
     provider: { id: 'prov-X', name: '测试第三方' },
     settingsConfig: {},
     env: { ANTHROPIC_BASE_URL: 'https://api.example.com', ANTHROPIC_AUTH_TOKEN: 'sk-secret-REAL' },
@@ -255,48 +255,46 @@ function buildApply(providerInfo) {
   const written = JSON.parse(fs.readFileSync(path.join(wd, '.claude', 'settings.local.json'), 'utf8'));
 
   check('第三方: 返回 ok', r.ok === true, JSON.stringify(r));
-  check('第三方: 本地 env 写的是 relay 地址',
-    /^http:\/\/127\.0\.0\.1:\d+\/relay\/sid-A$/.test(written.env?.ANTHROPIC_BASE_URL || ''),
-    written.env?.ANTHROPIC_BASE_URL);
-  check('第三方: 本地 env 用占位密钥（真实密钥不落盘）',
-    written.env?.ANTHROPIC_AUTH_TOKEN === 'webtmux-relay-sid-A'
-      && !JSON.stringify(written).includes('sk-secret-REAL'));
-  check('第三方: 标记 relay-proxy 且钉住 providerId',
-    written._localProvider === 'relay-proxy' && written._localProviderId === 'prov-X');
-  check('第三方: 真实 URL/密钥进入服务端映射',
-    relayMap.get('sid-A')?.url === 'https://api.example.com'
-      && relayMap.get('sid-A')?.key === 'sk-secret-REAL'
-      && relayMap.get('sid-A')?.keyMode === 'bearer');
+  check('第三方: 本地 env 直连真实地址（不是 127.0.0.1 转发地址）',
+    written.env?.ANTHROPIC_BASE_URL === 'https://api.example.com', written.env?.ANTHROPIC_BASE_URL);
+  check('第三方: 本地 env 是真实密钥', written.env?.ANTHROPIC_AUTH_TOKEN === 'sk-secret-REAL');
+  // 热加载时删键清不掉进程里已有的值，没有的键必须显式写 ""
+  check('第三方: 没有的键显式写 ""（热加载才能覆盖进程里的旧值）',
+    written.env?.ANTHROPIC_API_KEY === '' && written.env?.ANTHROPIC_MODEL === '', JSON.stringify(written.env));
+  check('第三方: 标记 session 且钉住 providerId',
+    written._localProvider === 'session' && written._localProviderId === 'prov-X');
   check('第三方: 保留原有 permissions', written.permissions?.allow?.[0] === 'Bash');
   // 关键：tmux env 必须是会话级（target），绝不能出现 -g 全局作用域
   check('第三方: tmux env 只写会话级、无 -g 全局',
     tmuxCalls.length > 0 && tmuxCalls.every(c => c.target === 'tmux-A' && c.scope !== '-g'),
     JSON.stringify(tmuxCalls));
+  check('第三方: tmux env 写的也是真实地址', tmuxCalls.some(c => c.name === 'ANTHROPIC_BASE_URL' && c.value === 'https://api.example.com'));
+  check('第三方: 源码里不再生成 /relay/ 地址', !/\/relay\/\$\{/.test(applyMatch[0]) && !/webtmux-relay-/.test(applyMatch[0]));
   // 新判据能识别它
   check('第三方: readLocalProviderConfig 判为本地生效',
     !!readLocalProviderConfig(wd));
 }
 
-// 3b OAuth 供应商 → 清 env、标记 oauth、清 relay 映射、tmux env 置 null
+// 3b OAuth 供应商（从旧 relay 配置切过来）→ 四个键写 ""、标记 oauth、tmux env 置 null
 {
   const wd = makeProject('a-oauth', {
     env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:3928/relay/sid-B', ANTHROPIC_AUTH_TOKEN: 'webtmux-relay-sid-B' },
     _localProvider: 'relay-proxy', _localProviderId: 'old-prov', model: 'opus'
   });
   const session = { id: 'sid-B', workingDir: wd, tmuxSessionName: 'tmux-B' };
-  const { fn, relayMap, tmuxCalls } = buildApply({
+  const { fn, tmuxCalls } = buildApply({
     provider: { id: 'prov-OAuth', name: 'Claude Official' },
     settingsConfig: { useOAuth: true }, env: {}, isOAuth: true
   });
-  relayMap.set('sid-B', { url: 'https://old.example', key: 'sk-old' });  // 预置旧映射
   const r = fn(session, 'claude', 'prov-OAuth');
   const written = JSON.parse(fs.readFileSync(path.join(wd, '.claude', 'settings.local.json'), 'utf8'));
 
   check('OAuth: 返回 ok', r.ok === true);
-  check('OAuth: 清空 ANTHROPIC_* env', !written.env?.ANTHROPIC_BASE_URL && !written.env?.ANTHROPIC_AUTH_TOKEN);
+  check('OAuth: 四个 ANTHROPIC_* 都显式写 ""（覆盖进程里旧的 relay/第三方值）',
+    ['ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL'].every(k => written.env?.[k] === ''),
+    JSON.stringify(written.env));
   check('OAuth: 标记 oauth 并清除旧 providerId',
     written._localProvider === 'oauth' && written._localProviderId === undefined);
-  check('OAuth: 清除旧 relay 映射', relayMap.get('sid-B') === null || relayMap.get('sid-B') === undefined);
   check('OAuth: tmux env 全部置 null（会话级）',
     tmuxCalls.length > 0 && tmuxCalls.every(c => c.value === null && c.target === 'tmux-B' && c.scope !== '-g'),
     JSON.stringify(tmuxCalls));
@@ -309,10 +307,10 @@ function buildApply(providerInfo) {
 {
   const wd = makeProject('a-missing', undefined);
   const session = { id: 'sid-C', workingDir: wd, tmuxSessionName: 'tmux-C' };
-  const relayMap2 = new Map(), tmuxCalls2 = [];
+  const tmuxCalls2 = [];
   const stubs = {
     resolveProviderInfo: () => null,
-    sessionRelay: { setProvider: (s, p) => relayMap2.set(s, p), clear: s => relayMap2.delete(s), get: s => relayMap2.get(s) },
+    sessionClaudeEnv,
     tmuxSetEnv: o => tmuxCalls2.push(o),
     sessionManager: { updateSession() {} },
     path, os, existsSync: fs.existsSync, mkdirSync: fs.mkdirSync,
@@ -331,8 +329,8 @@ results.length = 0;
 
 // ══ 组 4：POST /api/claude-code/config 的顺序不变量 ══════════════════════
 // 这个端点是 express 内联 handler，无法整段抽出来跑；但它最大的风险是「顺序」：
-// applySessionProvider 写完文件后，必须①重新读取②被 !appliedViaRelay 守卫挡住
-// ③最后才 writeFileSync。任一环节次序错了，relay env 就会被旧内容/真实密钥覆盖。
+// applySessionProvider 写完文件后，必须①重新读取②被 !appliedPerSession 守卫挡住
+// ③最后才 writeFileSync。任一环节次序错了，用户为本会话选的供应商就会被全局那家覆盖。
 // 用源码位置断言把这个不变量钉住，改动破坏顺序时测试立刻红。
 console.log('\n【组 4】config 端点的顺序不变量');
 {
@@ -340,32 +338,32 @@ console.log('\n【组 4】config 端点的顺序不变量');
   const body = seg.slice(0, seg.indexOf("app.delete('/api/claude-code/config/local'"));
   const iApply = body.indexOf('applySessionProvider(targetSession');
   const iReread = body.indexOf('config = JSON.parse(readFileSync(configPath');
-  const iGuard = body.indexOf('if (!appliedViaRelay)');
+  const iGuard = body.indexOf('if (!appliedPerSession)');
   const iWrite = body.indexOf('writeFileSync(configPath');
 
   check('端点内确实调用了 applySessionProvider', iApply > 0);
   check('重新读取 settings.local.json 在 applySessionProvider 之后',
     iReread > iApply, `apply=${iApply} reread=${iReread}`);
-  check('env 写入被 !appliedViaRelay 守卫包住', iGuard > iReread, `guard=${iGuard}`);
+  check('env 写入被 !appliedPerSession 守卫包住', iGuard > iReread, `guard=${iGuard}`);
   check('writeFileSync 在守卫之后（最后一步）', iWrite > iGuard, `write=${iWrite}`);
   check('端点把 sessionId 用于定位会话', body.includes('req.body?.sessionId'));
-  check('getCurrentProvider 带上了 tmuxSessionName（否则识别不出 relay）',
+  check('getCurrentProvider 带上了 tmuxSessionName（能读到在跑 CLI 的实测来源）',
     /getCurrentProvider\('claude', projectPath, targetSession\?\.tmuxSessionName/.test(body));
 
-  // 功能性重放：按端点顺序跑一遍，确认 relay env 在合并 model/permissions 后仍在
+  // 功能性重放：按端点顺序跑一遍，确认会话供应商在合并 model/permissions 后仍在、没被全局覆盖
   const wd = makeProject('e-post', { permissions: { allow: ['Read'] } });
   const session = { id: 'sid-E', workingDir: wd, tmuxSessionName: 'tmux-E' };
   const { fn } = buildApply({
     provider: { id: 'prov-E', name: '端点测试供应商' },
     settingsConfig: {},
-    env: { ANTHROPIC_BASE_URL: 'https://real.example.com', ANTHROPIC_AUTH_TOKEN: 'sk-must-not-persist' },
+    env: { ANTHROPIC_BASE_URL: 'https://real.example.com', ANTHROPIC_AUTH_TOKEN: 'sk-session-choice' },
     isOAuth: false
   });
-  const appliedViaRelay = fn(session, 'claude', 'prov-E').ok;
+  const appliedPerSession = fn(session, 'claude', 'prov-E').ok;
   const cp = path.join(wd, '.claude', 'settings.local.json');
   let config = JSON.parse(fs.readFileSync(cp, 'utf-8'));   // ← 端点的重新读取
   const localPermissions = config.permissions;
-  if (!appliedViaRelay) { config.env = { ANTHROPIC_AUTH_TOKEN: 'sk-must-not-persist' }; }  // 守卫：不该执行
+  if (!appliedPerSession) { config.env = { ANTHROPIC_BASE_URL: 'https://global.example.com' }; }  // 守卫：不该执行
   const globalConfig = { model: 'sonnet', permissions: { allow: ['Bash'] } };
   if (globalConfig.model) config.model = globalConfig.model;
   config.permissions = {
@@ -375,9 +373,9 @@ console.log('\n【组 4】config 端点的顺序不变量');
   fs.writeFileSync(cp, JSON.stringify(config, null, 2));
   const final = JSON.parse(fs.readFileSync(cp, 'utf-8'));
 
-  check('重放后 relay 地址仍在（未被覆盖）',
-    /\/relay\/sid-E$/.test(final.env?.ANTHROPIC_BASE_URL || ''), final.env?.ANTHROPIC_BASE_URL);
-  check('重放后真实密钥没有落盘', !JSON.stringify(final).includes('sk-must-not-persist'));
+  check('重放后会话所选供应商仍在（未被全局覆盖）',
+    final.env?.ANTHROPIC_BASE_URL === 'https://real.example.com' && final.env?.ANTHROPIC_AUTH_TOKEN === 'sk-session-choice',
+    final.env?.ANTHROPIC_BASE_URL);
   check('重放后 model/permissions 合并成功',
     final.model === 'sonnet' && final.permissions.allow.includes('Read') && final.permissions.allow.includes('Bash'));
   check('重放后仍被判为本地生效（面板显示会话独立）',
@@ -392,13 +390,13 @@ console.log('\n【组 5】删除本地配置时的残留清理');
 {
   const seg = src.slice(src.indexOf("app.delete('/api/claude-code/config/local'"));
   const body = seg.slice(0, 2600);
-  check('删除端点清理 relay 映射', /sessionRelay\.clear\(s\.id\)/.test(body));
+  check('删除端点不再碰 relay（已删除）', !/sessionRelay/.test(body));
   check('删除端点清空会话级 tmux ANTHROPIC_*',
     /tmuxSetEnv\(\{ target: s\.tmuxSessionName, name: k, value: null \}\)/.test(body));
   check('清理只针对同 workingDir 的会话',
     /s\.workingDir !== projectPath/.test(body));
   check('清理写在 unlinkSync 之后',
-    body.indexOf('unlinkSync') < body.indexOf('sessionRelay.clear'));
+    body.indexOf('unlinkSync') > 0 && body.indexOf('unlinkSync') < body.indexOf('tmuxSetEnv({ target: s.tmuxSessionName'));
 
   // 功能性：删掉文件后判据必须回到「无本地配置 → 跟随全局」
   const wd = makeProject('e-del', {
@@ -535,8 +533,8 @@ console.log('\n【组 8】空壳本地配置的防线');
   check('拒绝分支在 writeFileSync 之前', idxReject > 0 && idxWrite > 0 && idxReject < idxWrite);
 
   // 拒绝只发生在快照回落路径内：relay 成功时不该被这个检查拦住
-  const guardIdx = body.indexOf('if (!appliedViaRelay)');
-  check('空壳检查位于 !appliedViaRelay 分支内',
+  const guardIdx = body.indexOf('if (!appliedPerSession)');
+  check('空壳检查位于 !appliedPerSession 分支内',
     guardIdx > 0 && guardIdx < idxReject);
 
   // 快照路径的标记语义修正：不再叫 relay

@@ -37,7 +37,7 @@ const ModelLine = ({ model }) => (
 );
 
 /**
- * CLAUDE（执行者）与监督者两张供应商卡。执行者用 CC Switch 当前全局配置（项目里的会话级 relay 已剥离），
+ * CLAUDE（执行者）与监督者两张供应商卡。执行者用 CC Switch 当前全局配置（项目里的会话级供应商已移走），
  * provider 与 AI 面板同一个 getCurrentProvider 口径。
  */
 export const ProviderCards = ({ provider: p, task, lr }) => {

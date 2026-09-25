@@ -61,13 +61,13 @@ test('周期刷新：改完模型必须 updateSession 落库', () => {
 // /status 探针只在用户手动敲 /status 那一刻更新；之后 /model 换了模型也永不刷新。
 // 老实现把 status 列进豁免名单 → 陈旧快照永久压住兜底
 //（实测 3 个 src=status 显示 glm-5.3-flash，还有 1 个是空值却同样被保护）。
-test('周期刷新：豁免名单只剩 relay，status 不再永久压制', () => {
+test('周期刷新：没有无条件豁免的来源，status 不再永久压制（relay 已删除，v1.4.55）', () => {
   const i = SRC.indexOf('[模型周期刷新]');
+  assert(i > 0, '找不到周期刷新段 —— 锚点失效时必须报错，不能空过');
   const block = SRC.slice(i - 1600, i);
   assert(!/\['status',\s*'relay'\]\.includes/.test(block),
     "status 仍在豁免名单里，陈旧快照会永久压住 transcript 兜底");
-  assert(/configSource === 'relay' && sessionRelay\.getStats\(session\.id\)\?\.lastModel/.test(block),
-    '周期刷新对 relay 的豁免应附加「已嗅探到模型」条件');
+  assert(!/sessionRelay|configSource === 'relay'/.test(block), '周期刷新里还留着 relay 豁免');
 });
 
 // ---------- ④ 返回值出口统一用 transcript 兜底，断掉竞态 ----------
@@ -80,10 +80,9 @@ test('getCurrentProvider：buildResult 出口用 transcript 覆盖模型', () =>
   assert(/probeModelByWorkingDirSync\(workingDir\)/.test(block),
     'buildResult 没有用 transcript 兜底，陈旧 global 值会回写造成竞态');
   assert(/model: finalModel/.test(block), '返回值应使用兜底后的 finalModel');
-  // relay 的豁免只在**真嗅探到模型**时成立：没转发过请求时 lastModel 为空，
-  // 若仍按 configSource 豁免，面板会永久停在切换前的旧值（phyviz 实测踩到）。
-  assert(/!modelFromRelay/.test(block), 'relay 豁免应按「是否真嗅探到模型」判定，而非按 configSource');
-  assert(!/cs !== 'relay'/.test(block), '仍在按 configSource 无条件豁免 relay');
+  // relay 已删除（v1.4.55）：Claude 会话一律用 transcript 兜底，不再有「反代嗅探」这个例外
+  assert(/if \(appType === 'claude'\) \{\s*const probed = probeModelByWorkingDirSync/.test(block), 'Claude 会话没有无条件走 transcript 兜底');
+  assert(!/modelFromRelay|cs !== 'relay'/.test(block), '出口还留着 relay 例外');
 });
 test('同步探测函数存在且只读尾部（不整文件读）', () => {
   assert(/function probeModelByWorkingDirSync/.test(SRC), '缺少同步探测函数');

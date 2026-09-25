@@ -294,10 +294,12 @@ test('applySessionProvider 本体只用会话级 tmux target，不用 -g', () =>
   if (/homedir\(\)[\s\S]{0,60}'\.claude',\s*'settings\.json'/.test(body))
     throw new Error('applySessionProvider 触碰了全局配置');
 });
-test('切换后如实告知是否需重启（Claude Code 启动时读一次配置、不热更新）', () => {
-  if (!/needRestart/.test(handlerBlock)) throw new Error('未返回 needRestart，用户会误以为已生效');
-  if (!/relay\\\//.test(handlerBlock) && !/relay\//.test(handlerBlock))
-    throw new Error('未按「进程内是否已指向 relay」判断，无法区分首次设置与热切换');
+test('切换靠 settings env 热加载生效，不重启、不经 relay（relay 已于 v1.4.55 删除）', () => {
+  // 2026-09-25 实测：直连写进 settings.local.json 后约 20 秒，WebOffice 的 hook 即上报新地址，CLI 未重启
+  if (!/needRestart/.test(handlerBlock)) throw new Error('未回传 needRestart 字段，前端据此显示提示');
+  if (/relay/.test(handlerBlock)) throw new Error('切换 handler 里还有 relay 相关逻辑');
+  if (/restartClaudeWithEnv\(/.test(handlerBlock)) throw new Error('热加载即可生效，不该再打断用户重启 CLI');
+  if (!/无需重启/.test(handlerBlock)) throw new Error('完成提示没说明无需重启，用户会自己去 /quit');
 });
 test('切换后作废供应商实测缓存（否则面板显示切换前那家）', () => {
   if (!/session\.statusProbe = null/.test(handlerBlock))
@@ -306,15 +308,9 @@ test('切换后作废供应商实测缓存（否则面板显示切换前那家�
     throw new Error('未清 effectiveEnv');
 });
 
-// ============ 切换后自动重启 CLI（v1.3.9 找回 v1.3.8 丢失的行为）============
-// 老下拉走 switchProviderStateMachine，切完会 Esc → /exit → 等 shell → export 新 env && claude -c。
-// v1.3.8 改走 applySessionProvider 时漏了这一步，用户只能自己 /quit。现两条路径共用
-// restartClaudeWithEnv 一份实现。
-test('会话级切换在需要重启时自动调用 restartClaudeWithEnv', () => {
-  if (!/if \(type === 'claude' && needRestart\)[\s\S]{0,300}restartClaudeWithEnv\(session, r\.providerEnv/.test(handlerBlock))
-    throw new Error('handler 需要重启时没有自动重启，用户又得手动 /quit');
-  if (!/restartResult/.test(handlerBlock)) throw new Error('未把重启结果回传前端');
-});
+// ============ 状态机的重启实现（老下拉 switchProviderStateMachine 仍在用）============
+// 会话级切换已改为热加载、不再重启（见上一条）；状态机那条路径的 /exit → claude -c 重启保留，
+// 且只有一份实现。
 test('状态机与会话级切换共用同一份重启实现（不再各写一份）', () => {
   if (!/await restartClaudeWithEnv\(session, localConfig\.env/.test(SRV)) throw new Error('状态机未改用共用函数');
   const exits = SRV.split('send-keys -t "${tmuxName}" "/exit"').length - 1;

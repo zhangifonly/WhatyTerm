@@ -512,8 +512,9 @@ export class LongRunService {
       command, shellLine: buildShellLine(root, command),
       // 开新对话时要发的第一句：与长程交接后一样，让它从记忆接上
       resumePrompt: decided.mode === 'fresh' ? loadPrompts(task?.options?.promptsFile || PROMPT_FILE).resume : '',
-      // 长程期间从项目配置移走的会话级供应商：转回终端时重新应用
+      // 长程期间从项目配置移走的会话级供应商：转回终端时重新应用（官方登录没有供应商 id，单独标出）
       providerId: backup?._localProviderId || null,
+      providerOAuth: backup?._localProvider === 'oauth',
     };
   }
 
