@@ -3,9 +3,15 @@ const path = require('path');
 const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const { autoUpdater } = require('electron-updater');
+const { RespawnPolicy } = require('./respawnPolicy.cjs');
 
 let mainWindow;
 let serverProcess;
+// 服务异常退出后自动重拉（见 respawnPolicy.cjs）。serverStopping 标记「是我们主动停的」：
+// stopServer() 先把 serverProcess 置空、close 事件之后才到，不能靠变量是否为空判断
+let serverStopping = false;
+let respawnTimer = null;
+const respawnPolicy = new RespawnPolicy();
 let logStream;
 let tray = null;
 let forceQuit = false;  // 标记是否真正退出（区别于最小化到托盘）
@@ -852,6 +858,8 @@ function startServer() {
   }
 
   writeLog('[Electron] 启动内置服务器...');
+  serverStopping = false;
+  respawnPolicy.onStart(Date.now());
 
   const resourcesPath = getResourcesPath();
   const serverPath = path.join(resourcesPath, 'server', 'index.js');
@@ -910,8 +918,21 @@ function startServer() {
     }
   });
 
-  serverProcess.on('close', (code) => {
-    writeLog(`[Server] 进程退出，代码: ${code}`);
+  const proc = serverProcess;
+  proc.on('close', (code, signal) => {
+    writeLog(`[Server] 进程退出，代码: ${code}${signal ? `，信号: ${signal}` : ''}`);
+    if (serverProcess === proc) serverProcess = null;
+    // 异常退出 → 退避重拉。服务端启动时会自己清理上一次留下的孤儿子进程（ChildRegistry）
+    const decision = respawnPolicy.onExit(Date.now(), { stopping: serverStopping });
+    if (decision.action === 'restart') {
+      writeLog(`[Server] 异常退出，${decision.delayMs / 1000} 秒后自动重启（第 ${decision.attempt} 次）`);
+      clearTimeout(respawnTimer);
+      respawnTimer = setTimeout(() => { if (!serverStopping) startServer(); }, decision.delayMs);
+    } else if (decision.action === 'giveup') {
+      writeLog(`[Server] 放弃自动重启：${decision.reason}`);
+      dialog.showErrorBox('WhatyTerm 后台服务无法启动',
+        `${decision.reason}，已停止自动重启。\n常见原因：3928 端口被其他程序占用、安装文件损坏。\n请重启 WhatyTerm；仍不行请把日志发给我们。`);
+    }
   });
 
   serverProcess.on('error', (err) => {
@@ -920,6 +941,8 @@ function startServer() {
 }
 
 function stopServer() {
+  serverStopping = true;          // 主动停止：close 事件到来时不重拉
+  clearTimeout(respawnTimer);
   if (serverProcess) {
     console.log('[Electron] 停止服务器...');
     serverProcess.kill();

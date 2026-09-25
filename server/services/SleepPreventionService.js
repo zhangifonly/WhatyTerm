@@ -1,5 +1,6 @@
 import { spawn, execSync } from 'child_process';
 import os from 'os';
+import childRegistry from './ChildRegistry.js';
 
 class SleepPreventionService {
   constructor() {
@@ -53,10 +54,12 @@ class SleepPreventionService {
       // -d: 阻止显示器休眠（可选）
       // -i: 阻止系统空闲休眠
       // -s: 阻止系统休眠（包括合盖）
-      this.caffeinateProcess = spawn('caffeinate', ['-dis'], {
+      // -w <服务 pid>：服务一退出（哪怕是被 SIGKILL，退出钩子跑不到）caffeinate 也跟着退出。
+      // 以前不带它，服务被强杀后 caffeinate 被 launchd 收养，Mac 永远不能休眠（2026-09-26 实测留下一个）
+      this.caffeinateProcess = childRegistry.track(spawn('caffeinate', ['-dis', '-w', String(process.pid)], {
         stdio: 'ignore',
         detached: false
-      });
+      }), 'caffeinate', 'caffeinate -dis');
 
       this.caffeinateProcess.on('error', (err) => {
         console.error('[SleepPrevention] caffeinate 启动失败:', err.message);

@@ -51,6 +51,7 @@ function recordSignalForensics(sig) {
  */
 function shutdownOnSignal(sig) {
   recordSignalForensics(sig);
+  childRegistry?.markCleanExit();
   sleepPrevention?.destroy();
   try { frpTunnel?.killChildSync?.(); } catch { /* 退出路径上不能再抛 */ }
   process.exit(0);
@@ -225,6 +226,20 @@ import pricingTable from './services/usage/PricingTable.js';
 import { AutoPricing } from './services/usage/AutoPricing.js';
 import { PushService, hostOf } from './services/PushService.js';
 import { LongRunPushNotifier } from './services/longrunPush.js';
+import childRegistry from './services/ChildRegistry.js';
+
+// 上一次异常退出（SIGKILL / OOM / 被上层进程连坐）留下的孤儿子进程：必须在任何 spawn 之前清掉，
+// 否则 frpc 报 proxy already exists、caffeinate 双开（一直阻止休眠）。见 ChildRegistry.js 顶部说明
+const startupRecovery = childRegistry.recoverAtStartup();
+if (startupRecovery.abnormal) {
+  const when = new Date(startupRecovery.prevStartedAt || 0).toLocaleString('zh-CN', { hour12: false });
+  const what = startupRecovery.cleaned.map((c) => `${c.kind}(pid ${c.pid})`).join('、') || '无遗留进程';
+  console.log(`[恢复] 上次服务异常退出（pid ${startupRecovery.prevPid}，${when} 启动），已清理 ${startupRecovery.cleaned.length} 个遗留进程：${what}`);
+} else if (startupRecovery.skipped) {
+  console.log(`[恢复] ${startupRecovery.skipped}`);
+}
+// 正常退出（process.exit(0)）也算干净；异常码与被杀不标记，下次启动据此清理
+process.on('exit', (code) => { if (code === 0) childRegistry.markCleanExit(); });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -7223,6 +7238,11 @@ io.on('connection', (socket) => {
   socket.emit('sessions:usage', Object.fromEntries(usageMap));   // 新连上的客户端先拿一份当前值，不用等下一轮
   socket.emit('usage:pricing', pricingView());
   socket.emit('sessions:inputStuck', inputStuck.all());
+  // 本次是从异常退出中恢复的：启动后 10 分钟内连上的客户端提示一次（前端按上次的 pid 去重）
+  if (startupRecovery.abnormal && process.uptime() < 600) {
+    socket.emit('server:recovered', { prevPid: startupRecovery.prevPid, prevStartedAt: startupRecovery.prevStartedAt,
+      cleaned: startupRecovery.cleaned });
+  }
 
   socket.on('sessions:list', async () => {
     // 等待 SessionManager 初始化完成

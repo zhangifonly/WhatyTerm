@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import childRegistry from './ChildRegistry.js';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
@@ -108,9 +109,10 @@ class CloudflareTunnel {
     return new Promise(async (resolve) => {
       try {
         // 直接执行可执行文件，不使用 shell，避免路径空格问题
-        this.process = spawn(cloudflaredPath, ['tunnel', '--url', `http://localhost:${this.localPort}`], {
+        // 登记：服务被强杀后它会成孤儿、一直占着一条 quick tunnel，下次启动按登记清掉
+        this.process = childRegistry.track(spawn(cloudflaredPath, ['tunnel', '--url', `http://localhost:${this.localPort}`], {
           stdio: ['ignore', 'pipe', 'pipe']
-        });
+        }), 'cloudflared', `--url http://localhost:${this.localPort}`);
       } catch (err) {
         // 捕获 spawn 同步异常（如 EPERM）
         if (err.code === 'EPERM') {

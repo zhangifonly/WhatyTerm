@@ -10,6 +10,7 @@ import path from 'path';
 const execAsync = promisify(exec);
 import os from 'os';
 import { claudeStartCommand } from './sessionMode.js';
+import { probeTmuxSession, confirmTmuxGone } from './tmuxGone.js';
 import fs from 'fs';
 
 // 导入 Mux 模块桥接（新架构：mux-server 守护进程）
@@ -467,19 +468,24 @@ export class Session {
       console.log(`PTY 退出: ${this.tmuxSessionName}, code=${exitCode}`);
       this.pty = null;
 
-      // 检查 tmux 会话是否还存在
-      try {
-        execSync(`${getTmuxPrefix()} has-session -t "${this.tmuxSessionName}"`, { stdio: 'pipe' });
-        // tmux 会话还存在，只是 PTY 断开了，重新连接
-        if (this.attachCount > 0) {
-          console.log(`[Session] 重新连接 tmux 会话: ${this.tmuxSessionName}`);
-          this._attachToTmux();
+      // 附着客户端断了，不等于会话没了。只有 tmux 明确回答「找不到这个会话」才触发退出回调（→ 删会话记录）；
+      // 查询本身出错（被信号打断、机器太忙、超时）先隔 2 秒再查，查满 3 次仍说不准就保留会话。
+      // 以前查询一出错就当成用户 exit 了，会话记录被删、tmux 还活着，重启后这条会话就丢了（见 tmuxGone.js）
+      const tmuxCmd = useWSL ? ['wsl', 'tmux'] : [getLocalTmuxPath() || 'tmux'];
+      confirmTmuxGone(() => probeTmuxSession(tmuxCmd, this.tmuxSessionName)).then((verdict) => {
+        if (verdict === 'gone') {
+          console.log(`[Session] tmux 会话已退出: ${this.tmuxSessionName}`);
+          this.exitCallbacks.forEach(cb => cb(exitCode));
+        } else if (verdict === 'alive') {
+          // tmux 会话还在，只是 PTY 断开了，重新连接
+          if (this.attachCount > 0 && !this.pty) {
+            console.log(`[Session] 重新连接 tmux 会话: ${this.tmuxSessionName}`);
+            this._attachToTmux();
+          }
+        } else {
+          console.warn(`[Session] 查不清 tmux 会话 ${this.tmuxSessionName} 是否还在，保留会话不删（下次使用时会重新附着）`);
         }
-      } catch {
-        // tmux 会话已退出（用户执行了 exit），触发退出回调
-        console.log(`[Session] tmux 会话已退出: ${this.tmuxSessionName}`);
-        this.exitCallbacks.forEach(cb => cb(exitCode));
-      }
+      }).catch((err) => console.error(`[Session] 核对 tmux 会话失败: ${err.message}`));
     });
   }
 
@@ -1380,6 +1386,7 @@ export class SessionManager {
               name: row.name,
               origin: row.origin || null,
               claudeSessionId: row.claude_session_id || null,
+              workingDir: row.working_dir || '',   // 按 id 精确续接要找对话记录文件（见 claudeStartCommand）
             });
           }
         }

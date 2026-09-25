@@ -10,6 +10,7 @@ import https from 'https';
 import dependencyManager from './DependencyManager.js';
 import NativeFrpClient from './frp/NativeFrpClient.js';
 import { pickFrpServer } from './frp/pickServer.js';
+import childRegistry from './ChildRegistry.js';
 
 /**
  * 从 `ps -Ao pid=,ppid=,command=` 的输出里找**孤儿** frpc：用的是同一份配置文件，且父进程已是 launchd（ppid=1）。
@@ -514,10 +515,11 @@ subdomain = "${this.subdomain}"
       console.log(`[FrpTunnel] 使用 frpc: ${frpcPath}`);
 
       try {
-        this.frpProcess = spawn(frpcPath, ['-c', this.configPath], {
+        // 登记：服务被强杀后它会成孤儿，下次启动按登记清掉（killOrphanFrpc 的配置路径匹配仍作兜底）
+        this.frpProcess = childRegistry.track(spawn(frpcPath, ['-c', this.configPath], {
           stdio: ['ignore', 'pipe', 'pipe']
           // 不使用 shell，直接执行可执行文件，避免路径空格问题
-        });
+        }), 'frpc', this.configPath);
       } catch (err) {
         // 捕获 spawn 同步异常（如 EPERM）
         if (err.code === 'EPERM') {

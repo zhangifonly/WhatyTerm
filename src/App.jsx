@@ -840,6 +840,13 @@ export default function App() {
     });
     socket.on('usage:pricing', (data) => setPricing(data || null));
     socket.on('sessions:inputStuck', (map) => setInputStuckMap(map || {}));
+    // 服务从异常退出中恢复：每次恢复只提示一次（按上一个服务的 pid 去重，重连不重复弹）
+    socket.on('server:recovered', (r) => {
+      const key = `wt-recovered-${r?.prevPid}`;
+      try { if (sessionStorage.getItem(key)) return; sessionStorage.setItem(key, '1'); } catch { /* 隐私模式照样提示 */ }
+      const n = r?.cleaned?.length || 0;
+      toast.warning(`服务上次异常退出，已自动恢复${n ? `，清理了 ${n} 个遗留进程（${r.cleaned.map((c) => c.kind).join('、')}）` : ''}。会话都在 tmux 里，不受影响`);
+    });
 
     // 监听进程详情响应
     socket.on('session:processDetails', (data) => {
