@@ -2267,7 +2267,16 @@ ${historyText || '(空)'}
 
         // 使用插件分析状态（包括默认插件）
         // 注入 aiType，供插件在 shell 提示符下构造正确的 CLI 重启命令
-        const pluginResult = plugin.analyzeStatus(terminalContent, phase, { ...(projectContext || {}), aiType });
+        let pluginResult = plugin.analyzeStatus(terminalContent, phase, { ...(projectContext || {}), aiType });
+        // 插件的「出错」是在屏幕末尾搜 error/failed/测试失败 这类词得出的，只适用于裸 shell 里跑命令。
+        // CLI 在跑时屏上是 AI 的回复正文与 CLI 自己的状态栏，这些词几乎都不代表任务出错：
+        // 实测 ssh 会话已空闲，只因状态栏「✘ Auto-update failed · Run claude doctor」被部署运维插件
+        // 判成「检测到错误」，挂上「出错待处理」红条；同一屏在 16 个插件里有 5 个判出错。
+        // CLI 自己的真错误（API Error、崩溃）由下面的通用检测识别，不靠插件关键词。
+        if (pluginResult?.actionType === 'error' && detectedCLI) {
+          console.log(`[AIEngine] 插件 ${plugin.name} 按关键词判「${pluginResult.message || '出错'}」，但 ${detectedCLI} 在跑 —— 不采用，交给通用检测`);
+          pluginResult = null;
+        }
         if (pluginResult) {
           // Harness: Sprint feature 指令只在 feature 切换时注入一次
           // 之后用普通"继续"，避免重复发送导致 Claude "第 N 次重复，未执行"
