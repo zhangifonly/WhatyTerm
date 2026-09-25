@@ -19,6 +19,9 @@ async function test(name, fn) {
   catch (err) { results.failed++; results.errors.push({ name, error: err.message }); console.log(`❌ ${name}`); }
 }
 
+// 独占的临时目录：「临时文件都清掉」要数 webtmux-codex-call-* 目录，而正在运行的服务监控 Codex 会话时
+// 也在系统临时目录里建同名目录 —— 共用就会撞上（2026-09-26 全量测试偶发「残留 1 个」）。os.tmpdir() 每次调用都读 TMPDIR
+process.env.TMPDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'lr_codextext_tmpdir_'));
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'lr_codextext_'));
 const FAKE = path.join(TMP, 'fake-codex.mjs');
 fs.writeFileSync(FAKE, `

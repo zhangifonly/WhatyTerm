@@ -1,6 +1,6 @@
 {
   "name": "whatyterm",
-  "version": "1.4.60",
+  "version": "1.4.61",
   "description": "网梯终端 - AI 智能终端管理工具",
   "license": "SEE LICENSE IN LICENSE",
   "author": {
@@ -22,6 +22,10 @@
     "build:premium": "node scripts/build-premium.js",
     "build:release": "npm run build && npm run build:premium",
     "start": "node server/index.js",
+    "service:install": "bash scripts/webtmux-service.sh install",
+    "service:uninstall": "bash scripts/webtmux-service.sh uninstall",
+    "service:restart": "bash scripts/webtmux-service.sh restart",
+    "service:status": "bash scripts/webtmux-service.sh status",
     "db:migrate": "node server/db/migrate.js",
     "electron:dev": "NODE_ENV=development electron .",
     "electron:build": "npm run build:release && electron-builder",
