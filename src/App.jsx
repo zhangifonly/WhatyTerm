@@ -917,11 +917,9 @@ export default function App() {
         setSwitchMessage('');
         setSwitchProgress(0);
       }, 2000);
-      // 三种结局如实告知（Claude Code 启动时读一次配置、不热更新）：
-      //   restarted    服务端已自动 /exit + claude -c，新供应商已生效
-      //   not_running  CLI 没在跑，下次启动自动读到新配置，无需操作
-      //   needRestart  自动重启没成（等退出超时等），只能手动，必须明说，
-      //                否则用户以为切好了、请求实际还发往旧供应商
+      // 如实告知何时生效。v1.4.55 起会话级切换直连写项目配置，Claude Code 热加载 settings 的 env，
+      // 在跑的 CLI 自己切过去、不重启（WebOffice 实测约 20 秒）—— 所以不能说「即刻生效」。
+      // restarted / needRestart 两支留给老的状态机路径（它仍会 /exit + claude -c 重启）
       let tail;
       if (data.restartResult === 'restarted') {
         toast.success(`本会话已切到 ${data.providerName}，已自动重启 CLI 生效（不影响全局）`);
@@ -930,8 +928,8 @@ export default function App() {
         toast.info(`已为本会话设置 ${data.providerName}（不影响全局），但自动重启未完成：请 /quit 后 claude -c`);
         tail = '（自动重启未完成，待手动重启）';
       } else {
-        toast.success(`本会话已切到 ${data.providerName}，即刻生效（不影响全局）`);
-        tail = data.restartResult === 'not_running' ? '（CLI 未运行，下次启动生效）' : '（已生效）';
+        toast.success(`本会话已切到 ${data.providerName}（不影响全局）。CLI 约 20 秒内自动切过去，无需重启`);
+        tail = '（已写入，CLI 热加载生效）';
       }
       addDebugLog('providerSwitch', { message: `会话级切换到 ${data.providerName}${tail}` });
     });

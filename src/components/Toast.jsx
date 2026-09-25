@@ -1,6 +1,6 @@
 /**
  * Toast 轻量级提示组件
- * 显示黄色小提醒，用户可以点击叉关闭
+ * 右上角的提醒（成功/信息/警告/错误），5 秒后自动消失，也可以点叉关闭
  */
 import React, { useState, useEffect, useCallback, createContext, useContext, useRef } from 'react';
 
@@ -10,33 +10,19 @@ const ToastContext = createContext(null);
 // 全局 toast 引用，用于在非组件代码中调用
 let globalToastRef = null;
 
-// Toast 类型配置
+// Toast 类型配置：hue 是类型色（色条、图标、边框用）。
+// ⚠ 背景必须不透明：原来是 15% 透明度的色块，底下终端的字会透上来和提示叠在一起，看不清
+//   （切换供应商时的绿色提示就是这样）。现在是「主题弹层底色 + 一层淡色调」，正文用主题前景色，
+//   深色、浅色主题下都清楚 —— 原来的浅绿字放在浅色主题的白底上本来也看不清。
 const TOAST_TYPES = {
-  info: {
-    bg: 'hsl(45 100% 50% / 0.15)',
-    border: 'hsl(45 100% 50% / 0.4)',
-    color: 'hsl(45 100% 70%)',
-    icon: 'ℹ️'
-  },
-  success: {
-    bg: 'hsl(142 70% 45% / 0.15)',
-    border: 'hsl(142 70% 45% / 0.4)',
-    color: 'hsl(142 70% 65%)',
-    icon: '✓'
-  },
-  error: {
-    bg: 'hsl(0 70% 50% / 0.15)',
-    border: 'hsl(0 70% 50% / 0.4)',
-    color: 'hsl(0 70% 70%)',
-    icon: '✕'
-  },
-  warning: {
-    bg: 'hsl(30 100% 50% / 0.15)',
-    border: 'hsl(30 100% 50% / 0.4)',
-    color: 'hsl(30 100% 70%)',
-    icon: '⚠'
-  }
+  info: { hue: '45 100% 50%', icon: 'ℹ️' },
+  success: { hue: '142 70% 42%', icon: '✓' },
+  error: { hue: '0 72% 52%', icon: '✕' },
+  warning: { hue: '30 100% 50%', icon: '⚠' },
 };
+
+/** 不透明背景：淡色调叠在主题弹层底色上（渐变只是为了能叠两层，颜色是平的） */
+export const toastBackground = (hue) => `linear-gradient(hsl(${hue} / 0.16), hsl(${hue} / 0.16)), hsl(var(--popover))`;
 
 // 单个 Toast 项
 function ToastItem({ id, message, type = 'info', onClose }) {
@@ -57,25 +43,26 @@ function ToastItem({ id, message, type = 'info', onClose }) {
         alignItems: 'flex-start',
         gap: '8px',
         padding: '10px 12px',
-        background: config.bg,
-        border: `1px solid ${config.border}`,
+        background: toastBackground(config.hue),
+        border: `1px solid hsl(${config.hue} / 0.55)`,
+        borderLeft: `3px solid hsl(${config.hue})`,
         borderRadius: '6px',
-        color: config.color,
-        fontSize: '12px',
-        boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+        color: 'hsl(var(--popover-foreground))',
+        fontSize: '13px',
+        boxShadow: '0 6px 20px rgba(0,0,0,0.35)',
         animation: 'toastSlideIn 0.2s ease-out',
         maxWidth: '320px',
         wordBreak: 'break-word'
       }}
     >
-      <span style={{ fontSize: '14px', lineHeight: 1 }}>{config.icon}</span>
+      <span style={{ fontSize: '14px', lineHeight: 1.4, color: `hsl(${config.hue})`, fontWeight: 700 }}>{config.icon}</span>
       <span style={{ flex: 1, lineHeight: 1.4 }}>{message}</span>
       <button
         onClick={() => onClose(id)}
         style={{
           background: 'transparent',
           border: 'none',
-          color: config.color,
+          color: 'inherit',
           cursor: 'pointer',
           padding: '0',
           fontSize: '14px',
