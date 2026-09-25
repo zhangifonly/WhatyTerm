@@ -34,7 +34,7 @@ import LongRunSide from './components/longrun/LongRunSide';
 import LongRunNewTask from './components/longrun/LongRunNewTask';
 import LongRunHandoffDialog from './components/longrun/LongRunHandoffDialog';
 import LongRunSwitchDialog from './components/longrun/LongRunSwitchDialog';
-import { orderSessions, sessionNumbers as computeSessionNumbers, nextSortMode, longRunWaitingIds } from './utils/sessionSort.js';
+import { orderSessions, sessionNumbers as computeSessionNumbers, nextSortMode, longRunWaitingIds, autoRunIds, SORT_LABELS } from './utils/sessionSort.js';
 import './components/longrun/LongRun.css';
 import './components/longrun/LongRunEntries.css';
 import { registerOsc52, writeClipboard } from './terminalClipboard';
@@ -1410,8 +1410,9 @@ export default function App() {
   // 实际渲染顺序：置顶永远在最前，其余按当前排序模式。门牌号不参与重排。
   const orderedSessions = useMemo(() => {
     // 排序规则在 src/utils/sessionSort.js，移动版用的是同一份 —— 两端顺序才不会漂移
-    return orderSessions({ sessions, pinnedIds, sortMode, numbers: sessionNumbers, needIds: needsActionIds });
-  }, [sessions, pinnedIds, sortMode, sessionNumbers, needsActionIds]);
+    return orderSessions({ sessions, pinnedIds, sortMode, numbers: sessionNumbers, needIds: needsActionIds,
+      autoIds: autoRunIds(sessions, longRun.tasks) });
+  }, [sessions, pinnedIds, sortMode, sessionNumbers, needsActionIds, longRun.tasks]);
 
   // 切到某个会话后，左侧列表滚到它所在的位置。
   // 35 个会话一屏只放得下 8~9 个，用 ⌘K 搜索 / ⌘数字 / ⌘↓ 切过去后，
@@ -1823,9 +1824,9 @@ export default function App() {
           <button
             className="session-toolbar-btn"
             onClick={cycleSortMode}
-            title={'切换列表排序（门牌号不受影响，始终跟着会话走）\n固定：按创建顺序\n最近活跃：新的在前\n待处理优先：需要你介入的排前面'}
+            title={'切换列表排序（门牌号不受影响，始终跟着会话走）\n固定：按创建顺序\n最近活跃：新的在前\n待处理优先：需要你介入的排前面\n自动运行优先：自动操作开着或长程在跑的排前面，其余在后'}
           >
-            {sortMode === 'fixed' ? '固定顺序' : sortMode === 'active' ? '最近活跃' : '待处理优先'}
+            {SORT_LABELS[sortMode] || SORT_LABELS.fixed}
           </button>
         </div>
         {/* 两类分开显示，文案如实：「等确认」是屏上真开着选项面板，

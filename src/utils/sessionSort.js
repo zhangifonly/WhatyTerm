@@ -7,12 +7,16 @@
  * 排序规则以后再改也只改这里，不会重新漂移。
  */
 
-/** 排序模式：固定顺序（门牌号）/ 最近活跃 / 待处理优先 */
-export const SORT_MODES = ['fixed', 'active', 'pending'];
-export const SORT_LABELS = { fixed: '固定顺序', active: '最近活跃', pending: '待处理优先' };
+/**
+ * 排序模式：固定顺序（门牌号）/ 最近活跃 / 待处理优先 / 自动运行优先。
+ * ⚠ 服务端 server/services/uiPrefs.js 有一份同样的清单（服务端单独打包，不能引用 src/），
+ *   加模式要两边一起加，否则存不进偏好、刷新就回到固定顺序（tests/test-session-sort.mjs 有一致性检查）。
+ */
+export const SORT_MODES = ['fixed', 'active', 'pending', 'auto'];
+export const SORT_LABELS = { fixed: '固定顺序', active: '最近活跃', pending: '待处理优先', auto: '自动运行优先' };
 export const DEFAULT_SORT = 'fixed';
 
-/** 循环切换：固定 → 活跃 → 待处理 → 固定 */
+/** 循环切换：固定 → 活跃 → 待处理 → 自动运行 → 固定 */
 export const nextSortMode = (mode) => {
   const i = SORT_MODES.indexOf(mode);
   return SORT_MODES[(i < 0 ? 0 : i + 1) % SORT_MODES.length];
@@ -71,6 +75,23 @@ export function longRunWaitingIds(sessions = [], tasks = []) {
   return out;
 }
 
+/**
+ * 「自动运行」的会话：自动操作开着（监控替你按继续/确认），或长程任务正在跑（无人值守）。
+ * 长程收工/停下后不算 —— 那时没有东西在替你推进。
+ *
+ * @param {Array} sessions
+ * @param {Array} longRunTasks  长程任务摘要（不传则只按自动操作开关判断）
+ */
+export function autoRunIds(sessions = [], longRunTasks = []) {
+  const running = new Set((longRunTasks || []).filter((t) => t?.state === 'running' && t.sessionId).map((t) => t.sessionId));
+  const out = new Set();
+  for (const s of sessions || []) {
+    if (!s?.id) continue;
+    if (s.runMode === 'longrun' ? running.has(s.id) : !!s.autoActionEnabled) out.add(s.id);
+  }
+  return out;
+}
+
 export function needsActionIds(sessions = [], aiStatusMap = {}, longRunTasks = []) {
   const awaiting = new Set();   // 屏上有确认菜单等按键
   const errored = new Set();    // 任务失败要你判断（与"等确认"是两回事，不并档）
@@ -105,12 +126,14 @@ export function needsActionIds(sessions = [], aiStatusMap = {}, longRunTasks = [
  * @param {string} [o.sortMode]
  * @param {object} [o.numbers]       门牌号（缺省现算）
  * @param {Set} [o.needIds]          需操作集合（缺省视为空）
+ * @param {Set} [o.autoIds]          自动运行集合（缺省按各会话的自动操作开关现算，见 autoRunIds）
  */
-export function orderSessions({ sessions = [], pinnedIds, sortMode = DEFAULT_SORT, numbers, needIds } = {}) {
+export function orderSessions({ sessions = [], pinnedIds, sortMode = DEFAULT_SORT, numbers, needIds, autoIds } = {}) {
   const list = [...(sessions || [])];
   const pins = pinnedIds instanceof Set ? pinnedIds : new Set(pinnedIds || []);
   const nums = numbers || sessionNumbers(list);
   const needs = needIds instanceof Set ? needIds : new Set(needIds || []);
+  const autos = autoIds instanceof Set ? autoIds : (autoIds ? new Set(autoIds) : autoRunIds(list));
   const num = (s) => nums[s?.id] || 9999;
 
   list.sort((a, b) => {
@@ -125,10 +148,14 @@ export function orderSessions({ sessions = [], pinnedIds, sortMode = DEFAULT_SOR
       const na = needs.has(a?.id) ? 0 : 1;
       const nb = needs.has(b?.id) ? 0 : 1;
       if (na !== nb) return na - nb;
+    } else if (sortMode === 'auto') {
+      const aa = autos.has(a?.id) ? 0 : 1;           // 自动运行的在前，不自动运行的在后
+      const ab = autos.has(b?.id) ? 0 : 1;
+      if (aa !== ab) return aa - ab;
     }
     return num(a) - num(b);                          // 同档内按门牌号，保证顺序确定
   });
   return list;
 }
 
-export default { SORT_MODES, SORT_LABELS, DEFAULT_SORT, nextSortMode, sessionNumbers, needsActionIds, longRunWaitingIds, orderSessions };
+export default { SORT_MODES, SORT_LABELS, DEFAULT_SORT, nextSortMode, sessionNumbers, needsActionIds, longRunWaitingIds, autoRunIds, orderSessions };

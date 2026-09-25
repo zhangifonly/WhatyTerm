@@ -20,7 +20,7 @@ export const PREFS_DIR = path.join(os.homedir(), '.webtmux');
 export const PREFS_FILE = path.join(PREFS_DIR, 'ui-prefs.json');
 
 /** 排序模式取值必须与前端共享模块（src/utils/sessionSort.js）一致 */
-export const SORT_MODES = ['fixed', 'active', 'pending'];
+export const SORT_MODES = ['fixed', 'active', 'pending', 'auto'];
 export const DEFAULT_PREFS = { pinnedSessions: [], sessionSort: 'fixed' };
 
 /**

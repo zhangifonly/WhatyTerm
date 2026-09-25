@@ -11,8 +11,9 @@
 
 import fs from 'fs';
 import {
-  SORT_MODES, DEFAULT_SORT, nextSortMode, sessionNumbers, needsActionIds, orderSessions, longRunWaitingIds,
+  SORT_MODES, SORT_LABELS, DEFAULT_SORT, nextSortMode, sessionNumbers, needsActionIds, orderSessions, longRunWaitingIds, autoRunIds,
 } from '../src/utils/sessionSort.js';
+import { SORT_MODES as SERVER_SORT_MODES, normalizePrefs } from '../server/services/uiPrefs.js';
 
 const results = { passed: 0, failed: 0, errors: [] };
 function assert(cond, msg) { if (!cond) throw new Error(msg || '断言失败'); }
@@ -121,14 +122,41 @@ test('长程在等你算需操作 —— 长程条目不经过 AI 监控，只�
   assert(order[0] === 'L', `长程等你没排最前：${order}`);
 });
 
+test('自动运行的判定：自动操作开着，或长程正在跑；长程收工后不算', () => {
+  const sessions = [
+    { id: 'A', autoActionEnabled: true },                  // 终端会话，自动操作开
+    { id: 'M' },                                           // 终端会话，自动操作关
+    { id: 'L', runMode: 'longrun' },                       // 长程在跑
+    { id: 'D', runMode: 'longrun', autoActionEnabled: true },  // 长程已收工：开关残留也不算
+  ];
+  const tasks = [{ sessionId: 'L', state: 'running' }, { sessionId: 'D', state: 'done' }];
+  assert([...autoRunIds(sessions, tasks)].sort().join() === 'A,L', [...autoRunIds(sessions, tasks)].join());
+  assert(autoRunIds(null, null).size === 0, '空参数不炸');
+});
+
+test('自动运行优先：自动运行的在前、其余在后，两组内各按门牌号；置顶仍压过一切', () => {
+  const autoIds = new Set(['d', 'b']);
+  assert(ids(orderSessions({ sessions: S, sortMode: 'auto', autoIds })) === 'bdac', ids(orderSessions({ sessions: S, sortMode: 'auto', autoIds })));
+  assert(ids(orderSessions({ sessions: S, sortMode: 'auto', autoIds, pinnedIds: ['c'] })) === 'cbda', '置顶要在最前');
+  // 不传 autoIds 时按会话自带的开关现算（老调用方/测试桩不用额外准备）
+  const withFlag = S.map((x) => ({ ...x, autoActionEnabled: x.id === 'c' }));
+  assert(ids(orderSessions({ sessions: withFlag, sortMode: 'auto' })) === 'cabd', '缺省应按 autoActionEnabled 分组');
+});
+
+test('新模式能存进偏好：服务端的模式清单与前端一致（否则刷新就被打回固定顺序）', () => {
+  assert(JSON.stringify(SERVER_SORT_MODES) === JSON.stringify(SORT_MODES), `前端 ${SORT_MODES} / 服务端 ${SERVER_SORT_MODES}`);
+  assert(normalizePrefs({ sessionSort: 'auto' }).sessionSort === 'auto', '服务端把 auto 当非法值丢掉了');
+  for (const m of SORT_MODES) assert(SORT_LABELS[m], `模式 ${m} 没有显示文字`);
+});
+
 test('不传长程任务时行为不变（老调用方不受影响）', () => {
   assert(needsActionIds([{ id: 'a' }], { a: { needsAction: true } }).has('a'));
   assert(longRunWaitingIds().size === 0 && longRunWaitingIds(null, null).size === 0, '空参数不炸');
 });
 
-test('模式循环：固定 → 活跃 → 待处理 → 固定；非法值回到固定', () => {
+test('模式循环：固定 → 活跃 → 待处理 → 自动运行 → 固定；非法值回到固定', () => {
   assert(nextSortMode('fixed') === 'active' && nextSortMode('active') === 'pending'
-    && nextSortMode('pending') === 'fixed', '循环顺序错');
+    && nextSortMode('pending') === 'auto' && nextSortMode('auto') === 'fixed', '循环顺序错');
   assert(nextSortMode('乱写') === 'fixed' && nextSortMode(undefined) === 'fixed', '非法值要有兜底');
 });
 
@@ -153,6 +181,14 @@ test('守卫：桌面的「待处理优先」与「长程等你摘要条」都�
   const uses = app.split('longRunWaitingIds(').length - 1;
   assert(uses >= 2, `桌面只有 ${uses} 处用了共享判定 —— 排序与摘要条应各一处，否则两处定义会分叉`);
   assert(!/x\.runMode === 'longrun'\s*\n?\s*&& longRun\.taskForSession/.test(app), '摘要条又在自己写判定');
+});
+
+test('守卫：两端都把长程任务交给 autoRunIds、按钮文字取共享 SORT_LABELS', () => {
+  const app = read('../src/App.jsx');
+  const list = read('../src/mobile/SessionList.jsx');
+  assert(/autoIds: autoRunIds\(sessions, longRun\.tasks\)/.test(app), '桌面没算自动运行集合（长程会被当成不自动运行）');
+  assert(/autoIds: autoRunIds\(sessions, longRunTasks\)/.test(list), '移动版没算自动运行集合');
+  assert(/SORT_LABELS\[sortMode\]/.test(app) && !/sortMode === 'fixed' \? '固定顺序'/.test(app), '桌面按钮文字又自己写了一份');
 });
 
 test('守卫：桌面与移动都从共享模块取排序，不各写一份', () => {

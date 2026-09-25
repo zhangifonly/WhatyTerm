@@ -1,6 +1,6 @@
 import React from 'react';
 import SessionCard from './SessionCard';
-import { orderSessions, needsActionIds, nextSortMode, SORT_LABELS, DEFAULT_SORT } from '../utils/sessionSort.js';
+import { orderSessions, needsActionIds, nextSortMode, SORT_LABELS, DEFAULT_SORT, autoRunIds } from '../utils/sessionSort.js';
 
 /**
  * 会话列表页。
@@ -20,7 +20,7 @@ export default function SessionList({
   // 每个条目最新的那个长程任务（一个条目可能跑过好几轮）
   const lrOf = (sid) => longRunTasks.filter((t) => t.sessionId === sid)
     .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))[0] || null;
-  const sorted = orderSessions({ sessions, pinnedIds, sortMode, needIds });
+  const sorted = orderSessions({ sessions, pinnedIds, sortMode, needIds, autoIds: autoRunIds(sessions, longRunTasks) });
   const needCount = needIds.size;
 
   return (
