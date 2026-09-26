@@ -12,6 +12,10 @@
  * CODEX_HOME）；续接带 `-c model_provider=<当前供应商>`，按现在选的供应商接回。
  */
 
+import { existsSync } from 'fs';
+import os from 'os';
+import path from 'path';
+
 /** TOML 基本字符串：只需转义反斜杠、双引号与控制字符 */
 export const tomlString = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\u0000-\u001f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)}"`;
 
@@ -46,14 +50,25 @@ export function withBearerToken(toml, apiKey) {
   return { toml: lines.join('\n'), injected: true, reason: '' };
 }
 
+/** 会话专属 CODEX_HOME（与 index.js applySessionProviderInfo 写入的位置一致） */
+export const sessionCodexHome = (sessionId, home = os.homedir()) => path.join(home, '.webtmux', 'sessions', String(sessionId), 'codex');
+
 /**
  * 启动 / 续接 codex 的命令。
- * @param {{codexProvider?: {providerKey?: string}}} session
- * @param {{resume?: boolean}} [o]  resume=true 续接上次对话（`codex resume --last`）
+ *
+ * ⚠ CODEX_HOME 必须写在命令里：tmux set-environment 只对**之后新建的窗格**生效，
+ * 窗格里早已在跑的 shell 看不到 —— 实测 3 个会话都设了 tmux 环境，从 shell 起的 codex 进程里一个都没有 CODEX_HOME，
+ * 全走全局配置（2026-09-26）。所以会话级供应商以前从 shell 里起 codex 时根本不生效。
+ *
+ * @param {{id?: string, codexProvider?: {providerKey?: string}}} session
+ * @param {{resume?: boolean, exists?: (p:string)=>boolean, home?: string}} [o]  resume=true 续接上次对话
  */
-export function codexStartCommand(session, { resume = false } = {}) {
+export function codexStartCommand(session, { resume = false, exists = existsSync, home } = {}) {
   const key = session?.codexProvider?.providerKey;
   // 供应商名只允许安全字符：它会原样进 shell 命令
   const override = typeof key === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(key) ? ` -c 'model_provider="${key}"'` : '';
-  return resume ? `codex --no-daemon resume --last${override}` : `codex --no-daemon${override}`;
+  const dir = session?.id && /^[A-Za-z0-9_-]{1,80}$/.test(String(session.id)) ? sessionCodexHome(session.id, home) : '';
+  // 会话没单独选过供应商（目录不存在）就跟随全局，不硬塞一个空目录
+  const envPrefix = dir && exists(path.join(dir, 'config.toml')) ? `CODEX_HOME='${dir.replace(/'/g, "'\\''")}' ` : '';
+  return `${envPrefix}${resume ? `codex --no-daemon resume --last${override}` : `codex --no-daemon${override}`}`;
 }

@@ -11,8 +11,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import http from 'http';
-import { spawn } from 'child_process';
-import { withBearerToken, topProvider, codexStartCommand, tomlString } from '../server/services/codexSessionConfig.js';
+import { spawn, spawnSync } from 'child_process';
+import { withBearerToken, topProvider, codexStartCommand, tomlString, sessionCodexHome } from '../server/services/codexSessionConfig.js';
 
 let pass = 0, fail = 0;
 const queue = [];
@@ -60,9 +60,32 @@ test('顶层供应商只认第一张表之前的 model_provider；TOML 字符串
 });
 
 test('启动命令：不连共享后台服务；续接带当前供应商；供应商名不安全就不拼进 shell', () => {
-  assert(codexStartCommand({}) === 'codex --no-daemon');
-  assert(codexStartCommand({ codexProvider: { providerKey: 'custom' } }, { resume: true }) === `codex --no-daemon resume --last -c 'model_provider="custom"'`);
-  assert(codexStartCommand({ codexProvider: { providerKey: "x'; rm -rf ~ #" } }, { resume: true }) === 'codex --no-daemon resume --last');
+  const no = { exists: () => false };
+  assert(codexStartCommand({}, no) === 'codex --no-daemon');
+  assert(codexStartCommand({ codexProvider: { providerKey: 'custom' } }, { resume: true, ...no }) === `codex --no-daemon resume --last -c 'model_provider="custom"'`);
+  assert(codexStartCommand({ codexProvider: { providerKey: "x'; rm -rf ~ #" } }, { resume: true, ...no }) === 'codex --no-daemon resume --last');
+});
+
+test('会话选过供应商：命令里显式带上会话的 CODEX_HOME（tmux 环境对已在跑的 shell 无效）；没选过就跟随全局', () => {
+  const S = { id: 'a819fe6d-28a2-4118-8821-b33c098e7620', codexProvider: { providerKey: 'custom' } };
+  const dir = sessionCodexHome(S.id, '/h');
+  const cmd = codexStartCommand(S, { resume: true, home: '/h', exists: (p) => p === `${dir}/config.toml` });
+  assert(cmd === `CODEX_HOME='${dir}' codex --no-daemon resume --last -c 'model_provider="custom"'`, cmd);
+  assert(codexStartCommand(S, { home: '/h', exists: () => false }) === `codex --no-daemon -c 'model_provider="custom"'`, '没有会话配置时不该带 CODEX_HOME');
+  assert(!codexStartCommand({ id: 'x;rm -rf ~' }, { exists: () => true }).includes('CODEX_HOME'), '非法会话 id 拼进了命令');
+});
+
+test('真实 shell：环境里没有 CODEX_HOME 的 shell 执行这条命令，codex 读到的是会话配置', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-cmd-'));
+  const id = 'probe-session-1';
+  const dir = sessionCodexHome(id, home);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'config.toml'), 'model_provider = "probe"\nmodel = "probe-model-from-session"\n[model_providers.probe]\nname = "probe"\nwire_api = "responses"\nbase_url = "http://127.0.0.1:9"\n');
+  const cmd = codexStartCommand({ id }, { home }).replace('codex --no-daemon', 'codex exec --skip-git-repo-check ok');
+  const env = { ...process.env }; delete env.CODEX_HOME;
+  const r = spawnSync('/bin/zsh', ['-c', `${cmd} < /dev/null 2>&1 | head -12`], { env, timeout: 20000, encoding: 'utf8' });
+  fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  assert(/model: probe-model-from-session/.test(r.stdout), `codex 没读会话配置：${String(r.stdout).split('\n').filter((l) => /^model:|^provider:/.test(l)).join(' | ')}`);
 });
 
 /** 本地假供应商：记下请求带没带密钥 */
@@ -106,6 +129,9 @@ test('接线：写会话配置时注入密钥并记下供应商名；切换后�
   assert(/'codex': 'codex --no-daemon resume --last'/.test(ai), '退回 shell 后的重启命令还会连后台服务');
   const sm = fs.readFileSync(new URL('../server/services/SessionManager.js', import.meta.url), 'utf8');
   assert(/if \(item\.aiType === 'codex'\) startCmd = codexStartCommand\(item, \{ resume: true \}\)/.test(sm), '重建会话续接没按当前供应商');
+  assert(/id: row\.id,\s*\/\/ Codex 续接要找会话专属 CODEX_HOME/.test(sm), '重建续接没带会话 id，找不到会话配置');
+  const send = IDX.slice(IDX.indexOf('function sendTextWithLanding'), IDX.indexOf('function autoActionBlockReason'));
+  assert(/session\.aiType === 'codex'\) \{\s*text = codexStartCommand\(session/.test(send), '监控重启 codex 的命令没换成带会话配置的');
 });
 
 for (const [name, fn] of queue) {

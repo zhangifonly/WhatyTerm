@@ -1445,6 +1445,11 @@ function captureNow(tmuxName) {
  * 不 await：核对最多要 3 秒，不能拖住整轮扫描里的其他会话。
  */
 function sendTextWithLanding(session, text) {
+  // 监控判「退回 shell → 重启 codex」时给的是通用命令：换成带本会话 CODEX_HOME 与当前供应商的版本，
+  // 否则重启出来的 codex 走全局配置（tmux 环境对已在跑的 shell 无效，见 codexStartCommand）
+  if (/^codex(\s|$)/.test(String(text).trim()) && session.aiType === 'codex') {
+    text = codexStartCommand(session, { resume: /\bresume\b/.test(text) });
+  }
   if (!session.tmuxSessionName) { session.sendInput(text, { submit: true }); return; }
   sendTextVerified({
     text,

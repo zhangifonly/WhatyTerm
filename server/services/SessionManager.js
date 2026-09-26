@@ -1388,6 +1388,7 @@ export class SessionManager {
               origin: row.origin || null,
               claudeSessionId: row.claude_session_id || null,
               workingDir: row.working_dir || '',   // 按 id 精确续接要找对话记录文件（见 claudeStartCommand）
+              id: row.id,   // Codex 续接要找会话专属 CODEX_HOME（见 codexStartCommand）
               codexProvider: (() => { try { return row.codex_provider ? JSON.parse(row.codex_provider) : null; } catch { return null; } })(),
             });
           }
