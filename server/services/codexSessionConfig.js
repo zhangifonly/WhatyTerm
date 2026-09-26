@@ -51,6 +51,29 @@ export function withBearerToken(toml, apiKey) {
 }
 
 /**
+ * 从全局 config.toml 带过来的「本机状态」表：目录信任、钩子信任、功能开关、插件与市场。
+ *
+ * 为什么（2026-09-26 实测）：CC Switch 里供应商的 config 只有供应商那几行。会话 config.toml 只写它，
+ * codex 启动就把 WebTmux 自己的三个钩子当成「新钩子」要求审核、把项目目录当成未信任要求确认 ——
+ * 自动续接时卡在这些弹窗上。这些是本机状态、跟供应商无关，应与全局一致。
+ * 只带会话配置里**没有**的表（按表头判断），供应商相关的表永远以会话自己的为准。
+ */
+export const CARRIED_TABLE_PREFIXES = ['projects.', 'hooks', 'features', 'marketplaces.', 'plugins.'];
+
+export function withCarriedTables(sessionToml, globalToml) {
+  const own = new Set((String(sessionToml || '').match(/^\s*\[[^\]\n]+\]/gm) || []).map((h) => h.trim()));
+  // 按「是不是以表头开头」挑，不按位置：全局配置可能直接以表头开头，slice(1) 会把第一张表也扔掉
+  const blocks = String(globalToml || '').split(/^(?=\s*\[)/m).filter((b) => /^\s*\[/.test(b));   // 顶层键那段不带
+  const carried = blocks.filter((b) => {
+    const head = b.trim().split('\n')[0].trim();
+    const name = head.replace(/^\[+|\]+$/g, '');
+    return CARRIED_TABLE_PREFIXES.some((p) => name === p.replace(/\.$/, '') || name.startsWith(p)) && !own.has(head);
+  });
+  if (!carried.length) return String(sessionToml || '');
+  return `${String(sessionToml || '').replace(/\s*$/, '\n')}\n# ── 以下由 WebTmux 从 ~/.codex/config.toml 带过来（目录/钩子信任等本机状态）──\n${carried.map((b) => b.replace(/\s*$/, '')).join('\n\n')}\n`;
+}
+
+/**
  * 会话专属 CODEX_HOME 里要**链接到全局 ~/.codex** 的项：对话记录、规则、技能、钩子、MCP/插件配置。
  *
  * 为什么（2026-09-26 实测）：CODEX_HOME 换成会话目录后，codex 在那里找对话记录，

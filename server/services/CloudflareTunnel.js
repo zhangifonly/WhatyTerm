@@ -152,7 +152,7 @@ class CloudflareTunnel {
 
             // 通知前端
             if (this.io) {
-              this.io.emit('tunnel:connected', { url: this.tunnelUrl });
+              this.io.emit('tunnel:connected', { url: this.tunnelUrl, type: 'cloudflare' });
             }
 
             resolve(this.tunnelUrl);
@@ -186,9 +186,9 @@ class CloudflareTunnel {
         this.process = null;
         this.tunnelUrl = '';
 
-        // 通知前端断开
+        // 通知前端断开 —— 必须带 type：FRP 在用时这条只是备用，前端据此不清掉 FRP 的地址
         if (this.io) {
-          this.io.emit('tunnel:disconnected');
+          this.io.emit('tunnel:disconnected', { type: 'cloudflare' });
         }
       });
 
@@ -212,8 +212,9 @@ class CloudflareTunnel {
       this.process = null;
       this.tunnelUrl = '';
 
-      // 清空配置中的 URL
-      this._saveTunnelUrl('');
+      // 清空配置中的 URL —— 只清自己存的那条：FRP 与它共用 tunnelUrl 字段，
+      // 并行启动时 FRP 已先存好地址，无条件写空会把 FRP 的地址也抹掉
+      this._clearSavedUrlIfMine();
     }
   }
 
@@ -244,6 +245,17 @@ class CloudflareTunnel {
   /**
    * 保存隧道 URL 到配置文件
    */
+  /** 配置里存的仍是 Cloudflare 地址才清空（被 FRP 覆盖过就不动） */
+  _clearSavedUrlIfMine() {
+    try {
+      if (!existsSync(SETTINGS_PATH)) return;
+      const settings = JSON.parse(readFileSync(SETTINGS_PATH, 'utf-8'));
+      if (/\.trycloudflare\.com/i.test(String(settings.tunnelUrl || ''))) this._saveTunnelUrl('');
+    } catch (err) {
+      console.error('[CloudflareTunnel] 清理保存的 URL 失败:', err.message);
+    }
+  }
+
   _saveTunnelUrl(url) {
     try {
       let settings = {};

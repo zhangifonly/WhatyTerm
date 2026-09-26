@@ -221,7 +221,7 @@ import crashReporter from './services/CrashReporter.js';
 import sleepPrevention from './services/SleepPreventionService.js';
 import PuppeteerReaper from './services/PuppeteerReaper.js';
 import { sessionClaudeEnv, relayMigrationPlan, OAUTH_PROVIDER_INFO } from './services/sessionProviderEnv.js';
-import { withBearerToken, topProvider, codexStartCommand, linkSharedCodexEntries } from './services/codexSessionConfig.js';
+import { withBearerToken, topProvider, codexStartCommand, linkSharedCodexEntries, withCarriedTables } from './services/codexSessionConfig.js';
 import { CodexExecTextClient } from './services/CodexExecText.js';
 import { LongRunService } from './services/LongRunService.js';
 import pricingTable from './services/usage/PricingTable.js';
@@ -6603,7 +6603,10 @@ function applySessionProviderInfo(session, appType, info) {
       // 自定义供应商（requires_openai_auth=false）不读 auth.json：密钥要写进供应商表的 experimental_bearer_token，
       // 否则请求不带密钥 → 401 API_KEY_REQUIRED（见 codexSessionConfig.js）
       const apiKey = sc.auth?.OPENAI_API_KEY || sc.auth?.CODEX_API_KEY || '';
-      const tokenized = withBearerToken(sc.config || '', apiKey);
+      // 目录/钩子信任等本机状态从全局带过来，否则 codex 一启动就卡在「审核钩子」「信任目录」弹窗上
+      let globalCodexToml = '';
+      try { globalCodexToml = readFileSync(path.join(os.homedir(), '.codex', 'config.toml'), 'utf8'); } catch { /* 没有全局配置 */ }
+      const tokenized = withBearerToken(withCarriedTables(sc.config || '', globalCodexToml), apiKey);
       if (sc.config) {
         const cfgPath = path.join(codexHome, 'config.toml');
         writeFileSync(cfgPath, tokenized.toml, { encoding: 'utf8', mode: 0o600 });

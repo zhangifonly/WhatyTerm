@@ -12,7 +12,7 @@ import os from 'os';
 import path from 'path';
 import http from 'http';
 import { spawn, spawnSync } from 'child_process';
-import { withBearerToken, topProvider, codexStartCommand, tomlString, sessionCodexHome, linkSharedCodexEntries } from '../server/services/codexSessionConfig.js';
+import { withBearerToken, topProvider, codexStartCommand, tomlString, sessionCodexHome, linkSharedCodexEntries, withCarriedTables } from '../server/services/codexSessionConfig.js';
 
 let pass = 0, fail = 0;
 const queue = [];
@@ -121,6 +121,22 @@ test('真实 codex：会话 CODEX_HOME 链接了全局对话记录后，resume �
   assert(!probe(false), '不链接也能找到 —— 测试没测到东西');
 });
 
+test('本机状态表从全局带过来：目录/钩子信任、功能开关；供应商表与顶层键以会话为准；会话已有的表不重复', () => {
+  const G = `model = "global-model"\nmodel_provider = "other"\n\n[model_providers.custom]\nbase_url = "https://global"\n\n[projects."/a"]\ntrust_level = "trusted"\n\n[features]\nhooks = true\n\n[hooks.state."/x:stop:0:0"]\ntrusted_hash = "sha256:1"\n`;
+  const out = withCarriedTables(CCS, G);
+  assert(out.includes('[features]') && out.includes('[hooks.state."/x:stop:0:0"]') && out.includes('trusted_hash = "sha256:1"'), '钩子信任没带过来');
+  assert((out.match(/^\[model_providers\.custom\]/gm) || []).length === 1 && !out.includes('https://global'), '全局的供应商表覆盖/混进了会话配置');
+  assert(!/global-model/.test(out) && topProvider(out) === 'custom', '全局顶层键混进来了');
+  // 会话自己的 CCS 里有 [projects."/x"]；全局也有同名表时不能再带一份（TOML 重复表头直接解析失败）
+  const dup = withCarriedTables(CCS, `[projects."/x"]\ntrust_level = "untrusted"\n`);
+  assert((dup.match(/^\[projects\."\/x"\]/gm) || []).length === 1 && !dup.includes('untrusted'), '会话已有的表被重复带了一份');
+  // 全局顶层键（第一张表之前）一个都不能带：它们在 TOML 里只能写在最前面，追加到末尾会落进上一张表
+  assert(!/^model = "global-model"/m.test(out) && !/model_provider = "other"/.test(out), '全局顶层键被带过来了');
+  assert(withCarriedTables(CCS, '') === CCS, '没有全局配置时应原样返回');
+  // 全局配置直接以表头开头（前面没有顶层键）：第一张表也要带
+  assert(withCarriedTables(CCS, '[features]\nhooks = true\n').includes('[features]'), '以表头开头的全局配置，第一张表被丢了');
+});
+
 /** 本地假供应商：记下请求带没带密钥 */
 function fakeProvider() {
   const hits = [];
@@ -154,9 +170,10 @@ test('接线：写会话配置时注入密钥并记下供应商名；切换后�
   const end = IDX.indexOf("} else if (appType === 'gemini') {", at);
   assert(at > 0 && end > at, '找不到会话级 codex 写入分支');
   const block = IDX.slice(at, end);
-  assert(/withBearerToken\(sc\.config \|\| '', apiKey\)/.test(block) && /tokenized\.toml/.test(block), '会话配置没注入密钥');
+  assert(/withBearerToken\([\s\S]{0,80}, apiKey\)/.test(block) && /tokenized\.toml/.test(block), '会话配置没注入密钥');
   assert(/providerKey: topProvider\(sc\.config \|\| ''\)/.test(block), '没记下供应商名，续接无法按当前供应商');
   assert(/linkSharedCodexEntries\(codexHome\)/.test(block), '会话 CODEX_HOME 没链接全局对话记录，换供应商后接不回原对话');
+  assert(/withBearerToken\(withCarriedTables\(sc\.config \|\| '', globalCodexToml\), apiKey\)/.test(block), '会话配置没带上全局的信任状态，codex 启动会卡在审核钩子弹窗');
   assert(/chmodSync\(cfgPath, 0o600\)/.test(block), '已有配置文件不会被改成仅自己可读（writeFileSync 的 mode 只对新文件生效）');
   assert(/session\.codexProvider = \{ \.\.\.snap, providerKey:/.test(IDX), '切换后落库的快照丢了 providerKey');
   assert(/const check = await verifyCodexHome\(r\.providerEnv\.CODEX_HOME\);\s*if \(!check\.ok\) \{[\s\S]{0,200}provider:switchError[\s\S]{0,200}return;/.test(IDX), '切换后没验证或失败仍报完成');

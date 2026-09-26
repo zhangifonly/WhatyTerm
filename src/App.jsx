@@ -35,6 +35,7 @@ import LongRunNewTask from './components/longrun/LongRunNewTask';
 import LongRunHandoffDialog from './components/longrun/LongRunHandoffDialog';
 import LongRunSwitchDialog from './components/longrun/LongRunSwitchDialog';
 import { orderSessions, sessionNumbers as computeSessionNumbers, nextSortMode, longRunWaitingIds, autoRunIds, SORT_LABELS } from './utils/sessionSort.js';
+import { nextTunnelView } from './utils/tunnelState.js';
 import './components/longrun/LongRun.css';
 import './components/longrun/LongRunEntries.css';
 import { registerOsc52, writeClipboard } from './terminalClipboard';
@@ -672,14 +673,16 @@ export default function App() {
       .catch(err => console.error('加载订阅状态失败:', err));
 
     // 监听 Cloudflare Tunnel 连接事件（自动获取免费域名）
+    // 两条隧道（FRP 固定域名 / Cloudflare 随机域名）共用这两个事件：断开只清掉当前显示的那条，
+    // 否则启动时 FRP 成功、停掉备用的 Cloudflare，它的「已断开」会把 📱 按钮一起抹掉（见 tunnelState.js）
     socket.on('tunnel:connected', (data) => {
-      console.log('[Tunnel] 已连接:', data.url);
-      setTunnelUrl(data.url);
+      console.log('[Tunnel] 已连接:', data?.type || '', data?.url);
+      setTunnelUrl((cur) => nextTunnelView({ url: cur }, { kind: 'connected', url: data?.url, type: data?.type }).url);
     });
 
-    socket.on('tunnel:disconnected', () => {
-      console.log('[Tunnel] 已断开');
-      setTunnelUrl('');
+    socket.on('tunnel:disconnected', (data) => {
+      console.log('[Tunnel] 已断开:', data?.type || '（未标类型）');
+      setTunnelUrl((cur) => nextTunnelView({ url: cur }, { kind: 'disconnected', type: data?.type }).url);
     });
 
     // 加载历史 AI 操作日志
