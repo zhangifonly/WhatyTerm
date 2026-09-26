@@ -12,7 +12,7 @@ import os from 'os';
 import path from 'path';
 import http from 'http';
 import { spawn, spawnSync } from 'child_process';
-import { withBearerToken, topProvider, codexStartCommand, tomlString, sessionCodexHome } from '../server/services/codexSessionConfig.js';
+import { withBearerToken, topProvider, codexStartCommand, tomlString, sessionCodexHome, linkSharedCodexEntries } from '../server/services/codexSessionConfig.js';
 
 let pass = 0, fail = 0;
 const queue = [];
@@ -88,6 +88,39 @@ test('真实 shell：环境里没有 CODEX_HOME 的 shell 执行这条命令，c
   assert(/model: probe-model-from-session/.test(r.stdout), `codex 没读会话配置：${String(r.stdout).split('\n').filter((l) => /^model:|^provider:/.test(l)).join(' | ')}`);
 });
 
+test('共用数据：对话记录等链接到全局；会话目录里已有的真实文件不动；重复调用不重建；指向别处的旧链接改正', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-link-'));
+  const g = path.join(root, 'global'), h = path.join(root, 'home');
+  fs.mkdirSync(path.join(g, 'sessions'), { recursive: true }); fs.mkdirSync(path.join(g, 'rules')); fs.writeFileSync(path.join(g, 'history.jsonl'), '');
+  fs.mkdirSync(h); fs.mkdirSync(path.join(h, 'rules'));                  // 会话目录里已有真实的 rules
+  fs.symlinkSync('/nowhere', path.join(h, 'history.jsonl'));             // 指向别处的旧链接
+  const r1 = linkSharedCodexEntries(h, g);
+  assert(fs.readlinkSync(path.join(h, 'sessions')) === path.join(g, 'sessions'), '对话记录没链接到全局');
+  assert(fs.readlinkSync(path.join(h, 'history.jsonl')) === path.join(g, 'history.jsonl'), '旧链接没改正');
+  assert(!fs.lstatSync(path.join(h, 'rules')).isSymbolicLink() && r1.kept.includes('rules'), '覆盖了会话目录里的真实文件');
+  assert(!fs.existsSync(path.join(h, 'skills')), '全局没有的项不该建链接');
+  assert(linkSharedCodexEntries(h, g).linked.length === 0, '重复调用又重建了链接');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('真实 codex：会话 CODEX_HOME 链接了全局对话记录后，resume 能找到原来的对话（不链接则找不到）', () => {
+  const sessions = path.join(os.homedir(), '.codex', 'sessions');
+  const recent = spawnSync('/bin/zsh', ['-c', `ls -t ${sessions}/2026/*/*/rollout-*.jsonl 2>/dev/null | head -1`], { encoding: 'utf8' }).stdout.trim();
+  if (!recent) { console.log('   （本机没有 Codex 对话记录，跳过）'); return; }
+  const id = recent.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/)[1];
+  const probe = (link) => {
+    const h = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-resume-'));
+    fs.writeFileSync(path.join(h, 'config.toml'), 'model = "gpt-6-sol"\n');
+    if (link) linkSharedCodexEntries(h);
+    // exec resume：找不到对话会立即报 No saved session；找到了就会往下走（连不上供应商也无所谓，限时结束）
+    const r = spawnSync('codex', ['exec', '--skip-git-repo-check', 'resume', id, 'ok'], { env: { ...process.env, CODEX_HOME: h }, input: '', timeout: 8000, encoding: 'utf8', cwd: os.tmpdir() });
+    fs.rmSync(h, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    return !/No saved session|no rollout found|not found/i.test(`${r.stdout}${r.stderr}`);
+  };
+  assert(probe(true), '链接后仍找不到原来的对话');
+  assert(!probe(false), '不链接也能找到 —— 测试没测到东西');
+});
+
 /** 本地假供应商：记下请求带没带密钥 */
 function fakeProvider() {
   const hits = [];
@@ -116,10 +149,14 @@ test('真实 codex：注入后的配置能被 codex 解析，请求带上了密�
 
 const IDX = fs.readFileSync(new URL('../server/index.js', import.meta.url), 'utf8');
 test('接线：写会话配置时注入密钥并记下供应商名；切换后当场测试，失败就报错不说完成；各启动入口不连后台服务', () => {
+  // 切出整个 codex 分支（到下一个 gemini 分支为止），不用固定字符窗口 —— 分支里加几行就会把断言挤出窗口
   const at = IDX.indexOf('// 会话专属 CODEX_HOME');
-  const block = IDX.slice(at, at + 1600);
+  const end = IDX.indexOf("} else if (appType === 'gemini') {", at);
+  assert(at > 0 && end > at, '找不到会话级 codex 写入分支');
+  const block = IDX.slice(at, end);
   assert(/withBearerToken\(sc\.config \|\| '', apiKey\)/.test(block) && /tokenized\.toml/.test(block), '会话配置没注入密钥');
   assert(/providerKey: topProvider\(sc\.config \|\| ''\)/.test(block), '没记下供应商名，续接无法按当前供应商');
+  assert(/linkSharedCodexEntries\(codexHome\)/.test(block), '会话 CODEX_HOME 没链接全局对话记录，换供应商后接不回原对话');
   assert(/chmodSync\(cfgPath, 0o600\)/.test(block), '已有配置文件不会被改成仅自己可读（writeFileSync 的 mode 只对新文件生效）');
   assert(/session\.codexProvider = \{ \.\.\.snap, providerKey:/.test(IDX), '切换后落库的快照丢了 providerKey');
   assert(/const check = await verifyCodexHome\(r\.providerEnv\.CODEX_HOME\);\s*if \(!check\.ok\) \{[\s\S]{0,200}provider:switchError[\s\S]{0,200}return;/.test(IDX), '切换后没验证或失败仍报完成');

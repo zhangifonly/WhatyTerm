@@ -221,7 +221,7 @@ import crashReporter from './services/CrashReporter.js';
 import sleepPrevention from './services/SleepPreventionService.js';
 import PuppeteerReaper from './services/PuppeteerReaper.js';
 import { sessionClaudeEnv, relayMigrationPlan, OAUTH_PROVIDER_INFO } from './services/sessionProviderEnv.js';
-import { withBearerToken, topProvider, codexStartCommand } from './services/codexSessionConfig.js';
+import { withBearerToken, topProvider, codexStartCommand, linkSharedCodexEntries } from './services/codexSessionConfig.js';
 import { CodexExecTextClient } from './services/CodexExecText.js';
 import { LongRunService } from './services/LongRunService.js';
 import pricingTable from './services/usage/PricingTable.js';
@@ -6610,6 +6610,11 @@ function applySessionProviderInfo(session, appType, info) {
         try { chmodSync(cfgPath, 0o600); } catch { /* mode 只对新建文件生效，已有文件要显式改（里面有密钥） */ }
       }
       if (!tokenized.injected) console.log(`[applySessionProvider] Codex 未写入 bearer token：${tokenized.reason}`);
+      // 对话记录、规则、技能等与全局共用：否则换了 CODEX_HOME 就接不回原来的对话（见 linkSharedCodexEntries）
+      try {
+        const lk = linkSharedCodexEntries(codexHome);
+        if (lk.kept.length) console.log(`[applySessionProvider] Codex 会话目录已有自己的 ${lk.kept.join('、')}，未改为共用`);
+      } catch (e) { console.warn('[applySessionProvider] 链接共用 Codex 数据失败:', e.message); }
       setEnv('CODEX_HOME', codexHome);
       providerEnv.CODEX_HOME = codexHome;
       // providerKey：config.toml 顶层 model_provider。续接旧对话时用 -c 强制按它走（对话记录里存的是当时的供应商）

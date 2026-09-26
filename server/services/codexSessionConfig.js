@@ -12,7 +12,7 @@
  * CODEX_HOME）；续接带 `-c model_provider=<当前供应商>`，按现在选的供应商接回。
  */
 
-import { existsSync } from 'fs';
+import { existsSync, lstatSync, symlinkSync, readlinkSync, unlinkSync } from 'fs';
 import os from 'os';
 import path from 'path';
 
@@ -48,6 +48,37 @@ export function withBearerToken(toml, apiKey) {
   while (at > header + 1 && !lines[at - 1].trim()) at--;
   lines.splice(at, 0, `experimental_bearer_token = ${tomlString(apiKey)}`);
   return { toml: lines.join('\n'), injected: true, reason: '' };
+}
+
+/**
+ * 会话专属 CODEX_HOME 里要**链接到全局 ~/.codex** 的项：对话记录、规则、技能、钩子、MCP/插件配置。
+ *
+ * 为什么（2026-09-26 实测）：CODEX_HOME 换成会话目录后，codex 在那里找对话记录，
+ * `codex resume <id>` 报「No saved session found」—— 一换供应商就接不回原来的对话；规则与技能也全丢。
+ * 只有 config.toml / auth.json（供应商与密钥）是会话自己的，其余与全局共用。
+ * 数据库类（state_5.sqlite、thread_history_1.sqlite 等）不链接：codex 运行时自己建，多个进程共写一份会互相锁住。
+ */
+export const SHARED_CODEX_ENTRIES = ['sessions', 'session_index.jsonl', 'history.jsonl', 'rules', 'skills', 'hooks.json', 'memories', 'plugins', 'prompts', 'AGENTS.md'];
+
+/**
+ * 在会话 CODEX_HOME 里建指向全局的链接。已存在的真实文件/目录不动（可能是 codex 在会话目录里新建的，删了会丢数据）；
+ * 全局里没有的项跳过。
+ * @returns {{linked: string[], kept: string[]}}
+ */
+export function linkSharedCodexEntries(codexHome, globalHome = path.join(os.homedir(), '.codex'), fsx = { existsSync, lstatSync, symlinkSync, readlinkSync, unlinkSync }) {
+  const linked = [], kept = [];
+  for (const name of SHARED_CODEX_ENTRIES) {
+    const src = path.join(globalHome, name), dst = path.join(codexHome, name);
+    if (!fsx.existsSync(src)) continue;
+    let st = null;
+    try { st = fsx.lstatSync(dst); } catch { /* 不存在 */ }
+    if (st && !st.isSymbolicLink()) { kept.push(name); continue; }
+    if (st && fsx.readlinkSync(dst) === src) continue;
+    if (st) fsx.unlinkSync(dst);          // 指向别处的旧链接
+    fsx.symlinkSync(src, dst);
+    linked.push(name);
+  }
+  return { linked, kept };
 }
 
 /** 会话专属 CODEX_HOME（与 index.js applySessionProviderInfo 写入的位置一致） */
