@@ -70,7 +70,7 @@ import { Server } from 'socket.io';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 // Trigger restart
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, unlinkSync, watch, statSync, readdirSync, openSync, readSync, closeSync, promises as fsp } from 'fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, unlinkSync, chmodSync, watch, statSync, readdirSync, openSync, readSync, closeSync, promises as fsp } from 'fs';
 import session from 'express-session';
 import crypto from 'crypto';
 import { execSync, spawnSync, exec as execCb } from 'child_process';
@@ -6599,7 +6599,11 @@ function applySessionProviderInfo(session, appType, info) {
       // 否则请求不带密钥 → 401 API_KEY_REQUIRED（见 codexSessionConfig.js）
       const apiKey = sc.auth?.OPENAI_API_KEY || sc.auth?.CODEX_API_KEY || '';
       const tokenized = withBearerToken(sc.config || '', apiKey);
-      if (sc.config) writeFileSync(path.join(codexHome, 'config.toml'), tokenized.toml, { encoding: 'utf8', mode: 0o600 });
+      if (sc.config) {
+        const cfgPath = path.join(codexHome, 'config.toml');
+        writeFileSync(cfgPath, tokenized.toml, { encoding: 'utf8', mode: 0o600 });
+        try { chmodSync(cfgPath, 0o600); } catch { /* mode 只对新建文件生效，已有文件要显式改（里面有密钥） */ }
+      }
       if (!tokenized.injected) console.log(`[applySessionProvider] Codex 未写入 bearer token：${tokenized.reason}`);
       setEnv('CODEX_HOME', codexHome);
       providerEnv.CODEX_HOME = codexHome;
@@ -9537,7 +9541,8 @@ ${terminalContext ? terminalContext : '（无）'}
             isOAuth: !!info.isOAuth,
           };
           if (type === 'claude') session.claudeProvider = snap;
-          else if (type === 'codex') session.codexProvider = snap;
+          // 保留 applySessionProvider 记下的 providerKey：续接旧对话时靠它按当前供应商接回
+          else if (type === 'codex') session.codexProvider = { ...snap, providerKey: session.codexProvider?.providerKey || topProvider(info.settingsConfig?.config || '') };
           else if (type === 'gemini') session.geminiProvider = snap;
           sessionManager.updateSession(session);
         }

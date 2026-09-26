@@ -84,7 +84,9 @@ test('真实 codex：注入后的配置能被 codex 解析，请求带上了密�
     const t = setTimeout(() => p.kill('SIGKILL'), 25000);
     p.on('exit', () => { clearTimeout(t); res(); });
   });
-  fp.close(); fs.rmSync(home, { recursive: true, force: true });
+  fp.close();
+  // codex 被杀后它的后台线程可能还在往 CODEX_HOME 写数据库，删目录偶尔撞上 ENOTEMPTY：清理失败不影响结论
+  try { fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch { /* 临时目录，系统会清 */ }
   assert(fp.hits.length > 0, '请求没打到会话配置的地址');
   assert(fp.hits.every((h) => h === 'Bearer sk-probe-123'), `请求没带对密钥：${JSON.stringify(fp.hits.slice(0, 2))}`);
 });
@@ -95,6 +97,8 @@ test('接线：写会话配置时注入密钥并记下供应商名；切换后�
   const block = IDX.slice(at, at + 1600);
   assert(/withBearerToken\(sc\.config \|\| '', apiKey\)/.test(block) && /tokenized\.toml/.test(block), '会话配置没注入密钥');
   assert(/providerKey: topProvider\(sc\.config \|\| ''\)/.test(block), '没记下供应商名，续接无法按当前供应商');
+  assert(/chmodSync\(cfgPath, 0o600\)/.test(block), '已有配置文件不会被改成仅自己可读（writeFileSync 的 mode 只对新文件生效）');
+  assert(/session\.codexProvider = \{ \.\.\.snap, providerKey:/.test(IDX), '切换后落库的快照丢了 providerKey');
   assert(/const check = await verifyCodexHome\(r\.providerEnv\.CODEX_HOME\);\s*if \(!check\.ok\) \{[\s\S]{0,200}provider:switchError[\s\S]{0,200}return;/.test(IDX), '切换后没验证或失败仍报完成');
   const reg = fs.readFileSync(new URL('../server/services/CliRegistry.js', import.meta.url), 'utf8');
   assert(/start: 'codex --no-daemon resume --last'/.test(reg), '注册表的 codex 启动命令还会连后台服务');
