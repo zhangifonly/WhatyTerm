@@ -42,7 +42,8 @@ const DEFAULT_CLI_TOOLS = {
       confirm: ['Do you want to proceed', '1\\.\\s*Yes']
     },
     commands: {
-      start: 'codex',
+      // 重建会话 / 退回 shell 后续接上次对话；不连共享后台服务（见 server/services/codexSessionConfig.js）
+      start: 'codex --no-daemon resume --last',
       quit: '/quit'
     },
     builtin: true,

@@ -64,7 +64,9 @@ console.log('[AIEngine] 不使用代理，直连 API');
 function getCliCommand(aiType) {
   const commands = {
     'claude': 'claude -c',
-    'codex': 'codex',
+    // 退回 shell 后接着上次对话；--no-daemon：不连共享后台服务（它按自己启动时的配置发请求，
+    // 会话级 CODEX_HOME 对它无效，见 codexSessionConfig.js）
+    'codex': 'codex --no-daemon resume --last',
     'gemini': 'gemini',
     'droid': 'droid',
     'opencode': 'opencode',

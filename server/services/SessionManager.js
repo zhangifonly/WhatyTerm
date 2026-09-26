@@ -10,6 +10,7 @@ import path from 'path';
 const execAsync = promisify(exec);
 import os from 'os';
 import { claudeStartCommand } from './sessionMode.js';
+import { codexStartCommand } from './codexSessionConfig.js';
 import { probeTmuxSession, confirmTmuxGone } from './tmuxGone.js';
 import fs from 'fs';
 
@@ -1387,6 +1388,7 @@ export class SessionManager {
               origin: row.origin || null,
               claudeSessionId: row.claude_session_id || null,
               workingDir: row.working_dir || '',   // 按 id 精确续接要找对话记录文件（见 claudeStartCommand）
+              codexProvider: (() => { try { return row.codex_provider ? JSON.parse(row.codex_provider) : null; } catch { return null; } })(),
             });
           }
         }
@@ -1503,6 +1505,8 @@ export class SessionManager {
         } catch {}
         // 来自长程的会话用 --resume（-c 找不到 claude -p 跑出的会话）
         if ((item.aiType || 'claude') === 'claude') startCmd = claudeStartCommand(item, startCmd);
+        // Codex：按会话当前选的供应商接回（对话记录里存的是当时的供应商，不覆盖就沿用旧的）
+        if (item.aiType === 'codex') startCmd = codexStartCommand(item, { resume: true });
         const tmuxCmd = getTmuxPrefix();
         try {
           execSync(`${tmuxCmd} send-keys -t "${item.tmuxSessionName}" ${JSON.stringify(startCmd)}`, { stdio: 'ignore' });

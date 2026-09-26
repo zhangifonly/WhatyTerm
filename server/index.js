@@ -221,6 +221,8 @@ import crashReporter from './services/CrashReporter.js';
 import sleepPrevention from './services/SleepPreventionService.js';
 import PuppeteerReaper from './services/PuppeteerReaper.js';
 import { sessionClaudeEnv, relayMigrationPlan, OAUTH_PROVIDER_INFO } from './services/sessionProviderEnv.js';
+import { withBearerToken, topProvider, codexStartCommand } from './services/codexSessionConfig.js';
+import { CodexExecTextClient } from './services/CodexExecText.js';
 import { LongRunService } from './services/LongRunService.js';
 import pricingTable from './services/usage/PricingTable.js';
 import { AutoPricing } from './services/usage/AutoPricing.js';
@@ -6527,6 +6529,22 @@ function applySessionProvider(session, appType, providerId) {
   return applySessionProviderInfo(session, appType, info);
 }
 
+/**
+ * 用某个 CODEX_HOME 真发一次最小请求，确认供应商地址与密钥都能用。
+ * @returns {Promise<{ok:boolean, error?:string}>}
+ */
+async function verifyCodexHome(codexHome) {
+  try {
+    const client = new CodexExecTextClient({ timeoutMs: 60000, env: { ...process.env, CODEX_HOME: codexHome } });
+    await client.complete('你是连通性测试。只回复 ok。', 'ok');
+    return { ok: true };
+  } catch (e) {
+    // 只取报错里最能说明问题的一段：401 / 连不上 / 模型不存在
+    const m = String(e.message).match(/(unexpected status \d+[^,]*|API_KEY_REQUIRED|Unauthorized|error sending request[^,]*|model[^,]{0,60}not[^,]{0,40})/i);
+    return { ok: false, error: (m ? m[0] : e.message).slice(0, 200) };
+  }
+}
+
 /** applySessionProvider 的写入部分：info 已解析好（迁移旧配置时也用它，见 migrateSessionsOffRelay） */
 function applySessionProviderInfo(session, appType, info) {
   const workdir = session.workingDir;
@@ -6577,10 +6595,16 @@ function applySessionProviderInfo(session, appType, info) {
       if (!existsSync(codexHome)) mkdirSync(codexHome, { recursive: true });
       const sc = info.settingsConfig;
       if (sc.auth) writeFileSync(path.join(codexHome, 'auth.json'), JSON.stringify(sc.auth, null, 2), 'utf8');
-      if (sc.config) writeFileSync(path.join(codexHome, 'config.toml'), sc.config, 'utf8');
+      // 自定义供应商（requires_openai_auth=false）不读 auth.json：密钥要写进供应商表的 experimental_bearer_token，
+      // 否则请求不带密钥 → 401 API_KEY_REQUIRED（见 codexSessionConfig.js）
+      const apiKey = sc.auth?.OPENAI_API_KEY || sc.auth?.CODEX_API_KEY || '';
+      const tokenized = withBearerToken(sc.config || '', apiKey);
+      if (sc.config) writeFileSync(path.join(codexHome, 'config.toml'), tokenized.toml, { encoding: 'utf8', mode: 0o600 });
+      if (!tokenized.injected) console.log(`[applySessionProvider] Codex 未写入 bearer token：${tokenized.reason}`);
       setEnv('CODEX_HOME', codexHome);
       providerEnv.CODEX_HOME = codexHome;
-      session.codexProvider = { id: info.provider.id, name: info.provider.name };
+      // providerKey：config.toml 顶层 model_provider。续接旧对话时用 -c 强制按它走（对话记录里存的是当时的供应商）
+      session.codexProvider = { id: info.provider.id, name: info.provider.name, providerKey: topProvider(sc.config || '') };
     } else if (appType === 'gemini') {
       // 项目级 .gemini（实现时验证 gemini 是否读取；至少 env 经 tmux/spawn 生效）
       const gdir = path.join(workdir, '.gemini');
@@ -9531,7 +9555,19 @@ ${terminalContext ? terminalContext : '（无）'}
       const restartResult = null;
 
       const name = resolveProviderInfo(type, providerId)?.provider?.name || providerId;
-      const doneMsg = type === 'claude' ? '已写入，CLI 几秒内自动切换（无需重启）' : '切换完成';
+      // Codex：写完当场用会话自己的 CODEX_HOME 真发一次请求，401 / 连不上就如实报错，不说「切换完成」。
+      // 以前只写文件不验证，密钥没写进 codex 会读的位置，一直 401 却显示切换成功（2026-09-26 iSpring）
+      if (type === 'codex' && r.providerEnv?.CODEX_HOME) {
+        emit('VERIFYING', '正在用新配置发一次测试请求...', 85);
+        const check = await verifyCodexHome(r.providerEnv.CODEX_HOME);
+        if (!check.ok) {
+          socket.emit('provider:switchError', { sessionId, error: `配置已写入，但测试请求失败：${check.error}` });
+          console.warn(`[Provider Switch] ${session.name} -> ${name} 测试请求失败: ${check.error}`);
+          return;
+        }
+      }
+      const doneMsg = type === 'claude' ? '已写入，CLI 几秒内自动切换（无需重启）'
+        : type === 'codex' ? '测试请求已通过；在跑的 Codex 需重新启动才会用新供应商' : '切换完成';
       emit('DONE', doneMsg, 100);
       socket.emit('provider:switchComplete', {
         sessionId, providerId, providerName: name, needRestart, restartResult,
