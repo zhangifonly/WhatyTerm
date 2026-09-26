@@ -229,6 +229,7 @@ import { AutoPricing } from './services/usage/AutoPricing.js';
 import { PushService, hostOf } from './services/PushService.js';
 import { LongRunPushNotifier } from './services/longrunPush.js';
 import childRegistry from './services/ChildRegistry.js';
+import { classifyApiErrorScreen } from './services/apiErrorGate.js';
 
 // 上一次异常退出（SIGKILL / OOM / 被上层进程连坐）留下的孤儿子进程：必须在任何 spawn 之前清掉，
 // 否则 frpc 报 proxy already exists、caffeinate 双开（一直阻止休眠）。见 ChildRegistry.js 顶部说明
@@ -4548,7 +4549,11 @@ async function runBackgroundAutoAction() {
     const baseCooldown = 5 * 60 * 1000;
     const fixCooldown = baseCooldown * Math.pow(2, Math.min(fixAttempts, 3));
     const canFix = now - lastFixTime > fixCooldown;
-    const hasApiError = claudeSessionFixer.detectApiError(terminalContent);
+    // 只认 CLI 自己停在屏幕末尾的「删 thinking 块能修好」的 API 错误（见 apiErrorGate.js）。
+    // 原来在整屏回滚里拼接找关键词，正文里的 Unexpected token … content-type 就会命中，
+    // 好好在跑的会话被反复 /quit、改写对话记录、重启（2026-09-26 phyviz 4 次）
+    const apiErrorVerdict = classifyApiErrorScreen(terminalContent);
+    const hasApiError = apiErrorVerdict.fixable;
 
     // 检测 Settings Error 并自动修复（带冷却时间防止重复）
     const settingsError = claudeSessionFixer.detectSettingsError(terminalContent);
@@ -4574,7 +4579,7 @@ async function runBackgroundAutoAction() {
 
     // 调试日志
     if (hasApiError) {
-      console.log(`[错误检测] 会话 ${session.name}: 检测到API错误, CLI=${cliDetection.cli || 'none'}(${cliDetection.method}), canFix=${canFix}, fixAttempts=${fixAttempts}, cooldown=${fixCooldown/60000}分钟, autoAction=${sessionData.autoActionEnabled}`);
+      console.log(`[错误检测] 会话 ${session.name}: 检测到可修复的 API 错误「${apiErrorVerdict.line.slice(0, 120)}」, CLI=${cliDetection.cli || 'none'}(${cliDetection.method}), canFix=${canFix}, fixAttempts=${fixAttempts}, cooldown=${fixCooldown/60000}分钟, autoAction=${sessionData.autoActionEnabled}`);
     }
 
     // 如果修复次数过多（3次以上），延长冷却时间但不关闭自动开关
@@ -4633,21 +4638,10 @@ async function runBackgroundAutoAction() {
           startTime: now
         };
 
-        // 步骤1: 发送 /quit 退出 Claude Code
+        // 步骤1: 发送 /quit 退出 Claude Code —— 与自动「继续」同一套发送：确认进了输入框再回车，
+        // 进不去就标「发送未生效」。原来 send-keys 后不核对，没落地就干等 2 分钟超时（屏上一串修复提示）
         console.log(`[错误修复] 会话 ${session.name}: 步骤1 - 发送 /quit 退出 Claude Code`);
-        try {
-          execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" "/quit"`);
-          setTimeout(() => {
-            try {
-              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" Enter`);
-            } catch (e) {
-              session.write('\r');
-            }
-          }, 100);
-        } catch (e) {
-          session.write('/quit');
-          setTimeout(() => session.write('\r'), 100);
-        }
+        sendTextWithLanding(session, '/quit');
 
         historyLogger.log(session.id, {
           type: 'system',
@@ -4794,21 +4788,9 @@ async function runBackgroundAutoAction() {
       // 延迟发送"继续"，等待 Claude Code 完全启动
       const tmuxSession = session.tmuxSessionName;
       setTimeout(() => {
-        try {
-          // 使用分开发送的方式（模拟人工输入）
-          execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" "继续"`);
-          setTimeout(() => {
-            try {
-              execSync(`${getTmuxPrefix()} send-keys -t "${tmuxSession}" Enter`);
-            } catch (e) {
-              session.write('\r');
-            }
-          }, 100);
-          console.log(`[错误修复] 会话 ${session.name}: 已发送"继续"命令`);
-        } catch (e) {
-          session.write('继续');
-          setTimeout(() => session.write('\r'), 100);
-        }
+        // 确认「继续」进了输入框再回车（同自动继续）；1 秒时 CLI 可能还没画出输入框，没落地会重打一次
+        sendTextWithLanding(session, '继续');
+        console.log(`[错误修复] 会话 ${session.name}: 已发送"继续"命令`);
       }, 1000);  // 等待 1 秒让 Claude Code 完全启动
 
       historyLogger.log(session.id, {
@@ -5811,9 +5793,12 @@ async function runBackgroundAutoActionGuarded() {
 // 每 1 秒检查一次（实际检测由 sessionCheckState 控制，支持爆发模式的 3 秒间隔）
 setInterval(runBackgroundAutoActionGuarded, 1000);
 
-// 主动扫描修复会话文件：每 30 分钟扫描一次，在错误发生前清理 thinking 块和空 text 块
+// 主动扫描修复会话文件：**已停用**（2026-09-26）。
+// 它每 30 分钟把近 7 天所有对话记录里的 thinking 块删掉 —— 包括 Claude Code 正在写的那一份
+//（当天改写 191 次，WebOffice/RustCandance/Hitech 各三十多次）。近一个月没有一次真实的 thinking 类错误需要它；
+// 真出现时由上面的错误检测按屏幕末尾的报错单独修那一个会话。设 WEBTMUX_PROACTIVE_THINKING_SCAN=1 可临时恢复。
 let lastProactiveScanTime = 0;
-setInterval(async () => {
+if (process.env.WEBTMUX_PROACTIVE_THINKING_SCAN === '1') setInterval(async () => {
   const now = Date.now();
   if (now - lastProactiveScanTime < 30 * 60 * 1000) return;
   lastProactiveScanTime = now;

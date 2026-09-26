@@ -1,0 +1,21 @@
+⏺ 修了两处误报：
+
+  manifest 的误报。静态站点把缺失路径回落到 index.html，未生成音频的语言返回 200 + HTML，json() 抛 Unexpected token '<' ——
+  每个页面报一条 error，把真故障埋掉。
+
+⏺ Bash(node scripts/check-pages.mjs 2>&1 | tail -20)
+  ⎿  ERR  /zh/lesson/3  SyntaxError: Unexpected token '<', "<!DOCTYPE "... is not valid JSON
+     14 +  page.on('console', (m) => m.type() === 'error' && errs.push(m.text().slice(0, 140)))
+     15 +  const ct = res.headers()['content-type'] || ''
+
+  加了 content-type 判定，降级逻辑本来是对的。另外 thinking 过程里提到的 invalid block 已经处理。
+
+✻ Cogitated for 7m 27s · done 23:34
+
+[38;5;174m✻[39m [38;5;174mInferring… [38;5;246m(23m 9s · ↓[39m [38;5;246m25.5k tokens)[39m
+[38;5;246m  ⎿  Tip: Connect Claude to your IDE · /ide[39m
+
+[38;5;244m─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;5;246m❯ [39m
+[38;5;244m─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;220m⏵⏵ auto mode on[38;5;246m (shift+tab to cycle) · esc to interrupt · ← 6 agents[39m
