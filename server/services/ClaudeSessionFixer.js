@@ -278,8 +278,9 @@ class ClaudeSessionFixer {
       await fs.copyFile(filepath, backupPath);
       console.log(`[ClaudeSessionFixer] 已创建备份: ${backupPath}`);
 
-      // 读取文件
+      // 读取文件（记下读时的大小：写回前核对，防止 CLI 在这期间追加的记录被覆盖掉）
       const content = await fs.readFile(filepath, 'utf-8');
+      const sizeAtRead = Buffer.byteLength(content, 'utf-8');
       const lines = content.split('\n');
 
       let removedCount = 0;
@@ -380,8 +381,17 @@ class ClaudeSessionFixer {
         fixedLines.push(JSON.stringify(data) + '\n');
       }
 
-      // 写回文件
-      await fs.writeFile(filepath, fixedLines.join(''), 'utf-8');
+      // 写回文件。⚠ 2026-09-26 实测：CLI 还在写的时候整份读出再整份写回，读与写之间 CLI 追加的记录会被覆盖，
+      // 对话链断在那一处（当天 134 处，58 个 tool_use 丢失）。所以：大小变了就放弃（交给下次、或 CLI 退出后再修），
+      // 写临时文件再原子替换，不会留下写了一半的文件
+      const sizeNow = (await fs.stat(filepath)).size;
+      if (sizeNow !== sizeAtRead) {
+        console.warn(`[ClaudeSessionFixer] 读取后文件又被写入（${sizeAtRead} → ${sizeNow} 字节），CLI 还在运行，放弃本次改写`);
+        return { success: false, error: 'CLI 正在写这份对话记录，已放弃改写（请在 CLI 退出后再修）', skippedBusy: true };
+      }
+      const tmpPath = `${filepath}.fixing-${process.pid}`;
+      await fs.writeFile(tmpPath, fixedLines.join(''), 'utf-8');
+      await fs.rename(tmpPath, filepath);
       if (relinkedCount > 0) {
         console.log(`[ClaudeSessionFixer] 重链 ${relinkedCount} 条记录的 parentUuid，保持对话链完整`);
       }
