@@ -10,7 +10,7 @@
  * 还是没有 → **不按回车**（按了也只是提交空输入框或别的东西），返回未落地，由调用方标记会话。
  */
 
-import { promptPendingText, stripPromptSuggestion } from './promptState.js';
+import { promptInputText, stripPromptSuggestion } from './promptState.js';
 
 const stripAnsi = (s) => String(s || '').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
 
@@ -19,10 +19,13 @@ const stripAnsi = (s) => String(s || '').replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').
  * screen 要带颜色码（capture-pane -e）：先去掉暗色的建议文字 —— 它剥了颜色码就和打进去的字分不开。
  */
 export function pendingCount(screen, text) {
-  const pending = promptPendingText(stripAnsi(stripPromptSuggestion(String(screen || ''))));
+  // 取输入框完整内容（含折行续写）：长指令会折成好几行，只看提示符那一行永远对不上
+  const pending = promptInputText(stripAnsi(stripPromptSuggestion(String(screen || ''))));
   if (pending === null) return -1;
   if (!text) return 0;
-  return pending.split(text).length - 1;
+  // 比对前抹掉所有空白：折行处的空格有没有、有几个，终端和原文不一定一致
+  const squash = (x) => String(x).replace(/\s+/g, '');
+  return squash(pending).split(squash(text)).length - 1;
 }
 
 /**

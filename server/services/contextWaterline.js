@@ -213,15 +213,24 @@ export function decideWaterlinePhase({ usedPercent, isIdle, phase = 'idle', memo
   const keep = (level, reason, nextPhase = phase) => ({ level, nextPhase, usedPercent: pct, reason });
 
   if (mode === 'off') return keep('none', '水位交接已关闭', 'idle');
-  if (pct === null) return keep('none', '无水位读数', phase);
 
   // compact_sent 阶段先于水位检查处理：/compact 一旦成功，水位必然回落到安全区，
   // 但闭环还差最后一步「先读 MEMORY.md 再续」的恢复指令。若被下面的回落复位拦截，
   // resume 永远发不出去——所以这一步单独前置（warn 模式除外，见 mode 判定在其后仍会拦）。
+  // ⚠ 也必须先于「无读数」：Claude Code 只在快满时才在底栏显示百分比，压缩成功后这行字就没了 ——
+  //   放在无读数判断之后，恢复指令永远发不出去（2026-09-26 Hitech 一直停在 compact_sent）
   if (mode === 'auto' && phase === 'compact_sent') {
     if (isCompacting) return keep('warn', '压缩进行中，等待结束', 'compact_sent');
     if (isIdle) return keep('resume', '压缩已结束，发恢复指令（先读 MEMORY.md 再续）', 'resumed');
     return keep('warn', '压缩已结束，等空闲发恢复指令', 'compact_sent');
+  }
+
+  if (pct === null) {
+    // 恢复之后读数消失 = 上下文已回落到底栏不显示的程度：闭环完成，复位。
+    // 原来原地不动，停在 resumed 永不复位 —— 下次再满时状态机认为「已恢复、等回落」，不再发收尾指令
+    //（WebOffice / RustCandance / ChemAIForge / phyviz / BiologyintheAIEra 都卡在这里）
+    if (phase === 'resumed') return keep('none', '恢复后已无水位读数（上下文已回落），闭环完成', 'idle');
+    return keep('none', '无水位读数', phase);
   }
 
   // 水位回落到安全区（多半刚发生过压缩）：无条件复位，闭环可重新开始。

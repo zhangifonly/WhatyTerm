@@ -225,31 +225,21 @@ test('记忆判据：真的写完了要认（中英文各形态）', () => {
 // 这条锁的是 index.js 的代码结构，不是纯函数行为。老实现在决策处就翻阶段，
 // 而决策点与发送点之间有 5 处 continue，被拦掉就丢步且阶段已推进 →
 // 3 轮兜底放行 → 记忆一字未写就 /compact。防的就是有人把赋值挪回去。
-test('结构：_waterlinePhase 的写入必须都在五处 continue 出口之后（提议+确认两段式）', async () => {
+test('结构：阶段只在发送「确认落地」之后推进（v1.4.68：唯一写入点 landWaterlinePhase，由落地回调调用）', async () => {
+  // 旧设计是「决策处提议 → 公共尾巴处落地」，但公共尾巴只是「调用了发送」的同步点，发送本身异步核对：
+  // 收尾指令一次都没进输入框，阶段照样翻成 handoff_sent（2026-09-26 五个会话）。现在只有落地回调能推进
   const fs = await import('node:fs');
-  const src = fs.readFileSync('server/index.js', 'utf8').split('\n');
-  const lineOf = (pred) => src.reduce((acc, l, i) => (pred(l) ? [...acc, i + 1] : acc), []);
-  // 提议点：决策处只挂 _waterlineNextPhase，不写 _waterlinePhase
-  const proposeLines = lineOf((l) => l.includes('_waterlineNextPhase:'));
-  assert(proposeLines.length === 1, `提议点应恰好 1 处，实际 ${proposeLines.length}`);
-  // 真正的写入点（排除注释行）
-  const writeLines = lineOf((l) => /session\._waterlinePhase\s*=/.test(l) && !/^\s*\/\//.test(l.trim()));
-  assert(writeLines.length === 2, `写入点应恰好 2 处（compact 直发 + 文本发送），实际 ${writeLines.length}: ${writeLines}`);
-  // 每个写入点都必须晚于提议点——即"先提议、后落地"
-  for (const w of writeLines) {
-    assert(w > proposeLines[0], `写入点 ${w} 早于提议点 ${proposeLines[0]}，阶段又回到"先翻后发"了`);
-  }
-  // 落地点必须紧跟发送后的落账公共尾巴。lastActionMap.set 有三处
-  //（preAnalyze / ai_cache / ai 三条发送路径），水位只改写 preResult，
-  // 而 preResult 非空时走的就是 preAnalyze 那条，所以只需一个落地点，
-  // 但它必须真的贴着某个落账点——取最近的那个比较。
-  const commitTails = lineOf((l) => l.includes('lastActionMap.set(session.id'));
-  assert(commitTails.length >= 1, '找不到 lastActionMap.set 落账点');
-  const textCommit = writeLines[writeLines.length - 1];
-  const nearest = commitTails.reduce((a, b) =>
-    Math.abs(b - textCommit) < Math.abs(a - textCommit) ? b : a);
-  assert(Math.abs(textCommit - nearest) < 20,
-    `文本分支的阶段落地(${textCommit})应紧跟最近的落账点(${nearest})，否则不是"确认发出"语义`);
+  const text = fs.readFileSync('server/index.js', 'utf8');
+  const src = text.split('\n');
+  const writes = src.map((l, i) => [i + 1, l]).filter(([, l]) => /session\._waterlinePhase\s*=(?!=)/.test(l) && !/^\s*\/\//.test(l.trim()));
+  assert(writes.length === 1, `阶段写入点应恰好 1 处（landWaterlinePhase 里），实际 ${writes.length}: ${writes.map(([n]) => n)}`);
+  const fnStart = src.findIndex((l) => l.startsWith('function landWaterlinePhase(session, status) {')) + 1;
+  assert(fnStart > 0 && writes[0][0] > fnStart && writes[0][0] < fnStart + 20, '唯一写入点不在 landWaterlinePhase 里');
+  assert((text.match(/_waterlineNextPhase: wlNextPhase,/g) || []).length === 1, '决策处的阶段提议应恰好 1 处');
+  assert((text.match(/sendTextWithLanding\(session, action, \(\) => landWaterlinePhase\(session, status\)\)/g) || []).length === 3, '有文本发送点没把阶段落地挂在确认回调上');
+  assert(/sendTextWithLanding\(session, COMPACT_COMMAND, \(\) => landWaterlinePhase\(session, \{ _waterlineNextPhase: wlNextPhase \}\)\)/.test(text), '/compact 没按确认落地推进');
+  const send = text.slice(text.indexOf('function sendTextWithLanding('), text.indexOf('function landWaterlinePhase('));
+  assert(/if \(r\.landed === false\) \{[\s\S]*?\} else \{[\s\S]*?onLanded\?\.\(\)/.test(send), '没落地也调用了推进回调');
 });
 
 await Promise.all(pending);  // 等所有（含 async）测试跑完再汇总

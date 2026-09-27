@@ -41,6 +41,39 @@ export function promptPendingText(cleanText) {
   return null;
 }
 
+/**
+ * 输入框的**完整**内容：提示符那一行 + 下面折行的续写行，拼成一段（去掉折行处的换行与缩进）。
+ *
+ * 为什么另写一个（2026-09-26）：promptPendingText 只取提示符那一行。长指令（上下文交接的收尾提示、
+ * 恢复提示）在输入框里会折成三四行，只看第一行永远对不上整段 —— 自动发送的核对因此次次判「没进输入框」、
+ * 不按回车，这些提示一条都没发出去过（tableCard / mathviz / Hitech / ChemAIForge / BiologyintheAIEra 都是）。
+ * promptPendingText 保持原样：别处（草稿判断、回车提交）用它的「第一行」语义。
+ *
+ * @returns {string|null} null = 没找到提示符行
+ */
+export function promptInputText(cleanText) {
+  const lines = String(cleanText || '').split('\n').map((l) => l.replace(/\s+$/, ''));
+  // 找最后一个提示符行（跳过末尾的分隔线、状态栏）
+  let at = -1;
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 40); i--) {
+    if (/^\s*[❯>]\s?/.test(lines[i])) { at = i; break; }
+  }
+  if (at < 0) return null;
+  const parts = [lines[at].replace(/^\s*[❯>]\s?/, '')];
+  // 续写行：提示符下面、到输入框下边框（分隔线）为止
+  for (let i = at + 1; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l.trim() || DECORATION.test(l)) break;
+    parts.push(l.replace(/^\s+/, ''));
+  }
+  // CJK 折行处没有空格，英文单词折行处原本就有一个空格被换行吃掉 —— 两边都是字母/数字时补回空格
+  return parts.reduce((acc, seg) => {
+    if (!acc) return seg.trim();
+    const needSpace = /[A-Za-z0-9]$/.test(acc) && /^[A-Za-z0-9]/.test(seg);
+    return `${acc}${needSpace ? ' ' : ''}${seg.trim()}`;
+  }, '');
+}
+
 /** 提示符存在且为空 —— 真正的空闲，可以发文本指令 */
 export function isEmptyPrompt(cleanText) {
   return promptPendingText(cleanText) === '';
@@ -165,4 +198,4 @@ export function stripPromptSuggestion(raw) {
   return lines.join('\n');
 }
 
-export default { promptPendingText, isEmptyPrompt, hasUnsentInput, isOwnPendingInput, stripPromptSuggestion };
+export default { promptPendingText, promptInputText, isEmptyPrompt, hasUnsentInput, isOwnPendingInput, stripPromptSuggestion };

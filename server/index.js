@@ -198,7 +198,7 @@ import { getProjectRecordingService } from './services/ProjectRecordingService.j
 import cliRegistry from './services/CliRegistry.js';
 import HookServer, { isLongRunHookRequest } from './services/HookServer.js';
 import cliLearner from './services/CliLearner.js';
-import { readContextWaterline, decideWaterlinePhase, isMemoryWritten, HANDOFF_PROMPT, COMPACT_COMMAND, RESUME_PROMPT, LONGRUN_HANDOFF_PROMPT } from './services/contextWaterline.js';
+import { readContextWaterline, decideWaterlinePhase, isMemoryWritten, HANDOFF_PROMPT, COMPACT_COMMAND, RESUME_PROMPT, LONGRUN_HANDOFF_PROMPT, HANDOFF_WAIT_ROUNDS } from './services/contextWaterline.js';
 import { parseHandoffReceipt, HANDOFF_PHASE, HANDOFF_WAIT_MS } from './services/longrunHandoff.js';
 import { promptPendingText, stripPromptSuggestion } from './services/promptState.js';
 import { shouldStopMechanicalContinue, nextStreak } from './services/continueStreak.js';
@@ -231,6 +231,7 @@ import { LongRunPushNotifier } from './services/longrunPush.js';
 import childRegistry from './services/ChildRegistry.js';
 import deviceTrust, { DEVICE_COOKIE, DEVICE_TTL_MS, readCookie } from './services/DeviceTrust.js';
 import { classifyApiErrorScreen } from './services/apiErrorGate.js';
+import { memoryDirFor, memorySnapshot, memoryChangedSince } from './services/memoryProbe.js';
 
 // 上一次异常退出（SIGKILL / OOM / 被上层进程连坐）留下的孤儿子进程：必须在任何 spawn 之前清掉，
 // 否则 frpc 报 proxy already exists、caffeinate 双开（一直阻止休眠）。见 ChildRegistry.js 顶部说明
@@ -1475,13 +1476,17 @@ function captureNow(tmuxName) {
  * 发文本并确认它进了输入框再回车；没进去就重打一次；还不行就不回车、标记「发送未生效」。
  * 不 await：核对最多要 3 秒，不能拖住整轮扫描里的其他会话。
  */
-function sendTextWithLanding(session, text) {
+/**
+ * @param {Function} [onLanded]  确认进了输入框、按了回车之后才调用（认不出输入框、照旧发出时也调用）；
+ *   没落地就不调 —— 需要「确认发出后才推进」的状态（水位交接阶段）挂在这里，不能在调用处同步推进
+ */
+function sendTextWithLanding(session, text, onLanded = null) {
   // 监控判「退回 shell → 重启 codex」时给的是通用命令：换成带本会话 CODEX_HOME 与当前供应商的版本，
   // 否则重启出来的 codex 走全局配置（tmux 环境对已在跑的 shell 无效，见 codexStartCommand）
   if (/^codex(\s|$)/.test(String(text).trim()) && session.aiType === 'codex') {
     text = codexStartCommand(session, { resume: /\bresume\b/.test(text) });
   }
-  if (!session.tmuxSessionName) { session.sendInput(text, { submit: true }); return; }
+  if (!session.tmuxSessionName) { session.sendInput(text, { submit: true }); onLanded?.(); return; }
   sendTextVerified({
     text,
     typeText: (t) => session.sendInput(t, { submit: false }),
@@ -1491,11 +1496,27 @@ function sendTextWithLanding(session, text) {
     if (r.landed === false) {
       console.log(`[后台自动操作] 会话 ${session.name}: 「${text}」打了 ${r.attempts} 次都没进输入框，未按回车，标记发送未生效`);
       inputStuck.set(session.id, `「${text}」发了 ${r.attempts} 次都没进输入框 —— CLI 没有接收输入，监控已停手`);
-    } else if (r.landed) {
-      if (r.attempts > 1) console.log(`[后台自动操作] 会话 ${session.name}: 「${text}」第 ${r.attempts} 次才进输入框`);
-      inputStuck.clear(session.id);
+    } else {
+      if (r.landed && r.attempts > 1) console.log(`[后台自动操作] 会话 ${session.name}: 「${text}」第 ${r.attempts} 次才进输入框`);
+      if (r.landed) inputStuck.clear(session.id);
+      try { onLanded?.(); } catch (e) { console.error(`[后台自动操作] 会话 ${session.name}: 发出后的回调出错:`, e.message); }
     }
   }).catch((e) => console.error(`[后台自动操作] 会话 ${session.name}: 核对发送失败:`, e.message));
+}
+
+/** 水位交接阶段落地：只在文本确认进了输入框并提交之后调用（见 sendTextWithLanding 的 onLanded） */
+function landWaterlinePhase(session, status) {
+  if (!status?._waterlineNextPhase) return;
+  // 收尾指令真的发出去了：给记忆目录拍快照，之后只认「磁盘上的记忆文件真被改过」才算写完（见 memoryProbe.js）
+  if (status._waterlineNextPhase === 'handoff_sent' && session.workingDir) {
+    session._waterlineMemoryDir = memoryDirFor(session.workingDir);
+    session._waterlineMemoryBefore = memorySnapshot(session._waterlineMemoryDir);
+    session._waterlineNoMemoryWarned = false;
+  }
+  session._waterlinePhase = status._waterlineNextPhase;
+  session._waterlineHandoffRounds = 0;
+  try { sessionManager.updateSession(session); } catch {}  // 阶段落库，跨进程存活
+  console.log(`[水位交接] 会话 ${session.name}: 阶段落地 → ${status._waterlineNextPhase}`);
 }
 
 function autoActionBlockReason(status, screenText = '', sessionId = null) {
@@ -4986,8 +5007,20 @@ async function runBackgroundAutoAction() {
         const roundsSinceHandoff = (phase === 'handoff_sent' && isIdleNow)
           ? (session._waterlineHandoffRounds = (session._waterlineHandoffRounds || 0) + 1)
           : (phase === 'handoff_sent' ? (session._waterlineHandoffRounds || 0) : 0);
-        const memoryWritten = phase === 'handoff_sent'
-          && isMemoryWritten(getLastClaudeReply(terminalContent), roundsSinceHandoff);
+        // 记忆写完的判据：磁盘上的记忆文件在收尾之后被新建或改过。只看回复措辞 + 等 3 个空闲轮兜底，
+        // 会在 CLI 一个字没写时就放行 /compact（收尾指令没发出去时尤其如此）
+        const memChanged = phase === 'handoff_sent' && session._waterlineMemoryDir
+          ? memoryChangedSince(session._waterlineMemoryBefore || {}, memorySnapshot(session._waterlineMemoryDir)) : [];
+        const replySaysDone = phase === 'handoff_sent' && isMemoryWritten(getLastClaudeReply(terminalContent), 0);
+        const memoryWritten = memChanged.length > 0 && (replySaysDone || roundsSinceHandoff >= HANDOFF_WAIT_ROUNDS);
+        if (phase === 'handoff_sent' && !memChanged.length && roundsSinceHandoff >= HANDOFF_WAIT_ROUNDS * 2
+          && !session._waterlineNoMemoryWarned) {
+          // 等了 6 个空闲轮，记忆一个文件都没动：不压缩（压掉就全丢了），提醒人看一眼
+          session._waterlineNoMemoryWarned = true;
+          console.log(`[水位交接] 会话 ${session.name}: 收尾后 ${roundsSinceHandoff} 个空闲轮记忆文件都没变化，不压缩，等人处理`);
+          inputStuck.set(session.id, `上下文快满了，已请它先写记忆，但 ${session._waterlineMemoryDir} 里的记忆文件一直没变化 —— 没有压缩，请看一眼`, 'waterline');
+        }
+        if (memoryWritten) console.log(`[水位交接] 会话 ${session.name}: 记忆已更新 ${memChanged.join('、')}`);
         const wl = decideWaterlinePhase({
           usedPercent, isIdle: isIdleNow, phase, memoryWritten, isCompacting,
           mode: session.waterlineMode || 'auto',
@@ -5050,15 +5083,9 @@ async function runBackgroundAutoAction() {
           } else {
             console.log(`[水位交接] 会话 ${session.name}: ${wl.reason}`);
             try {
-              execSync(`${getTmuxPrefix()} send-keys -t "${session.tmuxSessionName}" ${JSON.stringify(COMPACT_COMMAND)}`);
-              setTimeout(() => {
-                try { execSync(`${getTmuxPrefix()} send-keys -t "${session.tmuxSessionName}" Enter`); }
-                catch { session.write('\r'); }
-              }, 120);
-              // 直发成功才落地阶段（与文本分支同一口径：确认发出后才推进）。
-              session._waterlinePhase = wlNextPhase;
-              session._waterlineHandoffRounds = 0;
-              try { sessionManager.updateSession(session); } catch {}  // 阶段落库，跨进程存活
+              // 与文本指令同一套发送：确认 /compact 进了输入框再回车，确认之后才落地阶段。
+              // 原来 send-keys 后不核对就翻成 compact_sent —— 没发出去也会跳到下一步发恢复指令
+              sendTextWithLanding(session, COMPACT_COMMAND, () => landWaterlinePhase(session, { _waterlineNextPhase: wlNextPhase }));
             } catch (e) {
               console.error(`[水位交接] 会话 ${session.name}: /compact 直发失败:`, e.message);
             }
@@ -5403,7 +5430,7 @@ async function runBackgroundAutoAction() {
             console.log(`[后台自动操作] 会话 ${session.name}: 发送文本 "${action}" + CR (延迟50ms)`);
             // v1.2.87 sendInput 直达 tmux server：write 依赖的 attach 客户端半死时静默丢键
             // v1.4.59 先确认文本进了输入框再回车，没进去就重打一次，还不行标记「发送未生效」
-            sendTextWithLanding(session, action);
+            sendTextWithLanding(session, action, () => landWaterlinePhase(session, status));
 
             // 记录操作到历史（用于智能监控）
             if (!session.actionHistory) session.actionHistory = [];
@@ -5473,12 +5500,9 @@ async function runBackgroundAutoAction() {
           // 水位阶段在这里才落地——「确认发出」的收口点（与 lastActionMap/台账同一处）。
           // 上面 5 处 continue 天然到不了这里，阶段留在原地 → 下轮重试同一步（不缺步）；
           // 到了这里就只推进一次（不重复）。
-          if (status._waterlineNextPhase) {
-            session._waterlinePhase = status._waterlineNextPhase;
-            session._waterlineHandoffRounds = 0;
-            try { sessionManager.updateSession(session); } catch {}  // 阶段落库，跨进程存活
-            console.log(`[水位交接] 会话 ${session.name}: 阶段落地 → ${status._waterlineNextPhase}`);
-          }
+          // ⚠ v1.4.68：落地挪进 landWaterlinePhase，由发送的「确认落地」回调调用。
+          //    这里是「调用了发送」的同步点，发送本身是异步核对的 —— 在这里推进，等于没确认就翻阶段：
+          //    收尾指令一次没进输入框，阶段照样翻成 handoff_sent（2026-09-26 五个会话都是这样）
           // 效果台账：延迟回读，按判定类型统计这次操作到底有没有推动事情发生
           actionOutcome.record(session, {
             state: status.currentState, actionType: status.actionType, action, beforeScreen: terminalContent,
@@ -5571,7 +5595,7 @@ async function runBackgroundAutoAction() {
               console.error(`[后台自动操作] 会话 ${session.name}: 选项选择失败:`, e.message);
             }
           } else {
-            sendTextWithLanding(session, action);  // v1.4.59 确认进了输入框再回车（同规则路径）
+            sendTextWithLanding(session, action, () => landWaterlinePhase(session, status));  // v1.4.59 确认进了输入框再回车（同规则路径）
           }
 
           // v1.2.96：ai_cache 路径也要维护 advanceSig + continueCount，否则下一轮熔断判定
@@ -5732,7 +5756,7 @@ async function runBackgroundAutoAction() {
           // 关键：分两次发送，模拟人工输入！
           console.log(`[后台自动操作] 会话 ${session.name}: 分开发送文本 "${action}" + CR`);
           // v1.4.59 与规则路径同一份实现：确认文本进了输入框再回车（原来走 write，attach 客户端半死时静默丢键）
-          sendTextWithLanding(session, action);
+          sendTextWithLanding(session, action, () => landWaterlinePhase(session, status));
         } else if (status.actionType === 'single_char') {
           // 单字符特殊按键（如 Tab、Escape）：通过 tmux send-keys 发送更可靠
           const tmuxSession = session.tmuxSessionName;

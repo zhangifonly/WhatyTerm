@@ -100,7 +100,7 @@ const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\
 const SRV = strip(fs.readFileSync(new URL('../server/index.js', import.meta.url), 'utf8'));
 test('接线：两条文本发送路径都走核对发送；台账停手时也标记；每轮抓屏检查解除；连上即推', () => {
   // 规则路径、AI 缓存路径、AI 分析路径三处文本发送
-  assert((SRV.match(/sendTextWithLanding\(session, action\)/g) || []).length === 3, '有文本发送路径没走核对');
+  assert((SRV.match(/sendTextWithLanding\(session, action[,)]/g) || []).length === 3, '有文本发送路径没走核对');
   assert(!/session\.sendInput\(action, \{ submit: true \}\)/.test(SRV), '还有不核对的直接发送');
   assert(/if \(paused\) \{\s*inputStuck\.set\(sessionId, paused, 'ledger'\)/.test(SRV), '台账停手没标记，又会静默停住');
   assert(/inputStuck\.refresh\(sessionData\.id, quickContent\)/.test(SRV), '每轮没检查解除');

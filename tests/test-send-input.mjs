@@ -32,7 +32,7 @@ t('监控执行器不再用 pty.write 发按键/文本', () => {
   ok(/session\.sendNamedKey\(action\)/.test(idx), '应改走 sendNamedKey');
   // v1.4.59 起文本走 sendTextWithLanding：sendInput 只打字 → 确认进了输入框 → sendNamedKey('Enter')。
   // 仍是文本与回车分两次发、都走 send-keys；只是回车要等确认落地后才按
-  ok(/sendTextWithLanding\(session, action\)/.test(idx), '文本应走 sendTextWithLanding（确认落地再回车）');
+  ok(/sendTextWithLanding\(session, action[,)]/.test(idx), '文本应走 sendTextWithLanding（确认落地再回车）');
   const fn = idx.slice(idx.indexOf('function sendTextWithLanding'), idx.indexOf('function autoActionBlockReason'));
   ok(/typeText: \(t\) => session\.sendInput\(t, \{ submit: false \}\)/.test(fn) && /pressEnter: \(\) => session\.sendNamedKey\('Enter'\)/.test(fn),
     '打字与回车都要走 send-keys（sendInput / sendNamedKey），不能退回 write');
