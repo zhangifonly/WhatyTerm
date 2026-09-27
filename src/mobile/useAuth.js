@@ -13,6 +13,8 @@ export function useAuth() {
   const checkAuth = useCallback(async () => {
     const data = await getAuthStatus();
     setStatus({ loading: false, ...data });
+    // 被电脑退出时关掉了自动重连（见 socket.js），重新登录后要打开
+    if (data?.authenticated) socket.io.opts.reconnection = true;
     if (data?.authenticated && !socket.connected) {
       socket.connect();
     } else if (data?.authenticated) {

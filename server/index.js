@@ -229,6 +229,7 @@ import { AutoPricing } from './services/usage/AutoPricing.js';
 import { PushService, hostOf } from './services/PushService.js';
 import { LongRunPushNotifier } from './services/longrunPush.js';
 import childRegistry from './services/ChildRegistry.js';
+import deviceTrust, { DEVICE_COOKIE, DEVICE_TTL_MS, readCookie } from './services/DeviceTrust.js';
 import { classifyApiErrorScreen } from './services/apiErrorGate.js';
 
 // 上一次异常退出（SIGKILL / OOM / 被上层进程连坐）留下的孤儿子进程：必须在任何 spawn 之前清掉，
@@ -845,6 +846,35 @@ const sessionMiddleware = session({
 // 表现为前端某些操作无响应而后端只打一条栈）。
 app.use(express.json({ limit: '10mb' }));
 app.use(sessionMiddleware);
+// 已授权设备：凭 cookie 里的设备令牌恢复登录状态（服务重启后内存会话丢了也不用重新登录，见 DeviceTrust.js）
+app.use((req, res, next) => {
+  if (req.session && !req.session.authenticated) {
+    const d = deviceTrust.verify(readCookie(req.headers.cookie, DEVICE_COOKIE), { ip: clientIp(req) });
+    if (d) { req.session.authenticated = true; req.session.username = req.session.username || d.method || 'device'; req.session.deviceId = d.id; }
+  }
+  next();
+});
+
+/** 远程客户端 IP（隧道转发时取代理头里的第一个） */
+function clientIp(req) {
+  return String(req.headers['cf-connecting-ip'] || (req.headers['x-forwarded-for'] || '').split(',')[0] || req.socket?.remoteAddress || '').trim();
+}
+
+/**
+ * 远程登录成功：标记会话已登录，并给这台设备发 7 天有效的令牌（httpOnly cookie）。
+ * 本机访问本来就免登录，不发令牌、不进授权设备列表。
+ */
+function grantLogin(req, res, method, username) {
+  req.session.authenticated = true;
+  req.session.username = username;
+  if (isLocalRequest(req)) return;
+  const { token, device } = deviceTrust.issue({ ua: req.headers['user-agent'] || '', ip: clientIp(req), method });
+  req.session.deviceId = device.id;
+  const secure = req.headers['x-forwarded-proto'] === 'https' || req.secure;
+  res.cookie(DEVICE_COOKIE, token, { httpOnly: true, sameSite: 'lax', secure, maxAge: DEVICE_TTL_MS, path: '/' });
+  console.log(`[设备授权] ${device.name}（${device.ip}）经${method}登录，7 天内免登录`);
+  io.to('local').emit('devices:changed');
+}
 
 // ── Claude Code 官方 Hooks 接收端点 ──────────────────────────────
 app.post('/hooks', (req, res) => {
@@ -2609,6 +2639,11 @@ const authMiddleware = (req, res, next) => {
   // 远程访问：已认证 session 直接放行（含扫码免密登录批准的会话，
   // 提前到密码检查之前——扫码授权模式下可以从未设置过密码）
   if (req.session && req.session.authenticated) {
+    // 由设备令牌授权、但设备已在桌面端被退出：作废
+    if (req.session.deviceId && !deviceTrust.has(req.session.deviceId)) {
+      req.session.authenticated = false;
+      return res.status(401).json({ error: '该设备已被退出，请重新登录', requireAuth: true });
+    }
     return next();
   }
 
@@ -2647,8 +2682,7 @@ app.post('/api/auth/login', (req, res) => {
   const result = authService.authenticate(username, password);
 
   if (result.success) {
-    req.session.authenticated = true;
-    req.session.username = username;
+    grantLogin(req, res, '密码', username);
     res.json({ success: true });
   } else {
     res.status(401).json({ success: false, error: result.error });
@@ -2680,8 +2714,7 @@ app.post('/api/auth/online-login', async (req, res) => {
     if (result.valid) {
       // 验证成功，创建会话
       authService.clearAttempts(ip);
-      req.session.authenticated = true;
-      req.session.username = email;
+      grantLogin(req, res, '账号', email);
       req.session.userId = result.userId;
       req.session.onlineAuth = true;  // 标记为在线认证
       req.session.hasValidLicense = result.hasValidLicense;
@@ -2714,8 +2747,31 @@ app.post('/api/auth/online-login', async (req, res) => {
 });
 
 app.post('/api/auth/logout', (req, res) => {
+  // 手机上主动退出：同时注销这台设备的令牌，否则下次打开凭 cookie 又自动登录了
+  deviceTrust.revokeToken(readCookie(req.headers.cookie, DEVICE_COOKIE));
+  res.clearCookie(DEVICE_COOKIE, { path: '/' });
+  io.to('local').emit('devices:changed');
   req.session.destroy();
   res.json({ success: true });
+});
+
+// 已授权设备列表 / 退出某台设备：只有本机（电脑上的 WhatyTerm）能管，远程设备不能互相踢
+app.get('/api/auth/devices', (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ error: '只能在本机查看' });
+  res.json({ devices: deviceTrust.list() });
+});
+app.post('/api/auth/devices/:id/revoke', (req, res) => {
+  if (!isLocalRequest(req)) return res.status(403).json({ error: '只能在本机操作' });
+  const ok = deviceTrust.revoke(req.params.id);
+  if (ok) {
+    // 立刻断开这台设备现有的连接：否则它开着的页面要等下次刷新才会被要求登录
+    for (const s of io.sockets.sockets.values()) {
+      if (s.request?.session?.deviceId === req.params.id) { s.emit('auth:revoked'); s.disconnect(true); }
+    }
+    io.to('local').emit('devices:changed');
+    console.log(`[设备授权] 本机退出了设备 ${req.params.id}`);
+  }
+  res.json({ success: ok });
 });
 
 app.post('/api/auth/setup', (req, res) => {
@@ -2793,8 +2849,7 @@ app.post('/api/auth/wx-login', (req, res) => {
     console.log(`[微信认证] 拒绝未绑定的 openid: ${String(openid).slice(0, 4)}****`);
     return res.status(403).json({ error: '该微信未被授权，请先在本机绑定' });
   }
-  req.session.authenticated = true;
-  req.session.username = 'wx';
+  grantLogin(req, res, '微信', 'wx');
   console.log(`[微信认证] 微信免密登录成功: ${openid.slice(0, 4)}****`);
   res.json({ success: true });
 });
@@ -2865,8 +2920,7 @@ app.get('/api/auth/scan-login-status', (req, res) => {
   if (r.sessionID !== req.sessionID) return res.status(403).json({ status: 'denied' });
   if (r.status === 'approved') {
     scanLoginRequests.delete(req.query.id);  // 一次性
-    req.session.authenticated = true;
-    req.session.username = 'scan';
+    grantLogin(req, res, '扫码', 'scan');
     console.log(`[扫码登录] 已放行 ${r.ip}`);
     return res.json({ status: 'approved' });
   }
@@ -7207,6 +7261,18 @@ io.use((socket, next) => {
 
   // 检查 session
   if (req.session && req.session.authenticated) {
+    // 由设备令牌授权的会话：设备在桌面端被退出后，内存会话也作废
+    if (req.session.deviceId && !deviceTrust.has(req.session.deviceId)) {
+      req.session.authenticated = false;
+      return next(new Error('需要登录'));
+    }
+    return next();
+  }
+
+  // 凭设备令牌恢复（服务重启后 socket 先于任何 HTTP 请求到达时）
+  const d = deviceTrust.verify(readCookie(req.headers.cookie, DEVICE_COOKIE), { ip: String(req.headers['x-forwarded-for'] || ip).split(',')[0].trim() });
+  if (d) {
+    if (req.session) { req.session.authenticated = true; req.session.deviceId = d.id; }
     return next();
   }
 

@@ -15,6 +15,8 @@ function setState(next) {
 }
 
 socket.on('connect', () => setState('connected'));
+// 电脑上把这台设备「退出」了：服务端先发这个再断开。进登录页，不自动重连（重连也只会被拒）
+socket.on('auth:revoked', () => { socket.io.opts.reconnection = false; setState('unauthorized'); });
 socket.on('disconnect', () => setState('disconnected'));
 socket.on('connect_error', (err) => {
   // 服务端 io.use 认证失败时 message 为「需要登录」

@@ -27,6 +27,7 @@ import { useLongRun } from './components/longrun/useLongRun';
 import { useLongRunBell } from './components/longrun/useLongRunBell';
 import ServerStaleBanner from './components/ServerStaleBanner.jsx';
 import SessionUsageCard from './components/SessionUsageCard.jsx';
+import TrustedDevices from './components/TrustedDevices.jsx';
 import LongRunHandoverDialog from './components/longrun/LongRunHandoverDialog';
 import { taskBadge, taskLine } from './components/longrun/longrunBoard';
 import LongRunMain from './components/longrun/LongRunMain';
@@ -2061,6 +2062,7 @@ export default function App() {
           {tunnelUrl && qrCodeExpanded && (
             <div className="qr-code-panel">
               <QRCodeDisplay url={tunnelUrl} />
+              <TrustedDevices socket={socket} />
             </div>
           )}
         </div>
