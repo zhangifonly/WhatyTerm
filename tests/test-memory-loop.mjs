@@ -90,6 +90,8 @@ test('接线：收尾确认发出时给记忆目录拍快照；只有记忆文�
   assert(/_waterlineNextPhase === 'handoff_sent'[\s\S]{0,200}memorySnapshot\(session\._waterlineMemoryDir\)/.test(land), '收尾发出时没拍记忆快照');
   assert(/const memoryWritten = memChanged\.length > 0 && \(replySaysDone \|\| roundsSinceHandoff >= HANDOFF_WAIT_ROUNDS\);/.test(IDX), '放行 /compact 不要求记忆文件真的变了');
   assert(/记忆文件一直没变化 —— 没有压缩，请看一眼/.test(IDX), '记忆一直没写时没提醒人');
+  // 复位不需要发送，必须直接落地（提议只在发送确认后落地，复位没有发送 → 永不落地）
+  assert(/wl\.level === 'none' && wlNextPhase === 'idle' && phase !== 'idle'\) \{[\s\S]{0,400}landWaterlinePhase\(session, \{ _waterlineNextPhase: 'idle' \}\)/.test(IDX), '复位没有直接落地');
 });
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`);

@@ -5095,6 +5095,12 @@ async function runBackgroundAutoAction() {
             session._waterlineWarnedAt = Date.now();
             console.log(`[水位交接] 会话 ${session.name}: ${wl.reason}`);
           }
+        } else if (wl.level === 'none' && wlNextPhase === 'idle' && phase !== 'idle') {
+          // 复位（水位回落 / 恢复后读数消失 / 关掉水位交接）：不需要发送任何东西，直接落地。
+          // 以前复位也只「提议」，而提议只在发送确认后落地 —— 复位没有发送，于是永远不落地，
+          // 会话卡在 resumed / compact_sent，下次再满也不会重新收尾
+          landWaterlinePhase(session, { _waterlineNextPhase: 'idle' });
+          console.log(`[水位交接] 会话 ${session.name}: 复位（${wl.reason}）`);
         }
       }
 
