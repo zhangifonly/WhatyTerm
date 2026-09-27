@@ -17,6 +17,25 @@
 
 export const EARLY_RULES = [
   {
+    id: 'cli-notice-enter',
+    // CLI 弹的一次性通知：只有一段说明和「Enter to continue · Esc to cancel」，没有选项。
+    // 实测（2026-09-26 Hitech）：auto mode 计费变更通知挂了 163 轮都判成「终端状态不明确」没人按，
+    // 会话停在那里，后台正在跑的工具也不往下走。按 Enter 就是「知道了」，CLI 接着干。
+    // 只认「没有任何编号选项」的：带 1./2. 选项的是要选择的面板，另有规则处理。
+    state: 'CLI 弹出了通知（Enter to continue），按回车关掉',
+    recentAction: 'CLI 显示了一条通知',
+    action: { type: 'key', key: 'Enter' },
+    reason: '屏幕末尾是 CLI 的一次性通知，只提供「Enter 继续 / Esc 取消」，没有需要选择的选项。按 Enter 确认已读，CLI 继续工作',
+    match({ tail, helpers }) {
+      const lines = String(tail).split('\n').map((l) => l.trim()).filter(Boolean);
+      const last = lines[lines.length - 1] || '';
+      if (!/^Enter to continue\s*[·•]\s*Esc to cancel$/i.test(last)) return false;
+      if (helpers.detectOptionMenu(tail)) return false;                   // 有选项 → 不是通知
+      if (lines.slice(-12).some((l) => /^[❯>]?\s*\d\.\s+\S/.test(l))) return false;
+      return { log: `CLI 通知：「${(lines.slice(-12).find((l) => l.length > 20) || '').slice(0, 60)}」` };
+    }
+  },
+  {
     id: 'cli-dialog-esc',
     // 这类面板是 CLI 自己的模态界面（/status、/config、/model…），开着时屏幕全是
     // 设置内容，AI 只能判「状态不明确」而无限空转（实测挂过 20+ 分钟）。
