@@ -4882,7 +4882,17 @@ async function runBackgroundAutoAction() {
 
   // === 原有的自动操作逻辑（需要开启自动操作开关）===
   for (const sessionData of sessions) {
-    if (!sessionData.autoActionEnabled) continue;
+    if (!sessionData.autoActionEnabled) {
+      // 自动操作关着就走不到下面的水位交接：交接做到一半（已发收尾、已压缩）的阶段会一直留着，
+      // 用户手动接管后压缩、续写，重新打开自动操作时状态机还以为在等回落，下次再满也不会收尾。
+      // 所以关着时把中途的阶段复位 —— 交接需要发送按键，本来就只在自动操作开着时才做
+      const s0 = sessionManager.getSession(sessionData.id);
+      if (s0 && s0._waterlinePhase && s0._waterlinePhase !== 'idle') {
+        console.log(`[水位交接] 会话 ${s0.name}: 自动操作已关闭，复位中途阶段 ${s0._waterlinePhase}`);
+        landWaterlinePhase(s0, { _waterlineNextPhase: 'idle' });
+      }
+      continue;
+    }
 
     const session = sessionManager.getSession(sessionData.id);
     if (!session || session.isAutoActioning) continue;

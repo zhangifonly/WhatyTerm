@@ -92,6 +92,8 @@ test('接线：收尾确认发出时给记忆目录拍快照；只有记忆文�
   assert(/记忆文件一直没变化 —— 没有压缩，请看一眼/.test(IDX), '记忆一直没写时没提醒人');
   // 复位不需要发送，必须直接落地（提议只在发送确认后落地，复位没有发送 → 永不落地）
   assert(/wl\.level === 'none' && wlNextPhase === 'idle' && phase !== 'idle'\) \{[\s\S]{0,400}landWaterlinePhase\(session, \{ _waterlineNextPhase: 'idle' \}\)/.test(IDX), '复位没有直接落地');
+  // 自动操作关着时走不到水位交接：中途阶段要在那里复位，否则重新打开后状态机以为还在交接中
+  assert(/if \(!sessionData\.autoActionEnabled\) \{[\s\S]{0,600}landWaterlinePhase\(s0, \{ _waterlineNextPhase: 'idle' \}\);\s*\}\s*continue;/.test(IDX), '自动操作关着时没复位中途阶段');
 });
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`);

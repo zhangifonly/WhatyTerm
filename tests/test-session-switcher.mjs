@@ -358,7 +358,8 @@ test('「待推进」摘要条已移除（常驻十几个、点进去无事可�
 test('快速探测放在不受自动操作开关限制的循环里', () => {
   const probeAt = SRV.indexOf('const wasOnScreen = !!session._confirmOnScreen');
   assert(probeAt > 0, '找不到快速探测代码');
-  const guardAt = SRV.indexOf('if (!sessionData.autoActionEnabled) continue;');
+  // 按「守卫条件」定位，不绑整行写法：这行后来改成了带复位逻辑的块（if (…) { … continue; }）
+  const guardAt = SRV.search(/if \(!sessionData\.autoActionEnabled\)( continue;| \{)/);
   assert(guardAt > 0, '找不到自动操作守卫');
   assert(probeAt < guardAt, '探测在守卫之后 —— 自动操作关着的会话仍然收不到及时状态');
 });
