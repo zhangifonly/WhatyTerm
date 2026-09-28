@@ -1816,6 +1816,20 @@ function settingsDefinesKey(workingDir, key) {
   });
 }
 
+/**
+ * 本地 settings.local.json 与全局 settings.json 合并后，CLI 实际用的地址与密钥（纯函数）。
+ * - 本地写了地址 → 用本地的
+ * - 本地 env 显式写了 ANTHROPIC_BASE_URL=""（会话选官方登录就这样写）→ 覆盖全局，CLI 走官方登录，地址为空
+ * - 本地根本没这个键（或没有本地配置）→ CLI 合并时全局的照样生效
+ * 由来（2026-09-28 Hitech）：旧逻辑本地为官方登录时也拿全局地址「补充显示」，
+ * 会话切成官方、/status 已显示 Claude Pro 账号，面板却按全局的 zjz-ai 认成 Whaty。
+ */
+function mergeLocalGlobalUrl(lp, globalUrl, globalKey) {
+  if (lp?.url) return { url: lp.url, key: lp.key || '' };
+  if (lp?.definesUrl) return { url: '', key: '' };
+  return { url: globalUrl || '', key: globalKey || '' };
+}
+
 function readLocalProviderConfig(workingDir) {
   if (!workingDir) return null;
   const p = path.join(workingDir, '.claude', 'settings.local.json');
@@ -1835,7 +1849,9 @@ function readLocalProviderConfig(workingDir) {
     key: c.env?.ANTHROPIC_AUTH_TOKEN || c.env?.ANTHROPIC_API_KEY || '',
     model: c.model || '',
     isOAuth: !url && marker === 'oauth',
-    providerId
+    providerId,
+    // env 里显式写了这个键（哪怕是 ""）：覆盖全局 settings.json 的地址。会话选官方登录时就是这样写的
+    definesUrl: typeof c.env?.ANTHROPIC_BASE_URL === 'string'
   };
 }
 
@@ -1883,26 +1899,12 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
           configSource = 'local';
           actualModel = lp.model;
           if (lp.providerId) localProviderId = lp.providerId;
-          if (lp.url) {
-            actualApiUrl = lp.url;
-            actualApiKey = lp.key;
-          } else if (lp.isOAuth) {
-            // 本地明确标记为官方 OAuth → 后续不应被全局 is_current(第三方) 覆盖
-            localIsOAuth = true;
-          }
+          // 本地明确标记为官方 OAuth → 后续不应被全局 is_current(第三方) 覆盖
+          if (lp.isOAuth) localIsOAuth = true;
+        } else {
+          actualModel = globalModel;
         }
-      }
-
-      // 如果没有本地配置，使用全局配置（但保留已检测到的 local 标记）
-      if (!actualApiUrl && configSource !== 'local') {
-        actualApiUrl = globalApiUrl;
-        actualApiKey = globalApiKey;
-        actualModel = globalModel;
-        configSource = 'global';
-      } else if (!actualApiUrl && configSource === 'local') {
-        // OAuth 本地配置：URL 为空但确实是本地配置，用全局值补充显示
-        actualApiUrl = globalApiUrl;
-        actualApiKey = globalApiKey;
+        ({ url: actualApiUrl, key: actualApiKey } = mergeLocalGlobalUrl(lp, globalApiUrl, globalApiKey));
       }
 
       // 进程环境变量：只作"启动时快照"证据，不再当最高优先级——
@@ -2036,7 +2038,8 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
       // 最后兜底：如果仍无 URL，检查 WebTmux 服务进程自身的环境变量
       // （tmux 会话继承服务进程 env，Claude Code 会使用这些变量）
       // 但如果 DB is_current 明确指向 OAuth 供应商，说明用户已切换到官方，不应使用过时的 env
-      if (!actualApiUrl && process.env.ANTHROPIC_BASE_URL) {
+      // settings 里显式写了地址（哪怕是 ""）会覆盖进程继承来的 env，同 procEnv 分支
+      if (!actualApiUrl && process.env.ANTHROPIC_BASE_URL && !settingsDefinesKey(workingDir, 'ANTHROPIC_BASE_URL')) {
         let dbPointsToOAuth = false;
         try {
           const checkDb = new Database(ccSwitchDbPath, { readonly: true });

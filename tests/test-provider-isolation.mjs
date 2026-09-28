@@ -663,6 +663,38 @@ console.log('\n【组 7】"继续"死循环熔断的计数口径');
   check('无历史 → 不触发 >=2 分支', breaker(undefined, '任意屏幕', hash) < 2);
 }
 
+// ══ 组：本地官方登录不能被全局第三方地址「补充显示」 ═════════════════════
+// 由来（2026-09-28 Hitech）：会话切成官方登录（本地 env 写 ANTHROPIC_BASE_URL=""），/status 显示 Claude Pro 账号，
+// 面板却拿全局 settings.json 的 zjz-ai 补上地址、按地址认成 Whaty。
+console.log('\n【组】本地与全局地址合并');
+{
+  const mm = src.match(/function mergeLocalGlobalUrl\(lp, globalUrl, globalKey\) \{[\s\S]*?\n\}/);
+  check('能从 server/index.js 抽到 mergeLocalGlobalUrl', !!mm);
+  const merge = mm ? new Function(`${mm[0]}; return mergeLocalGlobalUrl;`)() : () => ({});
+  const G = ['https://zjz-ai.webtrn.cn', 'sk-global'];
+  const at = (name, cfg) => merge(readLocalProviderConfig(makeProject(name, cfg)), ...G);
+
+  // 会话级切到官方登录后实际写出的形态（applySessionProvider 四键写全、值为空）
+  const oauth = at('m-oauth-explicit', { _localProvider: 'oauth', model: 'opus',
+    env: { ANTHROPIC_BASE_URL: '', ANTHROPIC_AUTH_TOKEN: '', ANTHROPIC_API_KEY: '', ANTHROPIC_MODEL: '' } });
+  check('本地官方登录（显式写空地址）→ 不拿全局第三方地址', oauth.url === '' && oauth.key === '', JSON.stringify(oauth));
+
+  const third = at('m-local-third', { env: { ANTHROPIC_BASE_URL: 'https://api.example.com', ANTHROPIC_AUTH_TOKEN: 'sk-local' } });
+  check('本地写了第三方地址 → 用本地的', third.url === 'https://api.example.com' && third.key === 'sk-local', JSON.stringify(third));
+
+  // 标了官方但 env 里没写地址这个键：CLI 合并时全局地址照样生效，显示要如实反映
+  const noKey = at('m-oauth-nokey', { _localProvider: 'oauth', env: {} });
+  check('本地没写地址键 → 全局地址照样生效', noKey.url === G[0] && noKey.key === G[1], JSON.stringify(noKey));
+
+  const none = merge(null, ...G);
+  check('没有本地配置 → 用全局', none.url === G[0] && none.key === G[1]);
+
+  // 接线：getCurrentProvider 的地址来自这个函数，不再有「本地为空就拿全局补」的旁路
+  const body = src.slice(src.indexOf('function getCurrentProvider('), src.indexOf('进程环境变量：只作'));
+  check('getCurrentProvider 经 mergeLocalGlobalUrl 合并地址', /=\s*mergeLocalGlobalUrl\(\s*lp\b/.test(body));
+  check('合并段里没有直接把全局地址赋给 actualApiUrl 的旁路', !/actualApiUrl\s*=\s*globalApiUrl/.test(body));
+}
+
 console.log(results.join('\n'));
 results.length = 0;
 
