@@ -214,6 +214,48 @@ test('normalizeStateKey：任务名/数字归一，规则族聚合不碎行', ()
   eq(ledger.normalizeStateKey(''), '未知');
 });
 
+// ============ 带色码的真实抓屏（capture-pane -e） ============
+// iSpring 实测：Codex 把色码插进 "esc to interrupt" 词中间，判据不剥码就失配，
+// 按 1 放行成功被记成 no_effect，连 3 次把正常会话停掉。
+
+const E = '\x1b';
+const codexMenuColored = [
+  `${E}[1mWould you like to run the following command?${E}[0m`,
+  `  $ ls -la`,
+  `${E}[36m› ${E}[0m${E}[1m1. Yes, proceed${E}[0m ${E}[2m(y)${E}[0m`,
+  `  2. No, and tell Codex what to do differently ${E}[2m(esc)${E}[0m`,
+  ``,
+  `  ${E}[2mPress ${E}[0;1menter${E}[0;2m to confirm or ${E}[0;1mesc${E}[0;2m to cancel${E}[0m`
+].join('\n');
+const codexRunningColored =
+  `• Ran ls -la\n ${E}[2mWorking${E}[0m ${E}[2m(3s • ${E}[0;1mesc${E}[0;2m to interrupt)${E}[0m\n› Ask Codex to do anything`;
+
+test('带色码的 Codex 确认框落账时识别为有菜单', () => {
+  const session = { id: 's-ansi', name: 't', getScreenContent: () => codexMenuColored };
+  const entry = ledger.record(session, { state: 'OpenAI Codex确认界面', actionType: 'select', action: '1', beforeScreen: codexMenuColored });
+  for (const t of ledger.pending.values()) clearTimeout(t);
+  ledger.pending.clear();
+  eq(entry.hadConfirmMenu, true, 'footer 被色码切开导致 hadConfirmMenu=false');
+});
+
+test('按 1 后 Codex 开始执行（带色码）记为 advanced，不记 no_effect', () => {
+  const r = verify(codexMenuColored, codexRunningColored, { actionType: 'select', action: '1', hadConfirmMenu: true });
+  eq(r.running, true, '色码插在 esc 两侧导致运行态失配');
+  eq(r.outcome, 'advanced');
+});
+
+test('带色码菜单关闭、命令已跑完回到提示符，也记为 advanced', () => {
+  const after = `• Ran ls -la\n  └ ${E}[2mtotal 8${E}[0m\n› Ask Codex to do anything`;
+  const r = verify(codexMenuColored, after, { actionType: 'select', action: '1', hadConfirmMenu: true });
+  eq(r.outcome, 'advanced');
+});
+
+test('带色码菜单按键后仍挂着，照样记 no_effect（别把真卡住放过去）', () => {
+  const still = codexMenuColored + `\n${E}[2m›${E}[0m`;
+  const r = verify(codexMenuColored, still, { actionType: 'select', action: '1', hadConfirmMenu: true });
+  eq(r.outcome, 'no_effect');
+});
+
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
 if (results.failed) for (const e of results.errors) console.log(`  • ${e.name}\n    ${e.error}`);
 process.exit(results.failed ? 1 : 0);

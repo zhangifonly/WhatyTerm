@@ -62,6 +62,17 @@ function hasConfirmMenu(text) {
   return isLiveConfirmMenu(text) || isCodexLiveConfirm(text) || CONFIRM_MENU.test(text);
 }
 
+// 判据只认可见文本。抓屏走 `capture-pane -e` 保留色码，Codex 会把色码插进词中间
+// （实测 `Working (2m 54s • \x1b[0;1mesc\x1b[0;2m to interrupt)`），不剥则
+// RUNNING 与菜单 footer 贴底判据双双失配：按 1 后菜单正常关闭、命令正常执行，
+// 却被记成 no_effect，连 3 次就触发 shouldPause 把正常会话停掉（iSpring 实测）。
+function stripAnsi(text) {
+  return String(text || '')
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')  // OSC
+    .replace(/\x1b\[[0-9;?]*[ -\/]*[@-~]/g, '')          // CSI
+    .replace(/\x1b[@-Z\\-_]/g, '');                      // 其他单字符转义
+}
+
 class ActionOutcome {
   constructor() {
     this.pending = new Map();   // id -> timer
@@ -95,7 +106,7 @@ class ActionOutcome {
       action: typeof info.action === 'string' ? info.action.slice(0, 40) : String(info.action || ''),
       source: info.source || 'rule',
       beforeHash: hash(before),
-      hadConfirmMenu: hasConfirmMenu(before),
+      hadConfirmMenu: hasConfirmMenu(stripAnsi(before)),
       // v1.2.88：声明式规则 id（aiRules/earlyRules.js），空转率可精确归因到单条规则
       rule: info.rule || null
     };
@@ -120,9 +131,10 @@ class ActionOutcome {
   _verify(session, entry) {
     const after = session.getScreenContent ? session.getScreenContent() : '';
     const changed = hash(after) !== entry.beforeHash;
-    const interrupted = INTERRUPTED.test(after);
-    const running = RUNNING.test(after);
-    const menuGone = entry.hadConfirmMenu && !hasConfirmMenu(after);
+    const plainAfter = stripAnsi(after);
+    const interrupted = INTERRUPTED.test(plainAfter);
+    const running = RUNNING.test(plainAfter);
+    const menuGone = entry.hadConfirmMenu && !hasConfirmMenu(plainAfter);
 
     let outcome;
     if (interrupted) {

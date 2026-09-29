@@ -384,13 +384,16 @@ class ClaudeSessionFixer {
       // 写回文件。⚠ 2026-09-26 实测：CLI 还在写的时候整份读出再整份写回，读与写之间 CLI 追加的记录会被覆盖，
       // 对话链断在那一处（当天 134 处，58 个 tool_use 丢失）。所以：大小变了就放弃（交给下次、或 CLI 退出后再修），
       // 写临时文件再原子替换，不会留下写了一半的文件
+      // ⚠ 核对必须紧贴 rename、放在写临时文件**之后**：原先先核对再写，大文件写临时文件要几十毫秒，
+      // 这段时间里 CLI 追加的记录会被随后的 rename 覆盖（竞态测试约半数复现）。现在窗口只剩 stat→rename 两个系统调用
+      const tmpPath = `${filepath}.fixing-${process.pid}`;
+      await fs.writeFile(tmpPath, fixedLines.join(''), 'utf-8');
       const sizeNow = (await fs.stat(filepath)).size;
       if (sizeNow !== sizeAtRead) {
+        await fs.unlink(tmpPath).catch(() => {});
         console.warn(`[ClaudeSessionFixer] 读取后文件又被写入（${sizeAtRead} → ${sizeNow} 字节），CLI 还在运行，放弃本次改写`);
         return { success: false, error: 'CLI 正在写这份对话记录，已放弃改写（请在 CLI 退出后再修）', skippedBusy: true };
       }
-      const tmpPath = `${filepath}.fixing-${process.pid}`;
-      await fs.writeFile(tmpPath, fixedLines.join(''), 'utf-8');
       await fs.rename(tmpPath, filepath);
       if (relinkedCount > 0) {
         console.log(`[ClaudeSessionFixer] 重链 ${relinkedCount} 条记录的 parentUuid，保持对话链完整`);
