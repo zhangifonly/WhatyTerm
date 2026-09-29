@@ -21,6 +21,7 @@ import {
   decideLidSleep, countKeepAwakeSessions, parseBatt, parsePmset, clampFloor, DEFAULT_BATTERY_FLOOR,
   thermalVerdict, parseBatteryTemp, DEFAULT_TEMP_LIMIT
 } from './lidSleepPolicy.js';
+import { readWinPower, setWinOverride, ensureWinReady, updateWinFloor, detectModernStandby } from './lidSleepWin.js';
 
 const HOME = os.homedir();
 const RUN_DIR = path.join(HOME, '.webtmux', 'run');
@@ -34,6 +35,10 @@ const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
 export const SUDOERS_PATH = `/etc/sudoers.d/whatyterm-lidsleep-${UID}`;
 const PMSET = '/usr/bin/pmset';
 const LID_POLL_MS = 5000;
+// 挂起诊断：两轮之间隔了这么久，说明进程被睡眠/挂起过（定时器 60 秒一轮）。
+// Windows 版是实验性的，家人试用时靠这份记录判断「合盖后后台到底有没有停」
+const SUSPEND_GAP_MS = 150 * 1000;
+const EVENTS_PATH = path.join(HOME, '.webtmux', 'lid-sleep-events.jsonl');
 // 系统热状态：经 JXA 的 ObjC 桥读 NSProcessInfo.thermalState，免编译、免 root，约 70ms
 const THERMAL_JXA = 'ObjC.import("Foundation"); $.NSProcessInfo.processInfo.thermalState';
 
@@ -53,7 +58,12 @@ function run(cmd, args, timeout = 5000) {
 
 class LidSleepGuard {
   constructor() {
-    this.supported = os.platform() === 'darwin';
+    this.isWin = os.platform() === 'win32';
+    this.supported = os.platform() === 'darwin' || this.isWin;
+    this.experimental = this.isWin;   // 未在 Windows 笔记本上实测
+    this.modernStandby = null;
+    this.suspendEvents = [];
+    this._lastTickAt = 0;
     this.config = this._loadConfig();
     this.installed = false;
     this.state = { sleepDisabled: null, owned: false, onAC: false, percent: null, lowPowerMode: false,
@@ -84,12 +94,19 @@ class LidSleepGuard {
   /** 授权规则是否可用：sudo -n -l 能列出这条命令即说明免密可执行（不需要 root 就能查） */
   async checkInstalled() {
     if (!this.supported) return false;
+    if (this.isWin) { this.installed = true; return true; }   // Windows 全程免管理员，无需授权
     const r = await run('/usr/bin/sudo', ['-n', '-l', PMSET, '-a', 'disablesleep', '1']);
     this.installed = r.ok;
     return this.installed;
   }
 
   async _readPower() {
+    if (this.isWin) {
+      const w = await readWinPower();
+      Object.assign(this.state, { onAC: w.onAC, percent: w.percent, lowPowerMode: false, sleepDisabled: w.overrideOn,
+        owned: w.owned, thermalState: null, batteryTempC: null, lidClosed: null, lidAction: w.lidAction });
+      return;
+    }
     const [batt, pm, th, bt] = await Promise.all([
       run(PMSET, ['-g', 'batt']), run(PMSET, ['-g']),
       run('/usr/bin/osascript', ['-l', 'JavaScript', '-e', THERMAL_JXA]),
@@ -109,6 +126,14 @@ class LidSleepGuard {
 
   /** 切换标志并读回核对——面板显示的是读回值，不是我们以为设成了什么 */
   async _setDisabled(on) {
+    if (this.isWin) {
+      const w = await setWinOverride(on, this.config.batteryFloor);
+      this.state.lastError = w.ok ? '' : w.error;
+      if (w.ok && on) this._touchHeartbeat();
+      await this._readPower();
+      console.log(`[LidSleep] Windows 合盖设置${on ? '改为不采取任何操作' : '已还原'}（${w.ok ? '成功' : w.error}）`);
+      return w.ok;
+    }
     const r = await run('/usr/bin/sudo', ['-n', PMSET, '-a', 'disablesleep', on ? '1' : '0']);
     if (!r.ok) {
       this.state.lastError = `pmset 执行失败：${(r.stderr || '').trim().slice(0, 120) || `退出码 ${r.code}`}`;
@@ -132,6 +157,14 @@ class LidSleepGuard {
     fs.writeFileSync(MARKER_PATH, `${this.config.batteryFloor} ${this.config.tempLimit}`);
   }
 
+  _recordSuspend(gapMs) {
+    const ev = { at: new Date().toISOString(), gapSec: Math.round(gapMs / 1000), platform: os.platform(),
+      overrideWasOn: !!(this.state.owned && this.state.sleepDisabled), onAC: this.state.onAC, percent: this.state.percent };
+    this.suspendEvents = [...this.suspendEvents, ev].slice(-5);
+    console.log(`[LidSleep] 检测到进程停顿 ${ev.gapSec} 秒（合盖不睡${ev.overrideWasOn ? '开着' : '没开'}）`);
+    try { fs.appendFileSync(EVENTS_PATH, JSON.stringify(ev) + '\n'); } catch {}
+  }
+
   _touchHeartbeat() {
     try { fs.writeFileSync(HEARTBEAT_PATH, String(Date.now())); } catch {}
   }
@@ -141,10 +174,18 @@ class LidSleepGuard {
     if (!this.supported || this._ticking) return;
     this._ticking = true;
     this._lastSessions = sessions;
+    const now = Date.now();
+    if (this._lastTickAt && now - this._lastTickAt > SUSPEND_GAP_MS) this._recordSuspend(now - this._lastTickAt);
+    this._lastTickAt = now;
     try {
       await this.checkInstalled();
       // 看门狗不在位就不开标志：服务一旦被强杀，没人还原，Mac 会永远不睡
-      this.watchdogReady = this.installed && this._ensureWatchdog ? await this._ensureWatchdog() : false;
+      if (this.isWin) {
+        this.watchdogReady = await ensureWinReady();
+        if (this.modernStandby === null) this.modernStandby = await detectModernStandby();
+      } else {
+        this.watchdogReady = this.installed && this._ensureWatchdog ? await this._ensureWatchdog() : false;
+      }
       await this._readPower();
       const k = countKeepAwakeSessions(sessions);
       Object.assign(this.state, { keepAwake: k.total, busy: k.busy, auto: k.auto });
@@ -161,7 +202,8 @@ class LidSleepGuard {
       this.state.reason = d.reason;
       if (d.disable) {
         if (!this.state.sleepDisabled) await this._setDisabled(true);
-        else if (!this.state.owned) this.state.reason = '合盖不睡已由其他工具开启（如 Amphetamine），WhatyTerm 不接管';
+        else if (!this.state.owned) this.state.reason = '合盖不睡已由其他工具或你自己的设置开启，WhatyTerm 不接管';
+        else if (this.isWin) await setWinOverride(true, this.config.batteryFloor);   // 服务重启后补回保活进程与看门狗
         if (this.state.owned) this._touchHeartbeat();
       } else if (this.state.owned && this.installed) {
         // 只还原自己开的；别人开的不碰
@@ -181,7 +223,7 @@ class LidSleepGuard {
    * 一合上就 `pmset displaysleepnow`（不需要 root）。
    */
   _syncLidWatcher() {
-    const need = this.state.owned && this.state.sleepDisabled;
+    const need = !this.isWin && this.state.owned && this.state.sleepDisabled;   // Windows 合盖自己会关内屏
     if (need && !this._lidTimer) {
       this._lidTimer = setInterval(() => this._pollLid(), LID_POLL_MS);
       if (this._lidTimer.unref) this._lidTimer.unref();
@@ -217,6 +259,10 @@ class LidSleepGuard {
       enabled: this.config.enabled,
       batteryFloor: this.config.batteryFloor,
       tempLimit: this.config.tempLimit,
+      platform: os.platform(),
+      experimental: this.experimental,
+      modernStandby: this.modernStandby,
+      suspendEvents: this.suspendEvents,
       installed: this.installed,
       watchdogReady: this.watchdogReady,
       active: !!(this.state.owned && this.state.sleepDisabled),
@@ -229,7 +275,10 @@ class LidSleepGuard {
     if (tempLimit !== undefined) this.config.tempLimit = clampTempLimit(tempLimit);
     if (batteryFloor !== undefined) this.config.batteryFloor = clampFloor(batteryFloor);
     this._saveConfig();
-    if (this.state.owned) this._writeMarker(); // 看门狗读这里的下限
+    if (this.state.owned) {   // 看门狗读标记里的下限
+      if (this.isWin) updateWinFloor(this.config.batteryFloor);
+      else this._writeMarker();
+    }
     return this.status;
   }
 

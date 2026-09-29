@@ -220,6 +220,7 @@ import telemetryService from './services/TelemetryService.js';
 import crashReporter from './services/CrashReporter.js';
 import sleepPrevention from './services/SleepPreventionService.js';
 import lidSleepGuard from './services/LidSleepGuard.js';
+import { uninstallWin as uninstallLidSleepWin } from './services/lidSleepWin.js';
 import { install as installLidSleep, uninstall as uninstallLidSleep, ensureWatchdog as ensureLidWatchdog, manualCommands as lidSleepManualCommands } from './services/lidSleepInstall.js';
 import PuppeteerReaper from './services/PuppeteerReaper.js';
 import { sessionClaudeEnv, relayMigrationPlan, OAUTH_PROVIDER_INFO } from './services/sessionProviderEnv.js';
@@ -3775,7 +3776,8 @@ lidSleepGuard.setWatchdogProvider(ensureLidWatchdog);
 const lidSleepTick = () => lidSleepGuard.tick(Array.from(sessionManager?.sessions?.values?.() || []));
 app.get('/api/lid-sleep', async (req, res) => {
   await lidSleepTick();
-  res.json({ ...lidSleepGuard.status, manual: lidSleepGuard.installed ? [] : lidSleepManualCommands() });
+  const needManual = !lidSleepGuard.installed && process.platform === 'darwin';
+  res.json({ ...lidSleepGuard.status, manual: needManual ? lidSleepManualCommands() : [] });
 });
 app.post('/api/lid-sleep', async (req, res) => {
   const { enabled, batteryFloor, tempLimit } = req.body || {};
@@ -3784,13 +3786,14 @@ app.post('/api/lid-sleep', async (req, res) => {
   res.json(lidSleepGuard.status);
 });
 app.post('/api/lid-sleep/install', async (req, res) => {
-  const r = await installLidSleep();
+  // Windows 免授权（改的是当前用户的电源方案），没有安装这一步
+  const r = process.platform === 'darwin' ? await installLidSleep() : { ok: true };
   await lidSleepTick();
   res.status(r.ok ? 200 : 400).json({ ...r, status: lidSleepGuard.status });
 });
 app.post('/api/lid-sleep/uninstall', async (req, res) => {
   await lidSleepGuard.setConfig({ enabled: false });
-  const r = await uninstallLidSleep();
+  const r = process.platform === 'win32' ? await uninstallLidSleepWin() : await uninstallLidSleep();
   await lidSleepTick();
   res.status(r.ok ? 200 : 400).json({ ...r, status: lidSleepGuard.status });
 });

@@ -18,6 +18,7 @@ import { execFileSync } from 'child_process';
 import { countKeepAwakeSessions, decideLidSleep, parseBatt, parsePmset, clampFloor, thermalVerdict, parseBatteryTemp } from '../server/services/lidSleepPolicy.js';
 import { buildSudoersRule, buildWatchdogScript, buildPlist } from '../server/services/lidSleepInstall.js';
 import { MARKER_PATH, HEARTBEAT_PATH } from '../server/services/LidSleepGuard.js';
+import { parseLidAction, parseActiveScheme, parseWinBattery, parseModernStandby, psq, buildWinWatchdog, WIN_MARKER } from '../server/services/lidSleepWin.js';
 
 let pass = 0, fail = 0;
 function test(name, fn) {
@@ -161,6 +162,34 @@ test('⑩ 开着盖子不管温度：看门狗与决策都不因过热还原', (
   eq(thermalVerdict({ thermalState: 2, batteryTempC: 30, lidClosed: true }).hot, true, '合盖照常保护');
   eq(thermalVerdict({ thermalState: 2, batteryTempC: 30, lidClosed: null }).hot, true, '读不到盖子按合盖');
   eq(thermalVerdict({ thermalState: 1, batteryTempC: 44, limitC: 45, tripped: true, lidClosed: false }).tripped, false, '开盖清掉滞回');
+});
+
+// ============ Windows（实验性）：解析真实输出。系统层行为见 scripts/e2e-lid-sleep-win.mjs（win-4090 实跑） ============
+const fx = (n) => fs.readFileSync(new URL(`./fixtures/${n}`, import.meta.url), 'utf-8');
+
+test('⑪ Windows：中文系统 powercfg /qh 能读出插电/电池两个值（win-4090 实采）', () => {
+  eq(JSON.stringify(parseLidAction(fx('powercfg-qh-lidaction-zh.txt'))), JSON.stringify({ ac: 1, dc: 1 }));
+  eq(JSON.stringify(parseLidAction('    Current AC Power Setting Index: 0x00000000\n    Current DC Power Setting Index: 0x00000003\n')),
+    JSON.stringify({ ac: 0, dc: 3 }), '英文系统');
+  eq(parseLidAction('电源方案 GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (平衡)\n  GUID 别名: SCHEME_BALANCED\n'), null,
+    '/q 在无盖机器上只有方案头（就是改用 /qh 的原因），不能读成值');
+  eq(parseActiveScheme('电源方案 GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (平衡)'), '381b4222-f694-41f0-9685-ff5bb260df2e');
+});
+
+test('⑪ Windows：电池——台式机无电池视为插电、放电=用电池、电量读得到', () => {
+  eq(JSON.stringify(parseWinBattery('')), JSON.stringify({ onAC: true, percent: null, hasBattery: false }));
+  eq(parseWinBattery('{"EstimatedChargeRemaining":37,"BatteryStatus":1}').onAC, false);
+  eq(parseWinBattery('[{"EstimatedChargeRemaining":88,"BatteryStatus":2}]').percent, 88, '多电池取第一块');
+});
+
+test('⑪ Windows：现代待机只看「可用」那段（台式机的 S0 在「不可用」里，win-4090 实采）', () => {
+  eq(parseModernStandby(fx('powercfg-a-desktop-zh.txt')), false);
+  eq(parseModernStandby('此系统上有以下睡眠状态:\n    待机(S0 低电量待机) 已连接网络\n    休眠\n\n此系统上没有以下睡眠状态:\n    待机 (S3)\n'), true);
+});
+
+test('⑪ Windows：脚本里的路径做了单引号转义（用户名带撇号不会截断命令）', () => {
+  eq(psq("C:\\Users\\O'Brien\\x"), "'C:\\Users\\O''Brien\\x'");
+  eq(buildWinWatchdog().includes(psq(WIN_MARKER)), true);
 });
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`);

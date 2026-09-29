@@ -4608,3 +4608,4 @@ body {
 .ls-manual code { display: block; margin-top: 4px; padding: 4px 6px; border-radius: 4px; background: hsl(var(--muted)); word-break: break-all; user-select: all; }
 .ls-error { font-size: 11px; color: hsl(0 70% 55%); margin-top: 4px; }
 .ls-uninstall { margin-top: 8px; font-size: 11px; padding: 2px 8px; border-radius: 4px; background: none; border: 1px solid hsl(var(--border)); color: hsl(var(--muted-foreground)); cursor: pointer; }
+.ls-badge.exp { background: hsl(38 90% 50% / 0.2); color: hsl(38 90% 50%); }
