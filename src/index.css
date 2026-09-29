@@ -4596,3 +4596,15 @@ body {
   border: 1px solid hsl(0 70% 50% / 0.45); background: transparent; color: hsl(0 70% 62%); }
 .td-revoke:hover, .td-revoke.armed { background: hsl(0 70% 50% / 0.18); }
 .td-revoke:disabled { opacity: 0.5; cursor: default; }
+
+/* 合盖不睡眠（设置 → 高级），复用 .td-* 的字号与配色 */
+.lid-sleep-card { margin: 0 0 16px; padding: 12px 14px; border: 1px solid hsl(var(--border)); border-radius: 8px; background: hsl(var(--card)); }
+.lid-sleep-card .td-empty { margin-bottom: 8px; }
+.ls-badge { margin-left: 8px; font-size: 10px; font-weight: 500; padding: 1px 6px; border-radius: 3px; background: hsl(var(--muted)); color: hsl(var(--muted-foreground)); }
+.ls-badge.on { background: hsl(142 70% 40% / 0.2); color: hsl(142 70% 45%); }
+.ls-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: hsl(var(--foreground)); margin: 6px 0; flex-wrap: wrap; }
+.ls-row select { font-size: 12px; padding: 2px 4px; }
+.ls-manual { font-size: 11px; color: hsl(var(--muted-foreground)); margin: 6px 0; }
+.ls-manual code { display: block; margin-top: 4px; padding: 4px 6px; border-radius: 4px; background: hsl(var(--muted)); word-break: break-all; user-select: all; }
+.ls-error { font-size: 11px; color: hsl(0 70% 55%); margin-top: 4px; }
+.ls-uninstall { margin-top: 8px; font-size: 11px; padding: 2px 8px; border-radius: 4px; background: none; border: 1px solid hsl(var(--border)); color: hsl(var(--muted-foreground)); cursor: pointer; }

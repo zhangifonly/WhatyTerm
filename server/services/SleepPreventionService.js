@@ -1,6 +1,7 @@
 import { spawn, execSync } from 'child_process';
 import os from 'os';
 import childRegistry from './ChildRegistry.js';
+import { countKeepAwakeSessions } from './lidSleepPolicy.js';
 
 class SleepPreventionService {
   constructor() {
@@ -41,8 +42,8 @@ class SleepPreventionService {
       clamshellSafe: this.clamshellSafe,
       // 给前端的人类可读提示
       clamshellHint: this.clamshellSafe
-        ? '已接电源，合盖可保持运行（Wi-Fi 长任务建议外接显示器或保持开盖最稳）'
-        : '电池供电下合盖会休眠并断开 Wi-Fi（Apple Silicon 硬限制），请接通电源后再合盖'
+        ? '已接电源，空闲不睡；合盖不睡需开启「合盖保活」（pmset disablesleep）'
+        : 'caffeinate 挡不住合盖睡眠；电池下合盖不睡需开启「合盖保活」'
     };
   }
 
@@ -99,12 +100,9 @@ class SleepPreventionService {
     this.detectPowerSource();
 
     // 统计有活跃 claude 进程的会话数
-    let activeCount = 0;
-    for (const session of sessions) {
-      const content = session.getScreenContent?.() || '';
-      const isRunning = /esc to interrupt|Cogitat|Brew|Bak|Wrangl|Form|Work/i.test(content);
-      if (isRunning) activeCount++;
-    }
+    // 原判据 /esc to interrupt|Cogitat|Brew|Bak|Wrangl|Form|Work/i 对整屏（含色码）匹配，
+    // Form/Work/Bak 在正文里随处可见，空闲会话也被当成在跑、一直阻止睡眠。改用与合盖保活同一口径
+    const activeCount = countKeepAwakeSessions(sessions).busy;
 
     this.activeSessionCount = activeCount;
     // 合盖保活只有"插电 + 有 caffeinate 保活"时才成立

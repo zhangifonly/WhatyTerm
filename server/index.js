@@ -219,6 +219,8 @@ import { RalphEngine, RALPH_CORE_PRESENT } from './services/ralph/loader.js';
 import telemetryService from './services/TelemetryService.js';
 import crashReporter from './services/CrashReporter.js';
 import sleepPrevention from './services/SleepPreventionService.js';
+import lidSleepGuard from './services/LidSleepGuard.js';
+import { install as installLidSleep, uninstall as uninstallLidSleep, ensureWatchdog as ensureLidWatchdog, manualCommands as lidSleepManualCommands } from './services/lidSleepInstall.js';
 import PuppeteerReaper from './services/PuppeteerReaper.js';
 import { sessionClaudeEnv, relayMigrationPlan, OAUTH_PROVIDER_INFO } from './services/sessionProviderEnv.js';
 import { withBearerToken, topProvider, codexStartCommand, linkSharedCodexEntries, withCarriedTables } from './services/codexSessionConfig.js';
@@ -3751,7 +3753,10 @@ app.post('/api/project-recordings/migrate', (req, res) => {
   }
 });
 
-// 休眠阻止 API
+// API 路由使用认证中间件
+app.use('/api', authMiddleware);
+
+// 休眠阻止 API（v1.4.71 起挪到认证之后：原先经隧道不登录就能切换本机防睡眠；全仓无调用方）
 app.get('/api/sleep-prevention', (req, res) => {
   res.json(sleepPrevention.status);
 });
@@ -3765,8 +3770,30 @@ app.post('/api/sleep-prevention/toggle', (req, res) => {
   res.json(sleepPrevention.status);
 });
 
-// API 路由使用认证中间件
-app.use('/api', authMiddleware);
+// 合盖保活（在认证之后：安装会弹管理员授权框、开启会改系统睡眠行为）
+lidSleepGuard.setWatchdogProvider(ensureLidWatchdog);
+const lidSleepTick = () => lidSleepGuard.tick(Array.from(sessionManager?.sessions?.values?.() || []));
+app.get('/api/lid-sleep', async (req, res) => {
+  await lidSleepTick();
+  res.json({ ...lidSleepGuard.status, manual: lidSleepGuard.installed ? [] : lidSleepManualCommands() });
+});
+app.post('/api/lid-sleep', async (req, res) => {
+  const { enabled, batteryFloor } = req.body || {};
+  await lidSleepGuard.setConfig({ enabled: typeof enabled === 'boolean' ? enabled : undefined, batteryFloor });
+  await lidSleepTick();
+  res.json(lidSleepGuard.status);
+});
+app.post('/api/lid-sleep/install', async (req, res) => {
+  const r = await installLidSleep();
+  await lidSleepTick();
+  res.status(r.ok ? 200 : 400).json({ ...r, status: lidSleepGuard.status });
+});
+app.post('/api/lid-sleep/uninstall', async (req, res) => {
+  await lidSleepGuard.setConfig({ enabled: false });
+  const r = await uninstallLidSleep();
+  await lidSleepTick();
+  res.status(r.ok ? 200 : 400).json({ ...r, status: lidSleepGuard.status });
+});
 
 // 手机网页推送（在 /api 认证之后：订阅等于拿到这台电脑的推送投递权）
 app.get('/api/push/key', (req, res) => {
@@ -6543,7 +6570,10 @@ setTimeout(runBackgroundStatusAnalysis, 5000);
 setInterval(() => {
   const sessions = Array.from(sessionManager.sessions.values());
   sleepPrevention.update(sessions);
+  lidSleepGuard.tick(sessions).catch(() => {});
 }, 60000);
+// 启动后尽快接上心跳：合盖期间服务重启，看门狗 180 秒内没见到心跳就会还原睡眠
+setTimeout(() => lidSleepTick().catch(() => {}), 10000);
 
 // 看门狗：自动回收失控/孤儿的 puppeteer Chrome，避免其吃满 CPU 拖垮终端输入
 const puppeteerReaper = new PuppeteerReaper();

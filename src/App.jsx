@@ -28,6 +28,7 @@ import { useLongRunBell } from './components/longrun/useLongRunBell';
 import ServerStaleBanner from './components/ServerStaleBanner.jsx';
 import SessionUsageCard from './components/SessionUsageCard.jsx';
 import TrustedDevices from './components/TrustedDevices.jsx';
+import LidSleepCard from './components/LidSleepCard.jsx';
 import LongRunHandoverDialog from './components/longrun/LongRunHandoverDialog';
 import { taskBadge, taskLine } from './components/longrun/longrunBoard';
 import LongRunMain from './components/longrun/LongRunMain';
@@ -4926,7 +4927,10 @@ function SettingsModal({ settings, onChange, onSave, onClose, auth, tunnelUrl, o
         )}
 
         {activeTab === 'advanced' && (
-          <AdvancedSettings embedded={true} />
+          <>
+            <LidSleepCard />
+            <AdvancedSettings embedded={true} />
+          </>
         )}
 
         {activeTab === 'about' && (
