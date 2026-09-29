@@ -99,6 +99,7 @@ class LidSleepGuard {
     const p = parsePmset(pm.stdout);
     const ts = parseInt(th.stdout.trim(), 10);
     this.state.thermalState = th.ok && Number.isInteger(ts) ? ts : null;
+    this.state.lidClosed = await this._readLid();
     let tempC = parseBatteryTemp(bt.stdout);
     if (tempC == null) tempC = parseBatteryTemp((await run('/usr/sbin/ioreg', ['-r', '-c', 'AppleSmartBattery', '-w0'])).stdout);
     this.state.batteryTempC = tempC;
@@ -139,6 +140,7 @@ class LidSleepGuard {
   async tick(sessions) {
     if (!this.supported || this._ticking) return;
     this._ticking = true;
+    this._lastSessions = sessions;
     try {
       await this.checkInstalled();
       // 看门狗不在位就不开标志：服务一旦被强杀，没人还原，Mac 会永远不睡
@@ -147,7 +149,7 @@ class LidSleepGuard {
       const k = countKeepAwakeSessions(sessions);
       Object.assign(this.state, { keepAwake: k.total, busy: k.busy, auto: k.auto });
       const thermal = thermalVerdict({ thermalState: this.state.thermalState, batteryTempC: this.state.batteryTempC,
-        limitC: this.config.tempLimit, tripped: this.state.thermalTripped });
+        limitC: this.config.tempLimit, tripped: this.state.thermalTripped, lidClosed: this.state.lidClosed });
       if (thermal.tripped !== this.state.thermalTripped) console.log(`[LidSleep] 过热保护${thermal.tripped ? '触发' : '解除'}：${thermal.why || '已降温'}`);
       this.state.thermalTripped = thermal.tripped;
       const d = decideLidSleep({
@@ -186,20 +188,27 @@ class LidSleepGuard {
     } else if (!need && this._lidTimer) {
       clearInterval(this._lidTimer);
       this._lidTimer = null;
-      this.state.lidClosed = null;
     }
   }
 
-  async _pollLid() {
+  /** 盖子状态：true 合上 / false 打开 / null 读不到（台式机没有这个键） */
+  async _readLid() {
     const r = await run('/usr/sbin/ioreg', ['-r', '-k', 'AppleClamshellState', '-d', '1']);
     const m = r.stdout.match(/"AppleClamshellState"\s*=\s*(Yes|No)/);
-    if (!m) return;
-    const closed = m[1] === 'Yes';
-    if (closed && this.state.lidClosed === false) {
+    return m ? m[1] === 'Yes' : null;
+  }
+
+  async _pollLid() {
+    const closed = await this._readLid();
+    if (closed === null) return;
+    const justClosed = closed && this.state.lidClosed === false;
+    this.state.lidClosed = closed;
+    if (justClosed) {
       await run(PMSET, ['displaysleepnow']);
       console.log('[LidSleep] 盖子合上，已关闭内屏');
+      // 开盖时不管温度，合上的瞬间立刻按温度重算一次，不等 60 秒定时器
+      this.tick(this._lastSessions || []).catch(() => {});
     }
-    this.state.lidClosed = closed;
   }
 
   get status() {

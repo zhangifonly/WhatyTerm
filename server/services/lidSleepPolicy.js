@@ -73,7 +73,10 @@ export const DEFAULT_TEMP_LIMIT = 45;
 export const THERMAL_SERIOUS = 2;
 const TEMP_HYSTERESIS = 5;
 
-export function thermalVerdict({ thermalState, batteryTempC, limitC = DEFAULT_TEMP_LIMIT, tripped = false }) {
+export function thermalVerdict({ thermalState, batteryTempC, limitC = DEFAULT_TEMP_LIMIT, tripped = false, lidClosed = null }) {
+  // 开着盖子不管温度：人在用、散热正常，满负荷发热是常态（用户 2026-09-29 定的口径）。
+  // 只认「明确开盖」；读不到盖子状态（台式机无盖、读取失败）按合盖处理，保守起见照常保护
+  if (lidClosed === false) return { hot: false, tripped: false, why: '' };
   const stateHot = Number.isInteger(thermalState) && thermalState >= THERMAL_SERIOUS;
   const tempHot = Number.isFinite(batteryTempC) && batteryTempC >= limitC;
   if (stateHot || tempHot) {

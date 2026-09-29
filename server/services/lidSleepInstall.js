@@ -51,8 +51,12 @@ THERM=$(/usr/bin/osascript -l JavaScript -e 'ObjC.import("Foundation"); $.NSProc
 WHY=""
 [ $((NOW - HBT)) -gt 180 ] && WHY="WhatyTerm 心跳超时"
 if echo "$BATT" | grep -q "Battery Power" && [ -n "$PCT" ] && [ "$PCT" -le "$FLOOR" ]; then WHY="电量 $PCT% 到下限 $FLOOR%"; fi
-if [ -n "$TEMP" ] && [ "$TEMP" -ge $((TLIMIT * 100)) ]; then WHY="电池温度 $((TEMP / 100))°C 到上限 $TLIMIT°C"; fi
-case "$THERM" in 2|3) WHY="系统热状态 $THERM（严重/危急）";; esac
+# 开着盖子不管温度（人在用、散热正常）；读不到盖子状态按合盖处理
+LID=$(/usr/sbin/ioreg -r -k AppleClamshellState -d 1 | grep -Eo '"AppleClamshellState" = (Yes|No)' | grep -Eo '(Yes|No)$')
+if [ "$LID" != "No" ]; then
+  if [ -n "$TEMP" ] && [ "$TEMP" -ge $((TLIMIT * 100)) ]; then WHY="电池温度 $((TEMP / 100))°C 到上限 $TLIMIT°C"; fi
+  case "$THERM" in 2|3) WHY="系统热状态 $THERM（严重/危急）";; esac
+fi
 [ -n "$WHY" ] || exit 0
 /usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0 && rm -f "$MARKER"
 /usr/bin/logger -t whatyterm-lidguard "已恢复睡眠：$WHY"

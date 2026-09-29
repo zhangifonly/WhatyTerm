@@ -121,13 +121,15 @@ test('本机真实电池温度可读（Apple Silicon 在 AppleSmartBatteryPack�
 });
 
 // ⑨ 看门狗脚本真跑：路径换到临时目录、sudo pmset 换成写记录文件，其余逻辑原样
-function runWatchdog({ marker, hbAgeSec }) {
+function runWatchdog({ marker, hbAgeSec, lid = 'Yes' }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lidguard-'));
   const m = path.join(dir, 'owner'), hb = path.join(dir, 'hb'), rec = path.join(dir, 'restored');
   const script = buildWatchdogScript()
     .replace(MARKER_PATH, m).replace(HEARTBEAT_PATH, hb)
     .replace('/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0', `echo restored > "${rec}"`)
-    .replace('/usr/bin/logger -t whatyterm-lidguard', 'echo');
+    .replace('/usr/bin/logger -t whatyterm-lidguard', 'echo')
+    .replace('/usr/sbin/ioreg -r -k AppleClamshellState -d 1', `echo '"AppleClamshellState" = ${lid}'`);
+  if (!script.includes(`= ${lid}'`)) throw new Error('看门狗脚本里找不到盖子状态读取，测试替换失效');
   fs.writeFileSync(path.join(dir, 'g.sh'), script);
   if (marker !== null) fs.writeFileSync(m, marker);
   fs.writeFileSync(hb, '');
@@ -151,6 +153,14 @@ test('⑨ 看门狗：温度上限低于当前电池温度时还原（两个数�
   const r = runWatchdog({ marker: '5 1', hbAgeSec: 10 });   // 上限 1°C，必然超
   eq(r.restored, true, `未按温度还原：${r.out}`);
   eq(/电池温度|热状态/.test(r.out), true, r.out);
+});
+
+test('⑩ 开着盖子不管温度：看门狗与决策都不因过热还原', () => {
+  eq(runWatchdog({ marker: '5 1', hbAgeSec: 10, lid: 'No' }).restored, false, '开盖却按温度还原了');
+  eq(thermalVerdict({ thermalState: 3, batteryTempC: 55, lidClosed: false }).hot, false, '开盖危急也不管');
+  eq(thermalVerdict({ thermalState: 2, batteryTempC: 30, lidClosed: true }).hot, true, '合盖照常保护');
+  eq(thermalVerdict({ thermalState: 2, batteryTempC: 30, lidClosed: null }).hot, true, '读不到盖子按合盖');
+  eq(thermalVerdict({ thermalState: 1, batteryTempC: 44, limitC: 45, tripped: true, lidClosed: false }).tripped, false, '开盖清掉滞回');
 });
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`);
