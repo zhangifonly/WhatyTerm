@@ -38,13 +38,21 @@ export function buildWatchdogScript() {
 MARKER="${MARKER_PATH}"
 HB="${HEARTBEAT_PATH}"
 [ -f "$MARKER" ] || exit 0
-FLOOR=$(tr -cd 0-9 < "$MARKER"); [ -n "$FLOOR" ] || FLOOR=20
+# 标记文件内容：「电量下限 温度上限」
+read FLOOR TLIMIT < "$MARKER"
+case "$FLOOR" in ''|*[!0-9]*) FLOOR=20;; esac
+case "$TLIMIT" in ''|*[!0-9]*) TLIMIT=45;; esac
 NOW=$(date +%s); HBT=$(stat -f %m "$HB" 2>/dev/null || echo 0)
 BATT=$(/usr/bin/pmset -g batt)
 PCT=$(echo "$BATT" | grep -Eo '[0-9]+%' | head -1 | tr -d %)
+TEMP=$(/usr/sbin/ioreg -r -c AppleSmartBatteryPack -w0 | grep -Eo '"Temperature" ?= ?[0-9]+' | head -1 | grep -Eo '[0-9]+$')
+[ -n "$TEMP" ] || TEMP=$(/usr/sbin/ioreg -r -c AppleSmartBattery -w0 | grep -Eo '"Temperature" ?= ?[0-9]+' | head -1 | grep -Eo '[0-9]+$')
+THERM=$(/usr/bin/osascript -l JavaScript -e 'ObjC.import("Foundation"); $.NSProcessInfo.processInfo.thermalState' 2>/dev/null)
 WHY=""
 [ $((NOW - HBT)) -gt 180 ] && WHY="WhatyTerm 心跳超时"
 if echo "$BATT" | grep -q "Battery Power" && [ -n "$PCT" ] && [ "$PCT" -le "$FLOOR" ]; then WHY="电量 $PCT% 到下限 $FLOOR%"; fi
+if [ -n "$TEMP" ] && [ "$TEMP" -ge $((TLIMIT * 100)) ]; then WHY="电池温度 $((TEMP / 100))°C 到上限 $TLIMIT°C"; fi
+case "$THERM" in 2|3) WHY="系统热状态 $THERM（严重/危急）";; esac
 [ -n "$WHY" ] || exit 0
 /usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0 && rm -f "$MARKER"
 /usr/bin/logger -t whatyterm-lidguard "已恢复睡眠：$WHY"

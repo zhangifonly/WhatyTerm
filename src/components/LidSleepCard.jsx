@@ -1,5 +1,8 @@
 import React, { useEffect, useState, useCallback } from 'react';
 
+// NSProcessInfo.thermalState 的四档
+const THERMAL_NAMES = ['正常', '偏高', '严重', '危急'];
+
 /**
  * 合盖保活开关（设置 → 高级）。借鉴 Amphetamine 的「合盖模式」与开源实现 Sleepless / LidAwake：
  * 有会话在跑或开着自动操作时切 `pmset disablesleep 1`，活停了、电量到下限、低电量模式就还原。
@@ -46,7 +49,7 @@ export default function LidSleepCard() {
       </div>
       <div className="td-empty">
         有会话在跑或开着自动操作时，合上盖子 Mac 也不睡，任务继续跑，可以用手机远程看。
-        活干完、电量到下限或进入低电量模式时，自动恢复正常睡眠。合盖后会关掉内屏；请别放进包里闷着。
+        活干完、电量到下限、进入低电量模式或温度过高时，自动恢复正常睡眠。合盖后会关掉内屏；请别放进包里闷着。
       </div>
 
       {!ready && (
@@ -79,11 +82,21 @@ export default function LidSleepCard() {
             </select>
             <span>时恢复睡眠</span>
           </label>
+          <label className="ls-row">
+            <span>电池温度达到</span>
+            <select value={st.tempLimit} disabled={!!busy}
+              onChange={(e) => post('/api/lid-sleep', { tempLimit: Number(e.target.value) }, 'temp')}>
+              {[40, 42, 45, 48, 50].map((v) => <option key={v} value={v}>{v}°C</option>)}
+            </select>
+            <span>或系统判定「过热」时恢复睡眠</span>
+          </label>
         </>
       )}
 
       <div className="td-meta">
         {st.reason}{st.onAC ? ' · 已接电源' : ` · 电池 ${st.percent ?? '?'}%`}
+        {st.batteryTempC != null && ` · 电池 ${st.batteryTempC.toFixed(1)}°C`}
+        {st.thermalState != null && ` · 热状态 ${THERMAL_NAMES[st.thermalState] || st.thermalState}`}
         {st.keepAwake > 0 && ` · 运行中 ${st.busy} / 自动操作 ${st.auto}`}
       </div>
       {(msg || st.lastError) && <div className="ls-error">{msg || st.lastError}</div>}

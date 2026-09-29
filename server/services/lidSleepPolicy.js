@@ -60,6 +60,40 @@ export function parseBatt(out) {
   return { onAC: /AC Power/i.test(text), percent: m ? Number(m[1]) : null };
 }
 
+/**
+ * 过热保护。两路信号，都不需要 root：
+ *   - 系统热状态 NSProcessInfo.thermalState：0 正常 / 1 偏高 / 2 严重 / 3 危急。
+ *     这是 macOS 综合所有传感器给的判断，比单个探头可靠；≥2 时系统已在降频
+ *   - 电池温度（ioreg AppleSmartBatteryPack 的 Temperature，单位 0.01°C）。
+ *     合盖闷着时电池是最怕热的部件，长期 45°C 以上明显加速老化
+ * 硬件本身有过热降频与紧急关机兜底，这里防的是「闷在包里一直满负荷」伤电池。
+ * 滞回：触发后要降到 热状态≤1 且 电池温度 ≤ 上限-5°C 才解除，否则会在阈值附近反复开关。
+ */
+export const DEFAULT_TEMP_LIMIT = 45;
+export const THERMAL_SERIOUS = 2;
+const TEMP_HYSTERESIS = 5;
+
+export function thermalVerdict({ thermalState, batteryTempC, limitC = DEFAULT_TEMP_LIMIT, tripped = false }) {
+  const stateHot = Number.isInteger(thermalState) && thermalState >= THERMAL_SERIOUS;
+  const tempHot = Number.isFinite(batteryTempC) && batteryTempC >= limitC;
+  if (stateHot || tempHot) {
+    const why = stateHot ? `系统热状态「${['正常', '偏高', '严重', '危急'][thermalState] || thermalState}」` : `电池 ${batteryTempC.toFixed(1)}°C ≥ ${limitC}°C`;
+    return { hot: true, tripped: true, why };
+  }
+  if (tripped) {
+    const cooled = (!Number.isInteger(thermalState) || thermalState < THERMAL_SERIOUS)
+      && (!Number.isFinite(batteryTempC) || batteryTempC <= limitC - TEMP_HYSTERESIS);
+    if (!cooled) return { hot: true, tripped: true, why: `降温中（需降到 ${limitC - TEMP_HYSTERESIS}°C 以下）` };
+  }
+  return { hot: false, tripped: false, why: '' };
+}
+
+/** 解析 ioreg 电池温度（Apple Silicon 在 AppleSmartBatteryPack，Intel 在 AppleSmartBattery；两种空格写法都认） */
+export function parseBatteryTemp(out) {
+  const m = String(out || '').match(/"Temperature"\s*=\s*(\d+)/);
+  return m ? Number(m[1]) / 100 : null;
+}
+
 /** 解析 `pmset -g`：SleepDisabled 标志与低电量模式 */
 export function parsePmset(out) {
   const text = String(out || '');
@@ -78,6 +112,8 @@ export function decideLidSleep(s) {
   if (!s.enabled) return { disable: false, reason: '未开启' };
   if (!s.installed) return { disable: false, reason: '尚未授权（需管理员密码安装一次）' };
   if (!s.keepAwake) return { disable: false, reason: '没有运行中或自动操作的会话，允许正常睡眠' };
+  // 过热优先于电源判断：插电时发热更大，不能因为插着电就豁免
+  if (s.thermal?.hot) return { disable: false, reason: `过热保护：${s.thermal.why}，恢复睡眠降温` };
   if (!s.onAC) {
     if (s.lowPowerMode) return { disable: false, reason: '电池供电且处于低电量模式，已让位' };
     if (s.percent == null) return { disable: false, reason: '读不到电量，保守起见允许睡眠' };

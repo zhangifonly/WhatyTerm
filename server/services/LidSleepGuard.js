@@ -18,7 +18,8 @@ import os from 'os';
 import path from 'path';
 import { execFile } from 'child_process';
 import {
-  decideLidSleep, countKeepAwakeSessions, parseBatt, parsePmset, clampFloor, DEFAULT_BATTERY_FLOOR
+  decideLidSleep, countKeepAwakeSessions, parseBatt, parsePmset, clampFloor, DEFAULT_BATTERY_FLOOR,
+  thermalVerdict, parseBatteryTemp, DEFAULT_TEMP_LIMIT
 } from './lidSleepPolicy.js';
 
 const HOME = os.homedir();
@@ -33,6 +34,14 @@ const UID = typeof process.getuid === 'function' ? process.getuid() : 0;
 export const SUDOERS_PATH = `/etc/sudoers.d/whatyterm-lidsleep-${UID}`;
 const PMSET = '/usr/bin/pmset';
 const LID_POLL_MS = 5000;
+// 系统热状态：经 JXA 的 ObjC 桥读 NSProcessInfo.thermalState，免编译、免 root，约 70ms
+const THERMAL_JXA = 'ObjC.import("Foundation"); $.NSProcessInfo.processInfo.thermalState';
+
+export function clampTempLimit(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return DEFAULT_TEMP_LIMIT;
+  return Math.min(60, Math.max(38, Math.round(n)));
+}
 
 function run(cmd, args, timeout = 5000) {
   return new Promise((resolve) => {
@@ -48,7 +57,8 @@ class LidSleepGuard {
     this.config = this._loadConfig();
     this.installed = false;
     this.state = { sleepDisabled: null, owned: false, onAC: false, percent: null, lowPowerMode: false,
-      keepAwake: 0, busy: 0, auto: 0, reason: '', lidClosed: null, lastError: '' };
+      keepAwake: 0, busy: 0, auto: 0, reason: '', lidClosed: null, lastError: '',
+      thermalState: null, batteryTempC: null, thermalTripped: false };
     this._lidTimer = null;
     this._ticking = false;
     this.watchdogReady = false;
@@ -60,9 +70,9 @@ class LidSleepGuard {
   _loadConfig() {
     try {
       const c = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
-      return { enabled: !!c.enabled, batteryFloor: clampFloor(c.batteryFloor) };
+      return { enabled: !!c.enabled, batteryFloor: clampFloor(c.batteryFloor), tempLimit: clampTempLimit(c.tempLimit) };
     } catch {
-      return { enabled: false, batteryFloor: DEFAULT_BATTERY_FLOOR };
+      return { enabled: false, batteryFloor: DEFAULT_BATTERY_FLOOR, tempLimit: DEFAULT_TEMP_LIMIT };
     }
   }
 
@@ -80,9 +90,18 @@ class LidSleepGuard {
   }
 
   async _readPower() {
-    const [batt, pm] = await Promise.all([run(PMSET, ['-g', 'batt']), run(PMSET, ['-g'])]);
+    const [batt, pm, th, bt] = await Promise.all([
+      run(PMSET, ['-g', 'batt']), run(PMSET, ['-g']),
+      run('/usr/bin/osascript', ['-l', 'JavaScript', '-e', THERMAL_JXA]),
+      run('/usr/sbin/ioreg', ['-r', '-c', 'AppleSmartBatteryPack', '-w0'])
+    ]);
     const b = parseBatt(batt.stdout);
     const p = parsePmset(pm.stdout);
+    const ts = parseInt(th.stdout.trim(), 10);
+    this.state.thermalState = th.ok && Number.isInteger(ts) ? ts : null;
+    let tempC = parseBatteryTemp(bt.stdout);
+    if (tempC == null) tempC = parseBatteryTemp((await run('/usr/sbin/ioreg', ['-r', '-c', 'AppleSmartBattery', '-w0'])).stdout);
+    this.state.batteryTempC = tempC;
     Object.assign(this.state, { onAC: b.onAC, percent: b.percent, sleepDisabled: p.sleepDisabled, lowPowerMode: p.lowPowerMode });
     this.state.owned = fs.existsSync(MARKER_PATH);
   }
@@ -96,7 +115,7 @@ class LidSleepGuard {
     }
     fs.mkdirSync(RUN_DIR, { recursive: true });
     if (on) {
-      fs.writeFileSync(MARKER_PATH, String(this.config.batteryFloor));
+      this._writeMarker();
       this._touchHeartbeat();
     } else {
       fs.rmSync(MARKER_PATH, { force: true });
@@ -105,6 +124,11 @@ class LidSleepGuard {
     this.state.lastError = this.state.sleepDisabled === on ? '' : '读回的 SleepDisabled 与期望不一致';
     console.log(`[LidSleep] disablesleep=${on ? 1 : 0}（读回 ${this.state.sleepDisabled ? 1 : 0}）`);
     return this.state.sleepDisabled === on;
+  }
+
+  /** 标记文件兼作看门狗的参数：「电量下限 温度上限」两个整数 */
+  _writeMarker() {
+    fs.writeFileSync(MARKER_PATH, `${this.config.batteryFloor} ${this.config.tempLimit}`);
   }
 
   _touchHeartbeat() {
@@ -122,7 +146,12 @@ class LidSleepGuard {
       await this._readPower();
       const k = countKeepAwakeSessions(sessions);
       Object.assign(this.state, { keepAwake: k.total, busy: k.busy, auto: k.auto });
+      const thermal = thermalVerdict({ thermalState: this.state.thermalState, batteryTempC: this.state.batteryTempC,
+        limitC: this.config.tempLimit, tripped: this.state.thermalTripped });
+      if (thermal.tripped !== this.state.thermalTripped) console.log(`[LidSleep] 过热保护${thermal.tripped ? '触发' : '解除'}：${thermal.why || '已降温'}`);
+      this.state.thermalTripped = thermal.tripped;
       const d = decideLidSleep({
+        thermal,
         enabled: this.config.enabled, installed: this.installed && this.watchdogReady, keepAwake: k.total,
         onAC: this.state.onAC, percent: this.state.percent, lowPowerMode: this.state.lowPowerMode,
         floor: this.config.batteryFloor
@@ -178,6 +207,7 @@ class LidSleepGuard {
       supported: this.supported,
       enabled: this.config.enabled,
       batteryFloor: this.config.batteryFloor,
+      tempLimit: this.config.tempLimit,
       installed: this.installed,
       watchdogReady: this.watchdogReady,
       active: !!(this.state.owned && this.state.sleepDisabled),
@@ -185,11 +215,12 @@ class LidSleepGuard {
     };
   }
 
-  async setConfig({ enabled, batteryFloor } = {}) {
+  async setConfig({ enabled, batteryFloor, tempLimit } = {}) {
     if (typeof enabled === 'boolean') this.config.enabled = enabled;
+    if (tempLimit !== undefined) this.config.tempLimit = clampTempLimit(tempLimit);
     if (batteryFloor !== undefined) this.config.batteryFloor = clampFloor(batteryFloor);
     this._saveConfig();
-    if (this.state.owned) fs.writeFileSync(MARKER_PATH, String(this.config.batteryFloor)); // 看门狗读这里的下限
+    if (this.state.owned) this._writeMarker(); // 看门狗读这里的下限
     return this.status;
   }
 

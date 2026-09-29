@@ -3778,8 +3778,8 @@ app.get('/api/lid-sleep', async (req, res) => {
   res.json({ ...lidSleepGuard.status, manual: lidSleepGuard.installed ? [] : lidSleepManualCommands() });
 });
 app.post('/api/lid-sleep', async (req, res) => {
-  const { enabled, batteryFloor } = req.body || {};
-  await lidSleepGuard.setConfig({ enabled: typeof enabled === 'boolean' ? enabled : undefined, batteryFloor });
+  const { enabled, batteryFloor, tempLimit } = req.body || {};
+  await lidSleepGuard.setConfig({ enabled: typeof enabled === 'boolean' ? enabled : undefined, batteryFloor, tempLimit });
   await lidSleepTick();
   res.json(lidSleepGuard.status);
 });

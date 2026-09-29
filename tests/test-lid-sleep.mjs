@@ -15,8 +15,9 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
-import { countKeepAwakeSessions, decideLidSleep, parseBatt, parsePmset, clampFloor } from '../server/services/lidSleepPolicy.js';
+import { countKeepAwakeSessions, decideLidSleep, parseBatt, parsePmset, clampFloor, thermalVerdict, parseBatteryTemp } from '../server/services/lidSleepPolicy.js';
 import { buildSudoersRule, buildWatchdogScript, buildPlist } from '../server/services/lidSleepInstall.js';
+import { MARKER_PATH, HEARTBEAT_PATH } from '../server/services/LidSleepGuard.js';
 
 let pass = 0, fail = 0;
 function test(name, fn) {
@@ -89,6 +90,67 @@ test('⑦ 看门狗脚本过 sh -n、plist 过 plutil -lint', () => {
     fs.writeFileSync(path.join(dir, 'g.plist'), buildPlist());
     execFileSync('/usr/bin/plutil', ['-lint', path.join(dir, 'g.plist')], { stdio: 'pipe' });
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ⑧ 过热：插电也不豁免；阈值附近不能反复开关（滞回）；读不到温度不误触发
+test('⑧ 过热保护：热状态严重/电池超上限即恢复睡眠，插电也不豁免', () => {
+  const hot = thermalVerdict({ thermalState: 2, batteryTempC: 30 });
+  eq(hot.hot, true);
+  eq(decideLidSleep({ ...base, onAC: true, thermal: hot }).disable, false, '插电过热仍须睡');
+  eq(thermalVerdict({ thermalState: 1, batteryTempC: 46, limitC: 45 }).hot, true, '电池超上限');
+  eq(thermalVerdict({ thermalState: 1, batteryTempC: 40, limitC: 45 }).hot, false, '偏高(1)是负载下的常态，不触发');
+  eq(thermalVerdict({ thermalState: null, batteryTempC: null }).hot, false, '读不到不误触发');
+});
+
+test('⑧ 滞回：触发后降到 上限-5°C 且热状态<2 才解除', () => {
+  let v = thermalVerdict({ thermalState: 1, batteryTempC: 45.2, limitC: 45 });
+  v = thermalVerdict({ thermalState: 1, batteryTempC: 43, limitC: 45, tripped: v.tripped });
+  eq(v.hot, true, '43°C 仍在降温中');
+  v = thermalVerdict({ thermalState: 2, batteryTempC: 38, limitC: 45, tripped: v.tripped });
+  eq(v.hot, true, '温度降了但热状态仍严重');
+  v = thermalVerdict({ thermalState: 1, batteryTempC: 39.5, limitC: 45, tripped: v.tripped });
+  eq(v.hot, false, '两路都降下来才解除');
+});
+
+test('本机真实电池温度可读（Apple Silicon 在 AppleSmartBatteryPack）', () => {
+  let out = execFileSync('/usr/sbin/ioreg', ['-r', '-c', 'AppleSmartBatteryPack', '-w0'], { encoding: 'utf-8' });
+  if (parseBatteryTemp(out) == null) out = execFileSync('/usr/sbin/ioreg', ['-r', '-c', 'AppleSmartBattery', '-w0'], { encoding: 'utf-8' });
+  const t = parseBatteryTemp(out);
+  eq(t > 5 && t < 80, true, `温度 ${t}`);
+  eq(parseBatteryTemp('"Temperature" = 3012'), 30.12, 'Intel 带空格写法');
+});
+
+// ⑨ 看门狗脚本真跑：路径换到临时目录、sudo pmset 换成写记录文件，其余逻辑原样
+function runWatchdog({ marker, hbAgeSec }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lidguard-'));
+  const m = path.join(dir, 'owner'), hb = path.join(dir, 'hb'), rec = path.join(dir, 'restored');
+  const script = buildWatchdogScript()
+    .replace(MARKER_PATH, m).replace(HEARTBEAT_PATH, hb)
+    .replace('/usr/bin/sudo -n /usr/bin/pmset -a disablesleep 0', `echo restored > "${rec}"`)
+    .replace('/usr/bin/logger -t whatyterm-lidguard', 'echo');
+  fs.writeFileSync(path.join(dir, 'g.sh'), script);
+  if (marker !== null) fs.writeFileSync(m, marker);
+  fs.writeFileSync(hb, '');
+  const t = new Date(Date.now() - hbAgeSec * 1000); fs.utimesSync(hb, t, t);
+  const out = execFileSync('/bin/sh', [path.join(dir, 'g.sh')], { encoding: 'utf-8' });
+  const r = { restored: fs.existsSync(rec), markerLeft: fs.existsSync(m), out: out.trim() };
+  fs.rmSync(dir, { recursive: true, force: true });
+  return r;
+}
+
+test('⑨ 看门狗：心跳新鲜不动；心跳超时还原并删标记；没标记（别人开的）不碰', () => {
+  const fresh = runWatchdog({ marker: '20 60', hbAgeSec: 10 });
+  eq(fresh.restored, false, `心跳新鲜却还原了：${fresh.out}`);
+  const stale = runWatchdog({ marker: '20 60', hbAgeSec: 600 });
+  eq(stale.restored, true); eq(stale.markerLeft, false);
+  eq(/心跳超时/.test(stale.out), true, stale.out);
+  eq(runWatchdog({ marker: null, hbAgeSec: 600 }).restored, false, '没有标记也还原了');
+});
+
+test('⑨ 看门狗：温度上限低于当前电池温度时还原（两个数的标记文件解析正确）', () => {
+  const r = runWatchdog({ marker: '5 1', hbAgeSec: 10 });   // 上限 1°C，必然超
+  eq(r.restored, true, `未按温度还原：${r.out}`);
+  eq(/电池温度|热状态/.test(r.out), true, r.out);
 });
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`);
