@@ -111,6 +111,33 @@ function execTmux(command, options = {}) {
   });
 }
 
+/**
+ * 拖动永远是选字，像普通终端一样（v1.4.75）。
+ *
+ * tmux 默认的 MouseDrag1Pane：应用开了鼠标上报（mouse_any_flag，Codex / 全屏 TUI 都开）就把拖拽
+ * 转发给应用，于是拖不出选区，只能按住 Shift/Option 走 xterm 原生选择——而那只能选当前一屏。
+ * 改成：WhatyTerm 的会话里拖拽一律进 tmux copy-mode（能跨屏、拖到边缘自动滚、松手经 OSC 52 复制），
+ * 单击和滚轮照旧交给应用（Codex 仍能滚自己的视图）。
+ *
+ * ⚠ 键绑定是整个 tmux server 全局的，而 WhatyTerm 用的是默认 socket，与用户自己的 tmux 共用。
+ *   所以按会话名限定：只有 whatyterm-* 会话改行为，用户自己的会话条件与 tmux 默认完全一致。
+ */
+export const DRAG_SEND_TO_APP_COND =
+  '#{||:#{pane_in_mode},#{&&:#{mouse_any_flag},#{!:#{m:whatyterm-*,#{session_name}}}}}';
+export const DRAG_BIND_ARGS = ['bind-key', '-T', 'root', 'MouseDrag1Pane',
+  'if-shell', '-F', DRAG_SEND_TO_APP_COND, 'send-keys -M', 'copy-mode -M'];
+let dragBindingSet = false;
+function ensureDragSelectsBinding() {
+  if (dragBindingSet) return;
+  const argv = useWSL ? ['wsl', 'tmux'] : [getLocalTmuxPath() || 'tmux'];
+  try {
+    execFileSync(argv[0], [...argv.slice(1), ...DRAG_BIND_ARGS], { stdio: 'ignore', timeout: 5000 });
+    dragBindingSet = true;
+  } catch (err) {
+    console.error(`[SessionManager] 设置拖动选择绑定失败: ${err.message}`);
+  }
+}
+
 // 获取 tmux 命令前缀（macOS 优先使用内置 tmux）
 function getTmuxPrefix() {
   if (useWSL) return 'wsl tmux';
@@ -339,6 +366,7 @@ export class Session {
       execSync(`${tmuxCmd} set-option -t "${this.tmuxSessionName}" set-clipboard on`, {
         stdio: 'ignore'
       });
+      ensureDragSelectsBinding();
       // 注：不需要再 append terminal-features —— tmux 3.2+ 的默认值里已含
       // `xterm*:clipboard`，而 pty 的 TERM 恒为 xterm-256color，正好匹配。
       // 早先这里追加过 `xterm-256color:clipboard`，但 `-a` 不去重，每建一个会话
