@@ -62,6 +62,85 @@ export async function writeClipboard(text) {
 }
 
 /**
+ * 「松手即复制」在 Safari / Firefox 上的关键：剪贴板写入必须发生在用户手势里。
+ *
+ * tmux 的 OSC 52 在鼠标松开后**异步**到达（几十毫秒后），那时已不算用户手势：
+ * Chrome 放行，Safari / Firefox 静默拒绝（execCommand 兜底同样要手势）——表现就是
+ * 「提示说松开即复制，实际什么都没复制」。
+ * 解法（Safari 官方推荐的写法）：在 mouseup 手势里**当场**调 clipboard.write，
+ * 内容给一个 Promise，等 OSC 52 到了再兑现。没等到（只是单击、没选中）就作废，剪贴板不动。
+ */
+const GESTURE_WAIT_MS = 1500;   // 双击选词 tmux 自己会等 0.3 秒再复制，留足余量
+let pendingGesture = null;      // { resolve, reject, timer, done: Promise<boolean> }
+
+function armGestureCopy() {
+  if (window.electronAPI?.writeClipboard) return;               // 走主进程，不需要手势
+  if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') return;
+  cancelGesture();
+  let resolve, reject;
+  const text = new Promise((res, rej) => { resolve = res; reject = rej; });
+  let item;
+  try {
+    item = new ClipboardItem({ 'text/plain': text.then((t) => new Blob([t], { type: 'text/plain' })) });
+  } catch {
+    return;                                                     // 不支持 Promise 形式的 ClipboardItem
+  }
+  const done = navigator.clipboard.write([item]).then(() => true, () => false);
+  const timer = setTimeout(() => cancelGesture(), GESTURE_WAIT_MS);
+  pendingGesture = { resolve, reject, timer, done };
+}
+
+function cancelGesture() {
+  if (!pendingGesture) return;
+  clearTimeout(pendingGesture.timer);
+  pendingGesture.reject(new Error('没有等到复制内容'));
+  pendingGesture = null;
+}
+
+/**
+ * 在终端容器上监听「拖动后松手 / 双击 / 三击」，在手势里预约一次剪贴板写入。
+ * 只有真拖动过（移动超过 3px）才预约，普通单击不碰剪贴板。返回解绑函数。
+ */
+export function attachGestureCopy(el) {
+  if (!el) return () => {};
+  let down = null;
+  let dragged = false;
+  const onDown = (e) => { if (e.button === 0) { down = { x: e.clientX, y: e.clientY }; dragged = false; } };
+  const onMove = (e) => {
+    if (down && (e.buttons & 1) && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 3) dragged = true;
+  };
+  const onUp = (e) => {
+    if (e.button === 0 && down && dragged) armGestureCopy();
+    down = null;
+  };
+  const onClicks = (e) => { if (e.detail >= 2) armGestureCopy(); };   // 双击选词、三击选行
+  el.addEventListener('mousedown', onDown, true);
+  document.addEventListener('mousemove', onMove, true);
+  document.addEventListener('mouseup', onUp, true);
+  el.addEventListener('click', onClicks, true);
+  return () => {
+    el.removeEventListener('mousedown', onDown, true);
+    document.removeEventListener('mousemove', onMove, true);
+    document.removeEventListener('mouseup', onUp, true);
+    el.removeEventListener('click', onClicks, true);
+    cancelGesture();
+  };
+}
+
+/** OSC 52 到达：有预约就兑现预约（手势内的写入），否则走普通写入。返回是否成功 */
+async function deliver(text) {
+  if (pendingGesture) {
+    const g = pendingGesture;
+    pendingGesture = null;
+    clearTimeout(g.timer);
+    g.resolve(text);
+    if (await g.done) return true;
+    // 浏览器不认 Promise 形式的写入：退回普通通道（Chrome 在非手势下也放行）
+  }
+  return writeClipboard(text);
+}
+
+/**
  * 给 xterm 装上 OSC 52 处理：tmux 复制完会发 `ESC ] 52 ; c ; <base64> BEL`。
  *
  * ⚠️ 只实现「写」不实现「读」。OSC 52 的查询形式（载荷为 `?`）会让终端把当前
@@ -82,7 +161,7 @@ export function registerOsc52(term, onCopied) {
         return true;
       }
       const text = decodeBase64Utf8(b64);
-      writeClipboard(text).then(ok => { if (ok) onCopied?.(text); });
+      deliver(text).then(ok => { if (ok) onCopied?.(text); });
     } catch (err) {
       console.error('[剪贴板] OSC 52 解析失败:', err?.message);
     }

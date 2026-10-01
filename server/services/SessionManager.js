@@ -4,6 +4,7 @@ import Database from 'better-sqlite3';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { execSync, execFileSync, exec } from 'child_process';
+import { createModeTracker, RESET_PRELUDE } from './termModes.js';
 import { promisify } from 'util';
 import path from 'path';
 
@@ -221,6 +222,8 @@ export class Session {
     this.aiEnabled = options.aiEnabled ?? true;
     this.autoMode = options.autoMode ?? false;
     this.autoActionEnabled = options.autoActionEnabled ?? false;  // 后台自动操作开关
+    // tmux 实际开着的终端模式（鼠标上报等），新页面接入时补发，见 termModes.js
+    this.termModes = createModeTracker();
     this.waterlineMode = options.waterlineMode || 'auto';  // 上下文水位交接：off/warn/auto
     // 三步闭环阶段必须落库：老实现只放内存，发版/崩溃/Electron 重启都会丢。
     // 丢在 handoff_sent 上 → 新进程从 idle 重判 → 同一条收尾指令二次发出，
@@ -423,6 +426,7 @@ export class Session {
       this.pty.onData((data) => {
         try {
           this.outputBuffer += data;
+          this.termModes.feed(data);
           if (this.outputBuffer.length > 100000) {
             this.outputBuffer = this.outputBuffer.slice(-50000);
           }
@@ -479,6 +483,7 @@ export class Session {
     this.pty.onData((data) => {
       try {
         this.outputBuffer += data;
+        this.termModes.feed(data);
         if (this.outputBuffer.length > 100000) {
           this.outputBuffer = this.outputBuffer.slice(-50000);
         }
@@ -516,6 +521,11 @@ export class Session {
         }
       }).catch((err) => console.error(`[Session] 核对 tmux 会话失败: ${err.message}`));
     });
+  }
+
+  /** 给新接入的页面补发的模式序列：先全关（xterm 实例跨会话复用）再按本会话实际状态打开 */
+  modePrelude() {
+    return RESET_PRELUDE + this.termModes.prelude();
   }
 
   write(data) {

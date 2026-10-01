@@ -219,6 +219,7 @@ import { RalphEngine, RALPH_CORE_PRESENT } from './services/ralph/loader.js';
 import telemetryService from './services/TelemetryService.js';
 import crashReporter from './services/CrashReporter.js';
 import sleepPrevention from './services/SleepPreventionService.js';
+import { protectedPids } from './services/orphanGuard.js';
 import lidSleepGuard from './services/LidSleepGuard.js';
 import { uninstallWin as uninstallLidSleepWin } from './services/lidSleepWin.js';
 import { install as installLidSleep, uninstall as uninstallLidSleep, ensureWatchdog as ensureLidWatchdog, manualCommands as lidSleepManualCommands } from './services/lidSleepInstall.js';
@@ -513,10 +514,14 @@ function cleanupOrphanProcesses(workDir, sessionName = '') {
       return descendants;
     }
 
+    // 服务自己的进程链（外壳 zsh、node 本身、caffeinate、各会话的 tmux attach）一律不碰，见 orphanGuard.js
+    const keep = protectedPids(process.pid, processMap, childrenMap);
+
     // 找到与项目相关的根进程（PPID=1 的孤儿进程）
     const orphanPids = [];
     for (const [pid, info] of processMap) {
       if (info.ppid !== '1') continue;
+      if (keep.has(pid)) continue;
 
       // 检查是否是可清理的进程类型
       const isCleanableType = cleanableTypes.some(type =>
@@ -552,7 +557,7 @@ function cleanupOrphanProcesses(workDir, sessionName = '') {
       pidsToKill.add(orphanPid);
       const descendants = getAllDescendants(orphanPid);
       for (const desc of descendants) {
-        pidsToKill.add(desc);
+        if (!keep.has(desc)) pidsToKill.add(desc);
       }
     }
 
@@ -8579,7 +8584,10 @@ io.on('connection', (socket) => {
       history: [], // 历史记录异步加载
       screenContent: paneContent,
       fullContent: fullContent, // 完整内容（包含滚动历史）
-      cursorPosition: cursorPos
+      cursorPosition: cursorPos,
+      // 回放的是 capture-pane 文字，不含 tmux 发过的模式切换；不补发的话浏览器里
+      // 鼠标上报是关的，拖动不经 tmux、松手不复制（v1.4.76，见 termModes.js）
+      modePrelude: session.modePrelude?.() || ''
     });
 
     // 异步发送历史记录（限制数量提升性能）

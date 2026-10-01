@@ -40,7 +40,7 @@ import { orderSessions, sessionNumbers as computeSessionNumbers, nextSortMode, l
 import { nextTunnelView } from './utils/tunnelState.js';
 import './components/longrun/LongRun.css';
 import './components/longrun/LongRunEntries.css';
-import { registerOsc52, writeClipboard } from './terminalClipboard';
+import { registerOsc52, writeClipboard, attachGestureCopy } from './terminalClipboard';
 import { fitTerminal, measureScrollbarWidth } from './terminalFit';
 
 const socket = io();
@@ -234,6 +234,7 @@ export default function App() {
   const [aiDebugLogs, setAiDebugLogs] = useState([]);
   const [showDebugPanel, setShowDebugPanel] = useState(false);
   const [pendingScreenContent, setPendingScreenContent] = useState(null);
+  const pendingModePreludeRef = useRef('');
   const [pendingCursorPosition, setPendingCursorPosition] = useState(null);
   const [terminalReady, setTerminalReady] = useState(false); // 跟踪终端是否已初始化
   const [copyHint, setCopyHint] = useState(false);  // "已复制"轻提示
@@ -484,6 +485,10 @@ export default function App() {
         screenContentLength: screenLen,
         fullContentLines: fullLines
       });
+      // tmux 实际开着的终端模式（鼠标上报等）。回放内容是 capture-pane 文字，不含这些切换，
+      // 不补的话拖动不经 tmux、松手不复制。存起来，和回放内容在同一处写入：这里直接写的话，
+      // 页面刚打开时终端可能还没建好，补发就丢了（Firefox 实测必丢，Chrome 偶发）
+      pendingModePreludeRef.current = data.modePrelude || '';
       setPendingScreenContent(data.fullContent || data.screenContent || '');
       setPendingCursorPosition(data.cursorPosition);
       setCurrentSession(data.session);
@@ -1037,6 +1042,8 @@ export default function App() {
     // === 复制体验：对齐普通终端 ===
     // tmux mouse on 时，滚轮与拖拽都归 tmux 管，跨屏选择由 tmux copy-mode 完成
     // （拖到边缘会自动滚动历史），复制结果经 OSC 52 送到这里写进系统剪贴板。
+    // 松手那一刻（用户手势内）预约剪贴板写入，Safari / Firefox 才放行，见 terminalClipboard.js
+    const detachGestureCopy = attachGestureCopy(terminalRef.current);
     const osc52Disposable = registerOsc52(term, () => {
       setCopyHint(true);
       clearTimeout(copyHintTimer.current);
@@ -1145,6 +1152,7 @@ export default function App() {
       // 切一次会话就会重跑一次，不清理会叠加定时器和重复的 OSC handler
       clearTimeout(copyHintTimer.current);
       osc52Disposable?.dispose?.();
+      detachGestureCopy();
       // 清理 IME 事件监听器
       if (textareaElement) {
         textareaElement.removeEventListener('compositionstart', handleCompositionStart);
@@ -1258,6 +1266,12 @@ export default function App() {
       }, 100);
     } else {
       console.warn('[Terminal] 收到空的屏幕内容，跳过重置以避免清空终端');
+    }
+
+    // 补发终端模式：放在回放内容之后写，xterm 按写入顺序解析，两者都在同一个队列里
+    if (pendingModePreludeRef.current) {
+      term.write(pendingModePreludeRef.current);
+      pendingModePreludeRef.current = '';
     }
 
     // 切换会话后自动获取焦点
