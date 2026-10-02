@@ -4617,3 +4617,21 @@ body {
 .usage-tok-parts { font-size: 10px; color: hsl(var(--muted-foreground)); margin-top: 2px; }
 .usage-models tr.usage-model-tok td { text-align: left; padding: 0 0 5px; font-size: 10px; color: hsl(var(--muted-foreground)); border-bottom: 1px dashed hsl(var(--border) / 0.4); }
 .usage-models tr.usage-model-row td { padding-bottom: 1px; }
+/* 用量卡片：摘要常显，点击展开/收起明细（v1.4.80） */
+.usage-card .usage-summary { cursor: pointer; border-radius: 6px; outline: none; margin: -4px; padding: 4px; }
+.usage-card .usage-summary[aria-disabled="true"] { cursor: default; }
+.usage-card .usage-summary:not([aria-disabled="true"]):hover { background: hsl(var(--muted) / 0.35); }
+.usage-card .usage-summary:focus-visible { box-shadow: 0 0 0 2px hsl(207 75% 63% / 0.6); }
+.usage-head { display: flex; align-items: center; gap: 6px; }
+.usage-warn { color: #d9b945; font-size: 12px; }
+.usage-toggle { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-weight: 400; }
+.usage-toggle-hint { font-size: 10px; color: hsl(var(--muted-foreground)); }
+.usage-chevron { display: inline-block; font-size: 10px; color: hsl(var(--muted-foreground)); transition: transform 0.18s ease; }
+.usage-card.expanded .usage-chevron { transform: rotate(90deg); }
+/* 高度过渡：grid 行从 0fr 到 1fr，不用 JS 量高度，内容变多变少都跟得上 */
+.usage-body { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.18s ease, opacity 0.18s ease; opacity: 0; }
+.usage-body.open { grid-template-rows: 1fr; opacity: 1; }
+.usage-body-inner { overflow: hidden; min-height: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .usage-body, .usage-chevron { transition: none; }
+}

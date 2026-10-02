@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import PricingNotes from './PricingNotes.jsx';
 
 /**
@@ -38,7 +38,18 @@ const sinceLabel = (ms) => {
   return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
 
+// 展开状态记在浏览器里：所有会话共用一个（不用每个会话各点一次），默认收起。读写都可能抛（隐私模式）
+const EXPANDED_KEY = 'webtmux_usage_card_expanded';
+const readExpanded = () => { try { return localStorage.getItem(EXPANDED_KEY) === '1'; } catch { return false; } };
+const saveExpanded = (v) => { try { localStorage.setItem(EXPANDED_KEY, v ? '1' : '0'); } catch { /* 记不住就算了 */ } };
+
 const SessionUsageCard = ({ usage, pricing }) => {
+  // hooks 必须在任何提前 return 之前
+  const [expanded, setExpanded] = useState(readExpanded);
+  const bodyRef = useRef(null);
+  const toggle = useCallback(() => setExpanded((v) => { saveExpanded(!v); return !v; }), []);
+  // 收起时明细区仍在 DOM 里（为了高度过渡），用 inert 让它既点不到也不被 Tab / 读屏读到。React 18 不认这个属性，手动设
+  useEffect(() => { if (bodyRef.current) bodyRef.current.inert = !expanded; }, [expanded, usage]);
   if (!usage) return null;
   if (usage.kind === 'unsupported' || usage.kind === 'ambiguous') {
     return (
@@ -65,71 +76,102 @@ const SessionUsageCard = ({ usage, pricing }) => {
   }, {});
   // token 列在 v1.4.79 之前记错了（Codex 每轮重复累加累计值），升级时清零重计：起点之后才有数
   const recentSince = usage.tokensSince > 0 && Date.now() - usage.tokensSince < 30 * 86400e3;
+  // 收起时也要看得见的提醒：藏在折叠里等于没提醒
+  const warnings = [
+    usage.incomplete && usage.unknownModels?.length > 0 && `费用不完整：${usage.unknownModels.join('、')} 不在价格表里`,
+    usage.estimated && '估算值：全部按价格表折算',
+    usage.scanning > 0 && `正在首次按模型拆分记录（${usage.scanning}%）`,
+    pricing?.missing?.length > 0 && `价格表缺 ${pricing.missing.length} 个在用模型`,
+  ].filter(Boolean);
+  const hasDetail = multi || recentSince || usage.scanning > 0 || usage.estimated || usage.incomplete
+    || usage.autoModels?.length > 0 || pricing?.missing?.length > 0 || pricing?.autoPriced?.length > 0;
+  const onKey = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } };
+
   return (
-    <div className="ai-status-section">
-      <h4>用量</h4>
-      <div className="usage-row">
-        <span className="usage-main">{money(total)}</span>
-        <span className="usage-sub">本会话累计</span>
+    <div className={`ai-status-section usage-card${expanded ? ' expanded' : ''}`}>
+      {/* 只有摘要区能点：明细里点击（比如选中数字复制）不会把卡片收回去 */}
+      <div className="usage-summary" role="button" tabIndex={hasDetail ? 0 : -1} aria-expanded={expanded}
+        aria-controls="usage-card-body" aria-disabled={!hasDetail} onClick={hasDetail ? toggle : undefined} onKeyDown={hasDetail ? onKey : undefined}
+        title={hasDetail ? (expanded ? '收起明细' : '展开明细') : undefined}>
+        <h4 className="usage-head">
+          <span>用量</span>
+          {!expanded && warnings.length > 0 && <span className="usage-warn" title={warnings.join('\n')} aria-label={warnings.join('；')}>⚠</span>}
+          {hasDetail && (
+            <span className="usage-toggle">
+              {!expanded && multi && <span className="usage-toggle-hint">{models.length} 个模型</span>}
+              <span className="usage-chevron" aria-hidden="true">▸</span>
+            </span>
+          )}
+        </h4>
+        <div className="usage-row">
+          <span className="usage-main">{money(total)}</span>
+          <span className="usage-sub">本会话累计</span>
+        </div>
+        <div className="usage-row">
+          <span className="usage-today">{money(today)}</span>
+          <span className="usage-sub">今天</span>
+          {!multi && usage.model && <span className="usage-model">{usage.model}</span>}
+        </div>
+        {totalTok > 0 && (
+          <div className="usage-tokens" title={tokParts(tokSum)}>
+            <span className="usage-tok-main">{tokens(totalTok)}</span>
+            <span className="usage-sub">token</span>
+            {todayTok > 0 && <span className="usage-sub">· 今天 {tokens(todayTok)}</span>}
+            <div className="usage-tok-parts">{tokParts(tokSum)}</div>
+          </div>
+        )}
       </div>
-      <div className="usage-row">
-        <span className="usage-today">{money(today)}</span>
-        <span className="usage-sub">今天</span>
-        {!multi && usage.model && <span className="usage-model">{usage.model}</span>}
-      </div>
-      {totalTok > 0 && (
-        <div className="usage-tokens" title={tokParts(tokSum)}>
-          <span className="usage-tok-main">{tokens(totalTok)}</span>
-          <span className="usage-sub">token</span>
-          {todayTok > 0 && <span className="usage-sub">· 今天 {tokens(todayTok)}</span>}
-          <div className="usage-tok-parts">{tokParts(tokSum)}</div>
+      {hasDetail && (
+        <div id="usage-card-body" ref={bodyRef} className={`usage-body${expanded ? ' open' : ''}`} aria-hidden={!expanded}>
+          <div className="usage-body-inner">
+            {multi && (
+              <table className="usage-models" aria-label="按模型的用量">
+                <thead>
+                  <tr><th scope="col">模型</th><th scope="col">累计</th><th scope="col">今天</th><th scope="col">占比</th></tr>
+                </thead>
+                <tbody>
+                  {models.map((m) => (
+                    <React.Fragment key={m.model}>
+                      <tr className={`usage-model-row${sameModel(m.model, usage.model) ? ' current' : ''}`}>
+                        <td className="usage-model-name">{m.model}{sameModel(m.model, usage.model) && <span className="usage-current-tag">当前</span>}</td>
+                        <td>{money(m.usd)}</td>
+                        <td className={m.today > 0 ? '' : 'dim'}>{money(m.today)}</td>
+                        <td className="dim">{pct(m.usd, total)}</td>
+                      </tr>
+                      <tr className="usage-model-tok">
+                        <td colSpan={4}>{sumTok(m) > 0 ? `${tokens(sumTok(m))} token：${tokParts(m)}` : (recentSince ? '统计起点之后没再用过' : '没有 token 记录')}</td>
+                      </tr>
+                    </React.Fragment>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            {recentSince && (
+              <p className="usage-note dim">token 自 {sinceLabel(usage.tokensSince)} 起统计（此前的记录有误，已清零重计）</p>
+            )}
+            {usage.scanning > 0 && (
+              <p className="usage-note dim">正在首次按模型拆分记录（{usage.scanning}%），完成前新增费用暂不计入</p>
+            )}
+            {usage.estimated && (
+              <p className="usage-note" title="CLI 只偶尔写一次自记账；这之后的部分按 CC Switch 价格表折算，实测偏差约 15%">
+                估算值：这份记录里没有 CLI 自己的账，全部按价格表折算
+              </p>
+            )}
+            {/* 只在真有缺价模型时说"不在价格表里"：不完整也可能只是还没有可计价的调用（金额本来就是 0） */}
+            {usage.incomplete && usage.unknownModels?.length > 0 && (
+              <p className="usage-note">
+                费用不完整：{usage.unknownModels.join('、')} 不在价格表里，这部分没算进去
+              </p>
+            )}
+            {usage.autoModels?.length > 0 && (
+              <p className="usage-note dim" title="CC Switch 里没有这些模型，价格取自 LiteLLM 社区价格表（每天自动更新）；在 CC Switch 里填了价就以它为准">
+                {usage.autoModels.join('、')} 按自动价格（LiteLLM）折算
+              </p>
+            )}
+            <PricingNotes data={pricing} />
+          </div>
         </div>
       )}
-      {multi && (
-        <table className="usage-models" aria-label="按模型的用量">
-          <thead>
-            <tr><th scope="col">模型</th><th scope="col">累计</th><th scope="col">今天</th><th scope="col">占比</th></tr>
-          </thead>
-          <tbody>
-            {models.map((m) => (
-              <React.Fragment key={m.model}>
-                <tr className={`usage-model-row${sameModel(m.model, usage.model) ? ' current' : ''}`}>
-                  <td className="usage-model-name">{m.model}{sameModel(m.model, usage.model) && <span className="usage-current-tag">当前</span>}</td>
-                  <td>{money(m.usd)}</td>
-                  <td className={m.today > 0 ? '' : 'dim'}>{money(m.today)}</td>
-                  <td className="dim">{pct(m.usd, total)}</td>
-                </tr>
-                <tr className="usage-model-tok">
-                  <td colSpan={4}>{sumTok(m) > 0 ? `${tokens(sumTok(m))} token：${tokParts(m)}` : (recentSince ? '统计起点之后没再用过' : '没有 token 记录')}</td>
-                </tr>
-              </React.Fragment>
-            ))}
-          </tbody>
-        </table>
-      )}
-      {recentSince && (
-        <p className="usage-note dim">token 自 {sinceLabel(usage.tokensSince)} 起统计（此前的记录有误，已清零重计）</p>
-      )}
-      {usage.scanning > 0 && (
-        <p className="usage-note dim">正在首次按模型拆分记录（{usage.scanning}%），完成前新增费用暂不计入</p>
-      )}
-      {usage.estimated && (
-        <p className="usage-note" title="CLI 只偶尔写一次自记账；这之后的部分按 CC Switch 价格表折算，实测偏差约 15%">
-          估算值：这份记录里没有 CLI 自己的账，全部按价格表折算
-        </p>
-      )}
-      {/* 只在真有缺价模型时说"不在价格表里"：不完整也可能只是还没有可计价的调用（金额本来就是 0） */}
-      {usage.incomplete && usage.unknownModels?.length > 0 && (
-        <p className="usage-note">
-          费用不完整：{usage.unknownModels.join('、')} 不在价格表里，这部分没算进去
-        </p>
-      )}
-      {usage.autoModels?.length > 0 && (
-        <p className="usage-note dim" title="CC Switch 里没有这些模型，价格取自 LiteLLM 社区价格表（每天自动更新）；在 CC Switch 里填了价就以它为准">
-          {usage.autoModels.join('、')} 按自动价格（LiteLLM）折算
-        </p>
-      )}
-      <PricingNotes data={pricing} />
     </div>
   );
 };
