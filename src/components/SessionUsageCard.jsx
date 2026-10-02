@@ -11,6 +11,22 @@ import PricingNotes from './PricingNotes.jsx';
  *   · 模型不在价格表里，费用只含已知模型
  */
 const money = (n) => `$${Number(n || 0).toFixed(2)}`;
+// 服务端已把 claude-opus-5.5 / claude-opus-5-5 这类同模型两种写法合成一行，比较时同样归一
+const sameModel = (a, b) => !!a && !!b && a.toLowerCase().replace(/\./g, '-') === b.toLowerCase().replace(/\./g, '-');
+const pct = (part, whole) => {
+  if (!(whole > 0)) return '—';
+  const p = (part / whole) * 100;
+  if (p > 0 && p < 1) return '<1%';      // 花了钱却显示 0% 会被读成没用过
+  if (p > 99 && p < 100) return '>99%';  // 同理，别的模型也花了钱，不能显示成 100%
+  return `${Math.round(p)}%`;
+};
+const tokens = (n) => {
+  const v = Number(n || 0);
+  if (v >= 1e9) return `${(v / 1e9).toFixed(1)}B`;
+  if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+  if (v >= 1e3) return `${(v / 1e3).toFixed(1)}K`;
+  return String(v);
+};
 
 
 const SessionUsageCard = ({ usage, pricing }) => {
@@ -28,6 +44,9 @@ const SessionUsageCard = ({ usage, pricing }) => {
   }
   const today = Number(usage.today || 0);
   const total = Number(usage.usd || 0);
+  // 用过两个及以上模型才列明细；只有一个模型时维持原来的一行显示，不多占地方
+  const models = (usage.byModel || []).filter((m) => m.usd > 0);
+  const multi = models.length >= 2;
   return (
     <div className="ai-status-section">
       <h4>用量</h4>
@@ -38,8 +57,29 @@ const SessionUsageCard = ({ usage, pricing }) => {
       <div className="usage-row">
         <span className="usage-today">{money(today)}</span>
         <span className="usage-sub">今天</span>
-        {usage.model && <span className="usage-model">{usage.model}</span>}
+        {!multi && usage.model && <span className="usage-model">{usage.model}</span>}
       </div>
+      {multi && (
+        <table className="usage-models" aria-label="按模型的用量">
+          <thead>
+            <tr><th scope="col">模型</th><th scope="col">累计</th><th scope="col">今天</th><th scope="col">占比</th></tr>
+          </thead>
+          <tbody>
+            {models.map((m) => (
+              <tr key={m.model} className={sameModel(m.model, usage.model) ? 'current' : ''}
+                title={`输入 ${tokens(m.input)} · 缓存读 ${tokens(m.cacheRead)} · 输出 ${tokens(m.output)}`}>
+                <td className="usage-model-name">{m.model}{sameModel(m.model, usage.model) && <span className="usage-current-tag">当前</span>}</td>
+                <td>{money(m.usd)}</td>
+                <td className={m.today > 0 ? '' : 'dim'}>{money(m.today)}</td>
+                <td className="dim">{pct(m.usd, total)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {usage.scanning > 0 && (
+        <p className="usage-note dim">正在首次按模型拆分记录（{usage.scanning}%），完成前新增费用暂不计入</p>
+      )}
       {usage.estimated && (
         <p className="usage-note" title="CLI 只偶尔写一次自记账；这之后的部分按 CC Switch 价格表折算，实测偏差约 15%">
           估算值：这份记录里没有 CLI 自己的账，全部按价格表折算

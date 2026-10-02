@@ -44,11 +44,14 @@ export class UsageLedger {
         PRIMARY KEY (day, session_id, cli, model)
       );
     `);
+    // v1.4.78：上一轮各模型的累计折算费用，用来把下一笔增量按模型拆开（老库没有这一列，补上）
+    const cols = this.db.prepare('PRAGMA table_info(cli_run_cursor)').all().map((c) => c.name);
+    if (!cols.includes('model_usd')) this.db.exec('ALTER TABLE cli_run_cursor ADD COLUMN model_usd TEXT');
   }
 
   getCursor(cli, runKey) {
     const r = this.db.prepare('SELECT * FROM cli_run_cursor WHERE cli=? AND run_key=?').get(cli, runKey);
-    return r ? { ...r, byModel: r.by_model ? JSON.parse(r.by_model) : {} } : null;
+    return r ? { ...r, byModel: r.by_model ? JSON.parse(r.by_model) : {}, modelUsd: r.model_usd ? JSON.parse(r.model_usd) : null } : null;
   }
 
   activeBinding(cli, runKey) {
@@ -75,19 +78,29 @@ export class UsageLedger {
     this.db.prepare('UPDATE cli_run_binding SET released_at=? WHERE cli=? AND run_key=? AND released_at IS NULL').run(now, cli, runKey);
   }
 
-  /** 一笔增量：写日账 + 累加 credited + 推游标，三件事必须原子，否则重启后会重复计 */
-  record({ sessionId, cli, runKey, deltaUsd, tokens = {}, model = '', cursor, now = Date.now(), lastDay = '' }) {
+  /**
+   * 一笔增量：写日账 + 累加 credited + 推游标，三件事必须原子，否则重启后会重复计。
+   * parts：按模型拆好的增量 [{model, usd, tokens}]（见 usageSplit.js）；不给就整笔记在 model 名下
+   */
+  record({ sessionId, cli, runKey, deltaUsd, tokens = {}, model = '', parts = null, cursor, now = Date.now(), lastDay = '' }) {
     const day = localDayKey(now, lastDay);
+    const rows = parts || [{ model, usd: deltaUsd, tokens }];
     const tx = this.db.transaction(() => {
-      if (deltaUsd > 0 || tokens.input || tokens.output) {
+      let credited = 0;
+      for (const r of rows) {
+        const t = r.tokens || {};
+        if (!(r.usd > 0 || t.input || t.output)) continue;
         this.db.prepare(`INSERT INTO cli_usage_daily (day, session_id, cli, model, cost_usd, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
           VALUES (?,?,?,?,?,?,?,?,?)
           ON CONFLICT(day, session_id, cli, model) DO UPDATE SET cost_usd=cost_usd+excluded.cost_usd,
             input_tokens=input_tokens+excluded.input_tokens, output_tokens=output_tokens+excluded.output_tokens,
             cache_read_tokens=cache_read_tokens+excluded.cache_read_tokens, cache_write_tokens=cache_write_tokens+excluded.cache_write_tokens`)
-          .run(day, sessionId, cli, model, deltaUsd, tokens.input || 0, tokens.output || 0, tokens.cacheRead || 0, tokens.cacheWrite || 0);
+          .run(day, sessionId, cli, r.model || '', r.usd || 0, t.input || 0, t.output || 0, t.cacheRead || 0, t.cacheWrite || 0);
+        credited += r.usd || 0;
+      }
+      if (credited > 0) {
         this.db.prepare('UPDATE cli_run_binding SET credited_usd=credited_usd+? WHERE session_id=? AND cli=? AND run_key=?')
-          .run(deltaUsd, sessionId, cli, runKey);
+          .run(credited, sessionId, cli, runKey);
       }
       this.db.prepare(`INSERT INTO cli_run_cursor (cli, run_key, file_path, inode, file_size, file_mtime, scan_offset, anchor_usd, by_model, cum_usd, cost_complete, estimated, updated_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -97,9 +110,28 @@ export class UsageLedger {
         .run(cli, runKey, cursor.filePath, String(cursor.inode || ''), cursor.fileSize || 0, cursor.fileMtime || 0,
           cursor.scanOffset || 0, cursor.anchorUsd || 0, JSON.stringify(cursor.byModel || {}), cursor.cumUsd || 0,
           cursor.costComplete ? 1 : 0, cursor.estimated ? 1 : 0, now);
+      if (cursor.modelUsd) {
+        this.db.prepare('UPDATE cli_run_cursor SET model_usd=? WHERE cli=? AND run_key=?').run(JSON.stringify(cursor.modelUsd), cli, runKey);
+      }
     });
     tx();
     return day;
+  }
+
+  /**
+   * 换了计价算法后重定认领基线：让「当前累计 − 基线 − 已记」= 0。
+   * 否则新旧算法的累计差（例如旧版按尾部模型给整份记录计价）会被当成新花的钱记进来，或者反过来把以后的花费吃掉
+   */
+  rebase(sessionId, cli, runKey, cumUsd) {
+    this.db.prepare('UPDATE cli_run_binding SET claimed_cum_usd=? - credited_usd WHERE session_id=? AND cli=? AND run_key=? AND released_at IS NULL')
+      .run(cumUsd, sessionId, cli, runKey);
+  }
+
+  /** 会话按模型的花费：累计 + 今天，按累计降序 */
+  sessionByModel(sessionId, today) {
+    return this.db.prepare(`SELECT model, SUM(cost_usd) usd, SUM(CASE WHEN day=? THEN cost_usd ELSE 0 END) today,
+        SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens, SUM(cache_read_tokens) cache_read_tokens
+      FROM cli_usage_daily WHERE session_id=? GROUP BY model HAVING usd > 0 OR input_tokens > 0 ORDER BY usd DESC`).all(today, sessionId);
   }
 
   sessionTotal(sessionId) {

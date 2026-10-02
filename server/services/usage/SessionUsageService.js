@@ -9,10 +9,11 @@ import { existsSync, readdirSync, statSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import { readClaudeRun } from './ClaudeUsageReader.js';
-import { readCodexRun, listCodexRuns } from './CodexUsageReader.js';
+import { readCodexRun, listCodexRuns, isSubagentRollout } from './CodexUsageReader.js';
 import { decideBinding, siblingsOf } from './UsageAttribution.js';
 import { diffCumulative, localDayKey } from './costMath.js';
 import pricingTable from './PricingTable.js';
+import { splitDelta, mainModelOf } from './usageSplit.js';
 
 export const CLAUDE_PROJECTS = () => path.join(os.homedir(), '.claude', 'projects');
 /** 与 index.js:1056 同一套编码（历史上漏过下划线，导致带下划线的项目找不到目录） */
@@ -29,8 +30,8 @@ export function newestTranscript(workingDir, root = null) {
 }
 
 export class SessionUsageService {
-  constructor({ ledger, pricing = pricingTable, claudeProjectsRoot = null, codexRoot = null } = {}) {
-    Object.assign(this, { ledger, pricing, claudeProjectsRoot, codexRoot });
+  constructor({ ledger, pricing = pricingTable, claudeProjectsRoot = null, codexRoot = null, codexScanBudget = undefined } = {}) {
+    Object.assign(this, { ledger, pricing, claudeProjectsRoot, codexRoot, codexScanBudget });
     this.state = new Map();   // sessionId -> 上一轮结果（用于 diff，不变就不广播）
     /**
      * runKey -> {incomplete, estimated, unknownModels, pricingVersion}：最近一次真正读到的结果。
@@ -48,7 +49,7 @@ export class SessionUsageService {
     const runs = this._runsFor(session, binding);
     if (!runs.length) return { ok: true, kind: 'empty', cli: binding.cli, sessionUsd: this.ledger.sessionTotal(session.id), todayUsd: this._today(session.id, now) };
 
-    let estimated = false, incomplete = false, model = '';
+    let estimated = false, incomplete = false, model = '', scanning = 0, mainThreadModel = '';
     const unknown = new Set();
     const autoPriced = new Set();
     const pricingVersion = this.pricing.version ?? 0;
@@ -61,7 +62,7 @@ export class SessionUsageService {
       if (prev && (!flags || flags.pricingVersion !== pricingVersion)) cur.fileMtime = -1;
       const read = binding.cli === 'claude'
         ? readClaudeRun(cur, this.pricing)
-        : readCodexRun(cur, this.pricing, session.currentModel || session.codexProvider?.model || '');
+        : readCodexRun(cur, this.pricing, session.currentModel || session.codexProvider?.model || '', this.codexScanBudget);
       if (!read) {
         // 文件没动，但归属可能刚变（另一个会话接管了这份记录）：用上次已知累计当基线补一次认领，
         // 否则接管后到下一次文件变动之间花的钱会被算到原持有者头上
@@ -70,6 +71,7 @@ export class SessionUsageService {
           this.ledger.claim(session.id, binding.cli, run.runKey, prev?.cum_usd || 0, binding.source || 'exclusive', now);
         }
         if (flags) {
+          if (flags.model && !run.subagent && !mainThreadModel) mainThreadModel = flags.model;
           if (flags.estimated) estimated = true;
           if (flags.incomplete) incomplete = true;
           flags.unknownModels.forEach((m) => unknown.add(m));
@@ -77,31 +79,55 @@ export class SessionUsageService {
         }
         continue;
       }
+      if (read.pending) {
+        // 大文件分轮扫：只存扫描进度，累计值沿用上次的，不认领、不计费
+        scanning = Math.max(scanning, read.progress || 0);
+        this.ledger.record({ sessionId: session.id, cli: binding.cli, runKey: run.runKey, deltaUsd: 0, now,
+          cursor: { ...read, cumUsd: prev?.cum_usd || 0, costComplete: prev ? !!prev.cost_complete : true, estimated: !!prev?.estimated, modelUsd: prev?.modelUsd || null } });
+        continue;
+      }
+      const split = { usd: read.modelUsd || {}, tok: read.modelTokens || null };
       this.runFlags.set(run.runKey, { estimated: !!read.estimated, incomplete: read.costComplete === false,
-        unknownModels: read.unknownModels || [], autoModels: read.autoModels || [], pricingVersion });
+        unknownModels: read.unknownModels || [], autoModels: read.autoModels || [], pricingVersion, model: read.model || '' });
       (read.unknownModels || []).forEach((m) => unknown.add(m));
       (read.autoModels || []).forEach((m) => autoPriced.add(m));
       if (read.estimated) estimated = true;
       if (read.costComplete === false) incomplete = true;
-      if (read.model) model = read.model;
+      // runs 按新到旧排（codex 一个目录可能有好几份 rollout）：「当前模型」取最新那份的，不能被旧记录覆盖
+      if (read.model && !model) model = read.model;
+      if (read.model && !run.subagent && !mainThreadModel) mainThreadModel = read.model;
       const bound = this.ledger.activeBinding(binding.cli, run.runKey);
       if (!bound || bound.session_id !== session.id) {
         this.ledger.claim(session.id, binding.cli, run.runKey, read.cumUsd, binding.source || 'exclusive', now);
-        this.ledger.record({ sessionId: session.id, cli: binding.cli, runKey: run.runKey, deltaUsd: 0, cursor: read, now });
+        this.ledger.record({ sessionId: session.id, cli: binding.cli, runKey: run.runKey, deltaUsd: 0, cursor: { ...read, modelUsd: split }, now });
         continue;                                           // 认领当轮只记基线，绝不把历史算进来
+      }
+      if (read.rescanned && prev) {
+        // 整份从头重扫（换了算法、换了文件）：只重定基线，新旧累计之差不是本轮花的钱
+        this.ledger.rebase(session.id, binding.cli, run.runKey, read.cumUsd);
+        this.ledger.record({ sessionId: session.id, cli: binding.cli, runKey: run.runKey, deltaUsd: 0, cursor: { ...read, modelUsd: split }, now });
+        continue;
       }
       const { delta } = diffCumulative(prev ? { inode: prev.inode, fileSize: prev.file_size, cumUsd: prev.cum_usd } : null,
         { inode: read.inode, fileSize: read.fileSize, cumUsd: read.cumUsd });
       // 第二道闸：本会话在这个 run 上累计记的钱，不得超过「当前累计 − 认领基线」。
       // 游标可能比认领还旧（上一次 WebTmux 运行留下的、或该 run 曾被别的会话跟过），只靠 diff 会把认领前的钱算进来
       const room = Math.max(0, read.cumUsd - (bound.claimed_cum_usd || 0) - (bound.credited_usd || 0));
-      this.ledger.record({ sessionId: session.id, cli: binding.cli, runKey: run.runKey, deltaUsd: Math.min(delta, room),
-        tokens: read.tokens || {}, model: read.model || model, cursor: read, now });
+      const amount = Math.min(delta, room);
+      // 按模型拆：上一轮没有分模型数据（升级前的游标）就整笔记给主模型，免得按整段历史的比例瞎分
+      // 拆不出模型时的兜底：本轮主模型 → 本会话别的 run 的主模型 → 这个 run 上一轮花得最多的模型
+      const main = read.model || model || mainModelOf(prev?.modelUsd?.usd) || session.currentModel || '';
+      const parts = prev?.modelUsd?.usd
+        ? splitDelta(amount, prev.modelUsd.usd, split.usd, main, prev.modelUsd.tok, split.tok)
+        : null;
+      this.ledger.record({ sessionId: session.id, cli: binding.cli, runKey: run.runKey, deltaUsd: amount,
+        model: main, parts, cursor: { ...read, modelUsd: split }, now });
     }
     return {
       ok: true, kind: 'ok', cli: binding.cli, source: binding.source,
       sessionUsd: this.ledger.sessionTotal(session.id), todayUsd: this._today(session.id, now),
-      estimated, incomplete, model, unknownModels: [...unknown], autoModels: [...autoPriced],
+      estimated, incomplete, model: mainThreadModel || model, unknownModels: [...unknown], autoModels: [...autoPriced],
+      byModel: this.ledger.sessionByModel(session.id, localDayKey(now)), scanning,
     };
   }
 
@@ -120,6 +146,6 @@ export class SessionUsageService {
     // codex：该工作目录下、会话创建之后还在写的 rollout。只取最近的几份，历史留给基线排除
     const since = session.createdAt ? new Date(session.createdAt).getTime() : 0;
     return listCodexRuns(session.workingDir, { since, root: this.codexRoot, limit: 8 })
-      .map((f) => ({ runKey: f.path, filePath: f.path }));
+      .map((f) => ({ runKey: f.path, filePath: f.path, subagent: isSubagentRollout(f.path) }));
   }
 }

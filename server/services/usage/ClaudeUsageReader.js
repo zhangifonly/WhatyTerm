@@ -74,6 +74,8 @@ export function readClaudeRun(cur, pricing) {
     const unknownModels = [];
     const autoModels = [];      // 价格取自 LiteLLM 自动表（CC Switch 里没有）的模型，界面要标明
     let post = 0, mainModel = '', mainTokens = -1;
+    // 各模型在锚点之后的折算费用。锚点（CLI 自记账）只有总数不分模型，所以这里只用来按比例拆分增量
+    const modelUsd = {};
     for (const [model, usage] of Object.entries(state.byModel)) {
       if (model === '<synthetic>') continue;      // CLI 自己合成的记录，不是 API 调用
       // token 全 0 的条目没有钱可算，不能因为它查不到价就标「不完整」（实测有无模型名的零用量行）
@@ -84,13 +86,14 @@ export function readClaudeRun(cur, pricing) {
       const usd = priceUsage(usage, price);
       if (usd === null) { unknownModels.push(model || '(未标模型名)'); continue; }
       if (source === 'litellm') autoModels.push(model);
+      modelUsd[model] = (modelUsd[model] || 0) + usd;
       post += usd;
     }
     return {
       cumUsd: anchorUsd + post,
       costComplete: unknownModels.length === 0 && (anchorUsd > 0 || post > 0 || st.size === 0),
       estimated: anchorUsd === 0,                  // 没有锚点：整份都是折算值
-      byModel: state.byModel, unknownModels, autoModels, model: mainModel,
+      byModel: state.byModel, unknownModels, autoModels, model: mainModel, modelUsd,
       scanOffset: st.size - Buffer.byteLength(state.remainder, 'utf8'),
       anchorUsd, inode: String(st.ino), fileSize: st.size, fileMtime: st.mtimeMs,
     };
