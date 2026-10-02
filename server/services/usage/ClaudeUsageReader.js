@@ -16,6 +16,16 @@ import { scanChunk } from './transcriptScan.js';
 import { priceUsage } from './costMath.js';
 
 export const CHUNK = 4 * 1024 * 1024;
+
+/** CLI 自己合成的记录不是 API 调用；token 全 0 的条目也不留 */
+function withoutSynthetic(tok) {
+  const out = {};
+  for (const [m, u] of Object.entries(tok || {})) {
+    if (m === '<synthetic>' || !(u.input || u.output || u.cacheRead || u.cacheWrite)) continue;
+    out[m] = u;
+  }
+  return out;
+}
 export const BOOTSTRAP_LIMIT = 64 * 1024 * 1024;   // 回溯找锚点的上限（实测最坏 36.7MB）
 
 function readRange(fd, from, to) {
@@ -66,7 +76,9 @@ export function readClaudeRun(cur, pricing) {
       from = findLastAnchorOffset(fd, st.size);
       anchorUsd = 0; byModel = {};
     }
-    let state = { remainder: '', byModel, anchor: null, anchorAt: -1 };
+    // 从头找锚点重扫（首见/换了文件）时读到的是历史，不算本轮新增 token
+    const tokFromScratch = !sameFile || !cur.scanOffset;
+    let state = { remainder: '', byModel, anchor: null, anchorAt: -1, newTok: {} };
     for (let pos = from; pos < st.size; pos += CHUNK) {
       state = scanChunk(readRange(fd, pos, Math.min(st.size, pos + CHUNK)), state, pos);
       if (state.anchor) { anchorUsd = state.anchor.totalCostUSD; state.anchor = null; }
@@ -94,6 +106,7 @@ export function readClaudeRun(cur, pricing) {
       costComplete: unknownModels.length === 0 && (anchorUsd > 0 || post > 0 || st.size === 0),
       estimated: anchorUsd === 0,                  // 没有锚点：整份都是折算值
       byModel: state.byModel, unknownModels, autoModels, model: mainModel, modelUsd,
+      tokDelta: tokFromScratch ? null : withoutSynthetic(state.newTok),
       scanOffset: st.size - Buffer.byteLength(state.remainder, 'utf8'),
       anchorUsd, inode: String(st.ino), fileSize: st.size, fileMtime: st.mtimeMs,
     };

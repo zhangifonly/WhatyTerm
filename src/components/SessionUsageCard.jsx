@@ -29,6 +29,15 @@ const tokens = (n) => {
 };
 
 
+const sumTok = (m) => (m.input || 0) + (m.cacheRead || 0) + (m.cacheWrite || 0) + (m.output || 0);
+/** 「输入 1.2M · 缓存读 30M · 输出 300K」：缓存读通常占九成以上，不拆开看会以为输入量大得离谱 */
+const tokParts = (m) => [['输入', m.input], ['缓存读', m.cacheRead], ['缓存写', m.cacheWrite], ['输出', m.output]]
+  .filter(([, v]) => v > 0).map(([k, v]) => `${k} ${tokens(v)}`).join(' · ');
+const sinceLabel = (ms) => {
+  const d = new Date(ms);
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
+
 const SessionUsageCard = ({ usage, pricing }) => {
   if (!usage) return null;
   if (usage.kind === 'unsupported' || usage.kind === 'ambiguous') {
@@ -47,6 +56,15 @@ const SessionUsageCard = ({ usage, pricing }) => {
   // 用过两个及以上模型才列明细；只有一个模型时维持原来的一行显示，不多占地方
   const models = (usage.byModel || []).filter((m) => m.usd > 0);
   const multi = models.length >= 2;
+  const allRows = usage.byModel || [];
+  const totalTok = allRows.reduce((a, m) => a + sumTok(m), 0);
+  const todayTok = allRows.reduce((a, m) => a + (m.todayTokens || 0), 0);
+  const tokSum = allRows.reduce((acc, m) => {
+    for (const k of ['input', 'cacheRead', 'cacheWrite', 'output']) acc[k] = (acc[k] || 0) + (m[k] || 0);
+    return acc;
+  }, {});
+  // token 列在 v1.4.79 之前记错了（Codex 每轮重复累加累计值），升级时清零重计：起点之后才有数
+  const recentSince = usage.tokensSince > 0 && Date.now() - usage.tokensSince < 30 * 86400e3;
   return (
     <div className="ai-status-section">
       <h4>用量</h4>
@@ -59,6 +77,14 @@ const SessionUsageCard = ({ usage, pricing }) => {
         <span className="usage-sub">今天</span>
         {!multi && usage.model && <span className="usage-model">{usage.model}</span>}
       </div>
+      {totalTok > 0 && (
+        <div className="usage-tokens" title={tokParts(tokSum)}>
+          <span className="usage-tok-main">{tokens(totalTok)}</span>
+          <span className="usage-sub">token</span>
+          {todayTok > 0 && <span className="usage-sub">· 今天 {tokens(todayTok)}</span>}
+          <div className="usage-tok-parts">{tokParts(tokSum)}</div>
+        </div>
+      )}
       {multi && (
         <table className="usage-models" aria-label="按模型的用量">
           <thead>
@@ -66,16 +92,23 @@ const SessionUsageCard = ({ usage, pricing }) => {
           </thead>
           <tbody>
             {models.map((m) => (
-              <tr key={m.model} className={sameModel(m.model, usage.model) ? 'current' : ''}
-                title={`输入 ${tokens(m.input)} · 缓存读 ${tokens(m.cacheRead)} · 输出 ${tokens(m.output)}`}>
-                <td className="usage-model-name">{m.model}{sameModel(m.model, usage.model) && <span className="usage-current-tag">当前</span>}</td>
-                <td>{money(m.usd)}</td>
-                <td className={m.today > 0 ? '' : 'dim'}>{money(m.today)}</td>
-                <td className="dim">{pct(m.usd, total)}</td>
-              </tr>
+              <React.Fragment key={m.model}>
+                <tr className={`usage-model-row${sameModel(m.model, usage.model) ? ' current' : ''}`}>
+                  <td className="usage-model-name">{m.model}{sameModel(m.model, usage.model) && <span className="usage-current-tag">当前</span>}</td>
+                  <td>{money(m.usd)}</td>
+                  <td className={m.today > 0 ? '' : 'dim'}>{money(m.today)}</td>
+                  <td className="dim">{pct(m.usd, total)}</td>
+                </tr>
+                <tr className="usage-model-tok">
+                  <td colSpan={4}>{sumTok(m) > 0 ? `${tokens(sumTok(m))} token：${tokParts(m)}` : (recentSince ? '统计起点之后没再用过' : '没有 token 记录')}</td>
+                </tr>
+              </React.Fragment>
             ))}
           </tbody>
         </table>
+      )}
+      {recentSince && (
+        <p className="usage-note dim">token 自 {sinceLabel(usage.tokensSince)} 起统计（此前的记录有误，已清零重计）</p>
       )}
       {usage.scanning > 0 && (
         <p className="usage-note dim">正在首次按模型拆分记录（{usage.scanning}%），完成前新增费用暂不计入</p>

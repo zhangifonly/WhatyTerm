@@ -29,6 +29,17 @@ export function newestTranscript(workingDir, root = null) {
   return files[0]?.file || null;
 }
 
+/**
+ * Claude 的 token 增量（读取器直接给出本轮新读到的分模型 token）挂到拆好的各模型上。
+ * 某模型本轮有 token 但费用没涨（例如锚点刚刷新），也补一行只记 token、不记钱
+ */
+export function withTokens(parts, tokDelta) {
+  if (!tokDelta) return parts;
+  const out = parts.map((p) => ({ ...p, tokens: tokDelta[p.model] || p.tokens || {} }));
+  for (const [m, t] of Object.entries(tokDelta)) if (!out.some((p) => p.model === m)) out.push({ model: m, usd: 0, tokens: t });
+  return out;
+}
+
 export class SessionUsageService {
   constructor({ ledger, pricing = pricingTable, claudeProjectsRoot = null, codexRoot = null, codexScanBudget = undefined } = {}) {
     Object.assign(this, { ledger, pricing, claudeProjectsRoot, codexRoot, codexScanBudget });
@@ -121,7 +132,8 @@ export class SessionUsageService {
         ? splitDelta(amount, prev.modelUsd.usd, split.usd, main, prev.modelUsd.tok, split.tok)
         : null;
       this.ledger.record({ sessionId: session.id, cli: binding.cli, runKey: run.runKey, deltaUsd: amount,
-        model: main, parts, cursor: { ...read, modelUsd: split }, now });
+        model: main, parts: withTokens(parts || [{ model: main, usd: amount, tokens: {} }], read.tokDelta),
+        cursor: { ...read, modelUsd: split }, now });
     }
     return {
       ok: true, kind: 'ok', cli: binding.cli, source: binding.source,

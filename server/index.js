@@ -6108,8 +6108,10 @@ async function runUsageTick() {
             unknownModels: r.unknownModels || [], autoModels: r.autoModels || [],
             // 分模型明细（同一会话用过多个模型时面板逐个列出）；scanning：大记录首次分轮扫描的进度
             byModel: mergeModelAliases((r.byModel || []).map((m) => ({ model: m.model || '', usd: m.usd, today: m.today,
-              input: m.input_tokens || 0, output: m.output_tokens || 0, cacheRead: m.cache_read_tokens || 0 })))
+              input: m.input_tokens || 0, output: m.output_tokens || 0, cacheRead: m.cache_read_tokens || 0,
+              cacheWrite: m.cache_write_tokens || 0, todayTokens: m.today_tokens || 0 })))
               .map((m) => ({ ...m, usd: round2(m.usd), today: round2(m.today) })),
+            tokensSince: usageLedger.tokensSince(),
             scanning: r.scanning ? Math.round(r.scanning * 100) : 0 }
           : { kind: r.kind, cli: r.cli, reason: r.reason || '' };
         // 金额先 round 到 2 位再比：浮点每轮都在抖，不这么做 37 张卡每分钟全量重渲染

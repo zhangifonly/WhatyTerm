@@ -58,7 +58,7 @@ export function mergeModelAliases(rows = []) {
     const g = groups.get(key);
     if (!g) { groups.set(key, { ...r, _top: r.usd }); continue; }
     if (r.usd > g._top) { g.model = r.model; g._top = r.usd; }
-    for (const k of ['usd', 'today', 'input', 'output', 'cacheRead']) g[k] = (g[k] || 0) + (r[k] || 0);
+    for (const k of ['usd', 'today', 'input', 'output', 'cacheRead', 'cacheWrite', 'todayTokens']) g[k] = (g[k] || 0) + (r[k] || 0);
   }
   return [...groups.values()].map(({ _top, ...r }) => ({ ...r, model: r.model || UNNAMED_MODEL }))
     .sort((a, b) => (a.model === UNNAMED_MODEL) - (b.model === UNNAMED_MODEL) || b.usd - a.usd);

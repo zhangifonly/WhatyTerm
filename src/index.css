@@ -4610,3 +4610,10 @@ body {
 .ls-error { font-size: 11px; color: hsl(0 70% 55%); margin-top: 4px; }
 .ls-uninstall { margin-top: 8px; font-size: 11px; padding: 2px 8px; border-radius: 4px; background: none; border: 1px solid hsl(var(--border)); color: hsl(var(--muted-foreground)); cursor: pointer; }
 .ls-badge.exp { background: hsl(38 90% 50% / 0.2); color: hsl(38 90% 50%); }
+/* 用量卡片的 token 显示 */
+.usage-tokens { margin-top: 6px; font-variant-numeric: tabular-nums; }
+.usage-tok-main { font-size: 13px; font-weight: 600; color: hsl(var(--foreground)); margin-right: 4px; }
+.usage-tokens .usage-sub { margin-right: 4px; }
+.usage-tok-parts { font-size: 10px; color: hsl(var(--muted-foreground)); margin-top: 2px; }
+.usage-models tr.usage-model-tok td { text-align: left; padding: 0 0 5px; font-size: 10px; color: hsl(var(--muted-foreground)); border-bottom: 1px dashed hsl(var(--border) / 0.4); }
+.usage-models tr.usage-model-row td { padding-bottom: 1px; }

@@ -47,6 +47,26 @@ export class UsageLedger {
     // v1.4.78：上一轮各模型的累计折算费用，用来把下一笔增量按模型拆开（老库没有这一列，补上）
     const cols = this.db.prepare('PRAGMA table_info(cli_run_cursor)').all().map((c) => c.name);
     if (!cols.includes('model_usd')) this.db.exec('ALTER TABLE cli_run_cursor ADD COLUMN model_usd TEXT');
+
+    // v1.4.79：v1.4.78 之前的 token 列不可信——Codex 每轮把 rollout 的**累计**值整个加一遍
+    //（实测一个会话记出 9 万亿缓存 token），Claude 则一直记 0。无法还原，一次性清零，从此刻起如实累加。
+    // 起点存在 meta 表里，界面据此注明「token 自某时起统计」
+    this.db.exec('CREATE TABLE IF NOT EXISTS cli_usage_meta (key TEXT PRIMARY KEY, value TEXT)');
+    if (!this.meta('tokens_since')) {
+      this.db.transaction(() => {
+        this.db.exec('UPDATE cli_usage_daily SET input_tokens=0, output_tokens=0, cache_read_tokens=0, cache_write_tokens=0');
+        this.db.prepare('INSERT INTO cli_usage_meta (key, value) VALUES (?, ?)').run('tokens_since', String(Date.now()));
+      })();
+    }
+  }
+
+  meta(key) {
+    return this.db.prepare('SELECT value FROM cli_usage_meta WHERE key=?').get(key)?.value ?? null;
+  }
+
+  /** token 统计起点（毫秒）：在此之前的 token 数被清零过，界面要注明 */
+  tokensSince() {
+    return Number(this.meta('tokens_since')) || 0;
   }
 
   getCursor(cli, runKey) {
@@ -130,8 +150,11 @@ export class UsageLedger {
   /** 会话按模型的花费：累计 + 今天，按累计降序 */
   sessionByModel(sessionId, today) {
     return this.db.prepare(`SELECT model, SUM(cost_usd) usd, SUM(CASE WHEN day=? THEN cost_usd ELSE 0 END) today,
-        SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens, SUM(cache_read_tokens) cache_read_tokens
-      FROM cli_usage_daily WHERE session_id=? GROUP BY model HAVING usd > 0 OR input_tokens > 0 ORDER BY usd DESC`).all(today, sessionId);
+        SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens, SUM(cache_read_tokens) cache_read_tokens,
+        SUM(cache_write_tokens) cache_write_tokens,
+        SUM(CASE WHEN day=? THEN input_tokens + output_tokens + cache_read_tokens + cache_write_tokens ELSE 0 END) today_tokens
+      FROM cli_usage_daily WHERE session_id=? GROUP BY model
+      HAVING usd > 0 OR input_tokens > 0 OR output_tokens > 0 ORDER BY usd DESC`).all(today, today, sessionId);
   }
 
   sessionTotal(sessionId) {

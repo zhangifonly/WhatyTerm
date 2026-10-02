@@ -101,6 +101,9 @@ export function scanChunk(chunk, state = {}, baseOffset = 0) {
       remember(hit.msgId);
     }
     addUsage(s.byModel, hit.model, hit.usage);
+    // 本次扫描新读到的 token：给「用量」显示 token 数用。byModel 遇到锚点会清零（它只服务于折算费用），
+    // token 数要的是实打实的累加，不能跟着清
+    if (s.newTok) addUsage(s.newTok, hit.model, hit.usage);
   }
   s.remainder = text.slice(from);
   return s;

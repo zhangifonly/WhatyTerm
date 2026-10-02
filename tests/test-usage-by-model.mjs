@@ -169,6 +169,57 @@ test('⑨ 子代理另起一份记录（更新、用便宜模型）：花费都�
   near(m['gpt-6-sol'], 10, '主线程'); near(m['gpt-6-luna'], 1, '子代理');
 });
 
+const tokOf = (ledger, sid, model) => ledger.sessionByModel(sid, '2099-01-01').find((r) => r.model === model) || {};
+
+test('⑩ Codex token：只记认领之后新增的，每轮不重复累加累计值（旧版一个会话记出 9 万亿）', () => {
+  const { ledger, svc } = fresh();
+  const r = rollout('g'); r.turn('gpt-6-sol', 't0'); r.call(5_000_000);   // 认领前的历史
+  const s = SESSION('s-g');
+  svc.collect(s, [s]);
+  for (let i = 0; i < 5; i++) { r.call(100_000); bump(r.file); svc.collect(s, [s]); }
+  r.turn('gpt-6-luna', 't1'); r.call(70_000); bump(r.file); svc.collect(s, [s]);
+  eq(tokOf(ledger, s.id, 'gpt-6-sol').output_tokens, 500_000, 'sol 输出 token（5 轮 × 10 万）');
+  eq(tokOf(ledger, s.id, 'gpt-6-luna').output_tokens, 70_000, 'luna 输出 token');
+});
+
+test('⑪ Claude token：如实累加（旧版一直是 0），遇到 CLI 自记账刷新也不丢', () => {
+  const root = path.join(TMP, 'claude2');
+  const dir = path.join(root, '-work-tk');
+  fs.mkdirSync(dir, { recursive: true });
+  const f = path.join(dir, 'run-t.jsonl');
+  const msg = (id, model, out) => JSON.stringify({ type: 'assistant', message: { id, model, usage: { input_tokens: 100, output_tokens: out, cache_read_input_tokens: 1000, cache_creation_input_tokens: 0 } } }) + '\n';
+  fs.writeFileSync(f, JSON.stringify({ type: 'cost-state', totalCostUSD: 1, sessionId: 'run-t' }) + '\n' + msg('h0', 'claude-opus-5', 999));
+  const ledger = new UsageLedger({ dbPath: path.join(TMP, 'claude2.db') });
+  const price = { version: 1, get: (m) => ({ price: { in: 5, out: 25, cacheRead: 0.5, cacheWrite: 6.25 }, modelId: m, source: 'ccswitch' }) };
+  const svc = new SessionUsageService({ ledger, pricing: price, claudeProjectsRoot: root });
+  const s = { id: 's-tk', aiType: 'claude', workingDir: '/work/tk', claudeSessionId: 'run-t', status: 'running' };
+  svc.collect(s, [s]);                                                         // 认领：h0 是历史，不计
+  fs.appendFileSync(f, msg('m1', 'claude-opus-5', 2000)); bump(f); svc.collect(s, [s]);
+  fs.appendFileSync(f, msg('m2', 'claude-sonnet-5', 300)
+    + JSON.stringify({ type: 'cost-state', totalCostUSD: 2, sessionId: 'run-t' }) + '\n'      // 自记账刷新（折算费用清零重算）
+    + msg('m3', 'claude-sonnet-5', 400)); bump(f); svc.collect(s, [s]);
+  const o = tokOf(ledger, s.id, 'claude-opus-5'), so = tokOf(ledger, s.id, 'claude-sonnet-5');
+  eq(o.output_tokens, 2000, 'opus 输出（不含认领前的 999）');
+  eq(so.output_tokens, 700, 'sonnet 输出（锚点前后两条都要算）');
+  eq(so.cache_read_tokens, 2000, 'sonnet 缓存读');
+});
+
+test('⑫ 升级时一次性清掉错的历史 token 并记下起点；之后再启动不会再清', () => {
+  const db = path.join(TMP, 'migrate.db');
+  const l1 = new UsageLedger({ dbPath: db });
+  l1.db.exec("DELETE FROM cli_usage_meta");                                   // 模拟升级前的库
+  l1.db.prepare("INSERT INTO cli_usage_daily (day, session_id, cli, model, cost_usd, input_tokens, output_tokens, cache_read_tokens) VALUES ('2026-09-30','x','codex','gpt-6-sol',5,9e12,3e10,9e12)").run();
+  const l2 = new UsageLedger({ dbPath: db });
+  const row = l2.db.prepare('SELECT * FROM cli_usage_daily').get();
+  eq(row.cache_read_tokens, 0, '错的 token 清零'); near(row.cost_usd, 5, '费用不动');
+  const since = l2.tokensSince();
+  eq(since > 0, true, '记下起点');
+  l2.db.prepare("UPDATE cli_usage_daily SET output_tokens=123").run();
+  const l3 = new UsageLedger({ dbPath: db });
+  eq(l3.db.prepare('SELECT output_tokens o FROM cli_usage_daily').get().o, 123, '第二次启动不得再清');
+  eq(l3.tokensSince(), since, '起点不变');
+});
+
 const REAL = path.join(os.homedir(), '.codex/sessions/2026/09/26/rollout-2026-09-26T07-47-26-01a0daf7-789d-7d70-b89b-b0b8a549d63f.jsonl');
 if (fs.existsSync(REAL)) {
   test('⑥ 真实记录（iSpring，三个模型）：各模型 token 之和 = Codex 末条累计', () => {
