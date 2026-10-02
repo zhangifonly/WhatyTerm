@@ -13,7 +13,7 @@ const left = (ms) => {
 };
 
 /**
- * 已授权登录的远程设备（二维码面板下方）。每台设备登录后 7 天内免登录，到期需重新登录；
+ * 已授权登录的远程设备（二维码面板下方）。每台设备登录后 30 天内免登录，到期需重新登录；
  * 在这里点「退出」立即失效，它开着的页面会被断开并要求重新登录。只有本机能看到和操作。
  */
 export default function TrustedDevices({ socket }) {
@@ -42,7 +42,7 @@ export default function TrustedDevices({ socket }) {
   if (devices === null) return null;   // 远程打开的桌面版看不到（接口只对本机开放）
   return (
     <div className="trusted-devices">
-      <div className="td-head">已授权的移动设备 <span className="td-hint">登录后 7 天内免登录</span></div>
+      <div className="td-head">已授权的移动设备 <span className="td-hint">登录后 30 天内免登录</span></div>
       {devices.length === 0 && <div className="td-empty">还没有设备登录过。手机扫上面的码即可登录。</div>}
       {devices.map((d) => (
         <div key={d.id} className="td-row">

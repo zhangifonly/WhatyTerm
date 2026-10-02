@@ -1,5 +1,5 @@
 /**
- * 已授权的远程设备（手机等）：登录一次，7 天内免登录；桌面端可查看、可逐个退出。
+ * 已授权的远程设备（手机等）：登录一次，30 天内免登录；桌面端可查看、可逐个退出。
  *
  * 为什么不靠 express-session：它默认把会话放在进程内存里，签名密钥每次启动随机生成 ——
  * 服务一重启（改代码、崩溃、launchd 拉起、整机重启）所有手机都要重新登录，cookie 上写的 7 天形同虚设。
@@ -15,7 +15,8 @@ import os from 'os';
 import path from 'path';
 
 export const DEVICE_COOKIE = 'wt_device';
-export const DEVICE_TTL_MS = 7 * 24 * 3600 * 1000;
+// 2026-10-02 用户定为一个月（原 7 天）。手机丢了可在电脑端「已授权设备」里立即退出
+export const DEVICE_TTL_MS = 30 * 24 * 3600 * 1000;
 /** 「最近使用」只在隔了这么久才写盘，避免每个请求都写文件 */
 const TOUCH_EVERY_MS = 60 * 1000;
 
@@ -51,7 +52,10 @@ export class DeviceTrust {
   _load() {
     try {
       const a = JSON.parse(readFileSync(this.file, 'utf8'));
-      return Array.isArray(a) ? a.filter((d) => d?.id && d?.tokenHash && d?.expiresAt) : [];
+      const list = Array.isArray(a) ? a.filter((d) => d?.id && d?.tokenHash && d?.expiresAt) : [];
+      // 期限改长后，已登录的设备按新期限顺延（从登录时算起），只延不缩
+      for (const d of list) if (d.createdAt && d.expiresAt < d.createdAt + DEVICE_TTL_MS) d.expiresAt = d.createdAt + DEVICE_TTL_MS;
+      return list;
     } catch { return []; }
   }
 

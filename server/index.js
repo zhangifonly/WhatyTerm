@@ -847,7 +847,7 @@ const sessionMiddleware = session({
   cookie: {
     secure: false,  // 开发环境使用 HTTP
     httpOnly: true,
-    maxAge: 7 * 24 * 60 * 60 * 1000  // 7 天
+    maxAge: DEVICE_TTL_MS  // 与设备免登录期限一致（30 天）
   }
 });
 
@@ -860,7 +860,14 @@ app.use(sessionMiddleware);
 app.use((req, res, next) => {
   if (req.session && !req.session.authenticated) {
     const d = deviceTrust.verify(readCookie(req.headers.cookie, DEVICE_COOKIE), { ip: clientIp(req) });
-    if (d) { req.session.authenticated = true; req.session.username = req.session.username || d.method || 'device'; req.session.deviceId = d.id; }
+    if (d) {
+      req.session.authenticated = true; req.session.username = req.session.username || d.method || 'device'; req.session.deviceId = d.id;
+      // 手机上那张 cookie 是登录时按当时的期限写的（老设备是 7 天），服务端顺延了它却还会按旧日子失效：
+      // 每个会话认出设备时按剩余期限重写一次
+      const secure = req.headers['x-forwarded-proto'] === 'https' || req.secure;
+      res.cookie(DEVICE_COOKIE, readCookie(req.headers.cookie, DEVICE_COOKIE),
+        { httpOnly: true, sameSite: 'lax', secure, maxAge: Math.max(0, d.expiresAt - Date.now()), path: '/' });
+    }
   }
   next();
 });
@@ -871,7 +878,7 @@ function clientIp(req) {
 }
 
 /**
- * 远程登录成功：标记会话已登录，并给这台设备发 7 天有效的令牌（httpOnly cookie）。
+ * 远程登录成功：标记会话已登录，并给这台设备发 30 天有效的令牌（httpOnly cookie）。
  * 本机访问本来就免登录，不发令牌、不进授权设备列表。
  */
 function grantLogin(req, res, method, username) {
@@ -882,7 +889,7 @@ function grantLogin(req, res, method, username) {
   req.session.deviceId = device.id;
   const secure = req.headers['x-forwarded-proto'] === 'https' || req.secure;
   res.cookie(DEVICE_COOKIE, token, { httpOnly: true, sameSite: 'lax', secure, maxAge: DEVICE_TTL_MS, path: '/' });
-  console.log(`[设备授权] ${device.name}（${device.ip}）经${method}登录，7 天内免登录`);
+  console.log(`[设备授权] ${device.name}（${device.ip}）经${method}登录，30 天内免登录`);
   io.to('local').emit('devices:changed');
 }
 

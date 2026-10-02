@@ -34,7 +34,7 @@ test('文件里只存令牌的哈希：看到文件也拿不到令牌；文件�
   if (process.platform !== 'win32') assert((fs.statSync(f).mode & 0o777) === 0o600, '文件权限不是 600');
 });
 
-test('7 天到期：到期前认，到期后不认并自动清掉；使用不续期（一周校验一次）', () => {
+test('到期（30 天）：到期前认，到期后不认并自动清掉；使用不续期（一周校验一次）', () => {
   let now = 1_000_000;
   const t = new DeviceTrust({ file: tmp(), now: () => now });
   const { token } = t.issue({ ua: IPHONE });
@@ -42,6 +42,29 @@ test('7 天到期：到期前认，到期后不认并自动清掉；使用不续
   assert(t.verify(token), '到期前就不认了');
   now += 2 * 60_000;
   assert(!t.verify(token) && t.list().length === 0, '到期后还认，或没清掉');
+});
+
+test('期限是一个月：第 29 天仍免登录（用户 2026-10-02 定的，原 7 天）', () => {
+  assert(DEVICE_TTL_MS === 30 * 24 * 3600 * 1000, `期限是 ${DEVICE_TTL_MS / 86400e3} 天`);
+  let now = 1_000_000;
+  const t = new DeviceTrust({ file: tmp(), now: () => now });
+  const { token } = t.issue({ ua: IPHONE });
+  now += 29 * 86400e3;
+  assert(t.verify(token), '第 29 天就不认了');
+});
+
+test('改期限前登录的设备（按 7 天写的记录）按新期限顺延；本来就更长的不缩短', () => {
+  const f = tmp();
+  const created = Date.now() - 6 * 86400e3;
+  const old = new DeviceTrust({ file: f });
+  const { token, device } = old.issue({ ua: IPHONE });
+  const raw = JSON.parse(fs.readFileSync(f, 'utf8'));
+  raw[0].createdAt = created; raw[0].expiresAt = created + 7 * 86400e3;           // 老版本写下的记录
+  raw.push({ ...raw[0], id: 'long', tokenHash: 'x'.repeat(raw[0].tokenHash.length), expiresAt: created + 90 * 86400e3 });
+  fs.writeFileSync(f, JSON.stringify(raw));
+  const t = new DeviceTrust({ file: f, now: () => created + 20 * 86400e3 });        // 第 20 天：按旧期限早过期了
+  assert(t.verify(token)?.id === device.id, '老设备没顺延，第 20 天被踢下线');
+  assert(t.list().find((d) => d.id === 'long').expiresAt === created + 90 * 86400e3, '更长的期限被缩短了');
 });
 
 test('桌面端退出某台设备：它立即失效，另一台不受影响；列表不带令牌哈希', () => {
