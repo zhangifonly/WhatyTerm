@@ -90,6 +90,17 @@ test('轮询定时器在 effect 清理里释放', () => {
   assert(!/if \(socket\) \{[^}]*$/.test(before), '清理函数仍嵌在 if (socket) 内，socket 为空时会漏');
 });
 
+test('轮询写在 App 组件里（写进别的组件拿不到 setServerStale，每次报错被 catch 吞掉，告警永不出现）', () => {
+  // v1.2.70~v1.4.81 实际就是这样：轮询在 AboutPage 里，只有打开「关于」页才跑，且必抛 ReferenceError
+  const start = APP.indexOf('export default function App(');
+  const next = APP.slice(start + 1).search(/\n(?:export\s+)?function [A-Z]/);
+  const appBody = APP.slice(start, next < 0 ? APP.length : start + 1 + next);
+  assert(start >= 0, '找不到 App 组件');
+  assert(/setServerStale\(/.test(appBody), 'setServerStale 的调用不在 App 组件内');
+  const outside = APP.slice(0, start) + APP.slice(start + appBody.length);
+  assert(!/setServerStale\(/.test(outside), 'App 之外还有组件在调 setServerStale（那里拿不到这个状态）');
+});
+
 test('CSS 里有告警条样式（没样式等于没提示）', () => {
   const css = fs.readFileSync(path.join(process.cwd(), 'src/index.css'), 'utf8');
   assert(/\.server-stale-banner\s*\{/.test(css), '缺少告警条样式');

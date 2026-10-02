@@ -25,7 +25,7 @@ import SprintProgress from './components/SprintProgress';
 import RalphWizard from './components/RalphWizard';
 import { useLongRun } from './components/longrun/useLongRun';
 import { useLongRunBell } from './components/longrun/useLongRunBell';
-import ServerStaleBanner from './components/ServerStaleBanner.jsx';
+import ServerStaleBanner, { PageStaleBanner } from './components/ServerStaleBanner.jsx';
 import SessionUsageCard from './components/SessionUsageCard.jsx';
 import TrustedDevices from './components/TrustedDevices.jsx';
 import LidSleepCard from './components/LidSleepCard.jsx';
@@ -245,6 +245,7 @@ export default function App() {
   // 服务端进程是否跑着旧代码（改完没重启）。修复在磁盘上、进程里还是老逻辑时，
   // 界面上完全看不出来，只会显得"修了没用" —— 这条提示就是为了避免再白排查一轮。
   const [serverStale, setServerStale] = useState(null);
+  const [serverVersion, setServerVersion] = useState('');
   const [usageMap, setUsageMap] = useState({});   // sessionId -> {usd, today, kind, ...}
   const [pricing, setPricing] = useState(null);
   const [inputStuckMap, setInputStuckMap] = useState({});   // sessionId -> {reason, since}：发送未生效   // 价格表状况（全局）：缺价 / 自动价 / 与 CC Switch 不一致
@@ -252,6 +253,32 @@ export default function App() {
   // 全是上个进程留下的（服务端内存缓存已清空），必须丢弃 —— 否则面板会拿
   // 重启前的旧判定继续显示，看上去就像"修复没生效"。
   const serverStartedAtRef = useRef(null);
+
+  // 服务端版本自检：进程里跑的版本 vs 磁盘上的版本（服务没重启），以及页面版本 vs 服务版本（页面没刷新）。
+  // ⚠ 这段原先写在 AboutPage 里，那里拿不到 setServerStale 等 App 的状态，每次都抛 ReferenceError
+  //   又被 .catch 吞掉——「服务端旧代码」告警从此再没出现过。必须留在 App 里
+  useEffect(() => {
+    const checkServerState = () => {
+      fetch('/api/server/state')
+        .then(r => r.json())
+        .then(d => {
+          setServerStale(d?.stale ? d : null);
+          if (d?.bootVersion) setServerVersion(d.bootVersion);
+          if (!d?.startedAt) return;
+          const prev = serverStartedAtRef.current;
+          serverStartedAtRef.current = d.startedAt;
+          // 只在启动时刻真的变了时清空；网络抖动重连时刻不变，不该误清
+          if (prev && prev !== d.startedAt) {
+            console.log('[Socket] 服务端已重启，丢弃重启前的 AI 判定');
+            setAiStatusMap({});
+          }
+        })
+        .catch((err) => console.warn('[服务状态] 检查失败:', err?.message));
+    };
+    checkServerState();
+    const staleTimer = setInterval(checkServerState, 60000);
+    return () => clearInterval(staleTimer);
+  }, []);
   const [aiStatusCountdown, setAiStatusCountdown] = useState(30);
   const [nextAnalysisTime, setNextAnalysisTime] = useState(Date.now() + 30000);
   const [aiHealthStatus, setAiHealthStatus] = useState({
@@ -2576,6 +2603,7 @@ export default function App() {
             </div>
           </div>
           <div className="ai-panel-content">
+            <PageStaleBanner serverVersion={serverVersion} />
             <ServerStaleBanner stale={serverStale} />
             {/* 当前 AI 供应商信息 */}
             <div className="ai-status-section" style={{ position: 'relative' }}>
@@ -4958,25 +4986,6 @@ function AboutPage({ socket, onClose }) {
 
   useEffect(() => {
     // 获取当前版本
-    // 服务端版本自检：内存里跑的版本 vs 磁盘上的版本
-    const checkServerState = () => {
-      fetch('/api/server/state')
-        .then(r => r.json())
-        .then(d => {
-          setServerStale(d?.stale ? d : null);
-          if (!d?.startedAt) return;
-          const prev = serverStartedAtRef.current;
-          serverStartedAtRef.current = d.startedAt;
-          // 只在启动时刻真的变了时清空；网络抖动重连时刻不变，不该误清
-          if (prev && prev !== d.startedAt) {
-            console.log('[Socket] 服务端已重启，丢弃重启前的 AI 判定');
-            setAiStatusMap({});
-          }
-        })
-        .catch(() => {});
-    };
-    checkServerState();
-    const staleTimer = setInterval(checkServerState, 60000);
 
     fetch('/api/update/version')
       .then(res => res.json())
@@ -4994,7 +5003,6 @@ function AboutPage({ socket, onClose }) {
     // 统一清理：原来 cleanup 写在 if (socket) 里面，socket 为空时不返回清理函数，
     // 定时器就漏掉了
     return () => {
-      clearInterval(staleTimer);
       socket?.off('system:info');
     };
   }, [socket]);
