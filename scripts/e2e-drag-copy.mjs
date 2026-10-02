@@ -68,7 +68,17 @@ for (const [bname, btype] of [['chromium', chromium], ['firefox', firefox], ['we
       await page.mouse.up();
       await page.waitForTimeout(1800);
       const clip = await page.evaluate(() => window.__clip);
-      const ok = clip.find((c) => c.ok && c.t && EXPECT.startsWith(c.t.trim()) && c.t.trim().length >= 10);
+      // 选完直接打字：高亮收起、退出选择模式，字进命令行（tmux 选择模式会吃按键，这一步是 v1.4.77 补的）
+      if (tmuxTarget) {
+        diag.heldAfterRelease = tmuxIn(tmuxTarget);
+        await page.keyboard.type('zq');
+        await page.waitForTimeout(600);
+        diag.inModeAfterType = tmuxIn(tmuxTarget);
+        diag.typedReached = execFileSync('tmux', ['capture-pane', '-p', '-t', tmuxTarget], { encoding: 'utf-8' }).includes('zq');
+        await page.keyboard.press('Backspace'); await page.keyboard.press('Backspace');
+      }
+      const typedOk = !tmuxTarget || (diag.heldAfterRelease === '1' && diag.inModeAfterType === '0' && diag.typedReached);
+      const ok = typedOk && clip.find((c) => c.ok && c.t && EXPECT.startsWith(c.t.trim()) && c.t.trim().length >= 10);
       r = { ...r, copied: !!ok, text: ok?.t, attempts: clip, diag };
     } catch (e) {
       r = { ...r, copied: false, error: e.message.slice(0, 200) };

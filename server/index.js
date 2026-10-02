@@ -8840,7 +8840,7 @@ io.on('connection', (socket) => {
 
       // tmux 模式下 write() 是同步的，mux-server 模式下是异步的
       // 直接调用，不使用 await 以避免不必要的延迟
-      session.write(data.input);
+      session.userInput(data.input);   // 鼠标操作后的首个按键会先退出 tmux 选择模式，见 SessionManager.userInput
 
       // 录制终端输入
       terminalRecorder.recordInput(data.sessionId, data.input);

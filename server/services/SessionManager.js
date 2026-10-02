@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { execSync, execFileSync, exec } from 'child_process';
 import { createModeTracker, RESET_PRELUDE } from './termModes.js';
+import { installSelectionBindings } from './tmuxSelection.js';
 import { promisify } from 'util';
 import path from 'path';
 
@@ -113,29 +114,18 @@ function execTmux(command, options = {}) {
 }
 
 /**
- * 拖动永远是选字，像普通终端一样（v1.4.75）。
- *
- * tmux 默认的 MouseDrag1Pane：应用开了鼠标上报（mouse_any_flag，Codex / 全屏 TUI 都开）就把拖拽
- * 转发给应用，于是拖不出选区，只能按住 Shift/Option 走 xterm 原生选择——而那只能选当前一屏。
- * 改成：WhatyTerm 的会话里拖拽一律进 tmux copy-mode（能跨屏、拖到边缘自动滚、松手经 OSC 52 复制），
- * 单击和滚轮照旧交给应用（Codex 仍能滚自己的视图）。
- *
- * ⚠ 键绑定是整个 tmux server 全局的，而 WhatyTerm 用的是默认 socket，与用户自己的 tmux 共用。
- *   所以按会话名限定：只有 whatyterm-* 会话改行为，用户自己的会话条件与 tmux 默认完全一致。
+ * 选字/复制对齐普通终端：拖动、双击选词、三击选行都进 tmux 选择模式，松手复制并保留高亮。
+ * 绑定全文与理由见 tmuxSelection.js（只改 whatyterm-* 会话，用户自己的 tmux 会话保持默认）。
  */
-export const DRAG_SEND_TO_APP_COND =
-  '#{||:#{pane_in_mode},#{&&:#{mouse_any_flag},#{!:#{m:whatyterm-*,#{session_name}}}}}';
-export const DRAG_BIND_ARGS = ['bind-key', '-T', 'root', 'MouseDrag1Pane',
-  'if-shell', '-F', DRAG_SEND_TO_APP_COND, 'send-keys -M', 'copy-mode -M'];
-let dragBindingSet = false;
+const tmuxArgv = () => (useWSL ? ['wsl', 'tmux'] : [getLocalTmuxPath() || 'tmux']);
+let selectionBindingsSet = false;
 function ensureDragSelectsBinding() {
-  if (dragBindingSet) return;
-  const argv = useWSL ? ['wsl', 'tmux'] : [getLocalTmuxPath() || 'tmux'];
+  if (selectionBindingsSet) return;
   try {
-    execFileSync(argv[0], [...argv.slice(1), ...DRAG_BIND_ARGS], { stdio: 'ignore', timeout: 5000 });
-    dragBindingSet = true;
+    installSelectionBindings(tmuxArgv(), execFileSync);
+    selectionBindingsSet = true;
   } catch (err) {
-    console.error(`[SessionManager] 设置拖动选择绑定失败: ${err.message}`);
+    console.error(`[SessionManager] 设置选字绑定失败: ${err.message}`);
   }
 }
 
@@ -526,6 +516,33 @@ export class Session {
   /** 给新接入的页面补发的模式序列：先全关（xterm 实例跨会话复用）再按本会话实际状态打开 */
   modePrelude() {
     return RESET_PRELUDE + this.termModes.prelude();
+  }
+
+  /**
+   * 用户输入的统一入口（前端键盘/鼠标）。选完字高亮会保留在 tmux 选择模式里，而选择模式会吃掉按键，
+   * 所以鼠标操作之后的第一下键盘输入，先确认并退出选择模式，再把按键交给 CLI——
+   * 和普通终端一样：选完直接打字，字照常进输入框，高亮消失、视图回到底部。
+   * 只在「上次键盘输入之后有过鼠标操作」时才查一次 tmux，平常打字零开销。
+   */
+  userInput(data) {
+    const text = String(data || '');
+    if (text.startsWith('\x1b[<')) {            // SGR 鼠标上报（点击/拖动/滚轮）
+      this._mouseSinceKey = true;
+    } else if (this._mouseSinceKey && useTmux) {
+      this._mouseSinceKey = false;
+      try {
+        const argv = tmuxArgv();
+        const inMode = execFileSync(argv[0], [...argv.slice(1), 'display', '-p', '-t', this.tmuxSessionName, '#{pane_in_mode}'],
+          { encoding: 'utf-8', timeout: 2000 }).trim();
+        if (inMode === '1') {
+          execFileSync(argv[0], [...argv.slice(1), 'send-keys', '-X', '-t', this.tmuxSessionName, 'cancel'], { stdio: 'ignore', timeout: 2000 });
+          // 单按 Esc 只用来取消高亮，不再传给 CLI：Claude Code / Codex 里 Esc 是「中断当前任务」，
+          // 选完字想按 Esc 收起高亮，结果把跑了半小时的活打断——这个代价不能有
+          if (text === '\x1b') return;
+        }
+      } catch { /* 查不到就照常写，最坏是这一下按键被选择模式吃掉 */ }
+    }
+    this.write(text);
   }
 
   write(data) {

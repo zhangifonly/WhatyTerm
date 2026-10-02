@@ -2095,7 +2095,7 @@ export default function App() {
                 {/* 拖动一律走 tmux copy-mode（能跨屏，拖到边缘自动滚历史），松手即复制。
                     v1.4.75 起 CLI 开了鼠标上报也一样：服务端把 whatyterm-* 会话的 MouseDrag1Pane
                     改成总进 copy-mode（SessionManager.ensureDragSelectsBinding），不再要按 Shift/Option。 */}
-                拖动选择，松开即复制
+                拖动选择、双击选词、三击选行，松开即复制
               </span>
               {copyHint && <span className="terminal-copy-toast">已复制到剪贴板</span>}
               {isDragOver && (
