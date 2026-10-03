@@ -84,7 +84,7 @@ try {
     /^\/\/ 规则版本 R7/.test(mean) && /^\/\/ 规则版本 R7/.test(read('mean.test.js')), `${mean.split('\n')[0]} | ${read('mean.test.js').split('\n')[0]}`);
   let out = '';
   try { out = execFileSync('node', ['--test'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { out = `失败：${e.stdout || e.message}`; }
-  ok('node --test 全过（含第一阶段的测试）', /[#ℹ] fail 0/.test(out) && /[#ℹ] pass [4-9]/.test(out), out.slice(-300));
+  ok('node --test 全过（含第一阶段的测试）', /[#ℹ] fail 0/.test(out) && /[#ℹ] pass ([4-9]|[1-9]\d+)\b/.test(out), out.slice(-300));
   const rules2 = ['CLAUDE.md', 'AGENTS.md'].filter((f) => fs.existsSync(path.join(ROOT, f)));
   ok('第二阶段没有新建规则文件（不会把原来那份遮住）', rules2.join() === rulesBefore2.join(), `之前 ${rulesBefore2.join('、')} → 之后 ${rules2.join('、')}`);
 } catch (e) {

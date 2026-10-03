@@ -100,7 +100,8 @@ await test('新建 tmux 直接落到工作目录，路径用单引号字面量�
 await test('监控三处入口与附着分析都跳过长程模式', () => {
   const idx = src('index.js');
   for (const fn of ['async function updateAllSessionsProjectInfo()', 'async function runBackgroundAutoAction()', 'async function runBackgroundStatusAnalysis()']) {
-    assert(between(idx, fn, 2500).includes('sessionManager.listSessions().filter((s) => !isLongRunMode(s))'), `${fn} 没跳过长程模式`);
+    // 只认「过滤条件里有 !isLongRunMode(s)」，别绑死整句写法（条件里还可以有别的，如正在换 CLI 的会话）
+    assert(/sessionManager\.listSessions\(\)\.filter\(\(s\) => [^\n]*!isLongRunMode\(s\)/.test(between(idx, fn, 2500)), `${fn} 没跳过长程模式`);
   }
   assert(between(idx, 'async function handleAIAnalysis(sessionId, session, socket) {', 200).includes('if (isLongRunMode(session)) return;'), '附着分析没跳过');
 });

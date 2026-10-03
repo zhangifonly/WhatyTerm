@@ -46,6 +46,7 @@ import LongRunMain from './components/longrun/LongRunMain';
 import LongRunSide from './components/longrun/LongRunSide';
 import LongRunNewTask from './components/longrun/LongRunNewTask';
 import LongRunHandoffDialog from './components/longrun/LongRunHandoffDialog';
+import CliSwitchDialog from './components/CliSwitchDialog';
 import LongRunSwitchDialog from './components/longrun/LongRunSwitchDialog';
 import { orderSessions, sessionNumbers as computeSessionNumbers, nextSortMode, longRunWaitingIds, autoRunIds, SORT_LABELS } from './utils/sessionSort.js';
 import { nextTunnelView } from './utils/tunnelState.js';
@@ -188,6 +189,7 @@ export default function App() {
   const longRunView = currentSession?.runMode === 'longrun';
   const [longRunNew, setLongRunNew] = useState(null);         // null | {mode, projectRoot?, requirementText?}
   const [longRunHandoff, setLongRunHandoff] = useState(null); // null | {sessionId, name, root}：转长程前先让会话把进度写进记忆
+  const [cliSwitch, setCliSwitch] = useState(null);           // null | {session, to}：普通会话换 CLI 接着开发（Claude Code ⇄ Codex）
   const [longRunSwitch, setLongRunSwitch] = useState(null);   // null | {sessionId, name, to}：长程⇄终端 切换确认框
   const [longRunHandover, setLongRunHandover] = useState(null); // null | sessionId
   // 长程收工：响一声 + 改标题（useLongRunBell 内），再补一条 toast —— 人正看着别的会话时，这是唯一能看到的提示
@@ -3353,6 +3355,10 @@ export default function App() {
         />
       )}
 
+      {cliSwitch && (
+        <CliSwitchDialog socket={socket} session={cliSwitch.session} to={cliSwitch.to} onClose={() => setCliSwitch(null)} />
+      )}
+
       {/* 转长程前的交接：写记忆 → 退出 CLI → 打开长程弹窗（下一步预填进需求） */}
       {longRunHandoff && (
         <LongRunHandoffDialog
@@ -3572,6 +3578,18 @@ export default function App() {
                     开始长程开发…
                   </div>
                 )}
+                {sessionContextMenu.session.workingDir && ['claude', 'codex'].includes(sessionContextMenu.session.aiType || 'claude') && (() => {
+                  const to = (sessionContextMenu.session.aiType || 'claude') === 'claude' ? 'codex' : 'claude';
+                  return (
+                    <div
+                      className="context-menu-item"
+                      title="当前 CLI 先写交接摘要，再在同一个终端里换成另一个接着开发"
+                      onClick={() => { setCliSwitch({ session: sessionContextMenu.session, to }); setSessionContextMenu(null); }}
+                    >
+                      换成 {to === 'codex' ? 'Codex' : 'Claude Code'} 接着开发…
+                    </div>
+                  );
+                })()}
               </>
             )}
             <div

@@ -61,17 +61,19 @@ test('顶层供应商只认第一张表之前的 model_provider；TOML 字符串
 
 test('启动命令：不连共享后台服务；续接带当前供应商；供应商名不安全就不拼进 shell', () => {
   const no = { exists: () => false };
-  assert(codexStartCommand({}, no) === 'codex --no-daemon');
-  assert(codexStartCommand({ codexProvider: { providerKey: 'custom' } }, { resume: true, ...no }) === `codex --no-daemon resume --last -c 'model_provider="custom"'`);
-  assert(codexStartCommand({ codexProvider: { providerKey: "x'; rm -rf ~ #" } }, { resume: true, ...no }) === 'codex --no-daemon resume --last');
+  const RULES = ` -c 'project_doc_fallback_filenames=["CLAUDE.md"]'`;
+  assert(codexStartCommand({}, no) === `codex --no-daemon${RULES}`);
+  assert(codexStartCommand({ codexProvider: { providerKey: 'custom' } }, { resume: true, ...no }) === `codex --no-daemon resume --last -c 'model_provider="custom"'${RULES}`);
+  assert(codexStartCommand({ codexProvider: { providerKey: "x'; rm -rf ~ #" } }, { resume: true, ...no }) === `codex --no-daemon resume --last${RULES}`);
 });
 
 test('会话选过供应商：命令里显式带上会话的 CODEX_HOME（tmux 环境对已在跑的 shell 无效）；没选过就跟随全局', () => {
   const S = { id: 'a819fe6d-28a2-4118-8821-b33c098e7620', codexProvider: { providerKey: 'custom' } };
   const dir = sessionCodexHome(S.id, '/h');
   const cmd = codexStartCommand(S, { resume: true, home: '/h', exists: (p) => p === `${dir}/config.toml` });
-  assert(cmd === `CODEX_HOME='${dir}' codex --no-daemon resume --last -c 'model_provider="custom"'`, cmd);
-  assert(codexStartCommand(S, { home: '/h', exists: () => false }) === `codex --no-daemon -c 'model_provider="custom"'`, '没有会话配置时不该带 CODEX_HOME');
+  const RULES = ` -c 'project_doc_fallback_filenames=["CLAUDE.md"]'`;
+  assert(cmd === `CODEX_HOME='${dir}' codex --no-daemon resume --last -c 'model_provider="custom"'${RULES}`, cmd);
+  assert(codexStartCommand(S, { home: '/h', exists: () => false }) === `codex --no-daemon -c 'model_provider="custom"'${RULES}`, '没有会话配置时不该带 CODEX_HOME');
   assert(!codexStartCommand({ id: 'x;rm -rf ~' }, { exists: () => true }).includes('CODEX_HOME'), '非法会话 id 拼进了命令');
 });
 

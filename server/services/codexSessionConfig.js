@@ -124,5 +124,7 @@ export function codexStartCommand(session, { resume = false, exists = existsSync
   const dir = session?.id && /^[A-Za-z0-9_-]{1,80}$/.test(String(session.id)) ? sessionCodexHome(session.id, home) : '';
   // 会话没单独选过供应商（目录不存在）就跟随全局，不硬塞一个空目录
   const envPrefix = dir && exists(path.join(dir, 'config.toml')) ? `CODEX_HOME='${dir.replace(/'/g, "'\\''")}' ` : '';
-  return `${envPrefix}${resume ? `codex --no-daemon resume --last${override}` : `codex --no-daemon${override}`}`;
+  // 没有 AGENTS.md 的项目读 CLAUDE.md：Claude Code 做过的项目换给 Codex 时规则不丢（只作用于这次启动，不改 config.toml）
+  const rules = ` -c 'project_doc_fallback_filenames=["CLAUDE.md"]'`;
+  return `${envPrefix}${resume ? `codex --no-daemon resume --last${override}` : `codex --no-daemon${override}`}${rules}`;
 }

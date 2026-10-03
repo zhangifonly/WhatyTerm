@@ -232,7 +232,8 @@ import { uninstallWin as uninstallLidSleepWin } from './services/lidSleepWin.js'
 import { install as installLidSleep, uninstall as uninstallLidSleep, ensureWatchdog as ensureLidWatchdog, manualCommands as lidSleepManualCommands } from './services/lidSleepInstall.js';
 import PuppeteerReaper from './services/PuppeteerReaper.js';
 import { sessionClaudeEnv, relayMigrationPlan, OAUTH_PROVIDER_INFO } from './services/sessionProviderEnv.js';
-import { withBearerToken, topProvider, codexStartCommand, linkSharedCodexEntries, withCarriedTables } from './services/codexSessionConfig.js';
+import { withBearerToken, topProvider, codexStartCommand, linkSharedCodexEntries, withCarriedTables, sessionCodexHome } from './services/codexSessionConfig.js';
+import { SWITCHABLE, SWITCH_REPLY_WAIT_MS, SWITCH_READY_WAIT_MS, codexPendingText, isCodexInputReady, isTrustPrompt, switchHandoffPrompt, switchFirstMessage, claudeMemoryDir, ensureBothRulesSettings, codexTurnSince, claudeTurnSince } from './services/cliSwitch.js';
 import { CodexExecTextClient } from './services/CodexExecText.js';
 import { LongRunService } from './services/LongRunService.js';
 import pricingTable from './services/usage/PricingTable.js';
@@ -4564,6 +4565,12 @@ function checkAndAdvanceFeature(sessionId, terminalContent, status) {
   io.to(`session:${sessionId}`).emit('progress:updated', { sessionId, progress: updated });
 }
 
+/**
+ * 正在换 CLI 的会话（session:switchCli 进行中）。这期间监控不读屏也不按键：
+ * 交接指令发出后它在写收尾，自动操作会去发「继续」；新 CLI 起来时监控还会去点信任目录、往输入框里塞字
+ */
+const cliSwitching = new Set();
+
 async function runBackgroundAutoAction() {
   // 等待 SessionManager 初始化完成
   if (!sessionManagerReady || !sessionManager) {
@@ -4571,7 +4578,7 @@ async function runBackgroundAutoAction() {
   }
 
   // 长程模式的条目 tmux 里只有 shell：错误修复会发 `claude -c`、自动操作会按键，都不能碰（见 sessionMode.js）
-  const sessions = sessionManager.listSessions().filter((s) => !isLongRunMode(s));
+  const sessions = sessionManager.listSessions().filter((s) => !isLongRunMode(s) && !cliSwitching.has(s.id));
   const now = Date.now();
 
   // === 独立的错误检测循环（不依赖自动操作开关）===
@@ -6365,7 +6372,7 @@ async function runBackgroundStatusAnalysis() {
   }
 
   // 长程模式的条目不做屏幕状态分析：屏上只有 shell，分析既浪费 API 又会给出"CLI 已退出"之类误导建议
-  const sessions = sessionManager.listSessions().filter((s) => !isLongRunMode(s));
+  const sessions = sessionManager.listSessions().filter((s) => !isLongRunMode(s) && !cliSwitching.has(s.id));
 
   // 串行处理会话，避免并发请求导致 429 错误
   for (const sessionData of sessions) {
@@ -8135,6 +8142,104 @@ io.on('connection', (socket) => {
         note: exited ? '' : 'CLI 30 秒内没退出，开长程前请手动确认它已退出' });
     } catch (e) {
       reply({ ok: false, error: e.message });
+    }
+  });
+
+  /**
+   * 普通会话换 CLI 接着开发（Claude Code ⇄ Codex）。纯逻辑与依据见 services/cliSwitch.js。
+   * 进度经 session:switchCliProgress 直接回给发起方（同 longrun:handoff：交接要等几分钟，人多半切去看别的会话）。
+   * ⚠ 交接没完成一律不退出当前 CLI：上下文还在它那里，退了才是真丢了。
+   */
+  socket.on('session:switchCli', async ({ sessionId, to } = {}, cb) => {
+    const reply = (d) => { if (typeof cb === 'function') cb(d); };
+    const step = (phase, text, extra = {}) => socket.emit('session:switchCliProgress', { sessionId, phase, text, ...extra });
+    const session = sessionManager?.getSession(sessionId);
+    if (!session) return reply({ ok: false, error: '会话不存在' });
+    if (isLongRunMode(session)) return reply({ ok: false, error: '长程条目请在长程里换执行者' });
+    const from = session.aiType || 'claude';
+    if (!SWITCHABLE[from] || !SWITCHABLE[to] || from === to) return reply({ ok: false, error: `不支持从 ${from} 换成 ${to}（目前支持 Claude Code ⇄ Codex）` });
+    const tmux = session.tmuxSessionName, cwd = session.workingDir;
+    if (!tmux || !cwd) return reply({ ok: false, error: '会话没有 tmux 或工作目录' });
+    if (cliSwitching.has(sessionId)) return reply({ ok: false, error: '这个会话正在换 CLI' });
+    cliSwitching.add(sessionId);
+    const screen = async () => session.getScreenContentAsync();
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const ready = (cli, raw) => (cli === 'codex' ? isCodexInputReady(raw) : isClaudeInputReady(raw));
+    const sendText = async (text, cli) => {
+      // 多行必须走 bracketed paste：直接发换行会被当成提交（两家 CLI 都实测过）
+      tmuxSendLiteral(tmux, bracketedPaste(text));
+      await sleep(300);
+      // Claude 把粘贴进来的整段记成 <pasted_content>（资料，不一定当指令）：后面补一句人自己敲的话，明确要它照做
+      if (cli === 'claude') { tmuxSendLiteral(tmux, ' 按上面这段的要求做。'); await sleep(200); }
+      execSync(`${getTmuxPrefix()} send-keys -t "${tmux}" Enter`);
+    };
+    let receipt = '', receiptFile = '';
+    try {
+      // ① 当前 CLI 收尾交接（没在跑就跳过：直接起新的，让它从代码与记忆接上）
+      if (processDetector.isCliRunning(tmux)) {
+        const raw = await screen();
+        const pending = from === 'codex' ? codexPendingText(raw) : promptPendingText(stripAnsiForProbe(stripPromptSuggestion(raw)));
+        if (pending) return reply({ ok: false, error: `输入框里有未提交的内容「${pending.slice(0, 30)}」，先发出去或清掉再换` });
+        step('waiting_idle', `等 ${SWITCHABLE[from]} 闲下来`);
+        let idle = false;
+        for (const t0 = Date.now(); Date.now() - t0 < 60000; await sleep(2000)) if (ready(from, await screen())) { idle = true; break; }
+        if (!idle) return reply({ ok: false, error: `60 秒内 ${SWITCHABLE[from]} 一直在忙，没发交接指令（不打断正在跑的活）` });
+        const sentAt = Date.now();
+        await sendText(switchHandoffPrompt(from, to), from);
+        step('handoff_sent', `已请 ${SWITCHABLE[from]} 写交接`);
+        let done = false;
+        for (let round = 0; Date.now() - sentAt < SWITCH_REPLY_WAIT_MS; round += 1) {
+          await sleep(3000);
+          step('writing', `${SWITCHABLE[from]} 在写交接`, { seconds: Math.round((Date.now() - sentAt) / 1000) });
+          if (from === 'codex') {
+            const home = existsSync(path.join(sessionCodexHome(session.id), 'sessions')) ? sessionCodexHome(session.id) : path.join(os.homedir(), '.codex');
+            const t = codexTurnSince(cwd, sentAt, home);
+            if (t.done) { receipt = t.text; done = true; break; }
+          } else {
+            // 读 Claude 自己的对话记录等这一轮结束（屏幕上的「最后一段」会混进指令回显，见 claudeTurnSince）
+            const t = claudeTurnSince(cwd, sentAt);
+            if (t.done) { receipt = t.text; done = true; break; }
+          }
+        }
+        if (!done) return reply({ ok: false, error: `等了 ${SWITCH_REPLY_WAIT_MS / 60000} 分钟，${SWITCHABLE[from]} 还没写完交接，没有退出它（上下文还在）` });
+        // 交接摘要先落盘：后面任何一步失败，人还能拿它手动接上
+        receiptFile = path.join(os.homedir(), '.webtmux', 'sessions', session.id, `handoff-${from}-to-${to}-${Date.now()}.md`);
+        mkdirSync(path.dirname(receiptFile), { recursive: true });
+        writeFileSync(receiptFile, receipt + '\n');
+        step('quitting', `退出 ${SWITCHABLE[from]}`);
+        if (!(await quitCliAndWait(session, tmux))) return reply({ ok: false, error: `${SWITCHABLE[from]} 30 秒内没退出，请到终端里确认`, receipt, receiptFile });
+      }
+      // ② 同一个窗格里起新 CLI（新对话）。规则文件两边都读得到：Codex 带读 CLAUDE.md 的回退，Claude 带「两个都读」
+      const cmd = to === 'codex' ? codexStartCommand(session, { resume: false }) : `claude --settings '${ensureBothRulesSettings()}'`;
+      step('starting', `启动 ${SWITCHABLE[to]}`);
+      tmuxSendLiteral(tmux, cmd);
+      await sleep(100);
+      execSync(`${getTmuxPrefix()} send-keys -t "${tmux}" Enter`);
+      session.aiType = to;
+      try { session[providerFieldOf(to)] = await getCurrentProvider(to, cwd, tmux); } catch { /* 显示用，取不到不影响 */ }
+      sessionManager.updateSession(session);
+      io.emit('sessions:updated', sessionManager.listSessions());
+      let up = false, trustAsked = false;
+      for (const t0 = Date.now(); Date.now() - t0 < SWITCH_READY_WAIT_MS; await sleep(2000)) {
+        const raw = await screen();
+        if (isTrustPrompt(raw)) {
+          // 信不信任这个目录是人的决定，不替人点
+          if (!trustAsked) { trustAsked = true; step('trust', `${SWITCHABLE[to]} 在问是否信任这个目录，请到终端里选择`); }
+          continue;
+        }
+        if (ready(to, raw)) { up = true; break; }
+      }
+      if (!up) return reply({ ok: false, error: `${SWITCHABLE[to]} 3 分钟内没准备好（还在问信任目录？）。交接摘要已存：${receiptFile || '（这次没有）'}`, receipt, receiptFile });
+      // ③ 交接摘要作为第一句发给新 CLI
+      const rulesFiles = ['CLAUDE.md', 'AGENTS.md'].filter((f) => existsSync(path.join(cwd, f)));
+      await sendText(switchFirstMessage({ from, to, receipt, rulesFiles, memoryDir: from === 'claude' ? claudeMemoryDir(cwd) : '' }), to);
+      step('done', `已换成 ${SWITCHABLE[to]}，交接摘要已发给它`);
+      console.log(`[换 CLI] ${session.name}: ${from} → ${to}${receipt ? '（带交接摘要）' : '（原 CLI 没在跑，无交接）'}`);
+      reply({ ok: true, from, to, receipt, receiptFile });
+    } catch (e) {
+      reply({ ok: false, error: e.message, receipt, receiptFile });
+    } finally {
+      cliSwitching.delete(sessionId);
     }
   });
 
