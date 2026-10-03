@@ -50,7 +50,7 @@ const ModelLine = ({ model }) => (
  */
 export const ProviderCards = ({ provider: p, task, lr }) => {
   const sup = task?.supervisor;
-  const supName = sup?.via === 'cli' ? (p?.name || 'CC Switch 当前配置') : sup?.providerName;
+  const supName = sup?.cli ? sup.cliLabel : sup?.via === 'cli' ? (p?.name || 'CC Switch 当前配置') : sup?.providerName;
   // 非 Claude 执行者：Cursor / Kiro 用自家账号，OpenCode 用开跑时选的 CC Switch 供应商（写死在它的配置里）。
   // 运行中切换供应商/模型的入口是给 Claude 执行者的，不显示
   const ex = task?.options?.executor || 'claude';
@@ -91,7 +91,7 @@ export const ProviderCards = ({ provider: p, task, lr }) => {
               <div className="lr-prov-head">
                 <p className="lr-prov-name on">{supName}</p>
                 <span className="lr-prov-tag" title={sup.via === 'cli' ? '经 claude CLI 调用，与执行者同一套地址、登录与代理' : '面板上明确选定的供应商，直接调 HTTP，调不通不会换别家'}>
-                  {sup.via === 'cli' ? (byOther ? 'claude CLI' : 'claude CLI·同执行者') : 'HTTP·所选供应商'}
+                  {sup.cli ? '同执行者的 CLI' : sup.via === 'cli' ? 'claude CLI·同执行者' : 'HTTP·所选供应商'}
                 </span>
               </div>
               {sup.via === 'http' && <p className="mono lr-prov-line">{sup.baseUrl}</p>}

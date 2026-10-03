@@ -1,5 +1,5 @@
 /**
- * 长程执行者的选择：Claude Code（默认）、Cursor CLI、Kiro CLI、OpenCode。监督者始终是 Claude（经 claude CLI），只换干活的那个。
+ * 长程执行者的选择：Claude Code（默认）、Cursor CLI、Kiro CLI、OpenCode。监督者跟着执行者走：选了哪个 CLI，监督者也用它自己（见 LongRunSupervisorCreds.makeSupervisorChannel）。
  *
  * 提示词按执行者改写：原版提示词是围着 Claude Code 的 Auto Memory 写的（第一句就是「确认自动记忆库开启，
  * 没开就停下来」）。别的 CLI 没有这个功能，原样发过去它会照字面停下等人。沙箱给 Claude 配的 autoMemoryDirectory

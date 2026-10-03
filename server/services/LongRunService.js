@@ -161,7 +161,7 @@ export function normalizeOptions(o = {}) {
     noSupervisor: !!o.noSupervisor,
     allowMissingRefs: !!o.allowMissingRefs,
     providerId: o.providerId || null,
-    // 执行者：claude（默认）| cursor。监督者始终是 Claude（见 longrunExecutor.js）
+    // 执行者：claude（默认）| cursor | kiro | opencode；监督者跟着执行者用同一个 CLI（见 makeSupervisorChannel）
     executor: normalizeExecutor(o.executor),
     // 从终端会话转长程且选「续同一条对话」时给：续那条 Claude 会话而不是开新的。
     // 只认 uuid 形态，免得把别的字符串当会话 id 传给 claude --resume
@@ -201,12 +201,14 @@ export class LongRunService {
    * 凭据来源与轮换见 LongRunSupervisorCreds.js。
    * @param {() => object} getTask  换供应商时往该任务的编排日志里记一笔（任务在监督者之后才建出来）
    */
-  _makeSupervisor(o, requirementText) {
+  _makeSupervisor(o, requirementText, prep = {}) {
     if (o.noSupervisor) return { supervisor: null, info: { status: 'off' } };
     const { text, source } = loadSystemPrompt(o.supervisorPrompt || null);
     const builtinText = o.supervisorPrompt ? loadSystemPrompt().text : text;
+    // 执行者不是 Claude 时，监督者也用那个 CLI（见 makeSupervisorChannel）
     const channel = makeSupervisorChannel({ engine: this.aiEngine, providerId: o.providerId,
-      ...(this.supervisorCli ? { cliFactory: this.supervisorCli } : {}) });
+      executor: o.executor, executorOpts: { model: o.model || prep.extra?.defaultModel || '', opencodeConfig: prep.extra?.opencodeConfig || '' },
+      ...(this.supervisorCli ? { cliFactory: this.supervisorCli, otherFactory: () => this.supervisorCli(o.model) } : {}) });
     if (!channel.complete) return { supervisor: null, info: channel.info };
     const supervisor = new Supervisor({
       requirementText, systemPrompt: text, promptSource: source, maxTokens: 4000, complete: channel.complete,
@@ -370,7 +372,7 @@ export class LongRunService {
 
     const input = requirementInput(req, { resume: continuing });
     let task = null;
-    const { supervisor, info } = this._makeSupervisor(o, input);
+    const { supervisor, info } = this._makeSupervisor(o, input, prep);
     reportSupervisor(sc, info);
     const { promptText, builtinText, ...supervisorInfo } = info;   // 全文不进快照
 

@@ -173,17 +173,20 @@ const LongRunNewTask = ({ lr, preset, sessions = [], onClose, onStarted, onOpene
             {Object.entries(EXECUTOR_UI).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
           </select>
           {form.executor !== 'claude' && (
-            <div className="lr-dim">监督者仍是 Claude。{executorUi(form.executor).note}{MEMORY_NOTE}</div>
+            <div className="lr-dim">监督者（判断做没做完、要不要换方向）也用 {executorUi(form.executor).title} 自己，不另外消耗 Claude。{executorUi(form.executor).note}{MEMORY_NOTE}</div>
           )}
         </div>
 
+        {/* Cursor / Kiro 的执行者与监督者都用它们自己的账号，CC Switch 供应商用不上，不显示 */}
+        {(form.executor === 'claude' || form.executor === 'opencode') && (
         <div className="form-group">
-          <label>{form.executor === 'opencode' ? '供应商（CC Switch，执行者与监督者共用）' : '监督者供应商（CC Switch）'}</label>
+          <label>{form.executor === 'opencode' ? '供应商（CC Switch，OpenCode 执行者与监督者都用它）' : '监督者供应商（CC Switch）'}</label>
           <select className="lr-select" value={form.providerId} onChange={(e) => set({ providerId: e.target.value })}>
             <option value="">跟随 CC Switch 当前 Claude 配置（经 claude CLI，与执行者同一套地址、登录与代理）</option>
             {providers.map((p) => <option key={p.id} value={p.id}>{p.name}{p.isCurrent ? '（当前）' : ''}</option>)}
           </select>
         </div>
+        )}
 
         {/* 模型放在主区而不是折叠的高级参数里：Hitech 两轮全败就败在模型没渠道，
             而那时它藏在「高级参数」后面，开跑前没人会去看一眼 */}

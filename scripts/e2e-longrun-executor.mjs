@@ -47,11 +47,14 @@ try {
   if (!r.ok) throw new Error(`启动失败：${r.error}`);
   taskId = r.task.id;
   entryId = r.task.sessionId || null;
+  ok(`监督者也用 ${LABEL}`, r.task.supervisor?.cli === EXECUTOR, JSON.stringify(r.task.supervisor));
   ok(`自检里写明执行者是 ${LABEL}`, JSON.stringify(r.task.selfCheck || []).includes(LABEL), JSON.stringify(r.task.selfCheck).slice(0, 300));
   const done = await new Promise((resolve) => {
     const t = setTimeout(() => resolve(null), 25 * 60 * 1000);
     s.on('longrun:event', (ev) => { if (ev.kind === 'finished') { clearTimeout(t); resolve(ev); } });
   });
+  // 监督者真被调用过：收工判定写在 loop.log 里
+  ok('监督者给出了判定', /监督者: 判定/.test(fs.readFileSync(path.join(ROOT, '.run', 'loop.log'), 'utf8')));
   ok('长程正常收工', done && /project_done|PROJECT_DONE|done/i.test(JSON.stringify(done)), JSON.stringify(done).slice(0, 400));
   ok('记忆库建在 .memory/（改写后的提示词它照做了）', fs.existsSync(path.join(ROOT, '.memory', 'MEMORY.md')));
   ok('插话发出且被执行者收到', injected && events.some((e) => e.kind === 'inject.applied')

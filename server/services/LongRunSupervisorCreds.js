@@ -10,6 +10,7 @@
  */
 
 import { ClaudeCliTextClient } from './ClaudeCliText.js';
+import { OtherCliTextClient, CLI_TEXT } from './OtherCliText.js';
 
 /** 原版默认用最强的 Opus 做判定（判定出错的代价是烧钱或越界代答）；与原版同名的环境变量可覆盖 */
 export const SUPERVISOR_DEFAULT_MODEL = 'claude-opus-5';
@@ -29,10 +30,24 @@ export function currentClaudeInfo(engine) {
  * @param {object} o.engine        AIEngine（明确选定供应商时用它解析与调用）
  * @param {string} [o.providerId]  面板上明确选的供应商
  * @param {(model: string) => {complete: Function}} [o.cliFactory]  测试钩子
+ * @param {string} [o.executor]  执行者 CLI。不是 Claude 时监督者也用它自己（同一套登录与配置），不再走 Claude
+ * @param {{model?: string, opencodeConfig?: string}} [o.executorOpts]  执行者的模型、OpenCode 配置文件
+ * @param {(o: object) => {complete: Function}} [o.otherFactory]  测试钩子
  * @returns {{complete?: Function, info: object}}
  */
 export function makeSupervisorChannel({ engine, providerId = null, model = supervisorModel(),
-  cliFactory = (m) => new ClaudeCliTextClient({ model: m }) } = {}) {
+  cliFactory = (m) => new ClaudeCliTextClient({ model: m }),
+  executor = 'claude', executorOpts = {}, otherFactory = (o) => new OtherCliTextClient(o) } = {}) {
+  // 监督者跟执行者是同一个 CLI：用户选 Cursor / Kiro / OpenCode 跑长程，就是要用那家的账号与模型，
+  // 不该另外消耗 Claude（多数人这时 Claude 正是没额度或没开通）。OpenCode 用执行者那份配置（所选 CC Switch 供应商）
+  if (executor && executor !== 'claude' && CLI_TEXT[executor]) {
+    const client = otherFactory({ cli: executor, model: executorOpts.model || '', opencodeConfig: executorOpts.opencodeConfig || '' });
+    return {
+      complete: (system, user) => client.complete(system, user),
+      info: { status: 'on', via: 'cli', cli: executor, cliLabel: CLI_TEXT[executor].label, model: executorOpts.model || '与执行者同一默认模型',
+        providerName: `${CLI_TEXT[executor].label}（与执行者同一个）`, baseUrl: '' },
+    };
+  }
   if (providerId) {
     const st = engine?.resolveSessionSettings?.('claude', providerId);
     if (!usable(st)) {

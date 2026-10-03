@@ -133,8 +133,13 @@ export function reportSupervisor(sc, s) {
     sc.warn(g, '  执行者每次结束都会停机等人判断。给所选供应商配上地址与密钥，或改回「跟随 CC Switch 当前配置」。');
     return;
   }
-  sc.info(g, `监督者: ${s.model || '(默认模型)'} @ ${s.baseUrl}`);
-  sc.info(g, s.via === 'cli'
+  if (s.cli) {
+    sc.info(g, `监督者: ${s.cliLabel}，${s.model}`);
+    sc.info(g, `  通道: 与执行者同一个 CLI（纯文本判断，不给工作区），用它自己的登录与配置，不另外消耗 Claude`);
+  } else {
+    sc.info(g, `监督者: ${s.model || '(默认模型)'} @ ${s.baseUrl}`);
+  }
+  if (!s.cli) sc.info(g, s.via === 'cli'
     ? `  通道: claude CLI，跟随 CC Switch 当前 Claude 配置（${s.providerName}），与执行者同一套地址、登录与代理`
     : `  通道: 直接调 HTTP，面板明确选定的供应商 ${s.providerName}（调不通不会换别家）`);
   // 换掉提示词等于换掉全部判定规则，来源必须打出来

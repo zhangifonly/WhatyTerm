@@ -15,6 +15,8 @@ import { isTaskDone } from './taskDonePattern.js';
 import { ClaudeCliTextClient, cliTextCwd } from './ClaudeCliText.js';
 import { CodexExecTextClient, codexTextCwd } from './CodexExecText.js';
 import { GrokSingleTextClient, GROK_CWD_PREFIX } from './GrokSingleText.js';
+import { OtherCliTextClient, OTHER_CWD_PREFIX } from './OtherCliText.js';
+import { sessionOpencodeConfig } from './opencodeCli.js';
 import { KIRO_START, detectKiroState, looksLikeKiro } from './kiroCli.js';
 import { detectOpencodeState, looksLikeOpencode } from './opencodeCli.js';
 import { detectCursorState, looksLikeCursor } from './cursorCli.js';
@@ -416,6 +418,13 @@ export class AIEngine {
     this.cliChannels = {
       codex: { source: 'codex_exec', factory: () => new CodexExecTextClient({ timeoutMs: STATUS_CLI_TIMEOUT_MS }) },
       grok: { source: 'grok_cli', factory: () => new GrokSingleTextClient({ timeoutMs: STATUS_CLI_TIMEOUT_MS }) },
+      // 会话跑的是哪个 CLI，读屏判断就用它自己的账号与配置（OpenCode 用本会话选的供应商那份配置）
+      cursor: { source: 'cursor_cli', factory: () => new OtherCliTextClient({ cli: 'cursor', timeoutMs: STATUS_CLI_TIMEOUT_MS }) },
+      kiro: { source: 'kiro_cli', factory: () => new OtherCliTextClient({ cli: 'kiro', timeoutMs: STATUS_CLI_TIMEOUT_MS }) },
+      opencode: { source: 'opencode_cli', factory: (sessionId) => {
+        const cfg = sessionId ? sessionOpencodeConfig(sessionId) : '';
+        return new OtherCliTextClient({ cli: 'opencode', opencodeConfig: cfg && fs.existsSync(cfg) ? cfg : '', timeoutMs: STATUS_CLI_TIMEOUT_MS });
+      } },
     };
 
     // 初始化插件管理器
@@ -3517,7 +3526,7 @@ ${historyText || '(空)'}
 
     let lastErr = null;
     try {
-      const parsed = await this._analyzeStatusViaCurrentConfig(prompt, aiType);
+      const parsed = await this._analyzeStatusViaCurrentConfig(prompt, aiType, sessionId);
       if (parsed) return parsed;
     } catch (err) {
       lastErr = err;
@@ -3569,7 +3578,7 @@ ${historyText || '(空)'}
    * 各通道都带与 HTTP 路径同一份 schema：带上 confidence，非对称降级才有依据；actionType 受 enum 约束。
    * 进程数受 AI 并发上限约束。测试覆盖 this.cliTextFactory / this.cliChannels，绝不起真 CLI。
    */
-  async _analyzeStatusViaCurrentConfig(prompt, aiType = 'claude') {
+  async _analyzeStatusViaCurrentConfig(prompt, aiType = 'claude', sessionId = null) {
     // 成功也要留一行：否则日志里分不清「没触发 AI」与「触发了、悄悄成功」，出问题时无从排查
     // 排队与调用分开记：AI 并发上限 3，实测并发 7 路时排队能占到 60 秒，混在一起会误判成通道慢
     const run = async (client, name) => {
@@ -3583,7 +3592,7 @@ ${historyText || '(空)'}
     let r = null, source = 'claude_cli';
     const own = this.cliChannels[aiType];
     if (own) {
-      try { r = await run(own.factory(), own.source); source = own.source; } catch (err) {
+      try { r = await run(own.factory(sessionId), own.source); source = own.source; } catch (err) {
         console.error(`[AIEngine] ${own.source} 状态分析失败，改用 claude -p:`, err.message);
       }
     }
@@ -3593,7 +3602,7 @@ ${historyText || '(空)'}
     parsed._source = source;
     // CLI 会把自己的工作目录告诉模型，实测模型会把它当成终端的 workingDir 报上来
     const wd = String(parsed.workingDir || '');
-    if ([basename(cliTextCwd()), basename(codexTextCwd()), GROK_CWD_PREFIX].some((d) => wd.includes(d))) parsed.workingDir = '未显示';
+    if ([basename(cliTextCwd()), basename(codexTextCwd()), GROK_CWD_PREFIX, OTHER_CWD_PREFIX].some((d) => wd.includes(d))) parsed.workingDir = '未显示';
     return parsed;
   }
 
