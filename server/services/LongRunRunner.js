@@ -684,8 +684,9 @@ export class LongRunRunner {
   abort() {
     const proc = this._proc;
     if (!proc || proc.exitCode !== null || proc.signalCode) return;
-    killProcessGroup(proc, SIGTERM);
-    setTimeout(() => { if (proc.exitCode === null && !proc.signalCode) killProcessGroup(proc, SIGKILL); }, 3000).unref();
+    // ⚠ 信号名要带引号：曾写成裸标识符 SIGTERM（未定义），点「终止」直接抛 ReferenceError，执行者根本没被杀
+    killProcessGroup(proc, 'SIGTERM');
+    setTimeout(() => { if (proc.exitCode === null && !proc.signalCode) killProcessGroup(proc, 'SIGKILL'); }, 3000).unref();
   }
 
   /** 组装结果（原版 _assemble），判定顺序逐条一致。 */

@@ -14,6 +14,8 @@ import os from 'os';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { loadPrompts, loadRequirement, extraDirsOf, PROMPT_SLOTS } from './LongRunPrompts.js';
+import { normalizeExecutor, runnerFactoryFor, promptsFor } from './longrunExecutor.js';
+import { cursorAccount } from './cursorCli.js';
 import { LongRunSandbox, sandboxRoots } from './LongRunSandbox.js';
 import { Supervisor, loadSystemPrompt } from './LongRunSupervisor.js';
 import { makeSupervisorChannel } from './LongRunSupervisorCreds.js';
@@ -159,6 +161,8 @@ export function normalizeOptions(o = {}) {
     noSupervisor: !!o.noSupervisor,
     allowMissingRefs: !!o.allowMissingRefs,
     providerId: o.providerId || null,
+    // 执行者：claude（默认）| cursor。监督者始终是 Claude（见 longrunExecutor.js）
+    executor: normalizeExecutor(o.executor),
     // 从终端会话转长程且选「续同一条对话」时给：续那条 Claude 会话而不是开新的。
     // 只认 uuid 形态，免得把别的字符串当会话 id 传给 claude --resume
     resumeSessionId: /^[0-9a-f-]{36}$/i.test(String(o.resumeSessionId || '')) ? String(o.resumeSessionId) : '',
@@ -316,8 +320,12 @@ export class LongRunService {
     const o = normalizeOptions(opts);
     const docPath = this.resolveDocPath(opts);
     if (!existsSync(docPath) || !statSync(docPath).isFile()) throw new LaunchError(`需求文档不存在: ${path.resolve(docPath)}`);
-    const prompts = loadPrompts(o.promptsFile || PROMPT_FILE);
+    const prompts = promptsFor(o.executor, loadPrompts(o.promptsFile || PROMPT_FILE));
     if (!o.noSupervisor) loadSystemPrompt(o.supervisorPrompt || null);          // 读不到硬失败
+    // Cursor 执行者：开跑前确认 CLI 已登录（-p 模式下没登录会每发都报错，白跑到连续失败停机）
+    if (o.executor === 'cursor' && !this.runnerFactory && !(await cursorAccount())) {
+      throw new LaunchError('Cursor CLI 没登录：先在终端里运行 cursor-agent login');
+    }
     checkRejectedRefs(previewRequirement(docPath), o);
 
     const root = this._projectRoot(opts, docPath);
@@ -349,6 +357,9 @@ export class LongRunService {
 
     const sc = new SelfCheck();
     reportPrompts(sc, prompts);
+    sc.info('执行者', o.executor === 'cursor'
+      ? `Cursor CLI（cursor-agent -p --force）${o.model ? `，模型 ${o.model}` : '，模型 Auto'}。按订阅计费不记美元，拿不到运行中水位、不做水位交接，人工插话会在工具间隙结束本发后续接`
+      : `Claude Code（claude -p）${o.model ? `，模型 ${o.model}` : ''}`);
     sc.info('项目', `项目: ${sandbox.root}（${MODE_TEXT[o.mode]}）`);
     reportClaudeTemplate(sc, sandbox);
     reportJobguard(sc);
@@ -372,7 +383,8 @@ export class LongRunService {
       sandbox, prompts, requirementText: input, supervisor,
       model: o.model, handoffFloor: o.handoffFloor, handoffCeiling: o.handoffCeiling, hardKill: o.hardKill,
       // 供应商侧故障时自动换模型用：只从供应商自己的 /v1/models 清单里挑，拿不到就退回等待
-      modelLister: () => listProviderModels({ engine: this.aiEngine, providerId: o.providerId || '' })
+      // Cursor 执行者不从 CC Switch 供应商换模型（那是 Claude 的清单）：遇到故障退回等待
+      modelLister: o.executor === 'cursor' ? null : () => listProviderModels({ engine: this.aiEngine, providerId: o.providerId || '' })
         .then((r) => (r.ok ? r.models : [])),
       maintenanceEvery: o.maintenanceEvery, totalBudgetUsd: o.totalBudgetUsd, maxLegs: o.maxLegs,
       taskWait: o.taskWait, askHuman: !o.noAsk, skipInit: resume,
@@ -382,7 +394,7 @@ export class LongRunService {
       // 挂起点就绪后立刻广播：need_human 事件先于挂起发出，那一刻的摘要里 awaitingHuman 还是 false，
       // 不补这一下列表徽标和回答框都出不来
       humanChannel: () => new Promise((resolve) => { task._humanWaiter = resolve; this._broadcast(task); }),
-      ...(this.runnerFactory ? { runnerFactory: this.runnerFactory } : {}),
+      runnerFactory: this.runnerFactory || runnerFactoryFor(o.executor),
     });
     this.tasks.set(id, task);
     this._emit(task, 'selfcheck', { items: task.selfCheck });
@@ -499,10 +511,13 @@ export class LongRunService {
     if (task?.state === 'running') return { ok: false, error: '长程还在跑，先等它结束或点「终止」' };
     const root = task?.sandbox.root || this.sessionBinder?.get(sessionId)?.workingDir;
     if (!root || !existsSync(root)) return { ok: false, error: '找不到这个条目的项目目录' };
-    const found = resolveClaudeSessionId({ root, liveSessionId: task?.loop?.sessionId || null });
+    // Cursor 执行者的对话 id 是 Cursor 的，终端里的 claude 接不上它：只能开新对话、从记忆接上
+    const byCursor = task?.options?.executor === 'cursor';
+    const found = byCursor ? null : resolveClaudeSessionId({ root, liveSessionId: task?.loop?.sessionId || null });
     const peak = lastContextPeak(root);
     const handoffFloor = task?.loop?.handoffFloor ?? HANDOFF_FLOOR;
-    const decided = decideHandover(mode, { peak, handoffFloor, hasSessionId: !!found });
+    const decided = byCursor ? { mode: 'fresh', reason: '长程执行者是 Cursor，终端的 Claude 接不上那段对话，开新对话从记忆接上' }
+      : decideHandover(mode, { peak, handoffFloor, hasSessionId: !!found });
     const backup = (() => { try { return JSON.parse(readFileSync(path.join(root, '.run', 'provider-env.backup.json'), 'utf8')); } catch { return null; } })();
     const command = buildLaunchCommand({ mode: decided.mode, claudeSessionId: found?.id,
       extraDirs: task?.loop?.extraDirs || [], model: task?.options?.model || '' });

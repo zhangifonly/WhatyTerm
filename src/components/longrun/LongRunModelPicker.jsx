@@ -11,18 +11,19 @@ import React, { useState, useEffect } from 'react';
  * 清单来自供应商自己的 /v1/models。拿不到就退回手输并说明原因 ——
  * 编一份清单只会再撞「无可用渠道」，比没有清单更坏。
  */
-const LongRunModelPicker = ({ lr, providerId, value, onChange }) => {
+const LongRunModelPicker = ({ lr, providerId, executor = 'claude', value, onChange }) => {
   const [state, setState] = useState({ loading: true });
   const [manual, setManual] = useState(false);
 
   const load = (refresh = false) => {
     setState({ loading: true });
-    lr.call('longrun:providerModels', { providerId: providerId || '', refresh }, 20000)
+    lr.call('longrun:providerModels', { providerId: providerId || '', refresh, executor }, 40000)
       .then((r) => setState({ loading: false, ...r }));
   };
 
   // 换供应商就得重查：不同中转站支持的模型不一样，沿用上一个的清单会选出个不存在的
-  useEffect(() => { load(false); }, [providerId]);   // eslint-disable-line react-hooks/exhaustive-deps
+  // 换执行者也要重查：Cursor 的清单来自 Cursor 账号，与 CC Switch 供应商无关
+  useEffect(() => { load(false); }, [providerId, executor]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   const models = state.models || [];
   const showSelect = !manual && state.ok && models.length > 0;
@@ -34,14 +35,14 @@ const LongRunModelPicker = ({ lr, providerId, value, onChange }) => {
     <div className="form-group">
       <label>
         执行者模型
-        {showSelect && <span className="lr-dim"> · 当前供应商支持 {models.length} 个</span>}
+        {showSelect && <span className="lr-dim"> · {executor === 'cursor' ? 'Cursor 账号可用' : '当前供应商支持'} {models.length} 个</span>}
       </label>
 
-      {state.loading && <div className="lr-dim">正在查当前供应商支持的模型…</div>}
+      {state.loading && <div className="lr-dim">{executor === 'cursor' ? '正在查 Cursor 账号可用的模型…' : '正在查当前供应商支持的模型…'}</div>}
 
       {!state.loading && showSelect && (
         <select className="lr-select" value={value} onChange={(e) => onChange(e.target.value)}>
-          <option value="">留空 = 用供应商默认{state.configured ? `（${state.configured}）` : ''}</option>
+          <option value="">{executor === 'cursor' ? '留空 = Cursor 默认（Auto）' : `留空 = 用供应商默认${state.configured ? `（${state.configured}）` : ''}`}</option>
           {options.map((m) => <option key={m} value={m}>{m}</option>)}
         </select>
       )}

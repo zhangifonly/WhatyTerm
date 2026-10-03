@@ -21,6 +21,7 @@ const LongRunNewTask = ({ lr, preset, sessions = [], onClose, onStarted, onOpene
     kind: preset?.projectRoot ? 'existing' : 'new', projectName: '', projectRoot: preset?.projectRoot || '',
     // requirementText 可能是刚交接过来的「下一会话应该从哪一项开始」：预填但让人过目，随时可改
     mode: preset?.mode || 'start', source: 'paste', requirementText: preset?.requirementText || '', docPath: '', fresh: false, providerId: '',
+    executor: 'claude',
     // 从终端「续同一条对话」转过来时带的会话 id：给了它长程就续那条对话，不发初始化
     resumeSessionId: preset?.resumeSessionId || '',
     ...ADVANCED_DEFAULTS,
@@ -166,6 +167,20 @@ const LongRunNewTask = ({ lr, preset, sessions = [], onClose, onStarted, onOpene
         </div>
 
         <div className="form-group">
+          <label>执行者（干活的 CLI）</label>
+          <select className="lr-select" value={form.executor} onChange={(e) => { set({ executor: e.target.value, model: '' }); setPlan(null); }}>
+            <option value="claude">Claude Code（默认）</option>
+            <option value="cursor">Cursor CLI（Cursor 账号，订阅计费）</option>
+          </select>
+          {form.executor === 'cursor' && (
+            <div className="lr-dim">
+              监督者仍是 Claude。Cursor 按订阅计费，预算上限对它不生效；拿不到运行中的上下文水位，不做水位交接（Cursor 自己管上下文）；
+              插话会在工具间隙结束当前这发，再接着同一段对话发进去。记忆仍在项目的 .memory/，换回 Claude 也接得上。
+            </div>
+          )}
+        </div>
+
+        <div className="form-group">
           <label>监督者供应商（CC Switch）</label>
           <select className="lr-select" value={form.providerId} onChange={(e) => set({ providerId: e.target.value })}>
             <option value="">跟随 CC Switch 当前 Claude 配置（经 claude CLI，与执行者同一套地址、登录与代理）</option>
@@ -175,7 +190,7 @@ const LongRunNewTask = ({ lr, preset, sessions = [], onClose, onStarted, onOpene
 
         {/* 模型放在主区而不是折叠的高级参数里：Hitech 两轮全败就败在模型没渠道，
             而那时它藏在「高级参数」后面，开跑前没人会去看一眼 */}
-        <LongRunModelPicker lr={lr} providerId={form.providerId} value={form.model}
+        <LongRunModelPicker lr={lr} providerId={form.providerId} executor={form.executor} value={form.model}
           onChange={(m) => { set({ model: m }); setPlan(null); }} />
 
         <button type="button" className="lr-link" onClick={() => setShowAdv(!showAdv)}>{showAdv ? '▾' : '▸'} 高级参数（水位、预算、维护、等待、监督者…）</button>

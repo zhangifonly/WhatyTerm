@@ -10,12 +10,13 @@ import { ctxView, fmtDur } from './longrunBoard.js';
 /** 头部「N次 ⇄N $x」与悬浮明细（同 AI 面板的操作统计） */
 export const HeaderStats = ({ board, task }) => {
   const spent = board?.spent_usd || 0;
+  const byCursor = task?.options?.executor === 'cursor';   // Cursor 按订阅计费，没有美元可记
   const item = (label, value, cls = '') => (
     <div className="tooltip-item"><span className="tooltip-label">{label}:</span><span className={`tooltip-value ${cls}`}>{value}</span></div>
   );
   return (
     <span className="ai-stats-wrapper">
-      <span className="ai-stats">{board?.legs || 0}次 ⇄{board?.handoffs || 0} ${spent.toFixed(2)}</span>
+      <span className="ai-stats">{board?.legs || 0}次 ⇄{board?.handoffs || 0} {byCursor ? '订阅' : `$${spent.toFixed(2)}`}</span>
       <div className="ai-stats-tooltip">
         <div className="tooltip-title">长程统计</div>
         {item('调用执行者', `${board?.legs || 0} 次`)}
@@ -23,9 +24,13 @@ export const HeaderStats = ({ board, task }) => {
         {item('记忆维护', `${board?.maintenances || 0} 轮`)}
         {item('监督者代你作答', `${board?.decisions || 0} 次`, board?.decisions ? 'failed' : '')}
         <div className="tooltip-divider"></div>
-        {item('已结算花费', `$${spent.toFixed(4)}`)}
-        {board?.running_cost > 0 && item('进行中（估算）', `约 $${board.running_cost.toFixed(2)}`)}
-        {task && item('预算上限', `$${Number(task.totalBudgetUsd || 0).toFixed(2)}`)}
+        {byCursor ? item('花费', 'Cursor 订阅计费，不记美元') : (
+          <>
+            {item('已结算花费', `$${spent.toFixed(4)}`)}
+            {board?.running_cost > 0 && item('进行中（估算）', `约 $${board.running_cost.toFixed(2)}`)}
+            {task && item('预算上限', `$${Number(task.totalBudgetUsd || 0).toFixed(2)}`)}
+          </>
+        )}
         {item('耗时', fmtDur(board?.elapsed_s))}
       </div>
     </span>
@@ -43,8 +48,20 @@ const ModelLine = ({ model }) => (
 export const ProviderCards = ({ provider: p, task, lr }) => {
   const sup = task?.supervisor;
   const supName = sup?.via === 'cli' ? (p?.name || 'CC Switch 当前配置') : sup?.providerName;
+  // Cursor 执行者：用 Cursor 账号（订阅），与 CC Switch 无关；运行中切换供应商/模型的入口是给 Claude 的，不显示
+  const byCursor = task?.options?.executor === 'cursor';
   return (
     <>
+      {byCursor ? (
+        <div className="ai-status-section">
+          <h4 className="lr-prov-title">CURSOR <span className="lr-dim">执行者</span></h4>
+          <div className="lr-prov-head">
+            <p className="lr-prov-name on">Cursor 官方</p>
+            <span className="lr-prov-tag" title="cursor-agent -p，用 Cursor 账号登录，按订阅计费，不记美元">Cursor 账号·订阅</span>
+          </div>
+          <ModelLine model={task?.options?.model || 'Auto'} />
+        </div>
+      ) : (
       <div className="ai-status-section">
         <h4 className="lr-prov-title">CLAUDE <span className="lr-dim">执行者</span></h4>
         <div className="lr-prov-head">
@@ -59,6 +76,7 @@ export const ProviderCards = ({ provider: p, task, lr }) => {
             currentModel={task?.options?.model || ''} currentProviderId={task?.options?.providerId || ''} />
         )}
       </div>
+      )}
       {sup && (
         <div className="ai-status-section">
           <h4 className="lr-prov-title">监督者</h4>
@@ -67,7 +85,7 @@ export const ProviderCards = ({ provider: p, task, lr }) => {
               <div className="lr-prov-head">
                 <p className="lr-prov-name on">{supName}</p>
                 <span className="lr-prov-tag" title={sup.via === 'cli' ? '经 claude CLI 调用，与执行者同一套地址、登录与代理' : '面板上明确选定的供应商，直接调 HTTP，调不通不会换别家'}>
-                  {sup.via === 'cli' ? 'claude CLI·同执行者' : 'HTTP·所选供应商'}
+                  {sup.via === 'cli' ? (byCursor ? 'claude CLI' : 'claude CLI·同执行者') : 'HTTP·所选供应商'}
                 </span>
               </div>
               {sup.via === 'http' && <p className="mono lr-prov-line">{sup.baseUrl}</p>}

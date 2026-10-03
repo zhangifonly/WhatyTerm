@@ -223,6 +223,7 @@ import { protectedPids } from './services/orphanGuard.js';
 import { providerFieldOf } from './services/cliProviderField.js';
 import { kiroProviderInfo } from './services/kiroCli.js';
 import { cursorProviderInfo, cursorStartCommand } from './services/cursorCli.js';
+import { listCursorModels } from './services/LongRunCursorRunner.js';
 import { buildOpencodeConfig, sessionOpencodeConfig, sessionOpencodeMeta, opencodeProviderInfo, opencodeStartCommand, verifyOpencodeConfig } from './services/opencodeCli.js';
 import { mergeModelAliases } from './services/usage/usageSplit.js';
 import lidSleepGuard from './services/LidSleepGuard.js';
@@ -8019,9 +8020,10 @@ io.on('connection', (socket) => {
    * 某供应商（空=CC Switch 当前配置）的可用模型清单，给开长程时的模型下拉用。
    * 拿不到就如实回 ok:false + 原因，界面退回手输 —— 编一份清单只会再撞「无可用渠道」。
    */
-  socket.on('longrun:providerModels', async ({ providerId, refresh } = {}, cb) => {
+  socket.on('longrun:providerModels', async ({ providerId, refresh, executor } = {}, cb) => {
     let d;
-    try { d = await listProviderModels({ engine: aiEngine, providerId: providerId || '', refresh: !!refresh }); }
+    // Cursor 执行者的模型是 Cursor 账号自己的清单（cursor-agent --list-models），与 CC Switch 供应商无关
+    try { d = executor === 'cursor' ? await listCursorModels() : await listProviderModels({ engine: aiEngine, providerId: providerId || '', refresh: !!refresh }); }
     catch (e) { d = { ok: false, models: [], error: e.message }; }
     if (typeof cb === 'function') cb(d);
   });

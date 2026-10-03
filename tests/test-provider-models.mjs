@@ -144,7 +144,8 @@ await test('守卫：模型选择在主区，不在折叠的高级参数里', ()
 await test('守卫：换供应商必须重查清单，且失败时退回手输', () => {
   // 只认「依赖数组里有 providerId 的 useEffect」这一件事，不锁具体写法
   const effects = PICKER.split('useEffect(').slice(1);
-  assert(effects.some((e) => /\[providerId\]/.test(e.slice(0, 200))),
+  // 依赖数组里含 providerId 就行（还可以有别的依赖，如执行者）：别绑死成 `[providerId]` 这一种写法
+  assert(effects.some((e) => /\[[^\]]*\bproviderId\b[^\]]*\]/.test(e.slice(0, 300))),
     '没有按 providerId 重查 —— 换了供应商还用旧清单，会选出个不存在的模型');
   assert(/providerId: providerId \|\| ''/.test(PICKER), '查询要把 providerId 传下去，否则永远查当前配置');
   assert(/<input value=\{value\}/.test(PICKER), '清单拿不到时必须退回手输，不能让人无法开跑');
