@@ -40,7 +40,7 @@ export default function SessionList({
       </div>
       {!loaded && <div className="m-empty">加载中…</div>}
       {loaded && sessions.length === 0 && (
-        <div className="m-empty">暂无运行中的会话<br />请在电脑端创建会话后查看</div>
+        <div className="m-empty">暂无运行中的会话<br />点上方「历史项目」选一个项目开始</div>
       )}
       {sorted.map((s) => (
         <SessionCard

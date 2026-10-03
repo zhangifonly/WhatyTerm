@@ -29,6 +29,7 @@ import ServerStaleBanner, { PageStaleBanner } from './components/ServerStaleBann
 import SessionUsageCard from './components/SessionUsageCard.jsx';
 import TrustedDevices from './components/TrustedDevices.jsx';
 import LidSleepCard from './components/LidSleepCard.jsx';
+import { findExistingSession, creatingKeyOf, resumePayload } from './utils/projectOpen.js';
 import LongRunHandoverDialog from './components/longrun/LongRunHandoverDialog';
 import { taskBadge, taskLine } from './components/longrun/longrunBoard';
 import LongRunMain from './components/longrun/LongRunMain';
@@ -429,17 +430,11 @@ export default function App() {
       setSessions(data);
       // 清除已创建会话的"正在创建"标记
       setCreatingProjectPaths(prev => {
+        // 键是「CLI 类型:目录」（creatingKeyOf）。原先按纯路径比对，和键永远对不上，标记从不清除：
+        // 会话关掉后再点同一个历史项目会被当成「正在创建」吞掉，只能刷新页面
         const newSet = new Set(prev);
         for (const session of data) {
-          if (session.workingDir) {
-            const normalizedWorkingDir = normalizePath(session.workingDir);
-            // 检查规范化后的路径是否在集合中
-            for (const path of newSet) {
-              if (normalizePath(path) === normalizedWorkingDir) {
-                newSet.delete(path);
-              }
-            }
-          }
+          if (session.workingDir) newSet.delete(creatingKeyOf({ aiType: session.aiType, path: session.workingDir }));
         }
         return newSet.size !== prev.size ? newSet : prev;
       });
@@ -1630,45 +1625,22 @@ export default function App() {
   // 打开最近项目（如果已有会话则切换，否则创建新会话）
   const handleOpenRecentProject = (project) => {
     // 规范化路径（去除末尾斜杠）
-    const normalizePath = (p) => p ? p.replace(/\/+$/, '') : '';
-    const projectPath = normalizePath(project.path);
-
-    // 检查是否有现有会话在该项目目录下工作。
-    // 必须同时匹配 aiType：同一个目录常常既跑过 Claude 又跑过 Codex，
-    // 只按目录匹配会让「点 Codex 历史项目却切到该目录下的 Claude 会话」，
-    // 表现为「点 codex 项目启动的却是 claude」。
+    // 规则与移动版共用，见 src/utils/projectOpen.js
     const wantType = project.aiType || 'claude';
-    const existingSession = sessions.find(s =>
-      normalizePath(s.workingDir) === projectPath &&
-      (s.aiType || 'claude') === wantType
-    );
+    const existingSession = findExistingSession(sessions, project);
 
     if (existingSession) {
       // 已有同类型会话，直接切换
       console.log(`[App] 项目 ${project.name}(${wantType}) 已有会话 ${existingSession.id}，切换过去`);
       attachSession(existingSession.id);
     } else {
-      // 检查是否正在创建该项目的会话（防止重复点击）。
-      // 键含 aiType：否则同目录下先点 Codex 再点 Claude 会被当成重复点击而被吞掉。
-      const creatingKey = `${wantType}:${projectPath}`;
+      const creatingKey = creatingKeyOf(project);
       if (creatingProjectPaths.has(creatingKey)) {
         console.log(`[App] 项目 ${project.name}(${wantType}) 正在创建会话中，忽略重复点击`);
         return;
       }
-
-      // 标记为正在创建
       setCreatingProjectPaths(prev => new Set(prev).add(creatingKey));
-
-      // 没有现有会话，创建新会话
-      const sessionData = {
-        name: project.name,
-        aiType: wantType,
-        workingDir: project.path,
-        projectName: project.name,
-        projectDesc: '',  // 由服务器端从项目文件提取
-        resumeCommand: project.resumeCommand
-      };
-      socket.emit('session:createAndResume', sessionData);
+      socket.emit('session:createAndResume', resumePayload(project));
     }
   };
 

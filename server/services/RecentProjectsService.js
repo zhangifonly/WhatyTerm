@@ -8,6 +8,15 @@ const HOME_DIR = os.homedir();
 /**
  * 获取各 CLI 工具的最近项目列表
  */
+/** 系统临时目录（macOS 的 os.tmpdir() 在 /var/folders 下，真实路径是 /private/var/folders） */
+const TEMP_ROOTS = [os.tmpdir(), '/tmp', '/private/tmp', '/var/folders', '/private/var/folders']
+  .map((p) => p.replace(/\/+$/, ''));
+try { TEMP_ROOTS.push(fs.realpathSync(os.tmpdir())); } catch { /* 读不到真实路径就只用上面的 */ }
+export function isTempPath(p) {
+  const x = String(p || '');
+  return TEMP_ROOTS.some((r) => r && (x === r || x.startsWith(r + '/')));
+}
+
 export class RecentProjectsService {
 
   /**
@@ -152,6 +161,8 @@ export class RecentProjectsService {
 
         // 检查路径是否有效
         if (!projectPath || !fs.existsSync(projectPath)) continue;
+        // WebTmux 后台调 CLI（监控分析、监督者）用的是系统临时目录，也会留下记录目录，不是用户的项目
+        if (isTempPath(projectPath)) continue;
 
         // 排除非项目目录（如 Documents、Desktop 等根目录）
         const pathParts = projectPath.split(path.sep).filter(Boolean);
@@ -214,7 +225,7 @@ export class RecentProjectsService {
               const filePath = path.join(dayDir, file);
               const cwd = this._extractCodexCwd(filePath);
 
-              if (cwd && fs.existsSync(cwd)) {
+              if (cwd && fs.existsSync(cwd) && !isTempPath(cwd)) {   // 临时目录是 WebTmux 后台调 codex exec 留下的
                 const stat = fs.statSync(filePath);
                 const existing = projectMap.get(cwd);
 
@@ -309,6 +320,8 @@ export class RecentProjectsService {
         }
 
         if (!projectPath || !fs.existsSync(projectPath)) continue;
+        // WebTmux 后台调 CLI（监控分析、监督者）用的是系统临时目录，也会留下记录目录，不是用户的项目
+        if (isTempPath(projectPath)) continue;
 
         // 排除系统/临时目录（与其它 CLI 一致：只展示真实项目）
         const parts = projectPath.split(path.sep).filter(Boolean);

@@ -3,12 +3,13 @@ import { onConnectionChange } from './socket';
 import { useSessions } from './useSessions';
 import SessionList from './SessionList';
 import SessionDetail from './SessionDetail';
+import ProjectPicker from './ProjectPicker';
 import LoginPage from './LoginPage';
 import { useAuth } from './useAuth';
 import PushSettings from './PushSettings';
 import { sessionFromUrl } from './deepLink';
 
-// 视图状态机：list（会话列表）| detail（会话详情，M3 接入）
+// 视图状态机：list（会话列表）| projects（历史项目，点一下开工）| detail（会话详情）
 export default function MobileApp() {
   const auth = useAuth();
   const [conn, setConn] = useState('disconnected');
@@ -50,8 +51,8 @@ export default function MobileApp() {
   return (
     <div className="m-app">
       <header className="m-topbar">
-        {view === 'detail' && (
-          <button className="m-btn m-back" onClick={() => { setView('list'); setCurrentId(null); }}>
+        {view !== 'list' && (
+          <button className="m-btn m-back" aria-label="返回会话列表" onClick={() => { setView('list'); setCurrentId(null); }}>
             ←
           </button>
         )}
@@ -59,12 +60,25 @@ export default function MobileApp() {
         <span className="m-topbar-title">
           {view === 'detail'
             ? (currentSession?.projectName || currentSession?.name || '会话')
-            : '网梯终端'}
+            : view === 'projects' ? '历史项目' : '网梯终端'}
         </span>
         {view === 'list' && <PushSettings />}
         {view === 'list' && <a className="m-desktop-link" href="/?desktop=1">桌面版</a>}
       </header>
       <main className="m-content">
+        {view !== 'detail' && (
+          <div className="m-switch" role="tablist" aria-label="切换会话与历史项目">
+            <button role="tab" aria-selected={view === 'list'} className={view === 'list' ? 'active' : ''} onClick={() => setView('list')}>
+              会话 {sessionsData.sessions.length || ''}
+            </button>
+            <button role="tab" aria-selected={view === 'projects'} className={view === 'projects' ? 'active' : ''} onClick={() => setView('projects')}>
+              历史项目
+            </button>
+          </div>
+        )}
+        {view === 'projects' && (
+          <ProjectPicker sessions={sessionsData.sessions} onOpen={(id) => { setCurrentId(id); setView('detail'); }} />
+        )}
         {view === 'list' && (
           <SessionList
             {...sessionsData}
