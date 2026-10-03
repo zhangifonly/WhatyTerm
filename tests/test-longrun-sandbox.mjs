@@ -193,6 +193,11 @@ test('项目配置只合并记忆目录：原有权限与非 relay 配置原样�
   const spec3 = LongRunSandbox.create(SANDBOX_NAME);
   assert(fs.readFileSync(sf, 'utf8') === '{ 这不是 JSON', '读不动的项目配置不能被覆盖');
   assert(execOf(spec3).autoMemoryDirectory === spec3.memoryDir, '记忆目录由执行者配置兜底');
+  // 换执行者续跑：Claude 执行者 CLAUDE.md 与 AGENTS.md 两个都读；祖先目录的 AGENTS.md 与 CLAUDE.md 一样不许改
+  const ex = execOf(spec3);
+  assert(ex.pluginConfigs?.['agents-md@builtin']?.options?.instructionFiles === 'claude-md-and-agents-md', '执行者应两个规则文件都读');
+  const parentAgents = path.join(path.dirname(spec3.root), 'AGENTS.md');
+  assert(ex.permissions.deny.includes(`Edit(/${parentAgents})`) && ex.permissions.deny.includes(`Write(/${parentAgents})`), '祖先 AGENTS.md 应禁改');
 });
 
 test('会话级供应商（直连/官方登录/旧 relay）长程期间移走，备份只留供应商 id 不留密钥；快照配置不动', () => {

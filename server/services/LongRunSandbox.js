@@ -135,6 +135,8 @@ export function ancestorClaudeMdDenies(root) {
   const add = (file) => { for (const tool of ['Edit', 'Write']) rules.push(`${tool}(/${file})`); };
   for (let dir = path.dirname(root); ; dir = path.dirname(dir)) {
     add(path.join(dir, 'CLAUDE.md'));
+    // 执行者现在也读、也写 AGENTS.md（见 _writeExecutorSettings），祖先目录那份同样不许它改（工作区根就有一份）
+    add(path.join(dir, 'AGENTS.md'));
     if (path.dirname(dir) === dir) break;
   }
   add(path.join(os.homedir(), '.claude', 'CLAUDE.md'));
@@ -385,6 +387,10 @@ export class LongRunSandbox {
     // 维护提示词允许"无需确认修改 CLAUDE.md"；项目与工作区同目录后，祖先目录的 CLAUDE.md（如工作区说明）不能被它改
     const deny = (payload.permissions.deny ||= []);
     for (const rule of ancestorClaudeMdDenies(this.root)) if (!deny.includes(rule)) deny.push(rule);
+    // CLAUDE.md 与 AGENTS.md 两个都读（Claude Code 2.1.277+ 的 Project instructions 设置，只认用户级或 --settings 传入的配置）。
+    // 默认是「有 CLAUDE.md 就不读 AGENTS.md」：换执行者续跑时，Codex 等工具写进 AGENTS.md 的规则 Claude 会看不到。
+    // 2026-10-04 实测 claude -p：默认只读到 CLAUDE.md，加上这项后两份都读到
+    payload.pluginConfigs = { 'agents-md@builtin': { options: { instructionFiles: 'claude-md-and-agents-md' } } };
     this._grantSkills(payload);
     this._gateMcp(payload);
     writeFileSync(this.executorSettingsPath, JSON.stringify(payload, null, 2) + '\n', 'utf8');

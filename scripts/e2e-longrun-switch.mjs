@@ -5,6 +5,8 @@
  * 检查：B 开的是新对话（不拿 A 的对话 id 去续）、开场复述得出 A 的进度、新文件遵守规矩、复用了 sum、
  *      测试全过、规则文件只有一份（没有新建另一份把原来的遮住）、监督者跟着换成 B。
  * 运行：node scripts/e2e-longrun-switch.mjs claude codex   （或 codex claude）
+ *   加 --claude-md：第一阶段后往项目里放一份内容无关的 CLAUDE.md（模拟团队本来就有）。
+ *   Claude 默认「有 CLAUDE.md 就不读 AGENTS.md」，此时规矩只在 AGENTS.md 里 —— 检验执行者配置的「两个都读」
  */
 import fs from 'fs';
 import path from 'path';
@@ -12,8 +14,9 @@ import { execFileSync } from 'child_process';
 import { sandboxBase } from '../server/services/LongRunLaunch.js';
 
 const [A, B] = [process.argv[2] || 'claude', process.argv[3] || 'codex'];
+const WITH_CLAUDE_MD = process.argv.includes('--claude-md');
 const { io } = await import(path.resolve('node_modules/socket.io-client/build/esm-debug/index.js'));
-const NAME = `wtsw${A}to${B}e2e`;
+const NAME = `wtsw${A}to${B}${WITH_CLAUDE_MD ? 'md' : ''}e2e`;
 const ROOT = path.join(sandboxBase(), NAME);
 if (fs.existsSync(ROOT)) throw new Error(`测试目录已存在，先确认里面不是你的东西再删：${ROOT}`);
 const REQ1 = ['# 需求', '',
@@ -55,6 +58,12 @@ try {
   const rules1 = ['CLAUDE.md', 'AGENTS.md'].filter((f) => fs.existsSync(path.join(ROOT, f)));
   console.log(`   第一阶段后的规则文件：${rules1.join('、') || '（没有）'}；规矩写在：${['CLAUDE.md', 'AGENTS.md'].filter((f) => /R7/.test(read(f))).join('、') || '规则文件里没有'}${/R7/.test(fs.readdirSync(path.join(ROOT, '.memory')).map((f) => read(`.memory/${f}`)).join('')) ? '；.memory 里也有' : ''}`);
 
+  if (WITH_CLAUDE_MD) {
+    if (rules1.join() !== 'AGENTS.md') throw new Error(`--claude-md 场景要求第一阶段把规矩写进 AGENTS.md，实际规则文件：${rules1.join('、') || '无'}`);
+    fs.writeFileSync(path.join(ROOT, 'CLAUDE.md'), '# 团队给 Claude 的说明\n\n回答用中文。\n');
+    console.log('   已放入一份内容无关的 CLAUDE.md（规矩只在 AGENTS.md 里）');
+  }
+  const rulesBefore2 = ['CLAUDE.md', 'AGENTS.md'].filter((f) => fs.existsSync(path.join(ROOT, f)));
   console.log(`== 第二阶段：${B}（续跑）`);
   const p2 = await runPhase('第二阶段', { requirementText: REQ2, mode: 'resume', projectRoot: ROOT, executor: B });
   ok('自检写明换了执行者', JSON.stringify(p2.task.selfCheck).includes('换执行者'), '');
@@ -77,7 +86,7 @@ try {
   try { out = execFileSync('node', ['--test'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { out = `失败：${e.stdout || e.message}`; }
   ok('node --test 全过（含第一阶段的测试）', /[#ℹ] fail 0/.test(out) && /[#ℹ] pass [4-9]/.test(out), out.slice(-300));
   const rules2 = ['CLAUDE.md', 'AGENTS.md'].filter((f) => fs.existsSync(path.join(ROOT, f)));
-  ok('规则文件只有一份（没有新建另一份把原来的遮住）', rules2.length <= 1, rules2.join('、'));
+  ok('第二阶段没有新建规则文件（不会把原来那份遮住）', rules2.join() === rulesBefore2.join(), `之前 ${rulesBefore2.join('、')} → 之后 ${rules2.join('、')}`);
 } catch (e) {
   fail++; console.log(`❌ ${e.message}`);
 } finally {

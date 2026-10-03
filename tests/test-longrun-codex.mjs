@@ -104,6 +104,10 @@ await test('⑥ 换执行者：规则只留一份、两边都读得到；交接�
   const cl = promptsFor('claude', orig, { root: '/p', exists: has(['AGENTS.md']) });
   eq([/CLAUDE\.md/.test(cl.maintain_2), /AGENTS\.md/.test(cl.maintain_2)], [false, true], 'Codex 项目交给 Claude：规则接着写 AGENTS.md');
   eq(promptsFor('claude', orig, { root: '/p', exists: has(['CLAUDE.md']) }), orig, 'Claude 自己的项目原样');
+  const neu = promptsFor('claude', orig, { root: '/p', exists: has([]) });
+  eq([/写进 AGENTS\.md（这个项目的规则文件，各个 AI 编程工具共用这一份）/.test(neu.maintain_2), /CLAUDE\.md/.test(neu.maintain_2), /Auto Memory/.test(neu.wrapup)], [true, false, true], '新项目 Claude 也写 AGENTS.md，记忆说法不动');
+  eq(/写进 AGENTS\.md/.test(promptsFor('claude', orig, { root: '/p', exists: has(['CLAUDE.md', 'AGENTS.md']) }).maintain_2), true, '两份都有：写 AGENTS.md（Codex 只读它）');
+  eq(promptsFor('claude', orig), orig, '没给项目目录：原样');
   eq(buildCodexArgs({}).includes('project_doc_fallback_filenames=["CLAUDE.md"]'), true, 'Codex 每次都带读 CLAUDE.md 的回退');
   const n = switchNote('claude', 'codex', '/p', has(['CLAUDE.md']));
   eq([/之前由 Claude Code 开发，现在改由 Codex/.test(n), /\.memory\/MEMORY\.md/.test(n), /项目规则在 CLAUDE\.md/.test(n)], [true, true, true], '交接说明');
