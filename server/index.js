@@ -233,7 +233,8 @@ import { install as installLidSleep, uninstall as uninstallLidSleep, ensureWatch
 import PuppeteerReaper from './services/PuppeteerReaper.js';
 import { sessionClaudeEnv, relayMigrationPlan, OAUTH_PROVIDER_INFO } from './services/sessionProviderEnv.js';
 import { withBearerToken, topProvider, codexStartCommand, linkSharedCodexEntries, withCarriedTables, sessionCodexHome } from './services/codexSessionConfig.js';
-import { SWITCHABLE, SWITCH_REPLY_WAIT_MS, SWITCH_READY_WAIT_MS, codexPendingText, isCodexInputReady, isTrustPrompt, switchHandoffPrompt, switchFirstMessage, claudeMemoryDir, ensureBothRulesSettings, codexTurnSince, claudeTurnSince } from './services/cliSwitch.js';
+import { SWITCHABLE, SWITCH_REPLY_WAIT_MS, SWITCH_READY_WAIT_MS, codexPendingText, isCodexInputReady, isTrustPrompt, switchHandoffPrompt, switchFirstMessage, claudeMemoryDir, ensureBothRulesSettings, codexTurnSince, claudeTurnSince, rememberThread, resumePlan } from './services/cliSwitch.js';
+import { exportTranscript } from './services/transcriptExport.js';
 import { CodexExecTextClient } from './services/CodexExecText.js';
 import { LongRunService } from './services/LongRunService.js';
 import pricingTable from './services/usage/PricingTable.js';
@@ -8173,7 +8174,8 @@ io.on('connection', (socket) => {
       if (cli === 'claude') { tmuxSendLiteral(tmux, ' 按上面这段的要求做。'); await sleep(200); }
       execSync(`${getTmuxPrefix()} send-keys -t "${tmux}" Enter`);
     };
-    let receipt = '', receiptFile = '';
+    let receipt = '', receiptFile = '', transcript = '';
+    const sessDir = path.join(os.homedir(), '.webtmux', 'sessions', session.id);
     try {
       // ① 当前 CLI 收尾交接（没在跑就跳过：直接起新的，让它从代码与记忆接上）
       if (processDetector.isCliRunning(tmux)) {
@@ -8185,6 +8187,7 @@ io.on('connection', (socket) => {
         for (const t0 = Date.now(); Date.now() - t0 < 60000; await sleep(2000)) if (ready(from, await screen())) { idle = true; break; }
         if (!idle) return reply({ ok: false, error: `60 秒内 ${SWITCHABLE[from]} 一直在忙，没发交接指令（不打断正在跑的活）` });
         const sentAt = Date.now();
+        let convFile = '';
         await sendText(switchHandoffPrompt(from, to), from);
         step('handoff_sent', `已请 ${SWITCHABLE[from]} 写交接`);
         let done = false;
@@ -8194,24 +8197,33 @@ io.on('connection', (socket) => {
           if (from === 'codex') {
             const home = existsSync(path.join(sessionCodexHome(session.id), 'sessions')) ? sessionCodexHome(session.id) : path.join(os.homedir(), '.codex');
             const t = codexTurnSince(cwd, sentAt, home);
-            if (t.done) { receipt = t.text; done = true; break; }
+            if (t.done) { receipt = t.text; convFile = t.file; done = true; break; }
           } else {
             // 读 Claude 自己的对话记录等这一轮结束（屏幕上的「最后一段」会混进指令回显，见 claudeTurnSince）
             const t = claudeTurnSince(cwd, sentAt);
-            if (t.done) { receipt = t.text; done = true; break; }
+            if (t.done) { receipt = t.text; convFile = t.file; done = true; break; }
           }
         }
         if (!done) return reply({ ok: false, error: `等了 ${SWITCH_REPLY_WAIT_MS / 60000} 分钟，${SWITCHABLE[from]} 还没写完交接，没有退出它（上下文还在）` });
         // 交接摘要先落盘：后面任何一步失败，人还能拿它手动接上
-        receiptFile = path.join(os.homedir(), '.webtmux', 'sessions', session.id, `handoff-${from}-to-${to}-${Date.now()}.md`);
-        mkdirSync(path.dirname(receiptFile), { recursive: true });
-        writeFileSync(receiptFile, receipt + '\n');
+        receiptFile = path.join(sessDir, `handoff-${from}-to-${to}-${Date.now()}.md`);
+        mkdirSync(sessDir, { recursive: true });
+        writeFileSync(receiptFile, receipt + '\n', { mode: 0o600 });
+        // 完整对话导出成 Markdown 给接手方按需查；记下这段对话的 id，以后换回来接着它
+        if (convFile) {
+          try { transcript = exportTranscript({ cli: from, file: convFile, outDir: sessDir, label: SWITCHABLE[from] }); } catch (e) { console.warn('[换 CLI] 导出对话记录失败:', e.message); }
+          rememberThread(session.id, from, convFile);
+        }
         step('quitting', `退出 ${SWITCHABLE[from]}`);
         if (!(await quitCliAndWait(session, tmux))) return reply({ ok: false, error: `${SWITCHABLE[from]} 30 秒内没退出，请到终端里确认`, receipt, receiptFile });
       }
-      // ② 同一个窗格里起新 CLI（新对话）。规则文件两边都读得到：Codex 带读 CLAUDE.md 的回退，Claude 带「两个都读」
-      const cmd = to === 'codex' ? codexStartCommand(session, { resume: false }) : `claude --settings '${ensureBothRulesSettings()}'`;
-      step('starting', `启动 ${SWITCHABLE[to]}`);
+      // ② 同一个窗格里起新 CLI。这个会话里用过它、那段对话也不太长 → 接着它自己的老对话；否则开新对话。
+      //    规则文件两边都读得到：Codex 带读 CLAUDE.md 的回退，Claude 带「两个都读」
+      const plan = resumePlan(session.id, to);
+      const cmd = to === 'codex'
+        ? codexStartCommand(session, { resumeId: plan.resume ? plan.id : '' })
+        : `claude${plan.resume ? ` --resume ${plan.id}` : ''} --settings '${ensureBothRulesSettings()}'`;
+      step('starting', `启动 ${SWITCHABLE[to]}：${plan.reason}`);
       tmuxSendLiteral(tmux, cmd);
       await sleep(100);
       execSync(`${getTmuxPrefix()} send-keys -t "${tmux}" Enter`);
@@ -8232,10 +8244,10 @@ io.on('connection', (socket) => {
       if (!up) return reply({ ok: false, error: `${SWITCHABLE[to]} 3 分钟内没准备好（还在问信任目录？）。交接摘要已存：${receiptFile || '（这次没有）'}`, receipt, receiptFile });
       // ③ 交接摘要作为第一句发给新 CLI
       const rulesFiles = ['CLAUDE.md', 'AGENTS.md'].filter((f) => existsSync(path.join(cwd, f)));
-      await sendText(switchFirstMessage({ from, to, receipt, rulesFiles, memoryDir: from === 'claude' ? claudeMemoryDir(cwd) : '' }), to);
-      step('done', `已换成 ${SWITCHABLE[to]}，交接摘要已发给它`);
-      console.log(`[换 CLI] ${session.name}: ${from} → ${to}${receipt ? '（带交接摘要）' : '（原 CLI 没在跑，无交接）'}`);
-      reply({ ok: true, from, to, receipt, receiptFile });
+      await sendText(switchFirstMessage({ from, to, receipt, rulesFiles, memoryDir: from === 'claude' ? claudeMemoryDir(cwd) : '', transcript, resumed: plan.resume }), to);
+      step('done', `已换成 ${SWITCHABLE[to]}（${plan.resume ? '接着它原来的对话' : '新对话'}），交接摘要${transcript ? '与完整记录' : ''}已交给它`);
+      console.log(`[换 CLI] ${session.name}: ${from} → ${to}（${plan.reason}）${receipt ? '，带交接摘要' : '，原 CLI 没在跑，无交接'}${transcript ? '与完整记录' : ''}`);
+      reply({ ok: true, from, to, receipt, receiptFile, transcript, resumed: plan.resume, resumeReason: plan.reason });
     } catch (e) {
       reply({ ok: false, error: e.message, receipt, receiptFile });
     } finally {

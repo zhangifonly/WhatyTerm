@@ -117,7 +117,7 @@ export const sessionCodexHome = (sessionId, home = os.homedir()) => path.join(ho
  * @param {{id?: string, codexProvider?: {providerKey?: string}}} session
  * @param {{resume?: boolean, exists?: (p:string)=>boolean, home?: string}} [o]  resume=true 续接上次对话
  */
-export function codexStartCommand(session, { resume = false, exists = existsSync, home } = {}) {
+export function codexStartCommand(session, { resume = false, resumeId = '', exists = existsSync, home } = {}) {
   const key = session?.codexProvider?.providerKey;
   // 供应商名只允许安全字符：它会原样进 shell 命令
   const override = typeof key === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(key) ? ` -c 'model_provider="${key}"'` : '';
@@ -126,5 +126,8 @@ export function codexStartCommand(session, { resume = false, exists = existsSync
   const envPrefix = dir && exists(path.join(dir, 'config.toml')) ? `CODEX_HOME='${dir.replace(/'/g, "'\\''")}' ` : '';
   // 没有 AGENTS.md 的项目读 CLAUDE.md：Claude Code 做过的项目换给 Codex 时规则不丢（只作用于这次启动，不改 config.toml）
   const rules = ` -c 'project_doc_fallback_filenames=["CLAUDE.md"]'`;
-  return `${envPrefix}${resume ? `codex --no-daemon resume --last${override}` : `codex --no-daemon${override}`}${rules}`;
+  // resumeId：接着指定的那段对话（换 CLI 换回来时用，见 cliSwitch.resumePlan）；只认 uuid，它会进 shell 命令
+  const id = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(resumeId)) ? resumeId : '';
+  const sub = id ? ` resume ${id}` : resume ? ' resume --last' : '';
+  return `${envPrefix}codex --no-daemon${sub}${override}${rules}`;
 }

@@ -17,6 +17,8 @@
 import { existsSync, readdirSync, readFileSync, statSync, openSync, readSync, closeSync, mkdirSync, writeFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
+import { readTailLines } from './transcriptExport.js';
+import { readRolloutTail } from './LongRunCodexRunner.js';
 
 export const SWITCHABLE = { claude: 'Claude Code', codex: 'Codex' };
 export const SWITCH_REPLY_WAIT_MS = 5 * 60 * 1000;
@@ -72,10 +74,13 @@ export function switchHandoffPrompt(from, to) {
 }
 
 /** 发给新 CLI 的第一句：说明换了人、附交接摘要、规则与记忆在哪 */
-export function switchFirstMessage({ from, to, receipt, rulesFiles = [], memoryDir = '' }) {
+export function switchFirstMessage({ from, to, receipt, rulesFiles = [], memoryDir = '', transcript = '', resumed = false }) {
   return [
-    `【换工具接着开发】这个项目刚才由 ${SWITCHABLE[from]} 开发，现在换成你（${SWITCHABLE[to]}）接着做。`,
-    `下面是 ${SWITCHABLE[from]} 留下的交接摘要。先按摘要核对现状（看代码、git log、跑测试），再从「下一步」接着做；摘要里没写到的，不要凭印象猜。`,
+    resumed
+      ? `【换回来接着开发】你（${SWITCHABLE[to]}）离开这个项目期间，由 ${SWITCHABLE[from]} 接着做了一段。上面是你们之前的对话，下面是 ${SWITCHABLE[from]} 那一段的交接摘要。`
+      : `【换工具接着开发】这个项目刚才由 ${SWITCHABLE[from]} 开发，现在换成你（${SWITCHABLE[to]}）接着做。`,
+    `${resumed ? '' : `下面是 ${SWITCHABLE[from]} 留下的交接摘要。`}先按摘要核对现状（看代码、git log、跑测试），再从「下一步」接着做；摘要里没写到的，不要凭印象猜。`,
+    transcript ? `${SWITCHABLE[from]} 那段的完整对话记录导出在 ${transcript}（Markdown，按时间顺序；已去掉思考过程、长输出截短）。摘要里没写到的细节——讨论过什么、报错原文、中途改过的要求——先去这里搜，不要通读。` : '',
     rulesFiles.length ? `项目规则在 ${rulesFiles.join('、')}：不管当初是写给哪个工具的，都照着遵守；以后新增规则也写进这份，不要另建一份。` : '',
     memoryDir ? `${SWITCHABLE[from]} 的记忆在 ${memoryDir}（MEMORY.md 是索引），需要细节时可以读。` : '',
     '', '---', '', String(receipt || '').trim() || `（${SWITCHABLE[from]} 没给出交接摘要：请从代码与 git log 自行确认进度）`,
@@ -137,7 +142,8 @@ export function codexTurnSince(cwd, sinceMs, home = path.join(os.homedir(), '.co
   for (const { f } of files) {
     if (rolloutCwd(f) !== cwd) continue;
     let text = '', done = false;
-    for (const line of readFileSync(f, 'utf8').split('\n')) {
+    // 只读末尾：rollout 能到 1GB 以上（整份读会 ERR_STRING_TOO_LONG），刚答完的那一轮一定在末尾
+    for (const line of readTailLines(f, 8 * 1024 * 1024).lines) {
       if (!line.includes('"task_complete"')) continue;
       let d; try { d = JSON.parse(line); } catch { continue; }
       if (d.payload?.type !== 'task_complete' || Date.parse(d.timestamp) < sinceMs) continue;
@@ -163,7 +169,7 @@ export function claudeTurnSince(cwd, sinceMs, home = os.homedir()) {
     .filter((x) => x.t >= sinceMs).sort((a, b) => b.t - a.t).map((x) => x.f);
   for (const f of files) {
     let texts = [], done = false, asked = false;
-    for (const line of readFileSync(f, 'utf8').split('\n')) {
+    for (const line of readTailLines(f, 8 * 1024 * 1024).lines) {
       if (!line) continue;
       let d; try { d = JSON.parse(line); } catch { continue; }
       if (Date.parse(d.timestamp || 0) < sinceMs) continue;
@@ -178,4 +184,58 @@ export function claudeTurnSince(cwd, sinceMs, home = os.homedir()) {
     if (done) return { done, text: texts.join('\n\n'), file: f };
   }
   return { done: false, text: '', file: '' };
+}
+
+// ── 对话 id：换回用过的 CLI 时接着它自己的老对话 ─────────────────
+/** 记录文件名里的对话 id：Claude 是 <uuid>.jsonl，Codex 是 rollout-<时间>-<uuid>.jsonl */
+export function conversationIdOf(file) {
+  return (String(file || '').match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i) || [])[1] || '';
+}
+
+const threadsFile = (sessionId, home) => path.join(home, '.webtmux', 'sessions', String(sessionId), 'cli-threads.json');
+/** 这个会话里各 CLI 最近一段对话：{claude: {id, file, at}, codex: {...}} */
+export function readThreads(sessionId, home = os.homedir()) {
+  try { return JSON.parse(readFileSync(threadsFile(sessionId, home), 'utf8')); } catch { return {}; }
+}
+export function rememberThread(sessionId, cli, file, home = os.homedir()) {
+  const id = conversationIdOf(file);
+  if (!id) return;
+  const all = readThreads(sessionId, home);
+  all[cli] = { id, file, at: Date.now() };
+  mkdirSync(path.dirname(threadsFile(sessionId, home)), { recursive: true });
+  writeFileSync(threadsFile(sessionId, home), JSON.stringify(all, null, 2) + '\n');
+}
+
+/** Claude 那段对话最后一次调用的上下文占用（input + 缓存读写），读不到返回 null */
+export function claudeOccupancy(file) {
+  let last = null;
+  for (const line of readTailLines(file, 4 * 1024 * 1024).lines) {
+    if (!line.includes('"usage"')) continue;
+    let d; try { d = JSON.parse(line); } catch { continue; }
+    const u = d.type === 'assistant' && d.message?.usage;
+    if (u) last = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+  }
+  return last;
+}
+
+/** 接老对话的上限：Claude 按 token（多数模型窗口 20 万），Codex 按窗口比例。超了就开新对话，靠摘要与完整记录接上 */
+export const RESUME_CLAUDE_MAX = 120_000;
+export const RESUME_CODEX_RATIO = 0.6;
+
+/**
+ * 换成 to 时能不能接着它在这个会话里的老对话。
+ * @returns {{resume: boolean, id?: string, reason: string}}
+ */
+export function resumePlan(sessionId, to, { home = os.homedir(), exists = existsSync } = {}) {
+  const t = readThreads(sessionId, home)[to];
+  if (!t?.id) return { resume: false, reason: `这个会话里还没用过 ${SWITCHABLE[to]}，开新对话` };
+  if (!t.file || !exists(t.file)) return { resume: false, reason: '原来那段对话的记录找不到了，开新对话' };
+  if (to === 'claude') {
+    const occ = claudeOccupancy(t.file);
+    if (occ != null && occ > RESUME_CLAUDE_MAX) return { resume: false, reason: `原来那段对话已占 ${occ.toLocaleString('en-US')} token，接着用很快会压缩，开新对话` };
+  } else {
+    const r = readRolloutTail(t.file);
+    if (r?.window && r.occupied > r.window * RESUME_CODEX_RATIO) return { resume: false, reason: `原来那段对话已占窗口的 ${Math.round(r.occupied / r.window * 100)}%，开新对话` };
+  }
+  return { resume: true, id: t.id, reason: `接着它原来那段对话（${t.id.slice(0, 8)}…）` };
 }

@@ -26,6 +26,7 @@ const PLAN = ['这个项目分三步做：',
   '② `mean.js`：导出 `mean(numbers)`，复用 `sum.js` 的 `sum`，空数组抛 RangeError；配 `mean.test.js`。',
   '③ `README.md`：用中文简单说明这两个函数。',
   'NaN 当作非数字处理（抛 TypeError）。',
+  '两个细节先记住，到时候照做：第 ② 步的 mean.test.js 里要有一个测试用例名为「平均值-三个数」；第 ③ 步 README 的一级标题必须是「数组小工具 R7」。',
   '这次只做第 ① 步，做完先停下（我要换工具）。之后接手的人直接按计划做 ②③，不需要再问我确认。只写文件，不要运行任何命令。'].join('\n');
 
 let fail = 0;
@@ -80,17 +81,23 @@ try {
   const r1 = await switchTo('codex');
   ok('换成 Codex 成功', r1.ok, r1.error || '');
   ok('Claude 的交接摘要写到了第二步', /mean/i.test(r1.receipt || ''), (r1.receipt || '').slice(0, 300));
+  const tr1 = r1.transcript && fs.existsSync(r1.transcript) ? fs.readFileSync(r1.transcript, 'utf8') : '';
+  ok('Claude 那段的完整记录导出了（含第一步的原话）', /平均值-三个数/.test(tr1) && /sum\.js/.test(tr1), r1.transcript || '没导出');
+  const claude1 = (JSON.parse(fs.readFileSync(path.join(os.homedir(), '.webtmux', 'sessions', id, 'cli-threads.json'), 'utf8')).claude || {}).id;
   await waitFor(() => exists('mean.js') && exists('mean.test.js') && isCodexInputReady(screen()), 480000, 'Codex 做完第二步');
   const mean = exists('mean.js') ? fs.readFileSync(path.join(DIR, 'mean.js'), 'utf8') : '';
   ok('Codex 接着做了第二步，复用 sum', /\.\/sum/.test(mean), mean.slice(0, 200));
+  ok('只在 Claude 对话里提过的细节，Codex 照做了（测试名「平均值-三个数」）', exists('mean.test.js') && /平均值-三个数/.test(fs.readFileSync(path.join(DIR, 'mean.test.js'), 'utf8')), '');
   ok('Codex 守了只写在 CLAUDE.md 里的规矩', /规则版本 R7/.test(first('mean.js')) && /规则版本 R7/.test(first('mean.test.js')), `${first('mean.js')} | ${first('mean.test.js')}`);
 
   console.log('== ③ 换回 Claude');
   const r2 = await switchTo('claude');
   ok('换回 Claude 成功', r2.ok, r2.error || '');
   ok('Codex 的交接摘要提到了进度', /mean/i.test(r2.receipt || ''), (r2.receipt || '').slice(0, 300));
+  ok('换回 Claude 接的是第一步那段老对话', r2.resumed === true && /--resume/.test(plain()) && plain().includes(claude1 || '没记下'), `${r2.resumeReason}；原对话 ${claude1}`);
   await waitFor(() => exists('README.md') && claudeReady() && !/esc to interrupt/.test(plain().slice(-1500)), 480000, 'Claude 做完第三步');
   ok('Claude 接着做了第三步（README 讲到两个函数）', exists('README.md') && /mean/.test(fs.readFileSync(path.join(DIR, 'README.md'), 'utf8')), '');
+  ok('第一步对话里定的 README 标题照做了（「数组小工具 R7」）', /^#\s*数组小工具 R7/m.test(exists('README.md') ? fs.readFileSync(path.join(DIR, 'README.md'), 'utf8') : ''), '');
   let out = '';
   try { out = execFileSync('node', ['--test'], { cwd: DIR, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }); } catch (e) { out = `失败：${e.stdout || e.message}`; }
   ok('node --test 全过', /[#ℹ] fail 0/.test(out) && /[#ℹ] pass ([4-9]|[1-9]\d+)\b/.test(out), out.slice(-300));

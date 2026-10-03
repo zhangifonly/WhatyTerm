@@ -44,14 +44,18 @@ const CliSwitchDialog = ({ socket, session, to, onClose }) => {
             <ol style={{ paddingLeft: 20, lineHeight: 1.7 }}>
               <li>等 {LABEL[from]} 闲下来，请它{from === 'claude' ? '把进度写进记忆，并' : ''}写一份交接摘要（进度、决定、失败过的方案、下一步）</li>
               <li>写完后退出 {LABEL[from]}；没写完就不退出，上下文不会丢</li>
-              <li>在同一个终端里启动 {LABEL[to]}（新对话），把交接摘要作为第一句发给它</li>
+              <li>把 {LABEL[from]} 这段的完整对话导出成一份能读的记录（存在本机 ~/.webtmux，不进项目），摘要没写到的细节让 {LABEL[to]} 去查</li>
+              <li>在同一个终端里启动 {LABEL[to]}：这个会话里用过它、原来那段对话也不太长，就接着它原来的对话；否则开新对话。再把交接摘要与完整记录的位置发给它</li>
             </ol>
             <p className="lr-dim">项目规则两边都读得到：{to === 'codex' ? 'Codex 没有 AGENTS.md 时会读 CLAUDE.md' : 'Claude 会同时读 CLAUDE.md 与 AGENTS.md'}。
               若 {LABEL[to]} 第一次在这个目录运行，会问是否信任目录，需要你到终端里选。</p>
           </>
         )}
         {state === 'running' && <p>{progress}</p>}
-        {state === 'done' && <p>已换成 {LABEL[to]}，交接摘要已发给它。{result?.receiptFile ? `摘要另存在 ${result.receiptFile}` : ''}</p>}
+        {state === 'done' && (
+          <p>已换成 {LABEL[to]}（{result?.resumeReason || '新对话'}），交接摘要已发给它。
+            {result?.transcript ? ` 完整记录：${result.transcript}` : ''}{result?.receiptFile ? ` 摘要另存：${result.receiptFile}` : ''}</p>
+        )}
         {state === 'failed' && (
           <>
             <p className="lr-err">{result?.error || '没有成功'}</p>
