@@ -14,8 +14,8 @@ import os from 'os';
 import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { loadPrompts, loadRequirement, extraDirsOf, PROMPT_SLOTS } from './LongRunPrompts.js';
-import { normalizeExecutor, runnerFactoryFor, promptsFor } from './longrunExecutor.js';
-import { prepareExecutor } from './longrunExecutorSetup.js';
+import { normalizeExecutor, runnerFactoryFor, promptsFor, switchNote, EXECUTORS } from './longrunExecutor.js';
+import { prepareExecutor, opencodeConfigPath } from './longrunExecutorSetup.js';
 import { LongRunSandbox, sandboxRoots } from './LongRunSandbox.js';
 import { Supervisor, loadSystemPrompt } from './LongRunSupervisor.js';
 import { makeSupervisorChannel } from './LongRunSupervisorCreds.js';
@@ -125,6 +125,19 @@ class LongRunTask {
       aborted: loop.aborted || '',
     };
   }
+}
+
+/**
+ * 上一轮的执行者：.run/executor.json（v1.4.96 起每次开跑写）；没有但跑过长程的，是 v1.4.92 之前的 Claude。
+ * 对话 id 取 .run/session_state.json（loop 每发都写，结束时是最后那段对话）。
+ */
+export function readPrevExecutor(root) {
+  const run = path.join(root, '.run');
+  let ex = {}, st = {};
+  try { ex = JSON.parse(readFileSync(path.join(run, 'executor.json'), 'utf8')); } catch { /* 没记 */ }
+  try { st = JSON.parse(readFileSync(path.join(run, 'session_state.json'), 'utf8')); } catch { /* 没跑过 */ }
+  const executor = ex.executor || (st.session_id ? 'claude' : '');
+  return { executor, model: ex.model || '', sessionId: st.session_id || '' };
 }
 
 /** 数值参数：缺省取默认，给了就必须合法（原版 argparse 按类型拒绝）。 */
@@ -322,11 +335,13 @@ export class LongRunService {
     const o = normalizeOptions(opts);
     const docPath = this.resolveDocPath(opts);
     if (!existsSync(docPath) || !statSync(docPath).isFile()) throw new LaunchError(`需求文档不存在: ${path.resolve(docPath)}`);
-    const prompts = promptsFor(o.executor, loadPrompts(o.promptsFile || PROMPT_FILE));
+    loadPrompts(o.promptsFile || PROMPT_FILE);                                     // 缺段就在这里硬失败
     if (!o.noSupervisor) loadSystemPrompt(o.supervisorPrompt || null);          // 读不到硬失败
     checkRejectedRefs(previewRequirement(docPath), o);
 
     const root = this._projectRoot(opts, docPath);
+    // 按项目里已有的规则文件改写提示词（换执行者时规则只留一份，见 sharedRulesFile）
+    const prompts = promptsFor(o.executor, loadPrompts(o.promptsFile || PROMPT_FILE), { root });
     const busy = this._runningOn(root);
     if (busy) throw new LaunchError(`项目 ${path.basename(root)} 上已有长程任务在跑（${busy.id}）。同一项目同时只能跑一个。`);
     // 执行者准备（登录、模型、供应商配置）放在动目录之前：没登录 / 模型不存在时什么都还没改
@@ -335,6 +350,21 @@ export class LongRunService {
       try { prep = await prepareExecutor({ o, root, engine: this.aiEngine }); }
       catch (e) { throw new LaunchError(e.message); }
       if (prep.thresholds) Object.assign(o, prep.thresholds);
+    }
+    // 换执行者续跑：上一执行者先续回它自己的对话收尾（见 LongRunLoop.switchHandoff）
+    const prev = readPrevExecutor(root);
+    let switchFrom = null;
+    if (o.mode !== 'start' && prev.executor && normalizeExecutor(prev.executor) !== o.executor && prev.sessionId) {
+      let extra = {};
+      if (prev.executor === 'kiro' && !this.runnerFactory) {
+        try { extra = (await prepareExecutor({ o: { ...o, executor: 'kiro', model: prev.model || '' }, root, engine: this.aiEngine })).extra; } catch { extra = null; }
+      } else if (prev.executor === 'opencode') {
+        extra = existsSync(opencodeConfigPath(root)) ? { opencodeConfig: opencodeConfigPath(root) } : null;
+      }
+      if (extra) {
+        switchFrom = { factory: this.runnerFactory || runnerFactoryFor(prev.executor, extra), sessionId: prev.sessionId, model: prev.model || '',
+          label: EXECUTORS[normalizeExecutor(prev.executor)].label, prompt: promptsFor(prev.executor, loadPrompts(o.promptsFile || PROMPT_FILE), { root }).wrapup };
+      }
     }
     prepareProject(root, { mode: o.mode, fresh: o.fresh });
     // 长程是会话条目的一种运行模式：找/建这个目录的条目。里面 claude 正在跑就拒绝 ——
@@ -349,11 +379,11 @@ export class LongRunService {
     try {
       sandbox = LongRunSandbox.open(root, { importMemory: o.mode === 'takeover' });
     } catch (e) { throw new LaunchError(e.message); }
-    return this._launch({ o, docPath, prompts, sandbox, sessionId, prep });
+    return this._launch({ o, docPath, prompts, sandbox, sessionId, prep, prev, switchFrom });
   }
 
   /** 建好沙箱之后：登记参考路径、收集自检清单、组装监督者与循环、异步开跑。 */
-  _launch({ o, docPath, prompts, sandbox, sessionId = null, prep = {} }) {
+  _launch({ o, docPath, prompts, sandbox, sessionId = null, prep = {}, prev = {}, switchFrom = null }) {
     const resume = o.mode === 'resume';
     const continuing = resume || o.mode === 'takeover';    // 在已有进度上继续：需求按"新增"包装
     // 带 spec 再解析一次：外部参考这次才真正登记进沙箱（--add-dir）。与预检同一套规则
@@ -370,7 +400,15 @@ export class LongRunService {
     if (continuing) reportPriorState(sc, priorState(sandbox.root));
     reportRequirement(sc, req, o);
 
-    const input = requirementInput(req, { resume: continuing });
+    // 换了执行者：需求前面加交接说明（进度在 .memory、规则在哪）；记下这一轮的执行者与模型，下次换人时用
+    try { mkdirSync(sandbox.runDir, { recursive: true }); writeFileSync(path.join(sandbox.runDir, 'executor.json'), JSON.stringify({ executor: o.executor, model: o.model || '', at: Date.now() }) + '\n'); } catch { /* 记不下不影响开跑 */ }
+    const note = continuing ? switchNote(prev.executor, o.executor, sandbox.root) : '';
+    if (note) {
+      sc.info('执行者', `换执行者：上一轮是 ${prev.executor}，这一轮在需求前附上交接说明`);
+      sc.info('执行者', switchFrom ? `  开场前先让 ${switchFrom.label} 续回它最后那段对话（${String(switchFrom.sessionId).slice(0, 8)}…）收尾，把进度写进 .memory`
+        : '  找不到上一执行者的对话（或它现在用不了），跳过收尾：新执行者从代码与 .memory 现有内容接上');
+    }
+    const input = (note ? `${note}\n\n` : '') + requirementInput(req, { resume: continuing });
     let task = null;
     const { supervisor, info } = this._makeSupervisor(o, input, prep);
     reportSupervisor(sc, info);
@@ -398,6 +436,7 @@ export class LongRunService {
       // 不补这一下列表徽标和回答框都出不来
       humanChannel: () => new Promise((resolve) => { task._humanWaiter = resolve; this._broadcast(task); }),
       runnerFactory: this.runnerFactory || runnerFactoryFor(o.executor, prep.extra),
+      switchFrom,
     });
     this.tasks.set(id, task);
     this._emit(task, 'selfcheck', { items: task.selfCheck });

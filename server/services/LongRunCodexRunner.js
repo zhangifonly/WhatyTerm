@@ -29,8 +29,11 @@ import { codexBillable, priceUsage } from './usage/costMath.js';
 import pricingTable from './usage/PricingTable.js';
 
 export const CODEX_BIN = 'codex';
+// project_doc_fallback_filenames：没有 AGENTS.md 的项目读 CLAUDE.md —— Claude 开发过的项目换给 Codex 时规则不丢
+// （只在这次调用里生效，不改用户的 config.toml）
 const COMMON = ['--json', '--skip-git-repo-check', '-c', 'sandbox_mode="workspace-write"',
-  '-c', 'sandbox_workspace_write.network_access=true', '-c', 'approval_policy="never"'];
+  '-c', 'sandbox_workspace_write.network_access=true', '-c', 'approval_policy="never"',
+  '-c', 'project_doc_fallback_filenames=["CLAUDE.md"]'];
 
 export function buildCodexArgs({ sessionId = '', resume = false, model = '', extraDirs = [] } = {}) {
   const m = model ? ['-m', model] : [];

@@ -14,6 +14,8 @@ import { handleCodexEvent, buildCodexArgs, findRollout, readRolloutTail, LongRun
 import { ExitReason } from '../server/services/LongRunRunner.js';
 import { prepareExecutor } from '../server/services/longrunExecutorSetup.js';
 import { makeSupervisorChannel } from '../server/services/LongRunSupervisorCreds.js';
+import { promptsFor, sharedRulesFile, switchNote } from '../server/services/longrunExecutor.js';
+import { loadPrompts } from '../server/services/LongRunPrompts.js';
 
 let pass = 0, fail = 0;
 const test = async (n, fn) => { try { await fn(); pass++; console.log(`✅ ${n}`); } catch (e) { fail++; console.log(`❌ ${n}\n    ${e.message}`); } };
@@ -89,6 +91,23 @@ await test('⑤ 开跑前：调不通拒绝；窗口小时收紧；监督者用 
   const made = [];
   const ch = makeSupervisorChannel({ executor: 'codex', executorOpts: { model: 'gpt-x' }, otherFactory: (o) => { made.push(o); return { complete: async () => ({ text: 'ok' }) }; } });
   eq([made[0].cli, made[0].model, ch.info.cliLabel], ['codex', 'gpt-x', 'Codex'], '监督者');
+});
+
+await test('⑥ 换执行者：规则只留一份、两边都读得到；交接说明', () => {
+  const has = (files) => (p) => files.some((f) => p.endsWith(`/${f}`));
+  eq([sharedRulesFile('/p', has(['CLAUDE.md'])), sharedRulesFile('/p', has(['AGENTS.md'])), sharedRulesFile('/p', has(['CLAUDE.md', 'AGENTS.md'])), sharedRulesFile('/p', has([]))],
+    ['CLAUDE.md', 'AGENTS.md', null, null], '哪一份');
+  const orig = loadPrompts(path.resolve('server/prompts/longrun/提示词.txt'));
+  const cx = promptsFor('codex', orig, { root: '/p', exists: has(['CLAUDE.md']) });
+  eq([/写进 CLAUDE\.md/.test(cx.maintain_2), /AGENTS\.md/.test(cx.maintain_2)], [true, false], 'Claude 项目交给 Codex：规则接着写 CLAUDE.md');
+  eq(/写进 AGENTS\.md/.test(promptsFor('codex', orig, { root: '/p', exists: has([]) }).maintain_2), true, '新项目 Codex 写 AGENTS.md');
+  const cl = promptsFor('claude', orig, { root: '/p', exists: has(['AGENTS.md']) });
+  eq([/CLAUDE\.md/.test(cl.maintain_2), /AGENTS\.md/.test(cl.maintain_2)], [false, true], 'Codex 项目交给 Claude：规则接着写 AGENTS.md');
+  eq(promptsFor('claude', orig, { root: '/p', exists: has(['CLAUDE.md']) }), orig, 'Claude 自己的项目原样');
+  eq(buildCodexArgs({}).includes('project_doc_fallback_filenames=["CLAUDE.md"]'), true, 'Codex 每次都带读 CLAUDE.md 的回退');
+  const n = switchNote('claude', 'codex', '/p', has(['CLAUDE.md']));
+  eq([/之前由 Claude Code 开发，现在改由 Codex/.test(n), /\.memory\/MEMORY\.md/.test(n), /项目规则在 CLAUDE\.md/.test(n)], [true, true, true], '交接说明');
+  eq([switchNote('codex', 'codex', '/p'), switchNote('', 'codex', '/p')], ['', ''], '没换人不加');
 });
 
 fs.rmSync(TMP, { recursive: true, force: true });

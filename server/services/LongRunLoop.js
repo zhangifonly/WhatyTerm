@@ -144,6 +144,9 @@ export class LongRunLoop {
     this.extraDirs = [...(o.extraDirs || []), ...(this.spec.extraDirs || [])];
     this.humanChannel = o.humanChannel || null;
     this.runnerFactory = o.runnerFactory || ((opts) => new LongRunRunner(opts));
+    // 换执行者续跑：开场前先让上一执行者续回它自己那段对话做一次收尾（把进度写进 .memory），
+    // 新执行者才有东西可接。{factory, sessionId, prompt, model, label}；不换执行者时为 null
+    this.switchFrom = o.switchFrom || null;
     this._onEvent = o.onEvent || null;
 
     this.spentUsd = 0;
@@ -517,6 +520,7 @@ export class LongRunLoop {
 
     let stop, needs = '';
     try {
+      await this.switchHandoff();
       stop = await this.open();
       if (stop == null) [stop, needs] = await this.mainPhase();
     } catch (e) {
@@ -560,6 +564,36 @@ export class LongRunLoop {
       needs_from_human: needs,
     }, null, 2), 'utf8');
     return report;
+  }
+
+  /**
+   * 换执行者时的交接：上一执行者续回它最后那段对话，发收尾提示词（写进度、结论、下一步进 .memory）。
+   * 为什么要这一步：项目正常收工时不会发收尾，记忆里往往只有初始化写的整理规则、没有进度 ——
+   * 2026-10-03 实测 Claude → Codex，Codex 开场如实说「进度没有记录」，只能自己翻文件。
+   * 收尾失败不拦着开跑：新执行者照样能从代码与 git 接上，只是少了记忆。
+   */
+  async switchHandoff() {
+    const sw = this.switchFrom;
+    if (!sw?.factory || !sw.sessionId) return;
+    this.log(`换执行者：先让上一执行者（${sw.label}）续回对话 ${String(sw.sessionId).slice(0, 8)}… 收尾，把进度写进记忆`);
+    this.emit('switch.handoff', { from: sw.label, session_id: sw.sessionId });
+    const saved = { factory: this.runnerFactory, model: this.model };
+    this.runnerFactory = sw.factory;
+    this.model = sw.model || '';
+    this.sessionId = sw.sessionId;
+    try {
+      const r = await this.send(sw.prompt, `换执行者前收尾（${sw.label}）`, { resume: true });
+      if (r.exitReason !== ExitReason.COMPLETED && r.exitReason !== ExitReason.ASKED_HUMAN) {
+        this.log(`  ⚠ 上一执行者收尾没有正常完成（${r.exitReason}），新执行者只能从代码接上`);
+      }
+    } catch (e) {
+      if (e instanceof LoopInterrupted || e instanceof BudgetExceeded) throw e;
+      this.log(`  ⚠ 上一执行者收尾失败：${e.message}，新执行者只能从代码接上`);
+    } finally {
+      this.runnerFactory = saved.factory;
+      this.model = saved.model;
+      this.sessionId = null;        // 新执行者开新对话，绝不拿上一执行者的对话 id 去续
+    }
   }
 
   /** 开场：新项目发初始化 + 需求；续跑发新对话开始 + 需求。返回非 null 表示开场就该停机。 */

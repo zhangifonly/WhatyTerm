@@ -74,6 +74,33 @@ function makeLoop({ script = [], verdicts = null, onRun = null, ...over } = {}) 
 }
 const events = (loop) => fs.readFileSync(loop.eventsPath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
 
+// ── 换执行者：上一执行者先收尾 ──────────────────────────────
+await test('换执行者续跑：开场前用上一执行者续回它的对话收尾，之后新执行者开新对话', async () => {
+  const prevCalls = [];
+  const prevFactory = (ro) => ({ abort() {}, run: async (prompt, sessionId, resume) => {
+    prevCalls.push({ prompt, sessionId, resume, model: ro.model });
+    return { sessionId, exitReason: 'completed', contextPeak: 10, finalText: '已写进记忆', costUsd: 0.05, costEstimate: 0, injectText: '',
+      pendingTasks: [], numTurns: 1, error: '', durationS: 0, permissionDenials: [] };
+  } });
+  const loop = makeLoop({ skipInit: true, verdicts: ['done'],
+    switchFrom: { factory: prevFactory, sessionId: 'old-claude-sid', prompt: PROMPTS.wrapup, model: 'opus', label: 'Claude Code' } });
+  await loop.run();
+  assert(prevCalls.length === 1, `上一执行者应只收尾一次，实际 ${prevCalls.length}`);
+  assert(prevCalls[0].sessionId === 'old-claude-sid' && prevCalls[0].resume === true && prevCalls[0].prompt === PROMPTS.wrapup, '续回它自己的对话发收尾');
+  assert(prevCalls[0].model === 'opus', '用上一执行者的模型');
+  assert(loop._sent[0].prompt === PROMPTS.resume && loop._sent[0].resume === false, '新执行者开新对话，不拿旧 id 续');
+  assert(loop._runnerOpts.every((o) => o.model !== 'opus'), '新执行者的模型没被上一执行者的覆盖');
+  assert(Math.abs(loop.spentUsd - 0.05 - loop._sent.length * 0.1) < 1e-9, '收尾那发也记账');
+});
+
+await test('换执行者收尾失败不拦开跑', async () => {
+  const loop = makeLoop({ skipInit: true, verdicts: ['done'],
+    switchFrom: { factory: () => ({ abort() {}, run: async () => { throw new Error('kiro 没登录'); } }), sessionId: 's', prompt: 'p', label: 'Kiro CLI' } });
+  await loop.run();
+  assert(loop._sent[0].prompt === PROMPTS.resume, '照常开场');
+  assert(fs.readFileSync(path.join(loop._root, '.run', 'loop.log'), 'utf8').includes('上一执行者收尾失败'), '日志写明');
+});
+
 // ── WebTmux 独有：面板等人回答 ──────────────────────────────
 await test('面板回答原样发给执行者（不加包装），续同一会话', async () => {
   let asked = null;
