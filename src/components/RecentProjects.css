@@ -528,3 +528,8 @@
   font-size: 0.78rem;
   color: var(--text-secondary);
 }
+
+/* Kiro（AWS）：紫色 */
+.tab-btn.kiro.active { background: rgba(139, 92, 246, 0.15); border-color: #a78bfa; }
+.ai-badge.kiro { background: rgba(139, 92, 246, 0.2); color: #a78bfa; }
+.compact-ai-label.kiro { color: #a78bfa; background: rgba(139, 92, 246, 0.12); }

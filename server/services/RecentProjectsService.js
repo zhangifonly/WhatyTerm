@@ -2,6 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import Database from 'better-sqlite3';
+import { listKiroProjectDirs, KIRO_START } from './kiroCli.js';
 
 const HOME_DIR = os.homedir();
 
@@ -70,14 +72,15 @@ export class RecentProjectsService {
    * @param {number} limit - 每个 CLI 返回的最大项目数
    */
   static async getAllRecentProjects(limit = 200) {
-    const [claude, codex, gemini, grok] = await Promise.all([
+    const [claude, codex, gemini, grok, kiro] = await Promise.all([
       this.getClaudeProjects(limit),
       this.getCodexProjects(limit),
       this.getGeminiProjects(limit),
-      this.getGrokProjects(limit)
+      this.getGrokProjects(limit),
+      this.getKiroProjects(limit)
     ]);
 
-    return { claude, codex, gemini, grok };
+    return { claude, codex, gemini, grok, kiro };
   }
 
   /**
@@ -287,6 +290,22 @@ export class RecentProjectsService {
       }
     } catch {
       return null;
+    }
+  }
+
+  /** 获取 Kiro CLI 最近项目（来源与格式见 kiroCli.listKiroProjectDirs） */
+  static async getKiroProjects(limit = 10) {
+    try {
+      return listKiroProjectDirs({ openDb: (f) => new Database(f, { readonly: true, fileMustExist: true }) })
+        .filter((p) => fs.existsSync(p.path) && !isTempPath(p.path) && p.path.split(path.sep).filter(Boolean).length >= 2)
+        .slice(0, limit)
+        .map((p) => ({
+          name: path.basename(p.path), path: p.path, description: this._getProjectDescription(p.path),
+          lastUsed: p.lastUsed, aiType: 'kiro', resumeCommand: KIRO_START,
+        }));
+    } catch (error) {
+      console.error('[RecentProjects] 获取 Kiro 项目失败:', error);
+      return [];
     }
   }
 

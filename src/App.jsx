@@ -31,6 +31,13 @@ import LidSleepCard from './components/LidSleepCard.jsx';
 import { findExistingSession, creatingKeyOf, resumePayload, timeAgo } from './utils/projectOpen.js';
 import { searchSwitcher, flattenProjects } from './utils/switcherSearch.js';
 
+/** 只能用自家账号、不走 CC Switch 的 CLI：面板显示账号与模型，不给供应商切换 */
+const OFFICIAL_ONLY_CLIS = {
+  grok: { label: 'Grok (xAI) 官方', field: 'grokProvider', login: 'grok login' },
+  kiro: { label: 'Kiro (AWS) 官方', field: 'kiroProvider', login: 'kiro-cli login' },
+  cursor: { label: 'Cursor 官方', field: 'cursorProvider', login: 'cursor-agent login' },
+};
+
 /** 恢复刚关闭的会话的快捷键：⌘⇧T / Ctrl⇧T（桌面版），⌥⇧T（浏览器里也能用） */
 const isReopenClosedKey = (e) => e.code === 'KeyT' && e.shiftKey && (e.metaKey || e.ctrlKey || e.altKey);
 import LongRunHandoverDialog from './components/longrun/LongRunHandoverDialog';
@@ -2592,10 +2599,12 @@ export default function App() {
                    currentSession.aiType === 'gemini' ? 'GEMINI' :
                    currentSession.aiType === 'droid' ? 'DROID' :
                    currentSession.aiType === 'opencode' ? 'OPENCODE' :
-                   currentSession.aiType === 'grok' ? 'GROK' : 'AI'}
+                   currentSession.aiType === 'grok' ? 'GROK' :
+                   currentSession.aiType === 'kiro' ? 'KIRO' :
+                   currentSession.aiType === 'cursor' ? 'CURSOR' : 'AI'}
                 </h4>
-                {/* Droid/Grok 使用官方 OAuth 账号，不显示供应商切换按钮 */}
-                {currentSession.aiType !== 'droid' && currentSession.aiType !== 'grok' && (
+                {/* Droid/Grok/Kiro/Cursor 只能用自家账号，不显示供应商切换按钮 */}
+                {currentSession.aiType !== 'droid' && !OFFICIAL_ONLY_CLIS[currentSession.aiType] && (
                 <button
                   ref={providerButtonRef}
                   onClick={openProviderDropdown}
@@ -2637,14 +2646,15 @@ export default function App() {
                   );
                 }
 
-                // Grok 使用 x.ai OAuth 账号，特殊处理
-                if (currentSession.aiType === 'grok') {
-                  const gp = currentSession.grokProvider;
+                // 只能用自家账号的 CLI（Grok / Kiro / Cursor）：显示账号与模型，不显示供应商
+                const official = OFFICIAL_ONLY_CLIS[currentSession.aiType];
+                if (official) {
+                  const gp = currentSession[official.field];
                   return (
                     <div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                         <p style={{ fontWeight: 500, color: 'hsl(0 0% 75%)', margin: 0 }}>
-                          Grok (xAI) 官方
+                          {official.label}
                         </p>
                         <span style={{
                           fontSize: '9px',
@@ -2653,9 +2663,12 @@ export default function App() {
                           background: 'hsl(0 0% 50% / 0.2)',
                           color: 'hsl(0 0% 75%)'
                         }}>
-                          OAuth
+                          {gp?.loginMethod || 'OAuth'}
                         </span>
                       </div>
+                      {gp && gp.exists === false && (
+                        <p style={{ fontSize: '11px', color: '#f59e0b', marginTop: '4px' }}>没检测到登录，在终端里先登录（{official.login}）</p>
+                      )}
                       {gp?.oauthEmail && (
                         <p className="mono" style={{ fontSize: '11px', color: '#10b981', marginTop: '4px', wordBreak: 'break-all' }}>
                           {gp.oauthEmail}
@@ -5285,6 +5298,7 @@ function CreateSessionModal({ onClose, onCreate }) {
               <option value="codex">Codex</option>
               <option value="gemini">Gemini</option>
               <option value="grok">Grok</option>
+              <option value="kiro">Kiro</option>
             </select>
           </div>
           <div className="form-group">

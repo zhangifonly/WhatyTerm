@@ -62,6 +62,24 @@ const SessionUsageCard = ({ usage, pricing }) => {
       </div>
     );
   }
+  if (usage.kind === 'credits') {
+    // Kiro 按 credits 计费（订阅额度），没有公开的美元单价，如实显示 credits，不折算
+    return (
+      <div className="ai-status-section">
+        <h4>用量</h4>
+        <div className="usage-row">
+          <span className="usage-main">{Number(usage.credits || 0).toFixed(2)}</span>
+          <span className="usage-sub">credits · 本会话累计</span>
+        </div>
+        <div className="usage-row">
+          <span className="usage-today">{Number(usage.today || 0).toFixed(2)}</span>
+          <span className="usage-sub">credits · 今天</span>
+          {usage.model && <span className="usage-model">{usage.model}</span>}
+        </div>
+        <p className="usage-note dim">Kiro 按订阅额度（credits）计费，不折算美元；剩余额度在 Kiro 里输入 /usage 查看</p>
+      </div>
+    );
+  }
   const today = Number(usage.today || 0);
   const total = Number(usage.usd || 0);
   // 用过两个及以上模型才列明细；只有一个模型时维持原来的一行显示，不多占地方

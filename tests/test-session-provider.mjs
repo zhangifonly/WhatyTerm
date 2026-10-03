@@ -242,13 +242,14 @@ await testAsync('claude -p 失败要抛出（监控循环据此计失败），�
   assert(err && /未登录/.test(err.message), err?.message);
 });
 
-test('getSessionProviderId 按 aiType 取对应字段（codex 会话不能误读 claudeProvider）', () => {
+await testAsync('getSessionProviderId 按 aiType 取对应字段（codex 会话不能误读 claudeProvider）', async () => {
+  // v1.4.89 起映射集中在 cliProviderField.js：直接测映射本身，再确认 getSessionProviderId 用的是它
+  const { providerFieldOf } = await import('../server/services/cliProviderField.js');
+  const want = { claude: 'claudeProvider', codex: 'codexProvider', gemini: 'geminiProvider', grok: 'grokProvider', kiro: 'kiroProvider', droid: 'droidProvider' };
+  for (const [t, f] of Object.entries(want)) assert(providerFieldOf(t) === f, `${t} → ${providerFieldOf(t)}，应为 ${f}`);
   const src = fs.readFileSync(path.join(process.cwd(), 'server/index.js'), 'utf8');
   const m = src.match(/function getSessionProviderId[\s\S]{0,400}?\n\}/);
-  assert(m, '未找到 getSessionProviderId');
-  for (const f of ['codexProvider', 'geminiProvider', 'grokProvider', 'claudeProvider']) {
-    assert(m[0].includes(f), `未覆盖 ${f}`);
-  }
+  assert(m && /providerFieldOf\(aiType\)/.test(m[0]), 'getSessionProviderId 没走 providerFieldOf');
 });
 
 test('_loadSettings 跳过 env 为空的 ProviderService 空壳', () => {

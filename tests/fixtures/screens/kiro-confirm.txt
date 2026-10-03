@@ -1,0 +1,12 @@
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ✨ What's new: Cloud sessions, specs, expanded hooks, and an improved trust model.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Run the shell command: echo KIROPROBE_42 and tell me the output.
+↓ Shell echo KIROPROBE_42
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ shell requires approval
+ ❯ Yes, single permission
+   Trust, always allow in this session
+   No (Tab to edit)
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ esc to close · ↑↓ to navigate · ↵ to select · Tab to edit

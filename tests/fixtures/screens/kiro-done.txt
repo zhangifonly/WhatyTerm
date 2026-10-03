@@ -1,0 +1,10 @@
+  Run the shell command: echo KIROPROBE_42 and tell me the output.
+• Shell echo KIROPROBE_42
+    KIROPROBE_42
+• The output is:
+  KIROPROBE_42
+▸ Credits: turn 0.07 • session 0.07 | Time: 20s
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+kiro_default · auto · ◔ 1%                                                                                   ~/wtkirocap
+›  ask a question or describe a task ↵
+                                                                                                     /copy to clipboard

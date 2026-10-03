@@ -14,6 +14,7 @@ import { decideBinding, siblingsOf } from './UsageAttribution.js';
 import { diffCumulative, localDayKey } from './costMath.js';
 import pricingTable from './PricingTable.js';
 import { splitDelta, mainModelOf } from './usageSplit.js';
+import { kiroCredits } from '../kiroCli.js';
 
 export const CLAUDE_PROJECTS = () => path.join(os.homedir(), '.claude', 'projects');
 /** 与 index.js:1056 同一套编码（历史上漏过下划线，导致带下划线的项目找不到目录） */
@@ -53,6 +54,16 @@ export class SessionUsageService {
 
   /** 一个会话的一轮采集。返回 {ok, sessionUsd, todayUsd, ...} 或 {ok:false, kind, reason} */
   collect(session, allSessions, now = Date.now()) {
+    // Kiro 按 credits 计费（不是 token × 单价），本地记录里每轮都有 credits：直接读，不进美元账本。
+    // 只算这个终端会话建立之后结束的轮次（续接的老对话，之前花的不算进来）
+    if (session.aiType === 'kiro') {
+      const sib = siblingsOf(session, allSessions);
+      if (sib.length) return { ok: false, kind: 'ambiguous', cli: 'kiro', reason: `同目录还有 ${sib.length} 个 Kiro 会话在跑，无法区分是谁花的` };
+      const since = session.createdAt ? new Date(session.createdAt).getTime() : 0;
+      const dayStart = new Date(new Date(now).toDateString()).getTime();
+      const c = kiroCredits(session.workingDir, { since, dayStart, sessions: this.kiroSessions?.() });
+      return { ok: true, kind: 'credits', cli: 'kiro', credits: c.credits, todayCredits: c.todayCredits, model: c.model };
+    }
     const binding = decideBinding(session, siblingsOf(session, allSessions));
     if (binding.kind === 'unsupported' || binding.kind === 'ambiguous') {
       return { ok: false, kind: binding.kind, cli: binding.cli, reason: binding.reason };

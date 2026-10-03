@@ -15,6 +15,7 @@ import { isTaskDone } from './taskDonePattern.js';
 import { ClaudeCliTextClient, cliTextCwd } from './ClaudeCliText.js';
 import { CodexExecTextClient, codexTextCwd } from './CodexExecText.js';
 import { GrokSingleTextClient, GROK_CWD_PREFIX } from './GrokSingleText.js';
+import { KIRO_START, detectKiroState, looksLikeKiro } from './kiroCli.js';
 import { hasPendingQuestion } from './pendingQuestion.js';
 import { promptPendingText, isOwnPendingInput, stripPromptSuggestion } from './promptState.js';
 import { isLiveConfirmMenu, hasNearbyConfirmMenu, isCodexLiveConfirm } from './liveMenu.js';
@@ -70,7 +71,8 @@ function getCliCommand(aiType) {
     'gemini': 'gemini',
     'droid': 'droid',
     'opencode': 'opencode',
-    'grok': 'grok -c'
+    'grok': 'grok -c',
+    'kiro': KIRO_START
   };
   return commands[aiType] || commands['claude'];
 }
@@ -87,7 +89,8 @@ function getCliName(aiType) {
     'gemini': 'Google Gemini',
     'droid': 'Droid AI',
     'opencode': 'OpenCode',
-    'grok': 'Grok (xAI)'
+    'grok': 'Grok (xAI)',
+    'kiro': 'Kiro (AWS)'
   };
   return names[aiType] || names['claude'];
 }
@@ -235,7 +238,8 @@ export function hasRunningTimer(text) {
  *    必须先用本函数排除忙碌，才能走空闲分支。
  */
 export function isCliBusy(tailText) {
-  return hasRunningTimer(tailText) || /esc to interrupt/i.test(tailText);
+  // Kiro 运行时输入框位置是「›  Kiro is working · 1s · Type to steer」，没有计时器括号也没有 esc to interrupt
+  return hasRunningTimer(tailText) || /esc to interrupt|Kiro is working/i.test(tailText);
 }
 
 /**
@@ -1908,6 +1912,9 @@ ${historyText || '(空)'}
       return 'opencode';
     }
 
+    // Kiro CLI（AWS）：顶栏「agent · 模型 · ◔ N%」+ 输入框/运行条，或它独有的确认框措辞（见 kiroCli.js）
+    if (looksLikeKiro(terminalContent.slice(-8000))) return 'kiro';
+
     // 检测 Grok CLI 特征（xAI Grok Build TUI）
     // 特征：输入框边框 "Grok Build · ..."、底部栏 Ctrl+o:interject、运行态 Waiting…、完成态 Turn completed in
     if (/Grok Build/i.test(lastLines) ||
@@ -2208,6 +2215,34 @@ ${historyText || '(空)'}
           detectedCLI,
           ...pluginInfo
         };
+      }
+    }
+
+    // === 高优先级：Kiro 状态判读（同 Grok，必须在插件分析之前）===
+    // 文案全部实测（kiroCli.js 文件头）。确认框按数字没反应，光标默认在「Yes, single permission」上，
+    // 选第 1 项 = 直接回车（执行器对 select '1' 只发 Enter）。不选第 2 项「Trust, always allow in this session」：
+    // 那是本会话内放开整个工具（所有 shell 命令），比 Claude 的「本会话允许此类编辑」宽得多
+    if (aiType === 'kiro') {
+      const k = detectKiroState(earlyCleanContent.slice(-2500));
+      const base = { workingDir: '未显示', suggestion: null, updatedAt: new Date().toISOString(), preAnalyzed: true, detectedCLI, ...pluginInfo };
+      if (k?.state === 'confirm' && k.pointerOnYes) {
+        console.log('[AIEngine] 检测到 Kiro 确认框，光标在「Yes, single permission」，回车放行一次');
+        return { ...base, currentState: 'Kiro (AWS)确认界面', recentAction: '等待确认', needsAction: true,
+          actionType: 'select', suggestedAction: '1', actionReason: '工具需要确认，放行这一次（不选「本会话总是允许」）' };
+      }
+      if (k?.state === 'confirm') {
+        // 光标不在 Yes 上（用户自己移过）：不替人选，交给人
+        return { ...base, currentState: 'Kiro 确认界面（光标不在「Yes」上）', recentAction: '等待确认', needsAction: false,
+          actionType: 'none', suggestedAction: null, actionReason: '光标被移到别的选项，不替你按' };
+      }
+      if (k?.state === 'running') {
+        return { ...base, currentState: '程序运行中', recentAction: '执行中', needsAction: false, actionType: 'none',
+          suggestedAction: null, actionReason: 'Kiro 正在工作，不应打断' };
+      }
+      if (k?.state === 'idle') {
+        console.log('[AIEngine] 检测到 Kiro 空闲（输入框就绪），自动发送继续');
+        return { ...base, currentState: 'Kiro 空闲', recentAction: '等待输入', needsAction: true, actionType: 'text_input',
+          suggestedAction: '继续', actionReason: '空闲状态，自动继续开发' };
       }
     }
 

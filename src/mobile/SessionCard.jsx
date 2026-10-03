@@ -2,7 +2,7 @@ import React from 'react';
 
 const AI_COLORS = {
   claude: '#d97757', codex: '#10a37f', gemini: '#4285f4',
-  grok: '#8b5cf6', droid: '#f59e0b', opencode: '#06b6d4'
+  grok: '#8b5cf6', droid: '#f59e0b', opencode: '#06b6d4', kiro: '#7c3aed', cursor: '#e5e7eb'
 };
 
 /** 单个会话卡片：名称 + CLI 徽标 + AI 状态行 + 内存；needsAction 高亮 */

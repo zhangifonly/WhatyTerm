@@ -1104,6 +1104,9 @@ export class Session {
       codexProvider: this.codexProvider || null,
       geminiProvider: this.geminiProvider || null,
       grokProvider: this.grokProvider || null,
+      kiroProvider: this.kiroProvider || null,
+      cursorProvider: this.cursorProvider || null,
+      opencodeProvider: this.opencodeProvider || null,
       // 操作统计
       stats: this.stats || { total: 0, success: 0, failed: 0, aiAnalyzed: 0, aiFailed: 0, preAnalyzed: 0, hookFallback: 0 }
     };

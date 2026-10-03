@@ -220,6 +220,8 @@ import telemetryService from './services/TelemetryService.js';
 import crashReporter from './services/CrashReporter.js';
 import sleepPrevention from './services/SleepPreventionService.js';
 import { protectedPids } from './services/orphanGuard.js';
+import { providerFieldOf } from './services/cliProviderField.js';
+import { kiroProviderInfo } from './services/kiroCli.js';
 import { mergeModelAliases } from './services/usage/usageSplit.js';
 import lidSleepGuard from './services/LidSleepGuard.js';
 import { uninstallWin as uninstallLidSleepWin } from './services/lidSleepWin.js';
@@ -1452,10 +1454,7 @@ function safeGetSession(id) {
 // （原来监控只读全局 ai-settings.json 的单个 _providerId，那个 ID 一失效整条链就哑）
 function getSessionProviderId(session, aiType) {
   if (!session) return null;
-  const p = aiType === 'codex' ? session.codexProvider
-    : aiType === 'gemini' ? session.geminiProvider
-    : aiType === 'grok' ? session.grokProvider
-    : session.claudeProvider;
+  const p = session[providerFieldOf(aiType)];
   return p?.id || null;
 }
 
@@ -2104,6 +2103,10 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
     } else if (appType === 'gemini') {
       // gemini 的 URL/Key 不在 ~/.gemini/settings.json 里，只能从 CC Switch DB 的 is_current 读
       // 这里先不读，下面 DB 查询分支会走 is_current 回退路径返回
+    } else if (appType === 'kiro') {
+      // Kiro 只能用自家账号（Google / GitHub / Builder ID / IAM Identity Center，后端 Bedrock），不走 CC Switch。
+      // 账号取自 `kiro-cli whoami`（缓存 10 分钟），模型取本目录最近一段对话的记录（见 kiroCli.js）
+      return resolve(await kiroProviderInfo(workingDir));
     } else if (appType === 'grok') {
       // Grok CLI 使用 x.ai OAuth 认证，不走 CC Switch，从 ~/.grok 直接读取
       let grokEmail = '';
@@ -6110,7 +6113,9 @@ async function runUsageTick() {
     for (const sd of alive) {
       try {
         const r = sessionUsageService.collect(sd, alive);
-        const view = r.ok
+        const view = r.ok && r.kind === 'credits'
+          ? { kind: 'credits', cli: r.cli, credits: round2(r.credits), today: round2(r.todayCredits), model: r.model || '' }
+          : r.ok
           ? { kind: r.kind, cli: r.cli, usd: round2(r.sessionUsd), today: round2(r.todayUsd), estimated: !!r.estimated, incomplete: !!r.incomplete, model: r.model || '',
             unknownModels: r.unknownModels || [], autoModels: r.autoModels || [],
             // 分模型明细（同一会话用过多个模型时面板逐个列出）；scanning：大记录首次分轮扫描的进度
@@ -6444,10 +6449,7 @@ async function runBackgroundStatusAnalysis() {
 
           // 每次都重新读取供应商配置，确保 CC Switch 切换后及时生效
           const provider = await getCurrentProvider(cliType, session.workingDir, session.tmuxSessionName);
-          const currentProvider = cliType === 'claude' ? session.claudeProvider :
-                                  cliType === 'codex' ? session.codexProvider :
-                                  cliType === 'grok' ? session.grokProvider :
-                                  session.geminiProvider;
+          const currentProvider = session[providerFieldOf(cliType)];
 
           const providerChanged = !currentProvider || currentProvider.url !== provider.url || currentProvider.name !== provider.name;
 
@@ -6466,15 +6468,7 @@ async function runBackgroundStatusAnalysis() {
             if (shouldSkipUpdate) {
               // 不覆盖，保留 switchProviderStateMachine 设置的值
             } else {
-              if (cliType === 'claude') {
-                session.claudeProvider = provider;
-              } else if (cliType === 'codex') {
-                session.codexProvider = provider;
-              } else if (cliType === 'gemini') {
-                session.geminiProvider = provider;
-              } else if (cliType === 'grok') {
-                session.grokProvider = provider;
-              }
+              session[providerFieldOf(cliType)] = provider;
             }
           }
 
@@ -7500,15 +7494,7 @@ io.on('connection', (socket) => {
       const provider = await getCurrentProvider(session.aiType, session.workingDir, session.tmuxSessionName);
 
       // 根据 AI 类型保存对应的供应商信息
-      if (session.aiType === 'claude') {
-        session.claudeProvider = provider;
-      } else if (session.aiType === 'codex') {
-        session.codexProvider = provider;
-      } else if (session.aiType === 'gemini') {
-        session.geminiProvider = provider;
-      } else if (session.aiType === 'grok') {
-        session.grokProvider = provider;
-      }
+      session[providerFieldOf(session.aiType)] = provider;
 
       historyLogger.log(session.id, {
         type: 'system',
@@ -7526,15 +7512,7 @@ io.on('connection', (socket) => {
 
           // 更新供应商信息
           const detectedProvider = await getCurrentProvider(detectedCLI, session.workingDir, session.tmuxSessionName);
-          if (detectedCLI === 'claude') {
-            session.claudeProvider = detectedProvider;
-          } else if (detectedCLI === 'codex') {
-            session.codexProvider = detectedProvider;
-          } else if (detectedCLI === 'gemini') {
-            session.geminiProvider = detectedProvider;
-          } else if (detectedCLI === 'grok') {
-            session.grokProvider = detectedProvider;
-          }
+          session[providerFieldOf(detectedCLI)] = detectedProvider;
           console.log(`[Session创建] 已更新供应商: ${detectedProvider.name}`);
         }
       } catch (err) {
@@ -7668,15 +7646,7 @@ io.on('connection', (socket) => {
 
       // 获取供应商信息
       const provider = await getCurrentProvider(session.aiType, session.workingDir, session.tmuxSessionName);
-      if (session.aiType === 'claude') {
-        session.claudeProvider = provider;
-      } else if (session.aiType === 'codex') {
-        session.codexProvider = provider;
-      } else if (session.aiType === 'gemini') {
-        session.geminiProvider = provider;
-      } else if (session.aiType === 'grok') {
-        session.grokProvider = provider;
-      }
+      session[providerFieldOf(session.aiType)] = provider;
 
       // 保存会话
       sessionManager.updateSession(session);
@@ -7716,7 +7686,7 @@ io.on('connection', (socket) => {
       socket.emit('recentProjects:list', projects);
     } catch (error) {
       console.error('[RecentProjects] 获取失败:', error);
-      socket.emit('recentProjects:list', { claude: [], codex: [], gemini: [], grok: [] });
+      socket.emit('recentProjects:list', { claude: [], codex: [], gemini: [], grok: [], kiro: [] });
     }
   });
 
@@ -8312,10 +8282,7 @@ io.on('connection', (socket) => {
         try {
           const prov = await getCurrentProvider(session.aiType || 'claude', workingDir, session.tmuxSessionName);
           if (prov?.exists) {
-            const k = session.aiType === 'codex' ? 'codexProvider'
-              : session.aiType === 'gemini' ? 'geminiProvider'
-              : session.aiType === 'grok' ? 'grokProvider' : 'claudeProvider';
-            session[k] = prov;
+            session[providerFieldOf(session.aiType)] = prov;
             sessionManager.updateSession(session);
           }
         } catch (e) { console.warn('[Ralph向导] 初始化默认供应商失败:', e.message); }

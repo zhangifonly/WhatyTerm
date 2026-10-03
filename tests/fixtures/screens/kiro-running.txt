@@ -1,0 +1,9 @@
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ✨ What's new: Cloud sessions, specs, expanded hooks, and an improved trust model.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Run the shell command: echo KIROPROBE_42 and tell me the output.
+• Shell
+  esc to cancel
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+kiro_default · auto · ◔ 4%                                                                                   ~/wtkirocap
+›  Kiro is working · 1s · Type to steer · Ctrl+S to queue

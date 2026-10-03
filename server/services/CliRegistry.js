@@ -101,6 +101,24 @@ const DEFAULT_CLI_TOOLS = {
     enabled: true,
     createdAt: '2025-01-01T00:00:00.000Z'
   },
+  kiro: {
+    // 文案均为 kiro-cli 2.26.0 实测，判读逻辑见 server/services/kiroCli.js
+    id: 'kiro',
+    name: 'Kiro (AWS)',
+    processNames: ['kiro-cli', 'kiro-cli-chat'],
+    terminalPatterns: {
+      running: ['Kiro is working', 'Initializing'],
+      idle: ['ask a question,? or describe a task'],
+      confirm: ['requires approval', 'Yes, single permission']
+    },
+    commands: {
+      start: 'kiro-cli chat --resume',   // 本目录最近一段；目录里没有对话时直接开新的
+      quit: '/quit'
+    },
+    builtin: true,
+    enabled: true,
+    createdAt: '2026-10-03T00:00:00.000Z'
+  },
   grok: {
     id: 'grok',
     name: 'Grok (xAI)',

@@ -2,10 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { useTranslation } from '../i18n';
 import { matchPinyin } from '../utils/pinyin';
 import './RecentProjects.css';
+import { CLI_TABS } from '../utils/projectOpen.js';
 
 const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) => {
   const { t } = useTranslation();
-  const [projects, setProjects] = useState({ claude: [], codex: [], gemini: [], grok: [] });
+  const [projects, setProjects] = useState(() => Object.fromEntries(CLI_TABS.map((t) => [t.key, []])));
   const [activeTab, setActiveTab] = useState('claude');
   const [loading, setLoading] = useState(true);
   const [expandedSections, setExpandedSections] = useState({});
@@ -26,10 +27,8 @@ const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) 
       setProjects(data);
       setLoading(false);
       // 自动选择有项目的第一个 tab
-      if (data.claude?.length > 0) setActiveTab('claude');
-      else if (data.codex?.length > 0) setActiveTab('codex');
-      else if (data.gemini?.length > 0) setActiveTab('gemini');
-      else if (data.grok?.length > 0) setActiveTab('grok');
+      const first = CLI_TABS.find((t) => data?.[t.key]?.length > 0);
+      if (first) setActiveTab(first.key);
     };
 
     socket.on('recentProjects:list', handleList);
@@ -65,10 +64,7 @@ const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) 
     }
   };
 
-  const totalCount = (projects.claude?.length || 0) +
-                     (projects.codex?.length || 0) +
-                     (projects.gemini?.length || 0) +
-                     (projects.grok?.length || 0);
+  const totalCount = CLI_TABS.reduce((n, t) => n + (projects[t.key]?.length || 0), 0);
 
   if (loading) {
     // 骨架屏 - 改善感知加载速度
@@ -99,12 +95,7 @@ const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) 
   }
 
   // 合并所有项目并按时间排序（用于 compact 模式）
-  const allProjects = [
-    ...(projects.claude || []),
-    ...(projects.codex || []),
-    ...(projects.gemini || []),
-    ...(projects.grok || [])
-  ].sort((a, b) => b.lastUsed - a.lastUsed);
+  const allProjects = CLI_TABS.flatMap((t) => projects[t.key] || []).sort((a, b) => b.lastUsed - a.lastUsed);
 
   const currentProjects = projects[activeTab] || [];
 
@@ -118,12 +109,9 @@ const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) 
 
   // Compact 模式：VS Code 风格，分类显示 Claude/Codex/Gemini 各最多 5 个
   if (compact) {
-    const aiTypes = [
-      { key: 'claude', label: 'Claude', data: (projects.claude || []).filter(projectMatches) },
-      { key: 'codex', label: 'Codex', data: (projects.codex || []).filter(projectMatches) },
-      { key: 'gemini', label: 'Gemini', data: (projects.gemini || []).filter(projectMatches) },
-      { key: 'grok', label: 'Grok', data: (projects.grok || []).filter(projectMatches) }
-    ].filter(ai => ai.data.length > 0);
+    const aiTypes = CLI_TABS
+      .map((t) => ({ ...t, data: (projects[t.key] || []).filter(projectMatches) }))
+      .filter(ai => ai.data.length > 0);
 
     return (
       <div className="recent-projects compact">
@@ -213,38 +201,15 @@ const RecentProjects = ({ socket, onOpenProject, onPlayback, compact = false }) 
       </div>
 
       <div className="recent-projects-tabs">
-        {projects.claude?.length > 0 && (
+        {CLI_TABS.filter((tab) => projects[tab.key]?.length > 0).map((tab) => (
           <button
-            className={`tab-btn claude ${activeTab === 'claude' ? 'active' : ''}`}
-            onClick={() => setActiveTab('claude')}
+            key={tab.key}
+            className={`tab-btn ${tab.key} ${activeTab === tab.key ? 'active' : ''}`}
+            onClick={() => setActiveTab(tab.key)}
           >
-            Claude ({projects.claude.length})
+            {tab.label} ({projects[tab.key].length})
           </button>
-        )}
-        {projects.codex?.length > 0 && (
-          <button
-            className={`tab-btn codex ${activeTab === 'codex' ? 'active' : ''}`}
-            onClick={() => setActiveTab('codex')}
-          >
-            Codex ({projects.codex.length})
-          </button>
-        )}
-        {projects.gemini?.length > 0 && (
-          <button
-            className={`tab-btn gemini ${activeTab === 'gemini' ? 'active' : ''}`}
-            onClick={() => setActiveTab('gemini')}
-          >
-            Gemini ({projects.gemini.length})
-          </button>
-        )}
-        {projects.grok?.length > 0 && (
-          <button
-            className={`tab-btn grok ${activeTab === 'grok' ? 'active' : ''}`}
-            onClick={() => setActiveTab('grok')}
-          >
-            Grok ({projects.grok.length})
-          </button>
-        )}
+        ))}
       </div>
 
       <div className="recent-search">
