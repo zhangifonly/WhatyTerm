@@ -129,6 +129,26 @@ function ensureDragSelectsBinding() {
   }
 }
 
+/**
+ * 新建 tmux 会话，并让 Kiro CLI 的终端外壳（kiro-cli-term，源自 Fig 的 figterm）不要接管里面的 shell。
+ *
+ * 背景（2026-10-03 实测）：用户 ~/.zshrc 开头有 Kiro 的前置脚本，tmux 里也会把 zsh exec 成
+ * `zsh (kiro-cli-term)`，再由它另起真正的 zsh——27 个会话全部如此，CLI 的输出与按键都多穿一层 PTY。
+ * 连带 tmux 的 pane_current_command 永远是 zsh。Kiro 脚本自带的开关：PROCESS_LAUNCHED_BY_Q 有值就不接管。
+ * 用 -e 只设在这个会话上，用户自己开的终端照常有 Kiro 的补全。
+ * tmux < 3.1 不认 -e：失败就不带它再建一次（宁可多一层外壳，不能建不出会话）
+ */
+export const NO_KIRO_TERM_ENV = 'PROCESS_LAUNCHED_BY_Q=1';
+export function newTmuxSession(tmuxCmd, args) {
+  const opts = { stdio: 'ignore', env: { ...process.env, CLAUDECODE: undefined } };
+  try {
+    execSync(`${tmuxCmd} new-session ${args} -e ${NO_KIRO_TERM_ENV}`, opts);
+  } catch (err) {
+    console.warn(`[SessionManager] tmux 不支持 new-session -e（${err.message.split('\n')[0]}），不带环境变量重建`);
+    execSync(`${tmuxCmd} new-session ${args}`, opts);
+  }
+}
+
 // 获取 tmux 命令前缀（macOS 优先使用内置 tmux）
 function getTmuxPrefix() {
   if (useWSL) return 'wsl tmux';
@@ -300,10 +320,7 @@ export class Session {
         // 创建新的 tmux 会话
         // 有工作目录就直接在那里建：事后打 cd 要等 shell 就绪，路径里有引号/$ 还会出错
         const cwdArg = this.workingDir ? ` -c ${quoteSq(this.workingDir)}` : '';
-        execSync(`${tmuxCmd} new-session -d -s "${this.tmuxSessionName}" -x 80 -y 24${cwdArg}`, {
-          stdio: 'ignore',
-          env: { ...process.env, CLAUDECODE: undefined }
-        });
+        newTmuxSession(tmuxCmd, `-d -s "${this.tmuxSessionName}" -x 80 -y 24${cwdArg}`);
         // 设置 default-terminal 确保退格等按键正常工作
         try {
           execSync(`${tmuxCmd} set-option -t "${this.tmuxSessionName}" default-terminal "${defaultTerminal}"`, { stdio: 'ignore' });
@@ -1339,10 +1356,7 @@ export class SessionManager {
       catch { defaultTerminal = 'screen-256color'; }
 
       // -c 指定工作目录，保证 CLI 在原项目里启动
-      execSync(`${tmuxCmd} new-session -d -s "${tmuxName}" -x 80 -y 24 -c "${workingDir}"`, {
-        stdio: 'ignore',
-        env: { ...process.env, CLAUDECODE: undefined }
-      });
+      newTmuxSession(tmuxCmd, `-d -s "${tmuxName}" -x 80 -y 24 -c "${workingDir}"`);
       try {
         execSync(`${tmuxCmd} set-option -t "${tmuxName}" default-terminal "${defaultTerminal}"`, { stdio: 'ignore' });
       } catch {}
