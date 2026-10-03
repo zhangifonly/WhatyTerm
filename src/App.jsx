@@ -45,6 +45,7 @@ import { nextTunnelView } from './utils/tunnelState.js';
 import './components/longrun/LongRun.css';
 import './components/longrun/LongRunEntries.css';
 import { registerOsc52, writeClipboard, attachGestureCopy } from './terminalClipboard';
+import { attachMouseModeGuard } from './terminalMouseModes.js';
 import { fitTerminal, measureScrollbarWidth } from './terminalFit';
 
 const socket = io();
@@ -1069,6 +1070,8 @@ export default function App() {
     // （拖到边缘会自动滚动历史），复制结果经 OSC 52 送到这里写进系统剪贴板。
     // 松手那一刻（用户手势内）预约剪贴板写入，Safari / Firefox 才放行，见 terminalClipboard.js
     const detachGestureCopy = attachGestureCopy(terminalRef.current);
+    // tmux 进选择模式会「先全关再打开」鼠标上报，xterm 在全关那一下会丢掉正在进行的拖动（见 terminalMouseModes.js）
+    const detachMouseGuard = attachMouseModeGuard(term);
     const osc52Disposable = registerOsc52(term, () => {
       setCopyHint(true);
       clearTimeout(copyHintTimer.current);
@@ -1178,6 +1181,7 @@ export default function App() {
       clearTimeout(copyHintTimer.current);
       osc52Disposable?.dispose?.();
       detachGestureCopy();
+      detachMouseGuard();
       // 清理 IME 事件监听器
       if (textareaElement) {
         textareaElement.removeEventListener('compositionstart', handleCompositionStart);

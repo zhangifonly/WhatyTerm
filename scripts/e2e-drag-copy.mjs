@@ -6,6 +6,9 @@
  * 三个都必过。Firefox 不认 Promise 形式的 ClipboardItem（DataError），会退回普通写入。
  * diag 字段逐环记录：页面是否开了鼠标上报、发出的鼠标帧数、tmux 是否进入选择模式、页面收到的 OSC 52 帧数。
  * 测试会话需先输出几行再输出探针（不能在第一行：拖在屏幕最上沿会触发 tmux 自动上滚）。
+ * v1.4.88 必测场景：会话里的应用开着 1003（Claude Code 全屏模式就是），探针输出后接
+ *   printf '\033[?1003h\033[?1006h'; cat > /dev/null
+ * 去掉 attachMouseModeGuard 时三浏览器都只发出 3~5 个鼠标事件、不复制（实测），装上后全过。
  *
  * 用法：node scripts/e2e-drag-copy.mjs <playwright-core/index.mjs> <测试会话在列表里的文字前缀> [tmux 会话名]
  * 产物：~/.webtmux/e2e/drag-copy-<时间>.json
