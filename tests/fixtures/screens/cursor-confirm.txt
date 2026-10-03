@@ -1,0 +1,45 @@
+✓ zsh 配置已加载
+zhangzhen@MacBook-Pro wtcursorprobe % cursor-agent
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │                                                                                                                                                          │
+  │  ⚠ Workspace Trust Required                                                                                                                              │
+  │                                                                                                                                                          │
+  │  Cursor Agent can execute code and access files in this directory.                                                                                       │
+  │                                                                                                                                                          │
+  │  Do you trust the contents of this directory?                                                                                                            │
+  │                                                                                                                                                          │
+  │    /Users/zhangzhen/wtcursorprobe                                                                                                                        │
+  │                                                                                                                                                          │
+  │                                                                                                                                                          │
+  │    [a] Trust this workspace                                                                                                                              │
+  │    [q] Quit                                                                                                                                              │
+  │                                                                                                                                                          │
+  │  ⏳ Trusting workspace...                                                                                                                                │
+  │                                                                                                                                                          │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+  Cursor Agent
+  v2026.10.01-e373342
+  Tip: Type ? in the prompt bar to show in-app hints.
+
+
+  Run the shell command: echo WTCUR_OK and tell me the output.
+
+
+  I'll run that command and report the output.
+
+  $ echo WTCUR_OK Waiting for approval...
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ $  echo WTCUR_OK in .
+
+ Run this command?
+ Not in allowlist: echo
+  → Run (once) (y)
+    Add Shell(echo) to allowlist? (tab)
+    Run Everything (shift+tab)
+    Skip & tell the agent what to do instead (esc or n)
+
+

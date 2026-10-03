@@ -23,7 +23,9 @@ export function isSupportedCli(aiType) {
 export function decideBinding(session, siblings = []) {
   const cli = String(session?.aiType || 'claude');
   if (!isSupportedCli(cli)) {
-    return { kind: 'unsupported', cli, reason: `${cli} 不在本地记录用量` };
+    // Cursor CLI 按订阅计费，本地对话记录（~/.cursor/chats/*/store.db）里没有 token 与费用（2026-10-03 实测）
+    const reason = cli === 'cursor' ? 'Cursor 按订阅计费，本地记录里没有 token 和费用，用量请在 Cursor 账户页查看' : `${cli} 不在本地记录用量`;
+    return { kind: 'unsupported', cli, reason };
   }
   if (cli === 'claude' && session.claudeSessionId) {
     return {

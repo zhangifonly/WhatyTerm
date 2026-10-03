@@ -14,6 +14,7 @@ import os from 'os';
 import { claudeStartCommand } from './sessionMode.js';
 import { codexStartCommand } from './codexSessionConfig.js';
 import { opencodeStartCommand, sessionOpencodeConfig } from './opencodeCli.js';
+import { cursorStartCommand } from './cursorCli.js';
 import { probeTmuxSession, confirmTmuxGone } from './tmuxGone.js';
 import fs from 'fs';
 
@@ -1601,6 +1602,7 @@ export class SessionManager {
         // Codex：按会话当前选的供应商接回（对话记录里存的是当时的供应商，不覆盖就沿用旧的）
         if (item.aiType === 'codex') startCmd = codexStartCommand(item, { resume: true });
         if (item.aiType === 'opencode') startCmd = opencodeStartCommand(item);
+        if (item.aiType === 'cursor') startCmd = cursorStartCommand(item.workingDir);
         const tmuxCmd = getTmuxPrefix();
         try {
           execSync(`${tmuxCmd} send-keys -t "${item.tmuxSessionName}" ${JSON.stringify(startCmd)}`, { stdio: 'ignore' });

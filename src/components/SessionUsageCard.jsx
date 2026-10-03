@@ -57,7 +57,7 @@ const SessionUsageCard = ({ usage, pricing }) => {
         <h4>用量</h4>
         <p className="usage-note">{usage.reason || '拿不到这个会话的用量'}</p>
         <p className="usage-note dim">
-          {usage.kind === 'unsupported' ? '换成 Claude 或 Codex 的会话就能看到花费。' : '等同目录里其它同类会话结束后即可区分。'}
+          {usage.kind === 'unsupported' ? (usage.cli === 'cursor' ? '' : '换成 Claude 或 Codex 的会话就能看到花费。') : '等同目录里其它同类会话结束后即可区分。'}
         </p>
       </div>
     );

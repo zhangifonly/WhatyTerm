@@ -536,3 +536,6 @@
 .tab-btn.opencode.active { background: rgba(6, 182, 212, 0.15); border-color: #22d3ee; }
 .ai-badge.opencode { background: rgba(6, 182, 212, 0.2); color: #22d3ee; }
 .compact-ai-label.opencode { color: #22d3ee; background: rgba(6, 182, 212, 0.12); }
+.tab-btn.cursor.active { background: rgba(229, 231, 235, 0.12); border-color: #e5e7eb; }
+.ai-badge.cursor { background: rgba(229, 231, 235, 0.15); color: #e5e7eb; }
+.compact-ai-label.cursor { color: #e5e7eb; background: rgba(229, 231, 235, 0.1); }

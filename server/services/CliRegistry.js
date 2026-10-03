@@ -102,6 +102,25 @@ const DEFAULT_CLI_TOOLS = {
     enabled: true,
     createdAt: '2025-01-01T00:00:00.000Z'
   },
+  cursor: {
+    // 文案均为 cursor-agent 2026.10.01 实测，判读逻辑见 server/services/cursorCli.js
+    id: 'cursor',
+    name: 'Cursor CLI',
+    processNames: ['cursor-agent'],
+    terminalPatterns: {
+      running: ['ctrl\\+c to stop'],
+      idle: ['→ Add a follow-up', '→ Plan, search, build anything'],
+      confirm: ['\\(once\\) \\(y\\)', 'Skip & tell the agent what to do instead']
+    },
+    commands: {
+      // 本目录没有对话时 --continue 会直接退出，实际命令由 cursorStartCommand 按目录决定
+      start: 'cursor-agent --continue',
+      quit: '/quit'
+    },
+    builtin: true,
+    enabled: true,
+    createdAt: '2026-10-03T00:00:00.000Z'
+  },
   kiro: {
     // 文案均为 kiro-cli 2.26.0 实测，判读逻辑见 server/services/kiroCli.js
     id: 'kiro',

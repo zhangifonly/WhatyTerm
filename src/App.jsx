@@ -5304,6 +5304,7 @@ function CreateSessionModal({ onClose, onCreate }) {
               <option value="grok">Grok</option>
               <option value="kiro">Kiro</option>
               <option value="opencode">OpenCode</option>
+              <option value="cursor">Cursor</option>
             </select>
           </div>
           <div className="form-group">

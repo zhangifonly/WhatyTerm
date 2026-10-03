@@ -17,6 +17,7 @@ import { CodexExecTextClient, codexTextCwd } from './CodexExecText.js';
 import { GrokSingleTextClient, GROK_CWD_PREFIX } from './GrokSingleText.js';
 import { KIRO_START, detectKiroState, looksLikeKiro } from './kiroCli.js';
 import { detectOpencodeState, looksLikeOpencode } from './opencodeCli.js';
+import { detectCursorState, looksLikeCursor } from './cursorCli.js';
 import { hasPendingQuestion } from './pendingQuestion.js';
 import { promptPendingText, isOwnPendingInput, stripPromptSuggestion } from './promptState.js';
 import { isLiveConfirmMenu, hasNearbyConfirmMenu, isCodexLiveConfirm } from './liveMenu.js';
@@ -72,6 +73,7 @@ function getCliCommand(aiType) {
     'gemini': 'gemini',
     'droid': 'droid',
     'opencode': 'opencode -c',
+    'cursor': 'cursor-agent --continue',
     'grok': 'grok -c',
     'kiro': KIRO_START
   };
@@ -90,6 +92,7 @@ function getCliName(aiType) {
     'gemini': 'Google Gemini',
     'droid': 'Droid AI',
     'opencode': 'OpenCode',
+    'cursor': 'Cursor CLI',
     'grok': 'Grok (xAI)',
     'kiro': 'Kiro (AWS)'
   };
@@ -240,8 +243,8 @@ export function hasRunningTimer(text) {
  */
 export function isCliBusy(tailText) {
   // Kiro 运行时输入框位置是「›  Kiro is working · 1s · Type to steer」，没有计时器括号也没有 esc to interrupt；
-  // OpenCode 运行时底栏是「esc interrupt」（没有 to）
-  return hasRunningTimer(tailText) || /esc to interrupt|esc interrupt|Kiro is working/i.test(tailText);
+  // OpenCode 运行时底栏是「esc interrupt」（没有 to）；Cursor CLI 运行时输入行右侧是「ctrl+c to stop」
+  return hasRunningTimer(tailText) || /esc to interrupt|esc interrupt|Kiro is working|ctrl\+c to stop/i.test(tailText);
 }
 
 /**
@@ -1905,6 +1908,8 @@ ${historyText || '(空)'}
 
     // OpenCode：底栏「ctrl+p commands」+ 版本/「tab agents」/「esc interrupt」，或它的确认框措辞（见 opencodeCli.js）
     if (looksLikeOpencode(terminalContent.slice(-8000))) return 'opencode';
+    // Cursor CLI：输入行「→ Add a follow-up / → Plan, search, build anything」、确认框「Run (once) (y)」或信任目录框（见 cursorCli.js）
+    if (looksLikeCursor(terminalContent.slice(-8000))) return 'cursor';
 
     // Kiro CLI（AWS）：顶栏「agent · 模型 · ◔ N%」+ 输入框/运行条，或它独有的确认框措辞（见 kiroCli.js）
     if (looksLikeKiro(terminalContent.slice(-8000))) return 'kiro';
@@ -2236,6 +2241,32 @@ ${historyText || '(空)'}
       if (k?.state === 'idle') {
         console.log('[AIEngine] 检测到 Kiro 空闲（输入框就绪），自动发送继续');
         return { ...base, currentState: 'Kiro 空闲', recentAction: '等待输入', needsAction: true, actionType: 'text_input',
+          suggestedAction: '继续', actionReason: '空闲状态，自动继续开发' };
+      }
+    }
+
+    // === 高优先级：Cursor CLI 状态判读（同 Kiro，必须在插件分析之前）===
+    // 确认框按 y = 只放行这一次（实测 allowlist 不变）。不按回车：光标若被移到「Add … to allowlist」「Run Everything」
+    // 上，回车就成了永久放开；y 不管光标在哪都只放行一次。信任目录框不替人点：信不信任这个目录是人的决定
+    if (aiType === 'cursor') {
+      const c = detectCursorState(terminalContent.slice(-12000));
+      const base = { workingDir: '未显示', suggestion: null, updatedAt: new Date().toISOString(), preAnalyzed: true, detectedCLI, ...pluginInfo };
+      const idleNoop = (state, reason) => ({ ...base, currentState: state, recentAction: '等待输入', needsAction: false, actionType: 'none', suggestedAction: null, actionReason: reason });
+      if (c?.state === 'trust') return idleNoop('Cursor 询问是否信任此目录', '信不信任这个目录要你来定（按 a 信任，q 退出）');
+      if (c?.state === 'confirm') {
+        console.log('[AIEngine] 检测到 Cursor 确认框，按 y 放行这一次');
+        return { ...base, currentState: 'Cursor 确认界面', recentAction: '等待确认', needsAction: true,
+          actionType: 'single_char', suggestedAction: 'y', actionReason: '命令需要确认，放行这一次（不加入 allowlist、不选 Run Everything）' };
+      }
+      if (c?.state === 'running') {
+        return { ...base, currentState: '程序运行中', recentAction: '执行中', needsAction: false, actionType: 'none',
+          suggestedAction: null, actionReason: 'Cursor 正在工作，不应打断' };
+      }
+      if (c?.state === 'idle' && c.pending) return idleNoop('Cursor 输入框里有未发出的文字', '有人打了字还没发，发「继续」会接在后面一起发出去');
+      if (c?.state === 'idle' && c.fresh) return idleNoop('Cursor 新对话', '还没有对话，等你输入任务');
+      if (c?.state === 'idle') {
+        console.log('[AIEngine] 检测到 Cursor 空闲（输入框就绪），自动发送继续');
+        return { ...base, currentState: 'Cursor 空闲', recentAction: '等待输入', needsAction: true, actionType: 'text_input',
           suggestedAction: '继续', actionReason: '空闲状态，自动继续开发' };
       }
     }

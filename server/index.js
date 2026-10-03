@@ -222,6 +222,7 @@ import sleepPrevention from './services/SleepPreventionService.js';
 import { protectedPids } from './services/orphanGuard.js';
 import { providerFieldOf } from './services/cliProviderField.js';
 import { kiroProviderInfo } from './services/kiroCli.js';
+import { cursorProviderInfo, cursorStartCommand } from './services/cursorCli.js';
 import { buildOpencodeConfig, sessionOpencodeConfig, sessionOpencodeMeta, opencodeProviderInfo, opencodeStartCommand, verifyOpencodeConfig } from './services/opencodeCli.js';
 import { mergeModelAliases } from './services/usage/usageSplit.js';
 import lidSleepGuard from './services/LidSleepGuard.js';
@@ -1502,6 +1503,10 @@ function sendTextWithLanding(session, text, onLanded = null) {
   if (/^codex(\s|$)/.test(String(text).trim()) && session.aiType === 'codex') {
     text = codexStartCommand(session, { resume: /\bresume\b/.test(text) });
   }
+  // Cursor：本目录没有对话时 `--continue` 会直接退出（「No previous chats found.」），按目录换成能起来的命令
+  if (/^cursor-agent(\s|$)/.test(String(text).trim()) && session.aiType === 'cursor') {
+    text = cursorStartCommand(session.workingDir);
+  }
   // OpenCode 同理：带上本会话的 OPENCODE_CONFIG（重启出来的进程才用得上给本会话选的供应商）
   if (/^opencode(\s|$)/.test(String(text).trim()) && session.aiType === 'opencode') {
     text = opencodeStartCommand(session, { resume: /\s-c\b/.test(` ${text}`) });
@@ -2112,6 +2117,9 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
       // OpenCode 的会话级供应商写在会话专属配置里（applySessionProviderInfo），按 tmux 会话名找回是哪个会话
       const owner = tmuxSessionName ? sessionManager?.listSessions().find((s) => s.tmuxSessionName === tmuxSessionName) : null;
       return resolve(opencodeProviderInfo(owner));
+    } else if (appType === 'cursor') {
+      // Cursor CLI 只能用 Cursor 自家账号（订阅计费），不走 CC Switch。账号取自 `cursor-agent status`（见 cursorCli.js）
+      return resolve(await cursorProviderInfo());
     } else if (appType === 'kiro') {
       // Kiro 只能用自家账号（Google / GitHub / Builder ID / IAM Identity Center，后端 Bedrock），不走 CC Switch。
       // 账号取自 `kiro-cli whoami`（缓存 10 分钟），模型取本目录最近一段对话的记录（见 kiroCli.js）
@@ -7722,6 +7730,10 @@ io.on('connection', (socket) => {
             session.write(`${opencodeStartCommand(session)}\r`);
             return;
           }
+          if (session.aiType === 'cursor') {
+            session.write(`${cursorStartCommand(session.workingDir)}\r`);
+            return;
+          }
           if (data.resumeCommand) {
             session.write(`${data.resumeCommand}\r`);
           }
@@ -7745,7 +7757,7 @@ io.on('connection', (socket) => {
       socket.emit('recentProjects:list', projects);
     } catch (error) {
       console.error('[RecentProjects] 获取失败:', error);
-      socket.emit('recentProjects:list', { claude: [], codex: [], gemini: [], grok: [], kiro: [], opencode: [] });
+      socket.emit('recentProjects:list', { claude: [], codex: [], gemini: [], grok: [], kiro: [], opencode: [], cursor: [] });
     }
   });
 

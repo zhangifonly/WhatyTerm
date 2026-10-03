@@ -268,6 +268,14 @@ test('带色码菜单按键后仍挂着，照样记 no_effect（别把真卡住�
     const r = verify(fx('opencode-confirm.ansi.txt'), fx('opencode-running.txt'), { actionType: 'select', action: '1', hadConfirmMenu: true });
     eq(r.outcome, 'advanced');
   });
+  test('Cursor 确认框认得出是菜单；按 y 后菜单消失记 advanced', () => {
+    const entry = ledger.record(fakeSession([fx('cursor-confirm.txt')]), { state: 'Cursor 确认界面', actionType: 'single_char', action: 'y',
+      beforeScreen: fx('cursor-confirm.txt') });
+    clearTimeout(ledger.pending.get(entry.id)); ledger.pending.delete(entry.id);
+    eq(entry.hadConfirmMenu, true, '确认框');
+    const r = verify(fx('cursor-confirm.txt'), fx('cursor-running.txt'), { actionType: 'single_char', action: 'y', hadConfirmMenu: true });
+    eq(r.outcome, 'advanced');
+  });
 }
 
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);

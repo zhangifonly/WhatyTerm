@@ -46,9 +46,9 @@ function hash(screen) {
 
 // CLI 确实动起来了的证据（比「屏幕变了」更强的成功信号）
 // OpenCode 运行时底栏是「esc interrupt」（没有 to），Kiro 是「Kiro is working」（两者都是实测文案）
-const RUNNING = /esc to interrupt|esc interrupt|Kiro is working|正在|Running \d+ Task|\bthinking\b/i;
-// OpenCode / Kiro 的确认框（文案见 opencodeCli.js、kiroCli.js）：不认它们，按回车放行后菜单消失也算不上 menuGone
-const OTHER_CLI_CONFIRM = /Permission required[\s\S]{0,1500}Allow once\s+Allow always\s+Reject|requires approval[\s\S]{0,800}Yes, single permission/;
+const RUNNING = /esc to interrupt|esc interrupt|Kiro is working|ctrl\+c to stop|正在|Running \d+ Task|\bthinking\b/i;
+// OpenCode / Kiro / Cursor 的确认框（文案见 opencodeCli.js、kiroCli.js、cursorCli.js）：不认它们，按回车放行后菜单消失也算不上 menuGone
+const OTHER_CLI_CONFIRM = /Permission required[\s\S]{0,1500}Allow once\s+Allow always\s+Reject|requires approval[\s\S]{0,800}Yes, single permission|\(once\) \(y\)[\s\S]{0,600}Skip & tell the agent what to do instead/;
 const INTERRUPTED = /Interrupted\s*[·•]\s*What should Claude do instead/i;
 // v1.2.89 起与 AIEngine 的 Codex 验活闸共用一份定义（liveMenu.js），防止两处漂移
 import { CONFIRM_MENU_NEAR as CONFIRM_MENU, isLiveConfirmMenu, isCodexLiveConfirm } from './liveMenu.js';

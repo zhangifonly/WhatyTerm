@@ -1,0 +1,45 @@
+✓ zsh 配置已加载
+zhangzhen@MacBook-Pro wtcursorprobe % cursor-agent
+
+  [33m╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮[39m
+  [33m│[39m                                                                                                                                                          [33m│[39m
+  [33m│[39m  [1m[33m⚠ [39mWorkspace Trust Required[0m                                                                                                                              [33m│[39m
+  [33m│[39m                                                                                                                                                          [33m│[39m
+  [33m│[39m  Cursor Agent can execute code and access files in this directory.                                                                                       [33m│[39m
+  [33m│[39m                                                                                                                                                          [33m│[39m
+  [33m│[39m  Do you trust the contents of this directory?                                                                                                            [33m│[39m
+  [33m│[39m                                                                                                                                                          [33m│[39m
+  [33m│[39m    [1m[36m/Users/zhangzhen/wtcursorprobe[0m                                                                                                                        [33m│[39m
+  [33m│[39m                                                                                                                                                          [33m│[39m
+  [33m│[39m                                                                                                                                                          [33m│[39m
+  [33m│[39m  [2m  [a] Trust this workspace[0m                                                                                                                              [33m│[39m
+  [33m│[39m  [2m  [q] Quit[0m                                                                                                                                              [33m│[39m
+  [33m│[39m                                                                                                                                                          [33m│[39m
+  [33m│[39m  [34m⏳ Trusting workspace...[39m                                                                                                                                [33m│[39m
+  [33m│[39m                                                                                                                                                          [33m│[39m
+  [33m╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯[39m
+
+
+  Cursor Agent
+  [2mv2026.10.01-e373342[0m
+  [2mTip: Type ? in the prompt bar to show in-app hints.[0m
+
+ [48;2;36;36;40m                                                                                                                                                              [49m
+ [48;2;36;36;40m Run the shell command: echo WTCUR_OK and tell me the output.                                                                                                 [49m
+ [48;2;36;36;40m                                                                                                                                                              [49m
+
+  I'll run that command and report the output.
+
+  $ echo WTCUR_OK [2mWaiting for approval...[0m
+
+[38;2;167;139;250m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m $  echo WTCUR_OK [2min .[0m
+
+ [1m[38;2;167;139;250mRun this command?[0m
+ [2mNot in allowlist: echo[0m
+  [38;2;167;139;250m→ [1mRun (once)[0m[38;2;167;139;250m (y)[39m
+    Add Shell(echo) to allowlist? (tab)
+    Run Everything (shift+tab)
+    Skip & tell the agent what to do instead (esc or n)
+
+

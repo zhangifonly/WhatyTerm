@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import Database from 'better-sqlite3';
 import { listKiroProjectDirs, KIRO_START } from './kiroCli.js';
 import { listOpencodeProjectDirs } from './opencodeCli.js';
+import { listCursorProjectDirs, cursorStartCommand } from './cursorCli.js';
 
 const HOME_DIR = os.homedir();
 
@@ -73,16 +74,17 @@ export class RecentProjectsService {
    * @param {number} limit - 每个 CLI 返回的最大项目数
    */
   static async getAllRecentProjects(limit = 200) {
-    const [claude, codex, gemini, grok, kiro, opencode] = await Promise.all([
+    const [claude, codex, gemini, grok, kiro, opencode, cursor] = await Promise.all([
       this.getClaudeProjects(limit),
       this.getCodexProjects(limit),
       this.getGeminiProjects(limit),
       this.getGrokProjects(limit),
       this.getKiroProjects(limit),
-      this.getOpencodeProjects(limit)
+      this.getOpencodeProjects(limit),
+      this.getCursorProjects(limit)
     ]);
 
-    return { claude, codex, gemini, grok, kiro, opencode };
+    return { claude, codex, gemini, grok, kiro, opencode, cursor };
   }
 
   /**
@@ -296,6 +298,22 @@ export class RecentProjectsService {
   }
 
   /** 获取 Kiro CLI 最近项目（来源与格式见 kiroCli.listKiroProjectDirs） */
+  /** Cursor CLI：从 ~/.cursor/chats/<目录哈希>/<对话>/meta.json 的 cwd 取（见 cursorCli.js） */
+  static async getCursorProjects(limit = 10) {
+    try {
+      return listCursorProjectDirs()
+        .filter((p) => fs.existsSync(p.path) && !isTempPath(p.path) && p.path.split(path.sep).filter(Boolean).length >= 2)
+        .slice(0, limit)
+        .map((p) => ({
+          name: path.basename(p.path), path: p.path, description: this._getProjectDescription(p.path),
+          lastUsed: p.lastUsed, aiType: 'cursor', resumeCommand: cursorStartCommand(p.path),
+        }));
+    } catch (error) {
+      console.error('[RecentProjects] 获取 Cursor 项目失败:', error);
+      return [];
+    }
+  }
+
   /** OpenCode：从 ~/.local/share/opencode/opencode.db 的 session 表按目录取（见 opencodeCli.js） */
   static async getOpencodeProjects(limit = 10) {
     try {

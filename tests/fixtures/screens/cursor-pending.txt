@@ -1,0 +1,45 @@
+  │                                                                                                                                                          │
+  │  ⏳ Trusting workspace...                                                                                                                                │
+  │                                                                                                                                                          │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+  Cursor Agent
+  v2026.10.01-e373342
+  Tip: Type ? in the prompt bar to show in-app hints.
+
+
+  Run the shell command: echo WTCUR_OK and tell me the output.
+
+
+  I'll run that command and report the output.
+
+  $ echo WTCUR_OK 1m
+    WTCUR_OK
+
+  The command printed:
+
+  WTCUR_OK
+
+
+  Create a file named hello.txt containing the word hi. Do not run shell commands.
+
+
+  I'll create hello.txt with the word hi, using the file writer only.
+
+    Edited hello.txt +1
+
+    ▎+ hi
+
+  Created hello.txt in the workspace. It contains the word hi.
+
+
+
+
+  → hello pending
+
+
+  Auto · 6.9% · 1 file edited
+  ~/wtcursorprobe · master
+
+

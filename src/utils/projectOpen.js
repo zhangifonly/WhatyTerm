@@ -38,6 +38,7 @@ export const CLI_TABS = [
   { key: 'grok', label: 'Grok' },
   { key: 'kiro', label: 'Kiro' },
   { key: 'opencode', label: 'OpenCode' },
+  { key: 'cursor', label: 'Cursor' },
 ];
 
 /** 「3 分钟前」「2 天前」 */

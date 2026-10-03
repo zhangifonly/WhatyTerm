@@ -1,0 +1,45 @@
+✓ zsh 配置已加载
+zhangzhen@MacBook-Pro wtcursorprobe % cursor-agent
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │                                                                                                                                                          │
+  │  ⚠ Workspace Trust Required                                                                                                                              │
+  │                                                                                                                                                          │
+  │  Cursor Agent can execute code and access files in this directory.                                                                                       │
+  │                                                                                                                                                          │
+  │  Do you trust the contents of this directory?                                                                                                            │
+  │                                                                                                                                                          │
+  │    /Users/zhangzhen/wtcursorprobe                                                                                                                        │
+  │                                                                                                                                                          │
+  │                                                                                                                                                          │
+  │    [a] Trust this workspace                                                                                                                              │
+  │    [q] Quit                                                                                                                                              │
+  │                                                                                                                                                          │
+  │  ⏳ Trusting workspace...                                                                                                                                │
+  │                                                                                                                                                          │
+  ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+  Cursor Agent
+  v2026.10.01-e373342
+  Tip: Type ? in the prompt bar to show in-app hints.
+
+
+  Run the shell command: echo WTCUR_OK and tell me the output.
+
+
+ ⠠⠜ Working
+    Tip: Use /plan to iterate on an implementation plan before code changes.
+
+
+  → Add a follow-up                                                                                                                             ctrl+c to stop
+
+
+  Auto
+  ~/wtcursorprobe · master
+
+
+
+
+
+
