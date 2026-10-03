@@ -4640,3 +4640,10 @@ body {
   border-radius: 6px; font-size: 12px; background: hsl(207 75% 63% / 0.14); border: 1px solid hsl(207 75% 63% / 0.35); color: hsl(var(--foreground)); }
 .page-stale-banner button { flex-shrink: 0; font-size: 12px; padding: 3px 10px; border-radius: 4px; cursor: pointer;
   background: hsl(207 75% 63% / 0.25); border: 1px solid hsl(207 75% 63% / 0.5); color: hsl(var(--foreground)); }
+/* ⌘K 搜索里的历史结果（v1.4.86）：和运行中的会话分开一节，弱一档显示 */
+.switcher-section { margin: 8px 6px 4px; padding-top: 8px; border-top: 1px solid hsl(var(--border) / 0.6);
+  font-size: 11px; color: hsl(var(--muted-foreground)); letter-spacing: 0.3px; }
+.switcher-num.history { width: auto; min-width: 0; padding: 0 6px; font-size: 10px; white-space: nowrap;
+  background: hsl(var(--muted) / 0.6); color: hsl(var(--muted-foreground)); }
+.switcher-item.history .switcher-name { color: hsl(var(--foreground) / 0.85); }
+.switcher-when { font-size: 11px; color: hsl(var(--muted-foreground) / 0.8); flex-shrink: 0; }

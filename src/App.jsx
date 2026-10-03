@@ -4,7 +4,6 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import Anser from 'anser';
-import PinyinMatch from 'pinyin-match';
 import { ToastContainer, toast } from './components/Toast';
 import { longRunAdvice } from './components/longrun/longrunAdvice.js';
 import { useTranslation } from './i18n';
@@ -29,7 +28,8 @@ import ServerStaleBanner, { PageStaleBanner } from './components/ServerStaleBann
 import SessionUsageCard from './components/SessionUsageCard.jsx';
 import TrustedDevices from './components/TrustedDevices.jsx';
 import LidSleepCard from './components/LidSleepCard.jsx';
-import { findExistingSession, creatingKeyOf, resumePayload } from './utils/projectOpen.js';
+import { findExistingSession, creatingKeyOf, resumePayload, timeAgo } from './utils/projectOpen.js';
+import { searchSwitcher, flattenProjects } from './utils/switcherSearch.js';
 import LongRunHandoverDialog from './components/longrun/LongRunHandoverDialog';
 import { taskBadge, taskLine } from './components/longrun/longrunBoard';
 import LongRunMain from './components/longrun/LongRunMain';
@@ -1482,81 +1482,57 @@ export default function App() {
   const [switcherIndex, setSwitcherIndex] = useState(0);
   const switcherInputRef = useRef(null);
 
-  // 子序列模糊匹配：输入 wtx 能命中 WebTmux。纯 includes 做不到，
-  // 而 35 个会话里靠首字母缩写定位是最省按键的方式。
-  const fuzzyScore = (text, query) => {
-    if (!query) return 0;
-    const t = String(text || '').toLowerCase();
-    const q = query.toLowerCase();
-    if (t.includes(q)) return 1000 - t.indexOf(q);   // 连续匹配优先，越靠前越高
-    let ti = 0, hits = 0, lastHit = -1, bonus = 0;
-    for (const ch of q) {
-      const found = t.indexOf(ch, ti);
-      if (found === -1) return -1;                    // 有字符匹配不上 → 不命中
-      if (lastHit >= 0 && found === lastHit + 1) bonus += 3;  // 相邻加分
-      if (found === 0 || /[^a-z0-9]/.test(t[found - 1])) bonus += 5;  // 词首加分
-      lastHit = found; ti = found + 1; hits++;
-    }
-    return hits * 2 + bonus;
-  };
+  // ⌘K 搜索：运行中的会话在前，历史项目 / 已关闭会话命中也列在后面（规则见 src/utils/switcherSearch.js）
+  const [switcherProjects, setSwitcherProjects] = useState([]);
+  const [switcherClosed, setSwitcherClosed] = useState([]);
+  const switcherFetchedAt = useRef(0);
+  const pendingRestoreRef = useRef(null);   // 从搜索里恢复的已关闭会话：恢复完自动切过去
+  useEffect(() => {
+    if (!socket) return undefined;
+    const onProjects = (data) => setSwitcherProjects(flattenProjects(data));
+    const onClosed = (list) => setSwitcherClosed(Array.isArray(list) ? list : []);
+    const onRestored = (session) => {
+      if (session?.id && pendingRestoreRef.current) { pendingRestoreRef.current = null; attachSession(session.id); }
+    };
+    socket.on('recentProjects:list', onProjects);
+    socket.on('closedSessions:list', onClosed);
+    socket.on('closedSessions:updated', onClosed);
+    socket.on('session:restored', onRestored);
+    return () => {
+      socket.off('recentProjects:list', onProjects);
+      socket.off('closedSessions:list', onClosed);
+      socket.off('closedSessions:updated', onClosed);
+      socket.off('session:restored', onRestored);
+    };
+  }, [socket, attachSession]);
 
-  // 拼音匹配：中文首字母 / 全拼 / 中英混排都支持（sxzm → 数学之美，kjkk → 可监可控）。
-  //
-  // 为什么必须有：实测 35 个会话**名字全是英文**，但**目标和项目说明全含中文**
-  //（「WhatyMind 心镜」「星鉴 StellarForge」「可监可控」「AI 论文写作助手」）——
-  // 那才是脑子里记住一个会话的方式，而上面的子序列匹配对汉字完全无能
-  //（汉字进不了 a-z 的字符流）。
-  // 选 pinyin-match 而非 pinyin-pro：实测同一批真实数据，pinyin-pro 误命中明显更多
-  //（`xj` 命中 4 条、`daili` 把「心镜」也算上），且体积 1.1M vs 524K。
-  // 注意它**不做英文子序列**（`wtx` 匹配不到 WebTmux），所以两套匹配并存：
-  // 子序列管英文缩写，pinyin-match 管中文。
-  const pinyinHit = (text, query) => {
-    if (!text || !query) return false;
-    // 目标不含汉字时直接跳过——省掉整批英文文本的拼音解析开销
-    if (!/[一-龥]/.test(text)) return false;
-    try { return !!PinyinMatch.match(text, query); } catch { return false; }
-  };
+  const switcherResults = useMemo(() => searchSwitcher({
+    query: switcherQuery, sessions, orderedSessions, sessionNumbers,
+    projects: switcherProjects, closed: switcherClosed,
+  }), [switcherQuery, orderedSessions, sessions, sessionNumbers, switcherProjects, switcherClosed]);
 
-  const switcherResults = useMemo(() => {
-    const q = switcherQuery.trim();
-    if (!q) return orderedSessions;
-    // 纯数字直接按门牌号命中，输 "12" 就到 12 号
-    if (/^\d+$/.test(q)) {
-      const hit = sessions.filter(s => String(sessionNumbers[s.id]) === q);
-      if (hit.length) return hit;
-    }
-    return sessions
-      .map(s => {
-        const name = s.projectName || s.name || '';
-        const dir = s.workingDir || '';
-        // 目标和项目说明必须参与搜索：实测会话名全是英文，而中文关键词
-        //（心镜 / 星鉴 / 可监可控 / 论文写作）只存在于 goal 和 projectDesc 里，
-        // 不搜它们等于拼音功能没有可匹配的文本。截断到 120 字避免长说明拖慢匹配。
-        const goal = String(s.goal || '').slice(0, 120);
-        const desc = String(s.projectDesc || '').slice(0, 120);
-        // 英文子序列：名字 > 目录（目录命中降权，重名会话靠它区分）
-        let best = Math.max(
-          fuzzyScore(name, q),
-          fuzzyScore(s.name || '', q),
-          fuzzyScore(dir, q) - 200,
-        );
-        // 拼音：命中即给一个明确高于"弱子序列"但低于"名字连续命中"的分。
-        // 名字命中优先于目标/说明命中——前者更准，后者是兜底。
-        if (pinyinHit(name, q)) best = Math.max(best, 900);
-        if (pinyinHit(goal, q)) best = Math.max(best, 700);
-        if (pinyinHit(desc, q)) best = Math.max(best, 650);
-        // 中文直接输入（不转拼音）也要能搜到目标/说明里的词
-        const ql = q.toLowerCase();
-        if (goal.toLowerCase().includes(ql)) best = Math.max(best, 720);
-        if (desc.toLowerCase().includes(ql)) best = Math.max(best, 670);
-        return { s, score: best };
-      })
-      .filter(x => x.score > -1)
-      .sort((a, b) => b.score - a.score || (sessionNumbers[a.s.id] || 0) - (sessionNumbers[b.s.id] || 0))
-      .map(x => x.s);
-  }, [switcherQuery, orderedSessions, sessions, sessionNumbers]);
+  /** 打开搜索结果里的一条：运行中的切过去；历史项目建会话并续接；已关闭会话恢复 */
+  // 键盘上下移到历史那一节时，列表超出可视高度，选中项要跟着滚进来
+  useEffect(() => {
+    if (!switcherOpen) return;
+    document.querySelector('.switcher-list .switcher-item.active')?.scrollIntoView({ block: 'nearest' });
+  }, [switcherIndex, switcherOpen]);
+
+  const openSwitcherItem = (item) => {
+    if (!item) return;
+    if (item.kind === 'session') attachSession(item.s.id);
+    else if (item.kind === 'project') handleOpenRecentProject(item.p);
+    else if (item.kind === 'closed') { pendingRestoreRef.current = item.c.id; socket?.emit('session:restore', item.c.id); }
+    setSwitcherOpen(false);
+  };
 
   const openSwitcher = useCallback(() => {
+    // 历史项目扫一次约 30~50ms，一分钟内重复打开不再拉
+    if (socket && Date.now() - switcherFetchedAt.current > 60000) {
+      switcherFetchedAt.current = Date.now();
+      socket.emit('recentProjects:get');
+      socket.emit('closedSessions:get');
+    }
     setSwitcherQuery('');
     setSwitcherIndex(0);
     setSwitcherOpen(true);
@@ -3381,7 +3357,7 @@ export default function App() {
             <input
               ref={switcherInputRef}
               className="switcher-input"
-              placeholder="搜会话名 / 项目目录，或直接输门牌号…"
+              placeholder="搜会话名 / 项目目录 / 中文拼音，或直接输门牌号（历史项目也能搜到）…"
               value={switcherQuery}
               onChange={(e) => { setSwitcherQuery(e.target.value); setSwitcherIndex(0); }}
               onKeyDown={(e) => {
@@ -3394,21 +3370,50 @@ export default function App() {
                   setSwitcherIndex(i => Math.max(i - 1, 0));
                 } else if (e.key === 'Enter') {
                   e.preventDefault();
-                  const target = switcherResults[switcherIndex];
-                  if (target) { attachSession(target.id); setSwitcherOpen(false); }
+                  openSwitcherItem(switcherResults[switcherIndex]);
                 }
               }}
             />
             <div className="switcher-list">
               {switcherResults.length === 0 && (
-                <div className="switcher-empty">没有匹配的会话</div>
+                <div className="switcher-empty">没有匹配的会话或历史项目</div>
               )}
-              {switcherResults.slice(0, 12).map((s, i) => (
+              {switcherResults.map((item, i) => {
+                const firstHistory = item.kind !== 'session' && (i === 0 || switcherResults[i - 1].kind === 'session');
+                if (item.kind !== 'session') {
+                  const h = item.kind === 'project'
+                    ? { key: `p:${item.p.aiType}:${item.p.path}`, name: item.p.name, dir: item.p.path, type: item.p.aiType || 'claude', sub: item.p.description, at: item.p.lastUsed, tag: '历史项目', action: '新建会话并续接上次对话' }
+                    : { key: `c:${item.c.id}`, name: item.c.projectName || item.c.name, dir: item.c.workDir || item.c.workingDir || '', type: item.c.aiType || 'claude', sub: item.c.goal || item.c.projectDesc, at: item.c.closedAt, tag: '已关闭', action: '恢复这个会话' };
+                  return (
+                    <React.Fragment key={h.key}>
+                      {firstHistory && <div className="switcher-section">历史 · 没在运行，回车打开</div>}
+                      <div
+                        className={`switcher-item history ${i === switcherIndex ? 'active' : ''}`}
+                        onMouseEnter={() => setSwitcherIndex(i)}
+                        onClick={() => openSwitcherItem(item)}
+                        title={h.action}
+                      >
+                        <span className="switcher-num history">{h.tag}</span>
+                        <div className="switcher-main">
+                          <div className="switcher-line1">
+                            <span className="switcher-name">{h.name}</span>
+                            <span className="switcher-dir">{h.dir.split('/').slice(-2).join('/')}</span>
+                            {h.at ? <span className="switcher-when">{timeAgo(h.at)}</span> : null}
+                            <span className="switcher-type">{h.type}</span>
+                          </div>
+                          {h.sub && <div className="switcher-sub" title={h.sub}>{String(h.sub).replace(/\s+/g, ' ').slice(0, 60)}</div>}
+                        </div>
+                      </div>
+                    </React.Fragment>
+                  );
+                }
+                const s = item.s;
+                return (
                 <div
                   key={s.id}
                   className={`switcher-item ${i === switcherIndex ? 'active' : ''}`}
                   onMouseEnter={() => setSwitcherIndex(i)}
-                  onClick={() => { attachSession(s.id); setSwitcherOpen(false); }}
+                  onClick={() => openSwitcherItem(item)}
                 >
                   <span className="switcher-num">{sessionNumbers[s.id]}</span>
                   {hotkeySlots[s.id] && <span className="session-hotkey">⌘{hotkeySlots[s.id]}</span>}
@@ -3438,7 +3443,8 @@ export default function App() {
                     })()}
                   </div>
                 </div>
-              ))}
+                              );
+              })}
             </div>
             <div className="switcher-hint">
               ↑↓ 选择 · Enter 进入 · Esc 关闭 · ⌘1~⌘9 直达前九个 · ⌘↓ 跳下一个待确认

@@ -237,13 +237,17 @@ test('拼音：空值不抛错', () => {
   assert(pinyinHit('数学之美', '') === false);
   assert(pinyinHit(null, 'sx') === false);
 });
-test('搜索范围包含 goal 和 projectDesc（否则拼音没有可匹配文本）', () => {
-  const i = APP.indexOf('const switcherResults');
-  assert(i > 0, '找不到搜索逻辑');
-  const block = APP.slice(i, i + 2200);
-  assert(/s\.goal/.test(block), '搜索未覆盖 goal —— 中文关键词都在那里');
-  assert(/s\.projectDesc/.test(block), '搜索未覆盖 projectDesc');
-  assert(/pinyinHit/.test(block), '搜索未接入拼音匹配');
+test('搜索范围包含 goal 和 projectDesc（否则拼音没有可匹配文本）', async () => {
+  // v1.4.86 起搜索逻辑在 src/utils/switcherSearch.js：直接跑真实搜索，不再在 App.jsx 里找字面量
+  const { searchSwitcher } = await import('../src/utils/switcherSearch.js');
+  const sessions = [
+    { id: 'g', name: 'WhatyMind', goal: 'WhatyMind 心镜：情绪觉察' },
+    { id: 'd', name: 'StellarForge', projectDesc: '星鉴 StellarForge 天文数据平台' },
+  ];
+  const hit = (q) => searchSwitcher({ query: q, sessions }).map((x) => x.s.id);
+  assert(hit('xj').includes('g'), '搜不到 goal 里的中文（xj → 心镜）');
+  assert(hit('星鉴').includes('d'), '搜不到 projectDesc 里的中文');
+  assert(/from '\.\/utils\/switcherSearch\.js'/.test(APP), 'App.jsx 没接入共享搜索');
 });
 test('依赖已锁确切版本（pinyin-match，非 pinyin-pro）', () => {
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
