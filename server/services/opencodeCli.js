@@ -138,7 +138,9 @@ export const MODEL_PREFERENCE = [/^claude-opus-5-5$/, /^claude-opus-5\.5$/, /^cl
  * @returns {{ok:true, config:object, model:string}|{ok:false, error:string}}
  */
 export function buildOpencodeConfig({ name, env = {}, models = [] }) {
-  const baseUrl = String(env.ANTHROPIC_BASE_URL || '').trim().replace(/\/+$/, '');
+  // 地址可能已带接口路径：AIEngine 解析出的是完整的 …/v1/messages（长程从它取），CC Switch 里也有人填 …/v1。
+  // 下面统一再拼 /v1，不先剥掉就成了 /v1/messages/v1/messages（2026-10-03 长程 E2E 实测 404）
+  const baseUrl = String(env.ANTHROPIC_BASE_URL || '').trim().replace(/\/+$/, '').replace(/\/v1(\/messages)?$/i, '');
   const token = env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY || '';
   if (!baseUrl) return { ok: false, error: 'OpenCode 不能用 Claude 官方登录，请选一个第三方供应商' };
   if (!token) return { ok: false, error: 'CC Switch 里这个供应商没有密钥' };

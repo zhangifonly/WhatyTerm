@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { executorUi } from './longrunExecutors.js';
 
 /**
  * 执行者模型选择。
@@ -25,6 +26,7 @@ const LongRunModelPicker = ({ lr, providerId, executor = 'claude', value, onChan
   // 换执行者也要重查：Cursor 的清单来自 Cursor 账号，与 CC Switch 供应商无关
   useEffect(() => { load(false); }, [providerId, executor]);   // eslint-disable-line react-hooks/exhaustive-deps
 
+  const ui = executorUi(executor);
   const models = state.models || [];
   const showSelect = !manual && state.ok && models.length > 0;
   // 供应商配置里写死的模型可能不在清单里（中转站列表未必完整），补进去免得被"纠正"掉
@@ -35,14 +37,14 @@ const LongRunModelPicker = ({ lr, providerId, executor = 'claude', value, onChan
     <div className="form-group">
       <label>
         执行者模型
-        {showSelect && <span className="lr-dim"> · {executor === 'cursor' ? 'Cursor 账号可用' : '当前供应商支持'} {models.length} 个</span>}
+        {showSelect && <span className="lr-dim"> · {ui.modelsFrom} {models.length} 个</span>}
       </label>
 
-      {state.loading && <div className="lr-dim">{executor === 'cursor' ? '正在查 Cursor 账号可用的模型…' : '正在查当前供应商支持的模型…'}</div>}
+      {state.loading && <div className="lr-dim">正在查{ui.modelsFrom}的模型…</div>}
 
       {!state.loading && showSelect && (
         <select className="lr-select" value={value} onChange={(e) => onChange(e.target.value)}>
-          <option value="">{executor === 'cursor' ? '留空 = Cursor 默认（Auto）' : `留空 = 用供应商默认${state.configured ? `（${state.configured}）` : ''}`}</option>
+          <option value="">{ui.defaultModel ? `留空 = 默认（${ui.defaultModel}）` : `留空 = 用供应商默认${state.configured ? `（${state.configured}）` : ''}`}</option>
           {options.map((m) => <option key={m} value={m}>{m}</option>)}
         </select>
       )}

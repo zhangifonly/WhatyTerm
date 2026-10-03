@@ -1,8 +1,7 @@
 /**
  * 长程编排：Cursor CLI 执行者 —— 单次 `cursor-agent -p` 调用的生命周期管理。
  *
- * 与 LongRunRunner（claude -p）同一套接口：run(prompt, sessionId, resume) → 同形状的结果；loop、监督者、看板都不用改。
- * 判定纯函数（watchdogDecide 等）直接复用；只有「起什么进程、怎么读事件」是 Cursor 自己的。
+ * 起进程、看门狗、插话、收尾都在公共骨架 LongRunCliRunner 里；这里只有 Cursor 的参数与事件格式。
  *
  * 事件流（2026-10-03 用 cursor-agent 2026.10.01 实抓，`--output-format stream-json`）：
  *   system/init      {session_id, model, cwd}            —— 新对话的 id 只能从这里拿（也可先 create-chat）
@@ -18,11 +17,9 @@
  *   · 权限：-p 模式下没有人能点确认，用 --force（与 Claude 执行者放行 Bash 同一档）；--trust 跳过目录信任框
  */
 
-import { spawn, execFile } from 'child_process';
-import { mkdirSync, openSync, writeSync, closeSync } from 'fs';
-import path from 'path';
-import { adoptProcessGroup, killProcessGroup } from './LongRunJobGuard.js';
-import { ExitReason, watchdogDecide, clip, toolBrief, fmtToolInput, looksLikeQuestion, WALL_TIMEOUT, WATCHDOG_INTERVAL } from './LongRunRunner.js';
+import { execFile } from 'child_process';
+import { clip, toolBrief, fmtToolInput } from './LongRunRunner.js';
+import { LongRunCliRunner } from './LongRunCliRunner.js';
 
 export const CURSOR_BIN = 'cursor-agent';
 
@@ -106,167 +103,24 @@ export function listCursorModels() {
   });
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-/** 启动并监管一次 cursor-agent -p 调用。构造参数与 LongRunRunner 相同，Claude 专有的（settingsFile、allowedTools…）忽略 */
-export class LongRunCursorRunner {
-  constructor(o = {}) {
-    this.cwd = o.cwd;
-    this.env = o.env || process.env;
-    this.model = o.model || '';
-    this.extraDirs = o.extraDirs || [];
-    this.wallTimeout = o.wallTimeout ?? WALL_TIMEOUT;
-    this.eventsDir = o.eventsDir || null;
-    this.onStream = o.onStream || null;
-    this.checkInject = o.checkInject || null;
-    this.bin = o.cursorBin || CURSOR_BIN;
-    this.watchdogInterval = o.watchdogInterval ?? WATCHDOG_INTERVAL;
-    this.silence = o.silence || undefined;
+/** 一次 cursor-agent -p 调用 */
+export class LongRunCursorRunner extends LongRunCliRunner {
+  get bin() { return this.opts.cursorBin || CURSOR_BIN; }
+  get executor() { return 'cursor'; }
+  args({ prompt, sessionId, resume }) {
+    return buildCursorArgs({ prompt, sessionId, resume, model: this.model, extraDirs: this.extraDirs });
   }
-
-  _emit(kind, data = {}) {
-    if (!this.onStream) return;
-    try { this.onStream({ kind, ...data }); } catch { /* 监控挂了不影响任务 */ }
+  handle(ev, state, emit) {
+    handleCursorEvent(ev, state, emit);
+    if (!state.result) return;
+    state.done = true;
+    const u = state.result.usage || {};
+    state.usage = { input: Number(u.inputTokens) || 0, output: Number(u.outputTokens) || 0,
+      cacheRead: Number(u.cacheReadTokens) || 0, cacheWrite: Number(u.cacheWriteTokens) || 0 };
   }
-
-  async _terminate(proc) {
-    if (proc.exitCode !== null || proc.signalCode) return;
-    killProcessGroup(proc, 'SIGTERM');
-    for (let i = 0; i < 100 && proc.exitCode === null && !proc.signalCode; i++) await sleep(100);
-    if (proc.exitCode === null && !proc.signalCode) killProcessGroup(proc, 'SIGKILL');
-  }
-
-  /**
-   * 人工插话：没有 stdin 控制通道，只能结束本发、下一发 --resume 把话发进去。
-   * 只在工具间隙动手（立即模式除外）：工具跑到一半被杀，磁盘状态可能半截
-   */
-  _maybeInject(state) {
-    if (!this.checkInject || state.injectText) return false;
-    let pending = state.injectPending;
-    if (!pending) { try { pending = this.checkInject(); } catch { return false; } }
-    if (!pending) return false;
-    const [text, immediate] = pending;
-    if (state.toolInFlight && !immediate) {
-      if (!state.injectWaiting) { state.injectWaiting = true; this._emit('inject.waiting', { text: clip(text, 500) }); }
-      state.injectPending = pending;
-      return false;
-    }
-    state.injectPending = null;
-    state.injectText = text;
-    state.killReason = ExitReason.INTERRUPTED_BY_HUMAN;
-    this._emit('inject.sent', { text: clip(text, 500), immediate: !!immediate });
-    return true;
-  }
-
-  async run(prompt, sessionId = null, resume = false) {
-    const now = () => Date.now() / 1000;
-    const started = now();
-    const state = {
-      started, lastEvent: started, toolInFlight: null, inFlight: {}, toolNames: {}, toolCalls: 0,
-      killReason: null, finalText: '', texts: [], thinking: '', result: null, sessionId: resume ? sessionId : null,
-      model: '', sawDelta: false, injectText: '', injectWaiting: false, injectPending: null,
-      interruptSent: false, tasks: {}, taskWaitStarted: null, hangDetail: '',
-    };
-    const args = buildCursorArgs({ prompt, sessionId, resume, model: this.model, extraDirs: this.extraDirs });
-    let eventsPath = null, eventsFd = null;
-    if (this.eventsDir) {
-      mkdirSync(this.eventsDir, { recursive: true });
-      eventsPath = path.join(this.eventsDir, `cursor-${sessionId || 'new'}-${Math.floor(started)}.jsonl`);
-      eventsFd = openSync(eventsPath, 'w');
-    }
-    const proc = spawn(this.bin, args, { cwd: this.cwd, env: this.env, stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
-    adoptProcessGroup(proc);
-    this._proc = proc;
-    let stderr = '';
-    proc.stderr.on('data', (b) => { stderr = (stderr + b).slice(-20000); });
-    const emit = (k, d) => this._emit(k, d);
-
-    await new Promise((resolve) => {
-      let buf = '', stop = false;
-      const finish = () => { if (stop) return; stop = true; clearInterval(dog); resolve(); };
-      const onLine = (raw) => {
-        const line = String(raw).trim();
-        if (stop || !line) return;
-        state.lastEvent = now();
-        let ev; try { ev = JSON.parse(line); } catch { return; }
-        if (eventsFd != null) { try { writeSync(eventsFd, line + '\n'); } catch { /* 落盘失败不影响任务 */ } }
-        handleCursorEvent(ev, state, emit);
-        if (this._maybeInject(state) || state.result) finish();
-      };
-      proc.stdout.on('data', (chunk) => {
-        buf += chunk;
-        let nl;
-        while (!stop && (nl = buf.indexOf('\n')) >= 0) { const l = buf.slice(0, nl); buf = buf.slice(nl + 1); onLine(l); }
-      });
-      proc.stdout.on('end', () => { if (buf) onLine(buf); finish(); });
-      proc.on('error', (e) => { stderr += `\n${e.message}`; finish(); });
-      const dog = setInterval(() => {
-        if (proc.exitCode !== null || proc.signalCode) return;
-        // 静默期间也要能插话（模型长时间思考时没有事件进来，onLine 不会跑）
-        if (this._maybeInject(state)) { finish(); return; }
-        const d = watchdogDecide(state, now(), { wallTimeout: this.wallTimeout, taskWait: 0, silence: this.silence });
-        if (d.action !== 'kill') return;
-        state.killReason = d.reason;
-        if (d.hangDetail) state.hangDetail = d.hangDetail;
-        finish();
-      }, this.watchdogInterval * 1000);
-    });
-
-    // 收到 result 后 CLI 会自己退出；被判 kill 的整组结束
-    if (state.killReason) await this._terminate(proc);
-    for (let i = 0; i < 300 && proc.exitCode === null && !proc.signalCode; i++) await sleep(100);
-    if (proc.exitCode === null && !proc.signalCode) killProcessGroup(proc, 'SIGKILL');
-    if (eventsFd != null) { try { closeSync(eventsFd); } catch { /* 忽略 */ } }
-    return this._assemble(proc, state, started, eventsPath, stderr);
-  }
-
-  /** 面板「终止」：立刻整组杀掉 */
-  abort() {
-    const proc = this._proc;
-    if (!proc || proc.exitCode !== null || proc.signalCode) return;
-    killProcessGroup(proc, 'SIGTERM');
-    setTimeout(() => { if (proc.exitCode === null && !proc.signalCode) killProcessGroup(proc, 'SIGKILL'); }, 3000).unref();
-  }
-
-  /** 组装成与 LongRunRunner 同形状的结果 */
-  _assemble(proc, state, started, eventsPath, stderr) {
+  outcome(state) {
     const ev = state.result;
-    let reason = state.killReason;
-    if (reason == null) {
-      if (!ev) reason = ExitReason.ERROR;
-      else if (ev.is_error || ev.subtype === 'error') reason = ExitReason.ERROR;
-      else if (isCursorEmpty(state)) reason = ExitReason.EMPTY_RESULT;
-      else reason = ExitReason.COMPLETED;
-    }
-    const u = ev?.usage || {};
-    const errText = reason === ExitReason.ERROR
-      ? (String(ev?.is_error ? ev.result || '' : '').trim() || stderr.trim() || `cursor-agent 退出码 ${proc.exitCode}，没有返回结果`).slice(-2000)
-      : (reason === ExitReason.HANG_KILLED ? state.hangDetail : '');
-    const out = {
-      sessionId: state.sessionId || '',
-      exitReason: reason,
-      exitCode: proc.exitCode,
-      // 拿不到逐次调用的水位（见文件头），记 0：loop 不会因水位交接
-      contextPeak: 0,
-      totalTokens: (Number(u.inputTokens) || 0) + (Number(u.outputTokens) || 0) + (Number(u.cacheReadTokens) || 0),
-      usage: { input: Number(u.inputTokens) || 0, output: Number(u.outputTokens) || 0, cacheRead: Number(u.cacheReadTokens) || 0, cacheWrite: Number(u.cacheWriteTokens) || 0 },
-      // 订阅计费：不按美元记账
-      costUsd: 0,
-      costEstimate: 0,
-      injectText: state.injectText || '',
-      pendingTasks: [],
-      numTurns: state.toolCalls,
-      stopReason: null,
-      terminalReason: ev?.subtype || null,
-      permissionDenials: [],
-      finalText: state.finalText,
-      eventsPath,
-      durationS: Date.now() / 1000 - started,
-      error: errText,
-      executor: 'cursor',
-      model: state.model,
-    };
-    if (out.exitReason === ExitReason.COMPLETED && looksLikeQuestion(out)) out.exitReason = ExitReason.ASKED_HUMAN;
-    return out;
+    const error = ev && (ev.is_error || ev.subtype === 'error') ? String(ev.result || ev.error || '').trim() || 'Cursor 返回错误但没有正文' : '';
+    return { error, empty: !!ev && isCursorEmpty(state), terminalReason: ev?.subtype || null };
   }
 }

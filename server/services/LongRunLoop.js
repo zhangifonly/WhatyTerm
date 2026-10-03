@@ -402,8 +402,12 @@ export class LongRunLoop {
     this._lastResult = result;
 
     const est = result.costUsd ? '' : '（估算）';
+    // 不按美元计费的执行者：Cursor 订阅、Kiro credits。写美元 0 会让人以为没花钱，按它们自己的口径写
+    const money = result.executor === 'cursor' ? '订阅计费'
+      : result.executor === 'kiro' ? (result.creditsUnknown ? 'credits 未知（这发被中途结束，Kiro 没记下）' : `${result.credits || 0} credits`)
+        : `$${billed.toFixed(4)}${est}`;
     this.log(`    ${result.exitReason} · 水位 ${result.contextPeak.toLocaleString('en-US')} · `
-      + `${result.durationS.toFixed(0)}s · $${billed.toFixed(4)}${est}`);
+      + `${result.durationS.toFixed(0)}s · ${money}`);
     // 每发就把错误正文落进 loop.log。原先只记 exitReason，实测四发全 error 的日志里
     // 只有四行 `error`，真因（503 无可用渠道）只存在于 .run/events/*.jsonl 里，
     // 而那是给人看的最后一道口 —— 提示语还让人「去看 loop.log」，看了也没有。
@@ -418,6 +422,7 @@ export class LongRunLoop {
       duration_s: Math.round(result.durationS * 10) / 10,
       cost_usd: Math.round(billed * 1e4) / 1e4,
       cost_is_estimate: !result.costUsd,
+      ...(result.credits ? { credits: result.credits } : {}),
       text: String(result.finalText || '').slice(-8000),
       session_id: result.sessionId,
       pending_tasks: result.pendingTasks || [],

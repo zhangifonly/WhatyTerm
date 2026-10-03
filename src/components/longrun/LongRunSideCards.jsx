@@ -1,6 +1,7 @@
 import React from 'react';
 import LongRunRuntimeSwitch from './LongRunRuntimeSwitch.jsx';
 import { ctxView, fmtDur } from './longrunBoard.js';
+import { executorUi } from './longrunExecutors.js';
 
 /**
  * 长程右侧面板的几块卡片，版式照搬 AI 面板（头部统计悬浮框、CLAUDE 供应商卡、上下文水位条），
@@ -10,13 +11,15 @@ import { ctxView, fmtDur } from './longrunBoard.js';
 /** 头部「N次 ⇄N $x」与悬浮明细（同 AI 面板的操作统计） */
 export const HeaderStats = ({ board, task }) => {
   const spent = board?.spent_usd || 0;
-  const byCursor = task?.options?.executor === 'cursor';   // Cursor 按订阅计费，没有美元可记
+  const ex = task?.options?.executor || 'claude';
+  const credits = task?.credits || board?.credits || 0;      // Kiro 按 credits 计费
+  const noUsd = ex === 'cursor' || ex === 'kiro';            // 这两种不记美元
   const item = (label, value, cls = '') => (
     <div className="tooltip-item"><span className="tooltip-label">{label}:</span><span className={`tooltip-value ${cls}`}>{value}</span></div>
   );
   return (
     <span className="ai-stats-wrapper">
-      <span className="ai-stats">{board?.legs || 0}次 ⇄{board?.handoffs || 0} {byCursor ? '订阅' : `$${spent.toFixed(2)}`}</span>
+      <span className="ai-stats">{board?.legs || 0}次 ⇄{board?.handoffs || 0} {ex === 'cursor' ? '订阅' : ex === 'kiro' ? `${credits.toFixed(2)} cr` : `$${spent.toFixed(2)}`}</span>
       <div className="ai-stats-tooltip">
         <div className="tooltip-title">长程统计</div>
         {item('调用执行者', `${board?.legs || 0} 次`)}
@@ -24,7 +27,7 @@ export const HeaderStats = ({ board, task }) => {
         {item('记忆维护', `${board?.maintenances || 0} 轮`)}
         {item('监督者代你作答', `${board?.decisions || 0} 次`, board?.decisions ? 'failed' : '')}
         <div className="tooltip-divider"></div>
-        {byCursor ? item('花费', 'Cursor 订阅计费，不记美元') : (
+        {noUsd ? item('花费', ex === 'kiro' ? `${credits.toFixed(4)} credits（不折算美元）` : 'Cursor 订阅计费，不记美元') : (
           <>
             {item('已结算花费', `$${spent.toFixed(4)}`)}
             {board?.running_cost > 0 && item('进行中（估算）', `约 $${board.running_cost.toFixed(2)}`)}
@@ -48,18 +51,21 @@ const ModelLine = ({ model }) => (
 export const ProviderCards = ({ provider: p, task, lr }) => {
   const sup = task?.supervisor;
   const supName = sup?.via === 'cli' ? (p?.name || 'CC Switch 当前配置') : sup?.providerName;
-  // Cursor 执行者：用 Cursor 账号（订阅），与 CC Switch 无关；运行中切换供应商/模型的入口是给 Claude 的，不显示
-  const byCursor = task?.options?.executor === 'cursor';
+  // 非 Claude 执行者：Cursor / Kiro 用自家账号，OpenCode 用开跑时选的 CC Switch 供应商（写死在它的配置里）。
+  // 运行中切换供应商/模型的入口是给 Claude 执行者的，不显示
+  const ex = task?.options?.executor || 'claude';
+  const ui = executorUi(ex);
+  const byOther = ex !== 'claude';
   return (
     <>
-      {byCursor ? (
+      {byOther ? (
         <div className="ai-status-section">
-          <h4 className="lr-prov-title">CURSOR <span className="lr-dim">执行者</span></h4>
+          <h4 className="lr-prov-title">{ui.title} <span className="lr-dim">执行者</span></h4>
           <div className="lr-prov-head">
-            <p className="lr-prov-name on">Cursor 官方</p>
-            <span className="lr-prov-tag" title="cursor-agent -p，用 Cursor 账号登录，按订阅计费，不记美元">Cursor 账号·订阅</span>
+            <p className="lr-prov-name on">{ui.account || sup?.providerName || p?.name || 'CC Switch 供应商'}</p>
+            <span className="lr-prov-tag" title={ui.note}>{ui.billing}</span>
           </div>
-          <ModelLine model={task?.options?.model || 'Auto'} />
+          <ModelLine model={task?.options?.model || ui.defaultModel || '跟随配置'} />
         </div>
       ) : (
       <div className="ai-status-section">
@@ -85,7 +91,7 @@ export const ProviderCards = ({ provider: p, task, lr }) => {
               <div className="lr-prov-head">
                 <p className="lr-prov-name on">{supName}</p>
                 <span className="lr-prov-tag" title={sup.via === 'cli' ? '经 claude CLI 调用，与执行者同一套地址、登录与代理' : '面板上明确选定的供应商，直接调 HTTP，调不通不会换别家'}>
-                  {sup.via === 'cli' ? (byCursor ? 'claude CLI' : 'claude CLI·同执行者') : 'HTTP·所选供应商'}
+                  {sup.via === 'cli' ? (byOther ? 'claude CLI' : 'claude CLI·同执行者') : 'HTTP·所选供应商'}
                 </span>
               </div>
               {sup.via === 'http' && <p className="mono lr-prov-line">{sup.baseUrl}</p>}

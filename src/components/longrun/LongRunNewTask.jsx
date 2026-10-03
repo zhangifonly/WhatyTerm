@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import LongRunAdvanced, { ADVANCED_DEFAULTS, thresholdError } from './LongRunAdvanced.jsx';
 import LongRunPlanView from './LongRunPlanView.jsx';
+import { EXECUTOR_UI, executorUi, MEMORY_NOTE } from './longrunExecutors.js';
 import LongRunModelPicker from './LongRunModelPicker.jsx';
 
 const MODE_TEXT = { start: '新建', takeover: '接管已有项目', resume: '续跑' };
@@ -169,19 +170,15 @@ const LongRunNewTask = ({ lr, preset, sessions = [], onClose, onStarted, onOpene
         <div className="form-group">
           <label>执行者（干活的 CLI）</label>
           <select className="lr-select" value={form.executor} onChange={(e) => { set({ executor: e.target.value, model: '' }); setPlan(null); }}>
-            <option value="claude">Claude Code（默认）</option>
-            <option value="cursor">Cursor CLI（Cursor 账号，订阅计费）</option>
+            {Object.entries(EXECUTOR_UI).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
           </select>
-          {form.executor === 'cursor' && (
-            <div className="lr-dim">
-              监督者仍是 Claude。Cursor 按订阅计费，预算上限对它不生效；拿不到运行中的上下文水位，不做水位交接（Cursor 自己管上下文）；
-              插话会在工具间隙结束当前这发，再接着同一段对话发进去。记忆仍在项目的 .memory/，换回 Claude 也接得上。
-            </div>
+          {form.executor !== 'claude' && (
+            <div className="lr-dim">监督者仍是 Claude。{executorUi(form.executor).note}{MEMORY_NOTE}</div>
           )}
         </div>
 
         <div className="form-group">
-          <label>监督者供应商（CC Switch）</label>
+          <label>{form.executor === 'opencode' ? '供应商（CC Switch，执行者与监督者共用）' : '监督者供应商（CC Switch）'}</label>
           <select className="lr-select" value={form.providerId} onChange={(e) => set({ providerId: e.target.value })}>
             <option value="">跟随 CC Switch 当前 Claude 配置（经 claude CLI，与执行者同一套地址、登录与代理）</option>
             {providers.map((p) => <option key={p.id} value={p.id}>{p.name}{p.isCurrent ? '（当前）' : ''}</option>)}

@@ -5,7 +5,7 @@
  *   ② 参数：续接带 --resume，提示词放最后，--force/--trust 必带
  *   ③ 真起子进程（假 cursor-agent 脚本回放样本）：正常完成、退出报错带 stderr、空返回、静默中插话
  *   ④ 提示词改写：Cursor 版没有 Auto Memory / CLAUDE.md 字样，指向 .memory/；Claude 原样
- *   ⑤ 选项：executor 只认 claude / cursor；Claude 执行者「终止」不再抛错
+ *   ⑤ 选项：executor 不认识的一律当 claude；Claude 执行者「终止」不再抛错
  */
 import fs from 'fs';
 import os from 'os';

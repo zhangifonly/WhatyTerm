@@ -1,9 +1,9 @@
 /**
- * 长程 + Cursor 执行者 E2E：真服务 + 真 cursor-agent（Cursor 订阅）+ 真监督者（claude CLI，CC Switch 当前配置，会花一点钱）。
- * 场景：新建长程项目，执行者选 Cursor，需求是一个小 JS 模块 + 测试 →
- *      自检里写明执行者是 Cursor → 开场初始化记忆库（.memory/MEMORY.md 被建出来，说明改写后的提示词它照做了）→
- *      主线干活期间插一句话 → 插话在工具间隙生效、续同一段对话发进去 → 项目做完，测试真能跑过 → 费用记 $0（订阅）。
- * 运行：node scripts/e2e-longrun-cursor.mjs
+ * 长程 + 非 Claude 执行者 E2E：真服务 + 真 CLI + 真监督者（会花一点钱 / credits）。
+ * 场景：新建长程项目，选执行者，需求是一个小 JS 模块 + 测试 →
+ *      自检里写明执行者 → 开场初始化记忆库（.memory/MEMORY.md 被建出来，说明改写后的提示词它照做了）→
+ *      主线干活期间插一句话 → 插话在工具间隙生效、续同一段对话发进去 → 项目做完，测试真能跑过 → 计费口径对。
+ * 运行：node scripts/e2e-longrun-executor.mjs cursor | kiro | opencode [CC Switch 的 Claude 供应商 id（opencode 必填）]
  */
 import fs from 'fs';
 import path from 'path';
@@ -11,7 +11,12 @@ import { execFileSync } from 'child_process';
 import { sandboxBase } from '../server/services/LongRunLaunch.js';
 
 const { io } = await import(path.resolve('node_modules/socket.io-client/build/esm-debug/index.js'));
-const NAME = 'wtlrcursore2e';
+const EXECUTOR = process.argv[2] || 'cursor';
+const PROVIDER = process.argv[3] || '';
+const LABEL = { cursor: 'Cursor CLI', kiro: 'Kiro CLI', opencode: 'OpenCode' }[EXECUTOR];
+if (!LABEL) throw new Error(`不认识的执行者：${EXECUTOR}`);
+if (EXECUTOR === 'opencode' && !PROVIDER) throw new Error('opencode 要给一个 CC Switch 的第三方 Claude 供应商 id');
+const NAME = `wtlr${EXECUTOR}e2e`;
 const ROOT = path.join(sandboxBase(), NAME);
 if (fs.existsSync(ROOT)) throw new Error(`测试目录已存在，先确认里面不是你的东西再删：${ROOT}`);
 const REQ = [
@@ -38,11 +43,11 @@ s.on('longrun:event', (ev) => {
   }
 });
 try {
-  const r = await call('longrun:start', { projectName: NAME, requirementText: REQ, mode: 'start', executor: 'cursor', maxLegs: 12, noAsk: true });
+  const r = await call('longrun:start', { projectName: NAME, requirementText: REQ, mode: 'start', executor: EXECUTOR, providerId: PROVIDER || undefined, maxLegs: 12, noAsk: true }, 120000);
   if (!r.ok) throw new Error(`启动失败：${r.error}`);
   taskId = r.task.id;
   entryId = r.task.sessionId || null;
-  ok('自检里写明执行者是 Cursor', JSON.stringify(r.task.selfCheck || []).includes('Cursor CLI'), JSON.stringify(r.task.selfCheck).slice(0, 300));
+  ok(`自检里写明执行者是 ${LABEL}`, JSON.stringify(r.task.selfCheck || []).includes(LABEL), JSON.stringify(r.task.selfCheck).slice(0, 300));
   const done = await new Promise((resolve) => {
     const t = setTimeout(() => resolve(null), 25 * 60 * 1000);
     s.on('longrun:event', (ev) => { if (ev.kind === 'finished') { clearTimeout(t); resolve(ev); } });
@@ -56,8 +61,13 @@ try {
   // Node 24 默认报告器是 spec 格式（ℹ pass 3 / ℹ fail 0），老版本是 TAP（# pass 3 / # fail 0），两种都认
   ok('交付物：node --test 真能跑过', /[#ℹ] fail 0/.test(testOut) && /[#ℹ] pass [1-9]/.test(testOut), testOut.slice(-400));
   const results = events.filter((e) => e.kind === 'result');
-  ok('每发都续同一段 Cursor 对话或按交接开新对话，费用记 $0（订阅）', results.length > 0 && results.every((e) => e.cost_usd === 0),
-    JSON.stringify(results.map((e) => [e.label, e.exit_reason, e.cost_usd])));
+  // 计费口径：Cursor 订阅不记钱；Kiro 不记美元但有 credits；OpenCode 按价格表估算美元
+  const billing = {
+    cursor: ['费用记 $0（订阅）', results.length > 0 && results.every((e) => e.cost_usd === 0)],
+    kiro: ['美元记 0、credits 如实记下', results.length > 0 && results.every((e) => e.cost_usd === 0) && results.some((e) => e.credits > 0)],
+    opencode: ['按价格表估算美元', results.some((e) => e.cost_usd > 0)],
+  }[EXECUTOR];
+  ok(billing[0], billing[1], JSON.stringify(results.map((e) => [e.label, e.exit_reason, e.cost_usd, e.credits])));
   console.log(`   共 ${results.length} 发：${results.map((e) => `${e.label}→${e.exit_reason}`).join('，')}`);
 } catch (e) {
   fail++; console.log(`❌ ${e.message}`);

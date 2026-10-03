@@ -57,6 +57,12 @@ test('④ 生成配置：按偏好挑 Claude 模型、只列 Claude 系、Bearer
   eq(r.config.model, 'ccswitch/claude-opus-5-5', '默认模型');
 });
 
+test('④ 地址已带 /v1/messages 或 /v1：不重复拼接', () => {
+  for (const u of ['https://a.example.com/v1/messages', 'https://a.example.com/v1/', 'https://a.example.com'])
+    eq(buildOpencodeConfig({ name: 'X', env: { ANTHROPIC_BASE_URL: u, ANTHROPIC_API_KEY: 'k', ANTHROPIC_MODEL: 'm' } }).config.provider.ccswitch.options.baseURL,
+      'https://a.example.com/v1', u);
+});
+
 test('④ ANTHROPIC_MODEL 优先；API_KEY 不加 Bearer；官方登录、无密钥、无模型如实报错', () => {
   const r = buildOpencodeConfig({ name: 'X', env: { ANTHROPIC_BASE_URL: 'https://a.example.com', ANTHROPIC_API_KEY: 'k', ANTHROPIC_MODEL: 'my-model' }, models: [] });
   eq([r.ok, r.model, r.config.provider.ccswitch.options.headers], [true, 'my-model', undefined], '指定模型');

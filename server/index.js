@@ -224,6 +224,7 @@ import { providerFieldOf } from './services/cliProviderField.js';
 import { kiroProviderInfo } from './services/kiroCli.js';
 import { cursorProviderInfo, cursorStartCommand } from './services/cursorCli.js';
 import { listCursorModels } from './services/LongRunCursorRunner.js';
+import { listKiroModels } from './services/LongRunKiroRunner.js';
 import { buildOpencodeConfig, sessionOpencodeConfig, sessionOpencodeMeta, opencodeProviderInfo, opencodeStartCommand, verifyOpencodeConfig } from './services/opencodeCli.js';
 import { mergeModelAliases } from './services/usage/usageSplit.js';
 import lidSleepGuard from './services/LidSleepGuard.js';
@@ -8022,8 +8023,16 @@ io.on('connection', (socket) => {
    */
   socket.on('longrun:providerModels', async ({ providerId, refresh, executor } = {}, cb) => {
     let d;
-    // Cursor 执行者的模型是 Cursor 账号自己的清单（cursor-agent --list-models），与 CC Switch 供应商无关
-    try { d = executor === 'cursor' ? await listCursorModels() : await listProviderModels({ engine: aiEngine, providerId: providerId || '', refresh: !!refresh }); }
+    // Cursor / Kiro 执行者的模型是它们自己账号的清单，与 CC Switch 供应商无关；
+    // OpenCode 用 CC Switch 供应商，但走 Anthropic 协议，只列 Claude 系（与它的配置文件一致）
+    try {
+      if (executor === 'cursor') d = await listCursorModels();
+      else if (executor === 'kiro') d = await listKiroModels();
+      else {
+        d = await listProviderModels({ engine: aiEngine, providerId: providerId || '', refresh: !!refresh });
+        if (executor === 'opencode' && d.ok) d = { ...d, models: d.models.filter((m) => /claude/i.test(m)) };
+      }
+    }
     catch (e) { d = { ok: false, models: [], error: e.message }; }
     if (typeof cb === 'function') cb(d);
   });

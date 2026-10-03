@@ -98,6 +98,7 @@ export function applyEvent(state, ev) {
       break;
     case 'result':
       s.spent_usd = (s.spent_usd || 0) + (ev.cost_usd || 0);
+      s.credits = (s.credits || 0) + (ev.credits || 0);   // Kiro 执行者按 credits 计费
       s.running_cost = 0;
       s.session_id = ev.session_id || s.session_id;
       break;
