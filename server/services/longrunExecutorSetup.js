@@ -18,6 +18,9 @@ import { listCursorModels } from './LongRunCursorRunner.js';
 import { listKiroModels } from './LongRunKiroRunner.js';
 import { buildOpencodeConfig, verifyOpencodeConfig } from './opencodeCli.js';
 import { listProviderModels } from './ProviderModels.js';
+import { CodexExecTextClient } from './CodexExecText.js';
+import { codexHome, readRolloutTail } from './LongRunCodexRunner.js';
+import { readdirSync, statSync } from 'fs';
 
 /** 窗口装不下交接线时，按窗口比例收紧（只往小改，人填得更小的照旧） */
 export function fitThresholds(o, window) {
@@ -26,6 +29,18 @@ export function fitThresholds(o, window) {
   const handoffCeiling = Math.min(o.handoffCeiling, Math.round(window * 0.8));
   const handoffFloor = Math.min(o.handoffFloor, Math.round(window * 0.6));
   return handoffFloor < handoffCeiling && handoffCeiling < hardKill ? { handoffFloor, handoffCeiling, hardKill } : null;
+}
+
+/** 最近一段 Codex 对话报的上下文窗口（开跑前估水位线用；读不到返回 0） */
+export function newestCodexWindow(home = codexHome()) {
+  const root = path.join(home, 'sessions');
+  const desc = (p) => { try { return readdirSync(p).filter((x) => /^\d+$/.test(x)).sort().reverse(); } catch { return []; } };
+  for (const y of desc(root)) for (const m of desc(path.join(root, y))) for (const dd of desc(path.join(root, y, m))) {
+    const dir = path.join(root, y, m, dd);
+    const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl')).map((f) => ({ f, t: statSync(path.join(dir, f)).mtimeMs })).sort((a, b) => b.t - a.t);
+    for (const { f } of files.slice(0, 5)) { const r = readRolloutTail(path.join(dir, f)); if (r?.window) return r.window; }
+  }
+  return 0;
 }
 
 /** OpenCode 执行者配置文件的位置：按项目目录分，不放项目里（里面有密钥） */
@@ -43,7 +58,8 @@ export const opencodeConfigPath = (root, home = os.homedir()) =>
  * @throws {Error} 准备不了（没登录、模型不存在、供应商不可用…），消息直接给人看
  */
 export async function prepareExecutor({ o, root, engine, deps = {} }) {
-  const d = { cursorAccount, kiroAccount, listCursorModels, listKiroModels, listProviderModels, verify: verifyOpencodeConfig, home: os.homedir(), ...deps };
+  const d = { cursorAccount, kiroAccount, listCursorModels, listKiroModels, listProviderModels, verify: verifyOpencodeConfig, home: os.homedir(),
+    codexPing: (m) => new CodexExecTextClient({ model: m, timeoutMs: 90_000 }).complete('只回复 ok', 'ok'), codexWindow: newestCodexWindow, ...deps };
   const model = o.model || '';
   if (o.executor === 'cursor') {
     if (!(await d.cursorAccount())) throw new Error('Cursor CLI 没登录：先在终端里运行 cursor-agent login');
@@ -65,6 +81,17 @@ export async function prepareExecutor({ o, root, engine, deps = {} }) {
     return { extra: { contextWindow: window }, modelLister: null, thresholds,
       info: `Kiro CLI（kiro-cli chat --trust-all-tools），模型 ${m}${window ? `（上下文窗口 ${window.toLocaleString('en-US')}）` : ''}。`
         + `按 credits 计费不记美元（每发 credits 写进日志），预算上限对它不生效；人工插话会在工具间隙结束本发后续接`
+        + (thresholds ? `。窗口装不下默认交接线，已按窗口收紧为 ${thresholds.handoffFloor.toLocaleString('en-US')} / ${thresholds.handoffCeiling.toLocaleString('en-US')} / ${thresholds.hardKill.toLocaleString('en-US')}` : '') };
+  }
+  if (o.executor === 'codex') {
+    // Codex 用它自己的 config.toml（供应商与密钥都在那里），不经 CC Switch；开跑前真发一个最小请求，配不通当场报错
+    try { await d.codexPing(model); } catch (e) { throw new Error(`Codex 调不通（用的是 ~/.codex/config.toml 里的供应商）：${e.message}`); }
+    const window = d.codexWindow();
+    const thresholds = fitThresholds(o, window);
+    return { extra: {}, modelLister: null, thresholds,
+      info: `Codex（codex exec，workspace-write 沙箱、开网络、不弹确认），${model ? `模型 ${model}` : '模型用 config.toml 里的'}`
+        + `${window ? `（上下文窗口约 ${window.toLocaleString('en-US')}）` : ''}。水位从 Codex 的 rollout 记录读，按价格表估算美元，预算刹车与水位交接照常；`
+        + `只能写项目目录；人工插话在工具间隙结束本发后续接`
         + (thresholds ? `。窗口装不下默认交接线，已按窗口收紧为 ${thresholds.handoffFloor.toLocaleString('en-US')} / ${thresholds.handoffCeiling.toLocaleString('en-US')} / ${thresholds.hardKill.toLocaleString('en-US')}` : '') };
   }
   if (o.executor === 'opencode') {

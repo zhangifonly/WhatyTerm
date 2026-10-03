@@ -7,6 +7,12 @@ export const EXECUTOR_UI = {
     label: 'Claude Code（默认）', title: 'CLAUDE', account: '',
     modelsFrom: '当前供应商支持', defaultModel: '',
   },
+  codex: {
+    label: 'Codex（用它自己 config.toml 里的供应商）', title: 'CODEX', account: 'Codex 自己的配置', billing: 'config.toml·估算美元',
+    modelsFrom: 'Codex 配置', defaultModel: 'config.toml 里的模型',
+    note: 'Codex 用它自己 ~/.codex/config.toml 里的供应商与模型，开跑前会真发一个请求验证；在 workspace-write 沙箱里跑，只能写项目目录；'
+      + '水位从 Codex 的记录读，按价格表估算美元，预算刹车与水位交接照常；插话会在工具间隙结束当前这发，再接着同一段对话发进去。',
+  },
   cursor: {
     label: 'Cursor CLI（Cursor 账号，订阅计费）', title: 'CURSOR', account: 'Cursor 官方', billing: 'Cursor 账号·订阅',
     modelsFrom: 'Cursor 账号可用', defaultModel: 'Auto',

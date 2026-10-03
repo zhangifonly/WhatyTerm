@@ -3,7 +3,7 @@
  * 场景：新建长程项目，选执行者，需求是一个小 JS 模块 + 测试 →
  *      自检里写明执行者 → 开场初始化记忆库（.memory/MEMORY.md 被建出来，说明改写后的提示词它照做了）→
  *      主线干活期间插一句话 → 插话在工具间隙生效、续同一段对话发进去 → 项目做完，测试真能跑过 → 计费口径对。
- * 运行：node scripts/e2e-longrun-executor.mjs cursor | kiro | opencode [CC Switch 的 Claude 供应商 id（opencode 必填）]
+ * 运行：node scripts/e2e-longrun-executor.mjs codex | cursor | kiro | opencode [CC Switch 的 Claude 供应商 id（opencode 必填）]
  */
 import fs from 'fs';
 import path from 'path';
@@ -13,7 +13,7 @@ import { sandboxBase } from '../server/services/LongRunLaunch.js';
 const { io } = await import(path.resolve('node_modules/socket.io-client/build/esm-debug/index.js'));
 const EXECUTOR = process.argv[2] || 'cursor';
 const PROVIDER = process.argv[3] || '';
-const LABEL = { cursor: 'Cursor CLI', kiro: 'Kiro CLI', opencode: 'OpenCode' }[EXECUTOR];
+const LABEL = { codex: 'Codex', cursor: 'Cursor CLI', kiro: 'Kiro CLI', opencode: 'OpenCode' }[EXECUTOR];
 if (!LABEL) throw new Error(`不认识的执行者：${EXECUTOR}`);
 if (EXECUTOR === 'opencode' && !PROVIDER) throw new Error('opencode 要给一个 CC Switch 的第三方 Claude 供应商 id');
 const NAME = `wtlr${EXECUTOR}e2e`;
@@ -69,6 +69,7 @@ try {
     cursor: ['费用记 $0（订阅）', results.length > 0 && results.every((e) => e.cost_usd === 0)],
     kiro: ['美元记 0、credits 如实记下', results.length > 0 && results.every((e) => e.cost_usd === 0) && results.some((e) => e.credits > 0)],
     opencode: ['按价格表估算美元', results.some((e) => e.cost_usd > 0)],
+    codex: ['按价格表估算美元（从 Codex 的 rollout 记录算）', results.some((e) => e.cost_usd > 0)],
   }[EXECUTOR];
   ok(billing[0], billing[1], JSON.stringify(results.map((e) => [e.label, e.exit_reason, e.cost_usd, e.credits])));
   console.log(`   共 ${results.length} 发：${results.map((e) => `${e.label}→${e.exit_reason}`).join('，')}`);

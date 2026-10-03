@@ -1,5 +1,5 @@
 /**
- * 长程执行者的选择：Claude Code（默认）、Cursor CLI、Kiro CLI、OpenCode。监督者跟着执行者走：选了哪个 CLI，监督者也用它自己（见 LongRunSupervisorCreds.makeSupervisorChannel）。
+ * 长程执行者的选择：Claude Code（默认）、Codex、Cursor CLI、Kiro CLI、OpenCode。监督者跟着执行者走：选了哪个 CLI，监督者也用它自己（见 LongRunSupervisorCreds.makeSupervisorChannel）。
  *
  * 提示词按执行者改写：原版提示词是围着 Claude Code 的 Auto Memory 写的（第一句就是「确认自动记忆库开启，
  * 没开就停下来」）。别的 CLI 没有这个功能，原样发过去它会照字面停下等人。沙箱给 Claude 配的 autoMemoryDirectory
@@ -11,6 +11,7 @@ import { LongRunRunner } from './LongRunRunner.js';
 import { LongRunCursorRunner } from './LongRunCursorRunner.js';
 import { LongRunKiroRunner } from './LongRunKiroRunner.js';
 import { LongRunOpencodeRunner } from './LongRunOpencodeRunner.js';
+import { LongRunCodexRunner } from './LongRunCodexRunner.js';
 
 /**
  * 各执行者的特性（界面说明、自检、服务端校验都从这里取，不各写一份）：
@@ -20,13 +21,14 @@ import { LongRunOpencodeRunner } from './LongRunOpencodeRunner.js';
  */
 export const EXECUTORS = {
   claude: { label: 'Claude Code', billing: 'usd', context: true, rules: null },
+  codex: { label: 'Codex', billing: 'usd', context: true, rules: 'AGENTS.md' },
   cursor: { label: 'Cursor CLI', billing: 'subscription', context: false, rules: 'AGENTS.md 或合适的 `.cursor/rules` 文件' },
   kiro: { label: 'Kiro CLI', billing: 'credits', context: true, rules: 'AGENTS.md 或 `.kiro/steering/` 下合适的文件' },
   opencode: { label: 'OpenCode', billing: 'usd', context: true, rules: 'AGENTS.md' },
 };
 export const normalizeExecutor = (v) => (Object.hasOwn(EXECUTORS, v) ? v : 'claude');
 
-const RUNNERS = { claude: LongRunRunner, cursor: LongRunCursorRunner, kiro: LongRunKiroRunner, opencode: LongRunOpencodeRunner };
+const RUNNERS = { claude: LongRunRunner, codex: LongRunCodexRunner, cursor: LongRunCursorRunner, kiro: LongRunKiroRunner, opencode: LongRunOpencodeRunner };
 
 /** 执行者工厂（Loop 的 runnerFactory）。extra 是执行者专属参数：Kiro 的 contextWindow、OpenCode 的 opencodeConfig 等 */
 export function runnerFactoryFor(executor, extra = {}) {

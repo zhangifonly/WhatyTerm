@@ -8028,6 +8028,8 @@ io.on('connection', (socket) => {
     try {
       if (executor === 'cursor') d = await listCursorModels();
       else if (executor === 'kiro') d = await listKiroModels();
+      // Codex 用它自己 config.toml 里的供应商与模型，没有可查的清单
+      else if (executor === 'codex') d = { ok: false, models: [], error: 'Codex 用它自己 ~/.codex/config.toml 里的模型，留空即可；要换就手填' };
       else {
         d = await listProviderModels({ engine: aiEngine, providerId: providerId || '', refresh: !!refresh });
         if (executor === 'opencode' && d.ok) d = { ...d, models: d.models.filter((m) => /claude/i.test(m)) };

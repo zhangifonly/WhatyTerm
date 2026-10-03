@@ -31,10 +31,15 @@ export function toStrictSchema(s) {
   return { ...s, properties: props, required: Object.keys(props), additionalProperties: false };
 }
 
-export function buildCodexExecArgs({ cwd, instructionsFile, schemaFile = null, lastFile }) {
+/**
+ * @param {string} [o.model]   不给就用 config.toml 里的模型
+ * @param {string|null} [o.effort]  推理强度；终端读屏用 low 求快，长程监督者给 null 用用户自己的默认
+ */
+export function buildCodexExecArgs({ cwd, instructionsFile, schemaFile = null, lastFile, model = '', effort = 'low' }) {
   return ['exec', '--ephemeral', '--skip-git-repo-check', '--ignore-rules', '--sandbox', 'read-only', '--color', 'never',
     '-C', cwd, ...CODEX_DISABLED_FEATURES.flatMap((f) => ['--disable', f]),
-    '-c', `model_instructions_file=${JSON.stringify(instructionsFile)}`, '-c', 'model_reasoning_effort="low"',
+    '-c', `model_instructions_file=${JSON.stringify(instructionsFile)}`,
+    ...(effort ? ['-c', `model_reasoning_effort=${JSON.stringify(effort)}`] : []), ...(model ? ['-m', model] : []),
     ...(schemaFile ? ['--output-schema', schemaFile] : []), '-o', lastFile, '--json', '-'];
 }
 
@@ -52,8 +57,8 @@ export function parseCodexEvents(stdout) {
 }
 
 export class CodexExecTextClient {
-  constructor({ codexBin = 'codex', binPrefixArgs = [], timeoutMs = CODEX_TEXT_TIMEOUT_MS, env = process.env } = {}) {
-    Object.assign(this, { codexBin, binPrefixArgs, timeoutMs, env });
+  constructor({ codexBin = 'codex', binPrefixArgs = [], timeoutMs = CODEX_TEXT_TIMEOUT_MS, env = process.env, model = '', effort = 'low' } = {}) {
+    Object.assign(this, { codexBin, binPrefixArgs, timeoutMs, env, model, effort });
   }
 
   /** 返回 {text, stopReason, inputTokens, outputTokens, costUsd}，与 ClaudeCliTextClient 同形 */
@@ -69,7 +74,7 @@ export class CodexExecTextClient {
       if (schemaFile) writeFileSync(schemaFile, JSON.stringify(toStrictSchema(jsonSchema)));
       // 提示词走标准输入（参数里的 "-"），终端全文不进命令行
       const { code, out, err } = await runCli({ label: 'codex exec', bin: this.codexBin, cwd, env: internalCliEnv(this.env), stdin: user,
-        args: [...this.binPrefixArgs, ...buildCodexExecArgs({ cwd, instructionsFile, schemaFile, lastFile })], timeoutMs: this.timeoutMs });
+        args: [...this.binPrefixArgs, ...buildCodexExecArgs({ cwd, instructionsFile, schemaFile, lastFile, model: this.model, effort: this.effort })], timeoutMs: this.timeoutMs });
       const ev = parseCodexEvents(out);
       const text = existsSync(lastFile) ? readFileSync(lastFile, 'utf8').trim() : ev.lastText;
       if (code || ev.error || !text) {

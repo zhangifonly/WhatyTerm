@@ -11,6 +11,7 @@
 
 import { ClaudeCliTextClient } from './ClaudeCliText.js';
 import { OtherCliTextClient, CLI_TEXT } from './OtherCliText.js';
+import { CodexExecTextClient } from './CodexExecText.js';
 
 /** 原版默认用最强的 Opus 做判定（判定出错的代价是烧钱或越界代答）；与原版同名的环境变量可覆盖 */
 export const SUPERVISOR_DEFAULT_MODEL = 'claude-opus-5';
@@ -37,15 +38,19 @@ export function currentClaudeInfo(engine) {
  */
 export function makeSupervisorChannel({ engine, providerId = null, model = supervisorModel(),
   cliFactory = (m) => new ClaudeCliTextClient({ model: m }),
-  executor = 'claude', executorOpts = {}, otherFactory = (o) => new OtherCliTextClient(o) } = {}) {
+  executor = 'claude', executorOpts = {}, otherFactory = (o) => (o.cli === 'codex'
+    // Codex 的纯文本通道早就有（终端读屏在用）：只读沙箱、关工具、不落盘。监督者不压推理强度（effort: null）
+    ? new CodexExecTextClient({ model: o.model, effort: null })
+    : new OtherCliTextClient(o)) } = {}) {
   // 监督者跟执行者是同一个 CLI：用户选 Cursor / Kiro / OpenCode 跑长程，就是要用那家的账号与模型，
   // 不该另外消耗 Claude（多数人这时 Claude 正是没额度或没开通）。OpenCode 用执行者那份配置（所选 CC Switch 供应商）
-  if (executor && executor !== 'claude' && CLI_TEXT[executor]) {
+  const labelOf = (ex) => (ex === 'codex' ? 'Codex' : CLI_TEXT[ex]?.label);
+  if (executor && executor !== 'claude' && labelOf(executor)) {
     const client = otherFactory({ cli: executor, model: executorOpts.model || '', opencodeConfig: executorOpts.opencodeConfig || '' });
     return {
       complete: (system, user) => client.complete(system, user),
-      info: { status: 'on', via: 'cli', cli: executor, cliLabel: CLI_TEXT[executor].label, model: executorOpts.model || '与执行者同一默认模型',
-        providerName: `${CLI_TEXT[executor].label}（与执行者同一个）`, baseUrl: '' },
+      info: { status: 'on', via: 'cli', cli: executor, cliLabel: labelOf(executor), model: executorOpts.model || '与执行者同一默认模型',
+        providerName: `${labelOf(executor)}（与执行者同一个）`, baseUrl: '' },
     };
   }
   if (providerId) {

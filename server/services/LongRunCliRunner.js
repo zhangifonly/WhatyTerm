@@ -121,7 +121,9 @@ export class LongRunCliRunner {
       eventsPath = path.join(this.eventsDir, `${path.basename(this.bin)}-${sessionId || 'new'}-${Math.floor(started)}.jsonl`);
       eventsFd = openSync(eventsPath, 'w');
     }
-    const proc = spawn(this.bin, args, { cwd: this.cwd, env: this.childEnv(), stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    // 子类把 promptViaStdin 设为 true 时提示词走标准输入（Codex：参数里放 "-"），长需求不受命令行长度限制
+    const proc = spawn(this.bin, args, { cwd: this.cwd, env: this.childEnv(), stdio: [this.promptViaStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    if (this.promptViaStdin) { proc.stdin.on('error', () => {}); proc.stdin.end(text); }
     adoptProcessGroup(proc);
     this._proc = proc;
     let stderr = '';
