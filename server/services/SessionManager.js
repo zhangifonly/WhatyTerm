@@ -1311,6 +1311,8 @@ export class SessionManager {
       this.db.exec(`UPDATE sessions SET original_goal = goal WHERE original_goal IS NULL AND goal IS NOT NULL AND goal <> ''`);
     } catch {}
     // 补全 closed_sessions 缺失字段
+    // 会话结束（exit / 被删）的时刻：「恢复刚关闭的会话」按它从近到远回退。v1.4.87 起才有，之前结束的会话为空
+    try { this.db.exec(`ALTER TABLE sessions ADD COLUMN closed_at INTEGER`); } catch {}
     try { this.db.exec(`ALTER TABLE closed_sessions ADD COLUMN original_goal TEXT`); } catch {}
     try { this.db.exec(`ALTER TABLE closed_sessions ADD COLUMN working_dir TEXT`); } catch {}
     try { this.db.exec(`ALTER TABLE closed_sessions ADD COLUMN claude_provider TEXT`); } catch {}
@@ -1450,16 +1452,7 @@ export class SessionManager {
           tmuxExists = true;
           // 长程模式的条目 tmux 里只该有 shell（由服务端长程驱动），重建后不起 CLI
           if (row.run_mode !== 'longrun') {
-            this._pendingCliResume.push({
-              tmuxSessionName: sanitizeTmuxSessionName(row.tmux_session_name || ''),
-              aiType: row.ai_type || 'claude',
-              name: row.name,
-              origin: row.origin || null,
-              claudeSessionId: row.claude_session_id || null,
-              workingDir: row.working_dir || '',   // 按 id 精确续接要找对话记录文件（见 claudeStartCommand）
-              id: row.id,   // Codex 续接要找会话专属 CODEX_HOME（见 codexStartCommand）
-              codexProvider: (() => { try { return row.codex_provider ? JSON.parse(row.codex_provider) : null; } catch { return null; } })(),
-            });
+            this._pendingCliResume.push(this._resumeItemOf(row));
           }
         }
       }
@@ -1487,64 +1480,7 @@ export class SessionManager {
         continue;
       }
 
-      const session = new Session({
-        id: row.id,
-        name: row.name,
-        tmuxSessionName: row.tmux_session_name,
-        goal: row.goal,
-        originalGoal: row.original_goal || row.goal,
-        systemPrompt: row.system_prompt,
-        aiEnabled: !!row.ai_enabled,
-        autoMode: !!row.auto_mode,
-        autoActionEnabled: !!row.auto_action_enabled,
-        waterlineMode: row.waterline_mode || 'auto',
-        waterlinePhase: row.waterline_phase || 'idle',
-        waterlineHandoffRounds: row.waterline_rounds || 0,
-        createdAt: new Date(row.created_at),
-        skipPty: false,
-        isNew: false  // 恢复已有会话
-      });
-
-      // 恢复 AI 类型和供应商信息
-      session.aiType = row.ai_type || 'claude';
-      try {
-        session.claudeProvider = row.claude_provider ? JSON.parse(row.claude_provider) : null;
-      } catch (e) {
-        session.claudeProvider = null;
-      }
-      try {
-        session.codexProvider = row.codex_provider ? JSON.parse(row.codex_provider) : null;
-      } catch (e) {
-        session.codexProvider = null;
-      }
-      try {
-        session.geminiProvider = row.gemini_provider ? JSON.parse(row.gemini_provider) : null;
-      } catch (e) {
-        session.geminiProvider = null;
-      }
-
-      // 恢复操作统计
-      session.stats = {
-        total: row.stats_total || 0,
-        success: row.stats_success || 0,
-        failed: row.stats_failed || 0,
-        aiAnalyzed: row.stats_ai_analyzed || 0,
-        preAnalyzed: row.stats_pre_analyzed || 0,
-        aiFailed: row.stats_ai_failed || 0,
-        hookFallback: row.stats_hook_fallback || 0
-      };
-
-      // 恢复工作目录和项目信息
-      session.workingDir = row.working_dir || '';
-      session.projectName = row.project_name || '';
-      session.projectDesc = row.project_desc || '';
-
-      // 恢复团队信息
-      session.teamId = row.team_id || null;
-      session.teamRole = row.team_role || null;
-      session.runMode = row.run_mode === 'longrun' ? 'longrun' : 'terminal';
-      session.origin = row.origin || null;
-      session.claudeSessionId = row.claude_session_id || null;
+      const session = this._sessionFromRow(row);
 
       this.sessions.set(session.id, session);
       console.log(`恢复会话: ${session.name} (tmux: ${session.tmuxSessionName}, AI: ${session.aiType}, 自动操作: ${session.autoActionEnabled ? '开' : '关'}, 工作目录: ${session.workingDir || '未知'})`);
@@ -1554,6 +1490,83 @@ export class SessionManager {
     if (this._pendingCliResume.length > 0) {
       this._resumeCliForRecreated();
     }
+  }
+
+  /** 数据库一行 → 会话对象（启动还原、恢复刚关闭的会话共用） */
+  _sessionFromRow(row) {
+    const session = new Session({
+      id: row.id,
+      name: row.name,
+      tmuxSessionName: row.tmux_session_name,
+      goal: row.goal,
+      originalGoal: row.original_goal || row.goal,
+      systemPrompt: row.system_prompt,
+      aiEnabled: !!row.ai_enabled,
+      autoMode: !!row.auto_mode,
+      autoActionEnabled: !!row.auto_action_enabled,
+      waterlineMode: row.waterline_mode || 'auto',
+      waterlinePhase: row.waterline_phase || 'idle',
+      waterlineHandoffRounds: row.waterline_rounds || 0,
+      createdAt: new Date(row.created_at),
+      skipPty: false,
+      isNew: false  // 恢复已有会话
+    });
+
+    // 恢复 AI 类型和供应商信息
+    session.aiType = row.ai_type || 'claude';
+    try {
+      session.claudeProvider = row.claude_provider ? JSON.parse(row.claude_provider) : null;
+    } catch (e) {
+      session.claudeProvider = null;
+    }
+    try {
+      session.codexProvider = row.codex_provider ? JSON.parse(row.codex_provider) : null;
+    } catch (e) {
+      session.codexProvider = null;
+    }
+    try {
+      session.geminiProvider = row.gemini_provider ? JSON.parse(row.gemini_provider) : null;
+    } catch (e) {
+      session.geminiProvider = null;
+    }
+
+    // 恢复操作统计
+    session.stats = {
+      total: row.stats_total || 0,
+      success: row.stats_success || 0,
+      failed: row.stats_failed || 0,
+      aiAnalyzed: row.stats_ai_analyzed || 0,
+      preAnalyzed: row.stats_pre_analyzed || 0,
+      aiFailed: row.stats_ai_failed || 0,
+      hookFallback: row.stats_hook_fallback || 0
+    };
+
+    // 恢复工作目录和项目信息
+    session.workingDir = row.working_dir || '';
+    session.projectName = row.project_name || '';
+    session.projectDesc = row.project_desc || '';
+
+    // 恢复团队信息
+    session.teamId = row.team_id || null;
+    session.teamRole = row.team_role || null;
+    session.runMode = row.run_mode === 'longrun' ? 'longrun' : 'terminal';
+    session.origin = row.origin || null;
+    session.claudeSessionId = row.claude_session_id || null;
+    return session;
+  }
+
+  /** 重建出来的会话要续接 CLI 时的参数（见 _resumeCliForRecreated） */
+  _resumeItemOf(row) {
+    return {
+      tmuxSessionName: sanitizeTmuxSessionName(row.tmux_session_name || ''),
+      aiType: row.ai_type || 'claude',
+      name: row.name,
+      origin: row.origin || null,
+      claudeSessionId: row.claude_session_id || null,
+      workingDir: row.working_dir || '',   // 按 id 精确续接要找对话记录文件（见 claudeStartCommand）
+      id: row.id,   // Codex 续接要找会话专属 CODEX_HOME（见 codexStartCommand）
+      codexProvider: (() => { try { return row.codex_provider ? JSON.parse(row.codex_provider) : null; } catch { return null; } })(),
+    };
   }
 
   /**
@@ -2516,9 +2529,68 @@ export class SessionManager {
       session.killTmuxSession();
       session.status = 'deleted';
       this._saveSession(session);
+      this.db.prepare('UPDATE sessions SET closed_at = ? WHERE id = ?').run(Date.now(), id);
       this.sessions.delete(id);
       return true;
     }
     return false;
+  }
+
+  /**
+   * 最近关闭的会话（像浏览器的「最近关闭的标签页」），新的在前。
+   * 来源两处：在终端里 exit / 被删的会话（sessions 表 status=deleted，记录原样留着）与界面上「关闭」的（closed_sessions 表）。
+   * 过滤：工作目录已不存在的（测试目录之类）、长程条目、同目录同 CLI 已经开着的（再开一个会抢同一段对话）；
+   * 同目录同 CLI 只留最近的一条。closed_at 是 v1.4.87 才有的字段，之前结束的会话用 updated_at 近似（标 approx）
+   */
+  listRecentlyClosed({ limit = 10, days = 7, now = Date.now() } = {}) {
+    const since = now - days * 86400e3;
+    const key = (aiType, dir) => `${aiType || 'claude'}:${String(dir || '').replace(/\/+$/, '')}`;
+    const running = new Set([...this.sessions.values()].map((x) => key(x.aiType, x.workingDir)));
+    const out = [];
+    const seen = new Set();
+    const push = (e) => {
+      const k = key(e.aiType, e.workingDir);
+      if (!e.workingDir || seen.has(k) || running.has(k) || !fs.existsSync(e.workingDir)) return;
+      seen.add(k);
+      out.push(e);
+    };
+    const deleted = this.db.prepare(`SELECT * FROM sessions WHERE status = 'deleted' AND COALESCE(run_mode, 'terminal') != 'longrun'`).all()
+      .map((r) => ({ r, at: r.closed_at || Date.parse(r.updated_at) || 0 }))
+      .filter((x) => x.at >= since);
+    const closed = this.getClosedSessions().map((c) => ({ c, at: c.closedAt || 0 }));
+    const all = [
+      ...deleted.map(({ r, at }) => ({ id: r.id, source: 'deleted', name: r.project_name || r.name, aiType: r.ai_type || 'claude',
+        workingDir: r.working_dir || '', goal: r.goal || '', projectDesc: r.project_desc || '', closedAt: at, approx: !r.closed_at,
+        exactResume: !!r.claude_session_id })),
+      ...closed.map(({ c, at }) => ({ id: c.id, source: 'closed', name: c.projectName || c.name, aiType: c.aiType || 'claude',
+        workingDir: c.workDir || c.workingDir || '', goal: c.goal || '', projectDesc: c.projectDesc || '', closedAt: at, approx: false, exactResume: true })),
+    ].sort((a, b) => b.closedAt - a.closedAt);
+    for (const e of all) { if (out.length >= limit) break; push(e); }
+    return out;
+  }
+
+  /**
+   * 恢复一个刚关闭的会话：界面上「关闭」的走原来的 restoreSession（tmux 还活着，直接接回）；
+   * exit / 被删的在原目录重建 tmux，按原记录续接 CLI（Claude 有对话编号就 --resume 精确接回那一段），
+   * 目标、供应商、自动操作开关等全部照旧。与启动时还原走同一套构造（_sessionFromRow / _resumeItemOf）
+   */
+  reopenClosed(id) {
+    if (this.sessions.has(id)) return { success: true, session: this.sessions.get(id).toJSON(), alreadyExists: true };
+    if (this._getClosedSessionById(id)) return this.restoreSession(id);
+    const row = this.db.prepare(`SELECT * FROM sessions WHERE id = ? AND status = 'deleted'`).get(id);
+    if (!row) return { success: false, error: '找不到这个会话的记录' };
+    if (!row.working_dir || !fs.existsSync(row.working_dir)) return { success: false, error: `工作目录已不存在：${row.working_dir || '(空)'}` };
+    if (!this._recreateTmuxSession(row)) return { success: false, error: '重建终端失败' };
+    const session = this._sessionFromRow(row);
+    session.status = 'running';
+    this.sessions.set(session.id, session);
+    this._saveSession(session);
+    this.db.prepare('UPDATE sessions SET closed_at = NULL WHERE id = ?').run(id);
+    if (row.run_mode !== 'longrun') {
+      this._pendingCliResume.push(this._resumeItemOf(row));
+      this._resumeCliForRecreated();
+    }
+    console.log(`[SessionManager] 已恢复刚关闭的会话: ${session.name}（${session.aiType}，${session.workingDir}）`);
+    return { success: true, session: session.toJSON() };
   }
 }

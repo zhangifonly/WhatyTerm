@@ -58,6 +58,16 @@ test('⑤ 历史最多列 HISTORY_LIMIT 条，同分时最近用过的在前', (
   eq(r[0].p.name, 'proj19', '最近用过的在前');
 });
 
+test('⑥ 不输入：运行中的在前，最近关闭的跟在后面（最多 RECENT_CLOSED_LIMIT 个，保持服务端给的新→旧顺序）', () => {
+  const closed = Array.from({ length: 7 }, (_, i) => ({ id: `x${i}`, name: `old${i}`, workingDir: `/w/old${i}`, aiType: 'claude', closedAt: 100 - i }));
+  eq(run('', { closed }), ['S:WebTmuxNotes', 'S:iSpring', 'C:old0', 'C:old1', 'C:old2', 'C:old3', 'C:old4'], '空查询');
+});
+
+test('⑥ 有输入：最近关闭的会话按名字命中，排在运行中的之后；同一处的历史项目不再重复', () => {
+  const closed = [{ id: 'm', name: 'mathviz', workingDir: '/w/mathviz', aiType: 'claude', closedAt: 5 }];
+  eq(run('viz', { closed }), ['C:mathviz', 'P:phyviz:claude'], 'viz');
+});
+
 test('没有任何命中返回空', () => {
   eq(run('zzzqqq'), [], '空');
 });

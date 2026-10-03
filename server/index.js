@@ -8441,6 +8441,36 @@ io.on('connection', (socket) => {
     }
   });
 
+  // 最近关闭的会话（v1.4.87，像浏览器的「最近关闭的标签页」）
+  socket.on('recentClosed:list', async (opts, ack) => {
+    if (typeof opts === 'function') { ack = opts; opts = {}; }
+    try {
+      await waitForSessionManager();
+      ack?.({ ok: true, list: sessionManager.listRecentlyClosed({ limit: Math.min(20, Number(opts?.limit) || 10) }) });
+    } catch (e) { ack?.({ ok: false, error: e.message }); }
+  });
+
+  // 恢复刚关闭的会话：不给 id 就恢复最近的那一个（⌘⇧T）
+  socket.on('session:reopenClosed', async (opts, ack) => {
+    if (typeof opts === 'function') { ack = opts; opts = {}; }
+    try {
+      await waitForSessionManager();
+      const id = opts?.id || sessionManager.listRecentlyClosed({ limit: 1 })[0]?.id;
+      if (!id) { ack?.({ ok: false, error: '最近 7 天没有可恢复的会话' }); return; }
+      const result = sessionManager.reopenClosed(id);
+      if (!result.success) { ack?.({ ok: false, error: result.error }); return; }
+      const session = sessionManager.getSession(result.session.id);
+      if (session && !result.alreadyExists) { registerBellCallback(session); registerExitCallback(session); }
+      io.emit('sessions:updated', sessionManager.listSessions());
+      io.emit('closedSessions:updated', sessionManager.getClosedSessions());
+      console.log(`[恢复关闭] ${result.session.name}`);
+      ack?.({ ok: true, session: result.session });
+    } catch (e) {
+      console.error('[恢复关闭] 失败:', e.message);
+      ack?.({ ok: false, error: e.message });
+    }
+  });
+
   // 永久删除关闭的会话
   socket.on('closedSession:delete', (closedSessionId) => {
     const result = sessionManager.deleteClosedSession(closedSessionId);

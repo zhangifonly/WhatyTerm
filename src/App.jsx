@@ -30,6 +30,9 @@ import TrustedDevices from './components/TrustedDevices.jsx';
 import LidSleepCard from './components/LidSleepCard.jsx';
 import { findExistingSession, creatingKeyOf, resumePayload, timeAgo } from './utils/projectOpen.js';
 import { searchSwitcher, flattenProjects } from './utils/switcherSearch.js';
+
+/** 恢复刚关闭的会话的快捷键：⌘⇧T / Ctrl⇧T（桌面版），⌥⇧T（浏览器里也能用） */
+const isReopenClosedKey = (e) => e.code === 'KeyT' && e.shiftKey && (e.metaKey || e.ctrlKey || e.altKey);
 import LongRunHandoverDialog from './components/longrun/LongRunHandoverDialog';
 import { taskBadge, taskLine } from './components/longrun/longrunBoard';
 import LongRunMain from './components/longrun/LongRunMain';
@@ -1081,7 +1084,7 @@ export default function App() {
       //    输入框里打个 "1"（那正好是确认菜单的选项 1，后果不只是打错字）。
       //    ⌘K / ⌘↓ / ⌘1~⌘9 都不是终端里有意义的按键，全部让行。
       const switchMod = e.metaKey || e.ctrlKey;
-      if (switchMod && (e.key === 'k' || e.key === 'K' || e.key === 'ArrowDown' || /^[1-9]$/.test(e.key))) {
+      if (isReopenClosedKey(e) || (switchMod && (e.key === 'k' || e.key === 'K' || e.key === 'ArrowDown' || /^[1-9]$/.test(e.key)))) {
         return false;   // 不交给终端；window keydown 已注册处理（那里做 preventDefault）
       }
       const isCopy = (e.metaKey && e.key === 'c') || (e.ctrlKey && e.shiftKey && (e.key === 'C' || e.key === 'c'));
@@ -1486,25 +1489,33 @@ export default function App() {
   const [switcherProjects, setSwitcherProjects] = useState([]);
   const [switcherClosed, setSwitcherClosed] = useState([]);
   const switcherFetchedAt = useRef(0);
-  const pendingRestoreRef = useRef(null);   // 从搜索里恢复的已关闭会话：恢复完自动切过去
+  const reopeningRef = useRef(false);
   useEffect(() => {
     if (!socket) return undefined;
     const onProjects = (data) => setSwitcherProjects(flattenProjects(data));
-    const onClosed = (list) => setSwitcherClosed(Array.isArray(list) ? list : []);
-    const onRestored = (session) => {
-      if (session?.id && pendingRestoreRef.current) { pendingRestoreRef.current = null; attachSession(session.id); }
-    };
     socket.on('recentProjects:list', onProjects);
-    socket.on('closedSessions:list', onClosed);
-    socket.on('closedSessions:updated', onClosed);
-    socket.on('session:restored', onRestored);
-    return () => {
-      socket.off('recentProjects:list', onProjects);
-      socket.off('closedSessions:list', onClosed);
-      socket.off('closedSessions:updated', onClosed);
-      socket.off('session:restored', onRestored);
-    };
-  }, [socket, attachSession]);
+    return () => socket.off('recentProjects:list', onProjects);
+  }, [socket]);
+
+  const loadRecentClosed = useCallback(() => {
+    socket.emit('recentClosed:list', { limit: 10 }, (r) => { if (r?.ok) setSwitcherClosed(r.list || []); });
+  }, []);
+
+  /**
+   * 恢复刚关闭的会话（v1.4.87，像浏览器 ⌘⇧T 恢复标签页）：不给 id 就恢复最近关闭的那个。
+   * 服务端在原目录重建并续接原来那段对话，建好后切过去
+   */
+  const reopenClosedSession = useCallback((id) => {
+    if (reopeningRef.current) return;   // 连按时等上一个建完，免得一次恢复好几个
+    reopeningRef.current = true;
+    socket.emit('session:reopenClosed', id ? { id } : {}, (r) => {
+      reopeningRef.current = false;
+      if (!r?.ok) { toast.info(r?.error || '恢复失败'); return; }
+      attachSession(r.session.id);
+      toast.success(`已恢复「${r.session.projectName || r.session.name}」，正在续接原来的对话`);
+      loadRecentClosed();
+    });
+  }, [attachSession, loadRecentClosed]);
 
   const switcherResults = useMemo(() => searchSwitcher({
     query: switcherQuery, sessions, orderedSessions, sessionNumbers,
@@ -1522,7 +1533,7 @@ export default function App() {
     if (!item) return;
     if (item.kind === 'session') attachSession(item.s.id);
     else if (item.kind === 'project') handleOpenRecentProject(item.p);
-    else if (item.kind === 'closed') { pendingRestoreRef.current = item.c.id; socket?.emit('session:restore', item.c.id); }
+    else if (item.kind === 'closed') reopenClosedSession(item.c.id);
     setSwitcherOpen(false);
   };
 
@@ -1531,13 +1542,13 @@ export default function App() {
     if (socket && Date.now() - switcherFetchedAt.current > 60000) {
       switcherFetchedAt.current = Date.now();
       socket.emit('recentProjects:get');
-      socket.emit('closedSessions:get');
     }
+    loadRecentClosed();   // 每次都拉：刚关掉的要马上出现在列表里
     setSwitcherQuery('');
     setSwitcherIndex(0);
     setSwitcherOpen(true);
     setTimeout(() => switcherInputRef.current?.focus(), 0);
-  }, []);
+  }, [loadRecentClosed]);
 
   // 在给定集合内依次循环跳转
   const jumpToNext = useCallback((idSet) => {
@@ -1562,6 +1573,13 @@ export default function App() {
   //    那边必须放行这些组合键（见终端初始化处），否则会被当成输入发给 CLI。
   useEffect(() => {
     const onKey = (e) => {
+      // ⌘⇧T（桌面版，同浏览器恢复标签页）/ ⌥⇧T（浏览器里 ⌘⇧T 被浏览器自己拿走，网页收不到）：恢复刚关闭的会话。
+      // 用 e.code：mac 上按着 ⌥ 时 e.key 是「ˇ」
+      if (isReopenClosedKey(e)) {
+        e.preventDefault();
+        reopenClosedSession();
+        return;
+      }
       const mod = e.metaKey || e.ctrlKey;   // mac 用 ⌘，Win/Linux 用 Ctrl
       if (!mod) return;
       // ⌘K：开/关快速切换
@@ -1590,7 +1608,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [switcherOpen, openSwitcher, jumpToNextPending, sessions, hotkeySlots, attachSession]);
+  }, [switcherOpen, openSwitcher, jumpToNextPending, sessions, hotkeySlots, attachSession, reopenClosedSession]);
 
   // 创建会话
   const createSession = (data) => {
@@ -1825,6 +1843,14 @@ export default function App() {
             title={'切换列表排序（门牌号不受影响，始终跟着会话走）\n固定：按创建顺序\n最近活跃：新的在前\n待处理优先：需要你介入的排前面\n自动运行优先：自动操作开着或长程在跑的排前面，其余在后'}
           >
             {SORT_LABELS[sortMode] || SORT_LABELS.fixed}
+          </button>
+          <button
+            className="session-toolbar-btn"
+            onClick={() => reopenClosedSession()}
+            title={'恢复刚关闭的会话（⌘⇧T / ⌥⇧T），再按一次恢复更早的那个\n在原目录重建，接回原来那段对话，目标、供应商、自动操作照旧\n想挑一个：⌘K 不输入，看「最近关闭」'}
+            aria-label="恢复刚关闭的会话"
+          >
+            ↶
           </button>
         </div>
         {/* 两类分开显示，文案如实：「等确认」是屏上真开着选项面板，
@@ -3383,10 +3409,14 @@ export default function App() {
                 if (item.kind !== 'session') {
                   const h = item.kind === 'project'
                     ? { key: `p:${item.p.aiType}:${item.p.path}`, name: item.p.name, dir: item.p.path, type: item.p.aiType || 'claude', sub: item.p.description, at: item.p.lastUsed, tag: '历史项目', action: '新建会话并续接上次对话' }
-                    : { key: `c:${item.c.id}`, name: item.c.projectName || item.c.name, dir: item.c.workDir || item.c.workingDir || '', type: item.c.aiType || 'claude', sub: item.c.goal || item.c.projectDesc, at: item.c.closedAt, tag: '已关闭', action: '恢复这个会话' };
+                    : { key: `c:${item.c.id}`, name: item.c.name, dir: item.c.workingDir || '', type: item.c.aiType || 'claude', sub: item.c.goal || item.c.projectDesc, at: item.c.closedAt, approx: item.c.approx, tag: '刚关闭', action: item.c.exactResume ? '在原目录恢复，接回原来那段对话' : '在原目录恢复，续接上次对话' };
                   return (
                     <React.Fragment key={h.key}>
-                      {firstHistory && <div className="switcher-section">历史 · 没在运行，回车打开</div>}
+                      {firstHistory && (
+                        <div className="switcher-section">
+                          {switcherQuery.trim() ? '历史 · 没在运行，回车打开' : '最近关闭 · 回车恢复（⌘⇧T / ⌥⇧T 直接恢复最近一个）'}
+                        </div>
+                      )}
                       <div
                         className={`switcher-item history ${i === switcherIndex ? 'active' : ''}`}
                         onMouseEnter={() => setSwitcherIndex(i)}
@@ -3398,7 +3428,7 @@ export default function App() {
                           <div className="switcher-line1">
                             <span className="switcher-name">{h.name}</span>
                             <span className="switcher-dir">{h.dir.split('/').slice(-2).join('/')}</span>
-                            {h.at ? <span className="switcher-when">{timeAgo(h.at)}</span> : null}
+                            {h.at ? <span className="switcher-when" title={h.approx ? '关闭时间是估计的（升级前关闭的会话没记录准确时间）' : undefined}>{h.approx ? '约 ' : ''}{timeAgo(h.at)}</span> : null}
                             <span className="switcher-type">{h.type}</span>
                           </div>
                           {h.sub && <div className="switcher-sub" title={h.sub}>{String(h.sub).replace(/\s+/g, ' ').slice(0, 60)}</div>}

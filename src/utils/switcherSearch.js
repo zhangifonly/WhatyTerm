@@ -1,5 +1,7 @@
 /**
  * ⌘K 搜索：运行中的会话 + 历史（v1.4.86 起历史项目、已关闭会话命中也列出来，运行中的始终排前面）。
+ * v1.4.87：closed 换成服务端 recentClosed:list 的「最近关闭」（exit / 被删 / 界面关闭三种都在），
+ * 不输入时也列在运行中的会话后面（最多 RECENT_CLOSED_LIMIT 个），像浏览器的「最近关闭的标签页」。
  * 纯函数，从 App.jsx 抽出来便于测试。打分规则沿用原来那套（英文子序列 + 拼音 + 中文直接包含）。
  */
 import PinyinMatch from 'pinyin-match';
@@ -57,14 +59,20 @@ export function scoreFields(f, q) {
 
 export const RUNNING_LIMIT = 12;
 export const HISTORY_LIMIT = 8;
+export const RECENT_CLOSED_LIMIT = 5;
 
 /**
  * @returns {Array<{kind:'session', s}|{kind:'project', p}|{kind:'closed', c}>} 运行中的在前，历史在后
  */
 export function searchSwitcher({ query, sessions = [], orderedSessions = sessions, sessionNumbers = {}, projects = [], closed = [] }) {
   const q = String(query || '').trim();
-  // 不输入时只列运行中的：历史一百多条，全倒出来就淹没了真正要切的会话
-  if (!q) return orderedSessions.slice(0, RUNNING_LIMIT).map((s) => ({ kind: 'session', s }));
+  // 不输入时：运行中的 + 最近关闭的几个（历史项目一百多条不列，全倒出来就淹没了真正要切的会话）
+  if (!q) {
+    return [
+      ...orderedSessions.slice(0, RUNNING_LIMIT).map((s) => ({ kind: 'session', s })),
+      ...closed.slice(0, RECENT_CLOSED_LIMIT).map((c) => ({ kind: 'closed', c })),
+    ];
+  }
   // 纯数字按门牌号命中，只对运行中的会话有意义
   if (/^\d+$/.test(q)) {
     const hit = sessions.filter((s) => String(sessionNumbers[s.id]) === q);
@@ -86,11 +94,12 @@ export function searchSwitcher({ query, sessions = [], orderedSessions = session
   const hist = [];
   for (const c of closed) {
     const dir = c.workingDir || c.workDir || '';
-    if (dir && isRunning(dir, c.aiType)) continue;
+    if (dir && (isRunning(dir, c.aiType) || seen.has(key(dir, c.aiType)))) continue;
     const score = scoreFields({ name: c.projectName || c.name, altName: c.name, dir, goal: c.goal, desc: c.projectDesc }, q);
     if (score < 0) continue;
     if (dir) seen.add(key(dir, c.aiType));
-    hist.push({ item: { kind: 'closed', c }, score, at: c.closedAt || 0 });
+    // 刚关闭的会话加一档：能精确接回原来那段对话，而且多半就是想找它（匹配程度相近时排在历史项目前面）
+    hist.push({ item: { kind: 'closed', c }, score: score + 100, at: c.closedAt || 0 });
   }
   for (const p of projects) {
     if (isRunning(p.path, p.aiType) || seen.has(key(p.path, p.aiType))) continue;
