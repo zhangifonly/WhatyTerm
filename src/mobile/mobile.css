@@ -295,11 +295,14 @@ html, body {
   pointer-events: none;
 }
 
+/* 10 个键排两行、每行 5 个：一行放时 10×44px 最小宽 + 间距约 500px，iPhone 只有 390px 宽，
+   后半截（↓ 空格 Esc ↵）被挤到屏幕外。第一行「继续 1 2 3 Tab」，第二行「↑ ↓ 空格 Esc ↵」 */
 .m-actions-keys {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 6px;
 }
-.m-actions-keys .m-btn { flex: 1; padding: 0 4px; }
+.m-actions-keys .m-btn { min-width: 0; padding: 0 4px; }
 
 .m-actions-input {
   display: flex;
