@@ -4,6 +4,7 @@ import os from 'os';
 import crypto from 'crypto';
 import Database from 'better-sqlite3';
 import { listKiroProjectDirs, KIRO_START } from './kiroCli.js';
+import { listOpencodeProjectDirs } from './opencodeCli.js';
 
 const HOME_DIR = os.homedir();
 
@@ -72,15 +73,16 @@ export class RecentProjectsService {
    * @param {number} limit - 每个 CLI 返回的最大项目数
    */
   static async getAllRecentProjects(limit = 200) {
-    const [claude, codex, gemini, grok, kiro] = await Promise.all([
+    const [claude, codex, gemini, grok, kiro, opencode] = await Promise.all([
       this.getClaudeProjects(limit),
       this.getCodexProjects(limit),
       this.getGeminiProjects(limit),
       this.getGrokProjects(limit),
-      this.getKiroProjects(limit)
+      this.getKiroProjects(limit),
+      this.getOpencodeProjects(limit)
     ]);
 
-    return { claude, codex, gemini, grok, kiro };
+    return { claude, codex, gemini, grok, kiro, opencode };
   }
 
   /**
@@ -294,6 +296,22 @@ export class RecentProjectsService {
   }
 
   /** 获取 Kiro CLI 最近项目（来源与格式见 kiroCli.listKiroProjectDirs） */
+  /** OpenCode：从 ~/.local/share/opencode/opencode.db 的 session 表按目录取（见 opencodeCli.js） */
+  static async getOpencodeProjects(limit = 10) {
+    try {
+      return listOpencodeProjectDirs()
+        .filter((p) => fs.existsSync(p.path) && !isTempPath(p.path) && p.path.split(path.sep).filter(Boolean).length >= 2)
+        .slice(0, limit)
+        .map((p) => ({
+          name: path.basename(p.path), path: p.path, description: this._getProjectDescription(p.path),
+          lastUsed: p.lastUsed, aiType: 'opencode', resumeCommand: 'opencode -c',
+        }));
+    } catch (error) {
+      console.error('[RecentProjects] 获取 OpenCode 项目失败:', error);
+      return [];
+    }
+  }
+
   static async getKiroProjects(limit = 10) {
     try {
       return listKiroProjectDirs({ openDb: (f) => new Database(f, { readonly: true, fileMustExist: true }) })

@@ -16,6 +16,7 @@ import { ClaudeCliTextClient, cliTextCwd } from './ClaudeCliText.js';
 import { CodexExecTextClient, codexTextCwd } from './CodexExecText.js';
 import { GrokSingleTextClient, GROK_CWD_PREFIX } from './GrokSingleText.js';
 import { KIRO_START, detectKiroState, looksLikeKiro } from './kiroCli.js';
+import { detectOpencodeState, looksLikeOpencode } from './opencodeCli.js';
 import { hasPendingQuestion } from './pendingQuestion.js';
 import { promptPendingText, isOwnPendingInput, stripPromptSuggestion } from './promptState.js';
 import { isLiveConfirmMenu, hasNearbyConfirmMenu, isCodexLiveConfirm } from './liveMenu.js';
@@ -70,7 +71,7 @@ function getCliCommand(aiType) {
     'codex': 'codex --no-daemon resume --last',
     'gemini': 'gemini',
     'droid': 'droid',
-    'opencode': 'opencode',
+    'opencode': 'opencode -c',
     'grok': 'grok -c',
     'kiro': KIRO_START
   };
@@ -238,8 +239,9 @@ export function hasRunningTimer(text) {
  *    必须先用本函数排除忙碌，才能走空闲分支。
  */
 export function isCliBusy(tailText) {
-  // Kiro 运行时输入框位置是「›  Kiro is working · 1s · Type to steer」，没有计时器括号也没有 esc to interrupt
-  return hasRunningTimer(tailText) || /esc to interrupt|Kiro is working/i.test(tailText);
+  // Kiro 运行时输入框位置是「›  Kiro is working · 1s · Type to steer」，没有计时器括号也没有 esc to interrupt；
+  // OpenCode 运行时底栏是「esc interrupt」（没有 to）
+  return hasRunningTimer(tailText) || /esc to interrupt|esc interrupt|Kiro is working/i.test(tailText);
 }
 
 /**
@@ -1901,16 +1903,8 @@ ${historyText || '(空)'}
       return 'droid';
     }
 
-    // 检测 OpenCode CLI 特征
-    // OpenCode 是 SST/Anomaly 团队开发的开源 AI 编码代理
-    if (/opencode.*v\d+\.\d+/i.test(lastLines) ||
-        /opencode-ai/i.test(lastLines) ||
-        /OpenCode\s*>\s*$/m.test(lastLines) ||
-        /\[build\]|\[plan\]/i.test(lastLines) && /opencode/i.test(terminalContent) ||
-        /@general/i.test(lastLines) && /opencode/i.test(terminalContent) ||
-        /anomalyco\/opencode/i.test(lastLines)) {
-      return 'opencode';
-    }
+    // OpenCode：底栏「ctrl+p commands」+ 版本/「tab agents」/「esc interrupt」，或它的确认框措辞（见 opencodeCli.js）
+    if (looksLikeOpencode(terminalContent.slice(-8000))) return 'opencode';
 
     // Kiro CLI（AWS）：顶栏「agent · 模型 · ◔ N%」+ 输入框/运行条，或它独有的确认框措辞（见 kiroCli.js）
     if (looksLikeKiro(terminalContent.slice(-8000))) return 'kiro';
@@ -2242,6 +2236,41 @@ ${historyText || '(空)'}
       if (k?.state === 'idle') {
         console.log('[AIEngine] 检测到 Kiro 空闲（输入框就绪），自动发送继续');
         return { ...base, currentState: 'Kiro 空闲', recentAction: '等待输入', needsAction: true, actionType: 'text_input',
+          suggestedAction: '继续', actionReason: '空闲状态，自动继续开发' };
+      }
+    }
+
+    // === 高优先级：OpenCode 状态判读（同 Kiro，必须在插件分析之前）===
+    // 确认框按左右键移动、回车确认，默认高亮「Allow once」。高亮只能从色码看，所以传带色码的原文。
+    // 只在高亮确实是 Allow once 时回车（select '1' = 只发回车）；不选「Allow always」：那是把这类操作永久放开
+    if (aiType === 'opencode') {
+      const o = detectOpencodeState(terminalContent.slice(-12000));
+      const base = { workingDir: '未显示', suggestion: null, updatedAt: new Date().toISOString(), preAnalyzed: true, detectedCLI, ...pluginInfo };
+      if (o?.state === 'confirm' && o.highlighted === 'once') {
+        console.log('[AIEngine] 检测到 OpenCode 确认框，高亮在「Allow once」，回车放行一次');
+        return { ...base, currentState: 'OpenCode 确认界面', recentAction: '等待确认', needsAction: true,
+          actionType: 'select', suggestedAction: '1', actionReason: '工具需要确认，放行这一次（不选「Allow always」）' };
+      }
+      if (o?.state === 'confirm') {
+        // 高亮不在 Allow once（用户自己移过），或屏幕没带色码看不出高亮：不替人选
+        return { ...base, currentState: 'OpenCode 确认界面（高亮不在「Allow once」）', recentAction: '等待确认', needsAction: false,
+          actionType: 'none', suggestedAction: null, actionReason: '看不出或不是「Allow once」，不替你按' };
+      }
+      if (o?.state === 'running') {
+        return { ...base, currentState: '程序运行中', recentAction: '执行中', needsAction: false, actionType: 'none',
+          suggestedAction: null, actionReason: 'OpenCode 正在工作，不应打断' };
+      }
+      if (o?.state === 'idle' && o.pending) {
+        return { ...base, currentState: 'OpenCode 输入框里有未发出的文字', recentAction: '等待输入', needsAction: false, actionType: 'none',
+          suggestedAction: null, actionReason: '有人打了字还没发，发「继续」会接在后面一起发出去' };
+      }
+      if (o?.state === 'idle' && o.fresh) {
+        return { ...base, currentState: 'OpenCode 新对话', recentAction: '等待输入', needsAction: false, actionType: 'none',
+          suggestedAction: null, actionReason: '还没有对话，等你输入任务' };
+      }
+      if (o?.state === 'idle') {
+        console.log('[AIEngine] 检测到 OpenCode 空闲（输入框就绪），自动发送继续');
+        return { ...base, currentState: 'OpenCode 空闲', recentAction: '等待输入', needsAction: true, actionType: 'text_input',
           suggestedAction: '继续', actionReason: '空闲状态，自动继续开发' };
       }
     }
@@ -2589,14 +2618,8 @@ ${historyText || '(空)'}
         /\(\d+m\s*\d+s\)|\d+m\s+\d+s\s*$/.test(cleanContent.slice(-500))
       );
     } else if (aiType === 'opencode') {
-      // OpenCode CLI 运行中标志（排除确认界面）
-      // OpenCode 特有标志：[build] thinking, [plan] thinking
-      isRunning = !isConfirmDialog && (
-        /esc to interrupt/i.test(cleanContent) ||
-        /\[build\].*thinking|\[plan\].*thinking/i.test(cleanContent) ||
-        /Thinking|Processing|Generating/i.test(cleanContent) ||
-        /\(\d+m\s*\d+s\)|\d+m\s+\d+s\s*$/.test(cleanContent.slice(-500))
-      );
+      // OpenCode 运行中：底栏「esc interrupt」（1.18.34 实测，没有 to；见 opencodeCli.js）
+      isRunning = !isConfirmDialog && /esc interrupt/i.test(cleanContent.split('\n').filter((l) => l.trim()).slice(-3).join('\n'));
     } else if (aiType === 'grok') {
       // Grok 运行/空闲态已在插件分析前的高优先级块处理（见上方 aiType==='grok' 分支）
       // 此处保留兜底：若走到这里仍按运行态标志判断

@@ -85,17 +85,18 @@ const DEFAULT_CLI_TOOLS = {
     createdAt: '2025-01-01T00:00:00.000Z'
   },
   opencode: {
+    // 文案均为 opencode 1.18.34 实测，判读逻辑见 server/services/opencodeCli.js
     id: 'opencode',
     name: 'OpenCode',
-    processNames: ['opencode', 'opencode-cli'],
+    processNames: ['opencode', 'opencode.exe'],
     terminalPatterns: {
-      running: ['esc to interrupt', '\\(\\d+m\\s*\\d+s\\)', '\\[build\\].*thinking', '\\[plan\\].*thinking', 'Thinking'],
-      idle: ['^>\\s*$', '@general', '\\[build\\]\\s*$', '\\[plan\\]\\s*$', '\\? for shortcuts'],
-      confirm: ['Do you want to', '1\\.\\s*Yes', 'approve this action']
+      running: ['esc interrupt'],
+      idle: ['ctrl\\+p commands'],
+      confirm: ['Permission required', 'Allow once\\s+Allow always\\s+Reject']
     },
     commands: {
-      start: 'opencode',
-      quit: '/quit'
+      start: 'opencode -c',   // 本目录最近一段；目录里没有对话时直接开新的
+      quit: '/exit'
     },
     builtin: true,
     enabled: true,

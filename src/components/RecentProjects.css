@@ -533,3 +533,6 @@
 .tab-btn.kiro.active { background: rgba(139, 92, 246, 0.15); border-color: #a78bfa; }
 .ai-badge.kiro { background: rgba(139, 92, 246, 0.2); color: #a78bfa; }
 .compact-ai-label.kiro { color: #a78bfa; background: rgba(139, 92, 246, 0.12); }
+.tab-btn.opencode.active { background: rgba(6, 182, 212, 0.15); border-color: #22d3ee; }
+.ai-badge.opencode { background: rgba(6, 182, 212, 0.2); color: #22d3ee; }
+.compact-ai-label.opencode { color: #22d3ee; background: rgba(6, 182, 212, 0.12); }

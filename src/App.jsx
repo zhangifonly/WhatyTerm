@@ -793,7 +793,8 @@ export default function App() {
     console.log('[Provider] 获取供应商列表, appType:', appType);
 
     try {
-      const res = await fetch(`/api/cc-switch/providers?app=${appType}`);
+      // OpenCode 用 CC Switch 里 claude 类的供应商（Anthropic 协议），见 server/services/opencodeCli.js
+      const res = await fetch(`/api/cc-switch/providers?app=${appType === 'opencode' ? 'claude' : appType}`);
       const data = await res.json();
       const providers = data.data?.providers || data.providers || [];
       console.log('[Provider] 获取到供应商列表:', providers);
@@ -801,7 +802,8 @@ export default function App() {
       // 获取当前会话正在使用的供应商（不是全局激活的）
       const sessionProvider = appType === 'claude' ? currentSession.claudeProvider :
                               appType === 'codex' ? currentSession.codexProvider :
-                              appType === 'gemini' ? currentSession.geminiProvider : null;
+                              appType === 'gemini' ? currentSession.geminiProvider :
+                              appType === 'opencode' ? currentSession.opencodeProvider : null;
       const sessionProviderId = sessionProvider?.id || null;
       console.log('[Provider] 当前会话供应商ID:', sessionProviderId);
 
@@ -2685,11 +2687,13 @@ export default function App() {
 
                 const provider = currentSession.aiType === 'claude' ? currentSession.claudeProvider :
                                 currentSession.aiType === 'codex' ? currentSession.codexProvider :
-                                currentSession.aiType === 'gemini' ? currentSession.geminiProvider : null;
+                                currentSession.aiType === 'gemini' ? currentSession.geminiProvider :
+                                currentSession.aiType === 'opencode' ? currentSession.opencodeProvider : null;
 
                 const color = currentSession.aiType === 'claude' ? 'hsl(var(--primary))' :
                              currentSession.aiType === 'codex' ? 'hsl(142 70% 45%)' :
-                             currentSession.aiType === 'gemini' ? 'hsl(45 93% 47%)' : 'hsl(var(--muted-foreground))';
+                             currentSession.aiType === 'gemini' ? 'hsl(45 93% 47%)' :
+                             currentSession.aiType === 'opencode' ? 'hsl(188 94% 43%)' : 'hsl(var(--muted-foreground))';
 
                 const isLocalConfig = provider?.configSource === 'local';
                 const isProcessConfig = provider?.configSource === 'process';
@@ -5299,6 +5303,7 @@ function CreateSessionModal({ onClose, onCreate }) {
               <option value="gemini">Gemini</option>
               <option value="grok">Grok</option>
               <option value="kiro">Kiro</option>
+              <option value="opencode">OpenCode</option>
             </select>
           </div>
           <div className="form-group">

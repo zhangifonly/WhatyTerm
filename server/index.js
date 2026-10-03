@@ -202,7 +202,7 @@ import { readContextWaterline, decideWaterlinePhase, isMemoryWritten, HANDOFF_PR
 import { parseHandoffReceipt, HANDOFF_PHASE, HANDOFF_WAIT_MS } from './services/longrunHandoff.js';
 import { promptPendingText, stripPromptSuggestion } from './services/promptState.js';
 import { shouldStopMechanicalContinue, nextStreak } from './services/continueStreak.js';
-import { listProviderModels } from './services/ProviderModels.js';
+import { listProviderModels, cache as modelsCache } from './services/ProviderModels.js';
 import uiPrefs from './services/uiPrefs.js';
 import tokenStatsService from './services/TokenStatsService.js';
 import { UsageLedger } from './services/usage/UsageLedger.js';
@@ -222,6 +222,7 @@ import sleepPrevention from './services/SleepPreventionService.js';
 import { protectedPids } from './services/orphanGuard.js';
 import { providerFieldOf } from './services/cliProviderField.js';
 import { kiroProviderInfo } from './services/kiroCli.js';
+import { buildOpencodeConfig, sessionOpencodeConfig, sessionOpencodeMeta, opencodeProviderInfo, opencodeStartCommand, verifyOpencodeConfig } from './services/opencodeCli.js';
 import { mergeModelAliases } from './services/usage/usageSplit.js';
 import lidSleepGuard from './services/LidSleepGuard.js';
 import { uninstallWin as uninstallLidSleepWin } from './services/lidSleepWin.js';
@@ -1501,6 +1502,10 @@ function sendTextWithLanding(session, text, onLanded = null) {
   if (/^codex(\s|$)/.test(String(text).trim()) && session.aiType === 'codex') {
     text = codexStartCommand(session, { resume: /\bresume\b/.test(text) });
   }
+  // OpenCode 同理：带上本会话的 OPENCODE_CONFIG（重启出来的进程才用得上给本会话选的供应商）
+  if (/^opencode(\s|$)/.test(String(text).trim()) && session.aiType === 'opencode') {
+    text = opencodeStartCommand(session, { resume: /\s-c\b/.test(` ${text}`) });
+  }
   if (!session.tmuxSessionName) { session.sendInput(text, { submit: true }); onLanded?.(); return; }
   sendTextVerified({
     text,
@@ -2103,6 +2108,10 @@ function getCurrentProvider(appType, workingDir = null, tmuxSessionName = null) 
     } else if (appType === 'gemini') {
       // gemini 的 URL/Key 不在 ~/.gemini/settings.json 里，只能从 CC Switch DB 的 is_current 读
       // 这里先不读，下面 DB 查询分支会走 is_current 回退路径返回
+    } else if (appType === 'opencode') {
+      // OpenCode 的会话级供应商写在会话专属配置里（applySessionProviderInfo），按 tmux 会话名找回是哪个会话
+      const owner = tmuxSessionName ? sessionManager?.listSessions().find((s) => s.tmuxSessionName === tmuxSessionName) : null;
+      return resolve(opencodeProviderInfo(owner));
     } else if (appType === 'kiro') {
       // Kiro 只能用自家账号（Google / GitHub / Builder ID / IAM Identity Center，后端 Bedrock），不走 CC Switch。
       // 账号取自 `kiro-cli whoami`（缓存 10 分钟），模型取本目录最近一段对话的记录（见 kiroCli.js）
@@ -6658,9 +6667,37 @@ function resolveProviderInfo(appType, providerId) {
  *   providerEnv 用于拆分阶段 spawn 注入（值为 null 表示从继承 env 中删除该键）
  */
 function applySessionProvider(session, appType, providerId) {
-  const info = resolveProviderInfo(appType, providerId);
+  // OpenCode 用的是 CC Switch 里 claude 类的供应商（Anthropic 协议），见 opencodeCli.js
+  const info = resolveProviderInfo(appType === 'opencode' ? 'claude' : appType, providerId);
   if (!info) return { ok: false, error: '供应商不存在' };
   return applySessionProviderInfo(session, appType, info);
+}
+
+/**
+ * OpenCode 会话还没选过供应商时，按 CC Switch 当前的 Claude 供应商写一份会话配置。
+ * 和 Claude 会话「跟随 CC Switch 当前」同一个口径；不这样做 OpenCode 会用它自己的全局配置（多数机器上是空的，一启动就没模型可用）。
+ * 已经有配置（用户手动选过）就不动。
+ * @returns {Promise<{ok:boolean, skipped?:boolean, error?:string}>}
+ */
+async function ensureOpencodeProvider(session) {
+  if (!session?.id || (session.aiType || '') !== 'opencode') return { ok: true, skipped: true };
+  if (existsSync(sessionOpencodeConfig(session.id))) return { ok: true, skipped: true };
+  let providerId = '';
+  // CC Switch 当前供应商以它的 settings.json 为准（queryCcSwitchCurrentRow，库里 is_current 只作兜底）；
+  // ⚠ 不能用 providerService.list：那是迁移前的旧表，current 是个占位 id
+  try {
+    const db = builtinProviderDB.getDB(true);
+    providerId = queryCcSwitchCurrentRow(db, 'claude', 'id')?.id || '';
+    db.close();
+  } catch (e) { console.warn('[OpenCode] 读 CC Switch 当前供应商失败:', e.message); }
+  if (!providerId) {
+    console.warn(`[OpenCode] 会话 ${session.name}：CC Switch 里没有当前的 Claude 供应商，OpenCode 将用它自己的全局配置`);
+    return { ok: false, error: 'CC Switch 里没有当前的 Claude 供应商' };
+  }
+  await listProviderModels({ engine: aiEngine, providerId });
+  const r = applySessionProvider(session, 'opencode', providerId);
+  if (!r.ok) console.warn(`[OpenCode] 会话 ${session.name} 按 CC Switch 当前供应商写配置失败: ${r.error}`);
+  return r;
 }
 
 /**
@@ -6760,6 +6797,20 @@ function applySessionProviderInfo(session, appType, info) {
       writeFileSync(path.join(gdir, 'settings.json'), JSON.stringify(settings, null, 2), 'utf8');
       for (const [k, v] of Object.entries(info.env)) { setEnv(k, v); providerEnv[k] = v; }
       session.geminiProvider = { id: info.provider.id, name: info.provider.name };
+    } else if (appType === 'opencode') {
+      // 会话专属配置文件（不放项目目录：里面有密钥），启动命令里用 OPENCODE_CONFIG 指过去（opencodeStartCommand）。
+      // 模型清单由调用方先 await listProviderModels 预取进缓存（这里是同步函数，拿不到就只用 ANTHROPIC_MODEL）
+      const models = modelsCache.get(info.provider.id)?.data?.models || [];
+      const built = buildOpencodeConfig({ name: info.provider.name, env: info.isOAuth ? {} : info.env, models });
+      if (!built.ok) return { ok: false, error: built.error };
+      const cfgPath = sessionOpencodeConfig(session.id);
+      mkdirSync(path.dirname(cfgPath), { recursive: true });
+      writeFileSync(cfgPath, JSON.stringify(built.config, null, 2), { encoding: 'utf8', mode: 0o600 });
+      try { chmodSync(cfgPath, 0o600); } catch { /* mode 只对新建文件生效，已有文件要显式改（里面有密钥） */ }
+      writeFileSync(sessionOpencodeMeta(session.id), JSON.stringify({ id: info.provider.id, name: info.provider.name }), 'utf8');
+      setEnv('OPENCODE_CONFIG', cfgPath);
+      providerEnv.OPENCODE_CONFIG = cfgPath;
+      session.opencodeProvider = { ...opencodeProviderInfo(session), model: built.model };
     } else {
       return { ok: false, error: `不支持的 CLI: ${appType}` };
     }
@@ -7467,6 +7518,8 @@ io.on('connection', (socket) => {
 
       // 保存 AI 类型
       session.aiType = data.aiType || 'claude';
+      // OpenCode 会话：按 CC Switch 当前的 Claude 供应商写好会话配置（tmux 里已设好 OPENCODE_CONFIG 指向它）
+      if (session.aiType === 'opencode') await ensureOpencodeProvider(session);
 
       // 异步获取项目描述和目标（如果有工作目录）
       if (session.workingDir) {
@@ -7662,7 +7715,13 @@ io.on('connection', (socket) => {
         if (data.workingDir) {
           session.write(`cd "${data.workingDir}"\r`);
         }
-        setTimeout(() => {
+        setTimeout(async () => {
+          // OpenCode：先按 CC Switch 当前的 Claude 供应商写好会话配置，命令里带上 OPENCODE_CONFIG
+          if (session.aiType === 'opencode') {
+            await ensureOpencodeProvider(session);
+            session.write(`${opencodeStartCommand(session)}\r`);
+            return;
+          }
           if (data.resumeCommand) {
             session.write(`${data.resumeCommand}\r`);
           }
@@ -7686,7 +7745,7 @@ io.on('connection', (socket) => {
       socket.emit('recentProjects:list', projects);
     } catch (error) {
       console.error('[RecentProjects] 获取失败:', error);
-      socket.emit('recentProjects:list', { claude: [], codex: [], gemini: [], grok: [], kiro: [] });
+      socket.emit('recentProjects:list', { claude: [], codex: [], gemini: [], grok: [], kiro: [], opencode: [] });
     }
   });
 
@@ -9678,6 +9737,11 @@ ${terminalContext ? terminalContext : '（无）'}
     };
 
     try {
+      // OpenCode 的配置里要列出模型：先把供应商的模型清单取进缓存（applySessionProvider 是同步的）
+      if (type === 'opencode') {
+        emit('MODELS', '正在读取供应商的模型清单...', 15);
+        await listProviderModels({ engine: aiEngine, providerId });
+      }
       emit('APPLYING', '正在写入会话级配置...', 30);
       const r = applySessionProvider(session, type, providerId);
       if (!r.ok) {
@@ -9719,7 +9783,17 @@ ${terminalContext ? terminalContext : '（无）'}
       const needRestart = false;
       const restartResult = null;
 
-      const name = resolveProviderInfo(type, providerId)?.provider?.name || providerId;
+      const name = resolveProviderInfo(type === 'opencode' ? 'claude' : type, providerId)?.provider?.name || providerId;
+      // OpenCode：直接向供应商发一个 1 token 的请求验证地址/密钥/模型（不走 opencode run：它每次带 3 万多 token 的系统提示）
+      if (type === 'opencode' && r.providerEnv?.OPENCODE_CONFIG) {
+        emit('VERIFYING', '正在用新配置发一次测试请求...', 85);
+        const check = await verifyOpencodeConfig(r.providerEnv.OPENCODE_CONFIG);
+        if (!check.ok) {
+          socket.emit('provider:switchError', { sessionId, error: `配置已写入，但测试请求失败：${check.error}` });
+          console.warn(`[Provider Switch] ${session.name} -> ${name} 测试请求失败: ${check.error}`);
+          return;
+        }
+      }
       // Codex：写完当场用会话自己的 CODEX_HOME 真发一次请求，401 / 连不上就如实报错，不说「切换完成」。
       // 以前只写文件不验证，密钥没写进 codex 会读的位置，一直 401 却显示切换成功（2026-09-26 iSpring）
       if (type === 'codex' && r.providerEnv?.CODEX_HOME) {
@@ -9732,7 +9806,8 @@ ${terminalContext ? terminalContext : '（无）'}
         }
       }
       const doneMsg = type === 'claude' ? '已写入，CLI 几秒内自动切换（无需重启）'
-        : type === 'codex' ? '测试请求已通过；在跑的 Codex 需重新启动才会用新供应商' : '切换完成';
+        : type === 'codex' ? '测试请求已通过；在跑的 Codex 需重新启动才会用新供应商'
+        : type === 'opencode' ? '测试请求已通过；在跑的 OpenCode 需 /exit 后重新打开才会用新供应商' : '切换完成';
       emit('DONE', doneMsg, 100);
       socket.emit('provider:switchComplete', {
         sessionId, providerId, providerName: name, needRestart, restartResult,

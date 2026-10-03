@@ -37,6 +37,7 @@ export const CLI_TABS = [
   { key: 'gemini', label: 'Gemini' },
   { key: 'grok', label: 'Grok' },
   { key: 'kiro', label: 'Kiro' },
+  { key: 'opencode', label: 'OpenCode' },
 ];
 
 /** 「3 分钟前」「2 天前」 */

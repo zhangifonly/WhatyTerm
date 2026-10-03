@@ -15,6 +15,8 @@ import { diffCumulative, localDayKey } from './costMath.js';
 import pricingTable from './PricingTable.js';
 import { splitDelta, mainModelOf } from './usageSplit.js';
 import { kiroCredits } from '../kiroCli.js';
+import { opencodeUsage } from '../opencodeCli.js';
+import { priceUsage } from './costMath.js';
 
 export const CLAUDE_PROJECTS = () => path.join(os.homedir(), '.claude', 'projects');
 /** 与 index.js:1056 同一套编码（历史上漏过下划线，导致带下划线的项目找不到目录） */
@@ -63,6 +65,18 @@ export class SessionUsageService {
       const dayStart = new Date(new Date(now).toDateString()).getTime();
       const c = kiroCredits(session.workingDir, { since, dayStart, sessions: this.kiroSessions?.() });
       return { ok: true, kind: 'credits', cli: 'kiro', credits: c.credits, todayCredits: c.todayCredits, model: c.model };
+    }
+    // OpenCode：每条 assistant 消息自带模型与 token（opencode.db），直接按本会话建立之后的消息算，不进账本游标。
+    // 消息自带 cost 的（内置供应商）用它；自定义供应商 cost 恒为 0，按价格表 × token 算，查不到价就标「不完整」
+    if (session.aiType === 'opencode') {
+      const sib = siblingsOf(session, allSessions);
+      if (sib.length) return { ok: false, kind: 'ambiguous', cli: 'opencode', reason: `同目录还有 ${sib.length} 个 OpenCode 会话在跑，无法区分是谁花的` };
+      const since = session.createdAt ? new Date(session.createdAt).getTime() : 0;
+      const dayStart = new Date(new Date(now).toDateString()).getTime();
+      const priceOf = (m) => { const p = this.pricing.get(m, now)?.price || null; return (u) => priceUsage(u, p); };
+      const u = (this.opencodeUsage || opencodeUsage)(session.workingDir, { since, dayStart, priceOf });
+      return { ok: true, kind: u.byModel.length ? 'exclusive' : 'empty', cli: 'opencode', sessionUsd: u.usd, todayUsd: u.todayUsd,
+        incomplete: u.incomplete, unknownModels: u.unknownModels, model: u.model, byModel: u.byModel };
     }
     const binding = decideBinding(session, siblingsOf(session, allSessions));
     if (binding.kind === 'unsupported' || binding.kind === 'ambiguous') {

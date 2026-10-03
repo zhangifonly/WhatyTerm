@@ -1,0 +1,24 @@
+
+
+
+
+
+                                                      ▄
+                     █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█
+                     █  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀
+                     ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀
+
+
+   ┃
+   ┃  hello pending
+   ┃
+   ┃  Build · Big Pickle OpenCode Zen
+   ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+                                                   tab agents  ctrl+p commands
+
+
+
+            ● Tip Run /connect to add an AI provider and start coding
+
+  /private/tmp/oc-narrow2                                              1.18.34
+

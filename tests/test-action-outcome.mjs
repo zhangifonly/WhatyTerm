@@ -256,6 +256,20 @@ test('带色码菜单按键后仍挂着，照样记 no_effect（别把真卡住�
   eq(r.outcome, 'no_effect');
 });
 
+{
+  // OpenCode 实抓屏（opencode 1.18.34）：确认框按回车后变成运行中，底栏是「esc interrupt」（没有 to）
+  const fs = await import('fs');
+  const fx = (n) => fs.readFileSync(new URL(`./fixtures/screens/${n}`, import.meta.url), 'utf-8');
+  test('OpenCode 确认框认得出是菜单；回车后进入运行中记 advanced', () => {
+    const entry = ledger.record(fakeSession([fx('opencode-confirm.ansi.txt')]), { state: 'OpenCode 确认界面', actionType: 'select', action: '1',
+      beforeScreen: fx('opencode-confirm.ansi.txt') });
+    clearTimeout(ledger.pending.get(entry.id)); ledger.pending.delete(entry.id);
+    eq(entry.hadConfirmMenu, true, '确认框');
+    const r = verify(fx('opencode-confirm.ansi.txt'), fx('opencode-running.txt'), { actionType: 'select', action: '1', hadConfirmMenu: true });
+    eq(r.outcome, 'advanced');
+  });
+}
+
 console.log(`\n=== 结果：${results.passed} 通过 / ${results.failed} 失败 ===`);
 if (results.failed) for (const e of results.errors) console.log(`  • ${e.name}\n    ${e.error}`);
 process.exit(results.failed ? 1 : 0);

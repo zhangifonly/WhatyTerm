@@ -13,6 +13,7 @@ const execAsync = promisify(exec);
 import os from 'os';
 import { claudeStartCommand } from './sessionMode.js';
 import { codexStartCommand } from './codexSessionConfig.js';
+import { opencodeStartCommand, sessionOpencodeConfig } from './opencodeCli.js';
 import { probeTmuxSession, confirmTmuxGone } from './tmuxGone.js';
 import fs from 'fs';
 
@@ -139,10 +140,16 @@ function ensureDragSelectsBinding() {
  * tmux < 3.1 不认 -e：失败就不带它再建一次（宁可多一层外壳，不能建不出会话）
  */
 export const NO_KIRO_TERM_ENV = 'PROCESS_LAUNCHED_BY_Q=1';
-export function newTmuxSession(tmuxCmd, args) {
+/**
+ * 会话专属的 OpenCode 配置路径也一并设进去（文件不存在时 OpenCode 照常用自己的全局配置，实测无报错）：
+ * 用户在这个会话里自己敲 `opencode` 时，也能用上给本会话选的供应商（tmux set-environment 对已在跑的 shell 无效）。
+ */
+export function newTmuxSession(tmuxCmd, args, sessionId = '') {
   const opts = { stdio: 'ignore', env: { ...process.env, CLAUDECODE: undefined } };
+  const ocEnv = sessionId && /^[A-Za-z0-9_-]{1,80}$/.test(String(sessionId))
+    ? ` -e ${quoteSq(`OPENCODE_CONFIG=${sessionOpencodeConfig(sessionId)}`)}` : '';
   try {
-    execSync(`${tmuxCmd} new-session ${args} -e ${NO_KIRO_TERM_ENV}`, opts);
+    execSync(`${tmuxCmd} new-session ${args} -e ${NO_KIRO_TERM_ENV}${ocEnv}`, opts);
   } catch (err) {
     console.warn(`[SessionManager] tmux 不支持 new-session -e（${err.message.split('\n')[0]}），不带环境变量重建`);
     execSync(`${tmuxCmd} new-session ${args}`, opts);
@@ -320,7 +327,7 @@ export class Session {
         // 创建新的 tmux 会话
         // 有工作目录就直接在那里建：事后打 cd 要等 shell 就绪，路径里有引号/$ 还会出错
         const cwdArg = this.workingDir ? ` -c ${quoteSq(this.workingDir)}` : '';
-        newTmuxSession(tmuxCmd, `-d -s "${this.tmuxSessionName}" -x 80 -y 24${cwdArg}`);
+        newTmuxSession(tmuxCmd, `-d -s "${this.tmuxSessionName}" -x 80 -y 24${cwdArg}`, this.id);
         // 设置 default-terminal 确保退格等按键正常工作
         try {
           execSync(`${tmuxCmd} set-option -t "${this.tmuxSessionName}" default-terminal "${defaultTerminal}"`, { stdio: 'ignore' });
@@ -1361,7 +1368,7 @@ export class SessionManager {
       catch { defaultTerminal = 'screen-256color'; }
 
       // -c 指定工作目录，保证 CLI 在原项目里启动
-      newTmuxSession(tmuxCmd, `-d -s "${tmuxName}" -x 80 -y 24 -c "${workingDir}"`);
+      newTmuxSession(tmuxCmd, `-d -s "${tmuxName}" -x 80 -y 24 -c "${workingDir}"`, row.id);
       try {
         execSync(`${tmuxCmd} set-option -t "${tmuxName}" default-terminal "${defaultTerminal}"`, { stdio: 'ignore' });
       } catch {}
@@ -1593,6 +1600,7 @@ export class SessionManager {
         if ((item.aiType || 'claude') === 'claude') startCmd = claudeStartCommand(item, startCmd);
         // Codex：按会话当前选的供应商接回（对话记录里存的是当时的供应商，不覆盖就沿用旧的）
         if (item.aiType === 'codex') startCmd = codexStartCommand(item, { resume: true });
+        if (item.aiType === 'opencode') startCmd = opencodeStartCommand(item);
         const tmuxCmd = getTmuxPrefix();
         try {
           execSync(`${tmuxCmd} send-keys -t "${item.tmuxSessionName}" ${JSON.stringify(startCmd)}`, { stdio: 'ignore' });
